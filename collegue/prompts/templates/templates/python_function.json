@@ -1,0 +1,84 @@
+{
+  "id": "python_function",
+  "name": "Fonction Python",
+  "description": "Génère une fonction Python selon les spécifications fournies",
+  "template": "Écris une fonction Python qui répond à la description suivante :\n\nNom de la fonction : {function_name}\n\nDescription : {description}\n\nParamètres :\n{parameters}\n\nType de retour : {return_type}\n\nContraintes techniques :\n{constraints}\n\nAssure-toi que la fonction est :\n- Bien documentée avec docstrings\n- Optimisée pour la performance\n- Robuste avec gestion d'erreurs\n- Conforme aux bonnes pratiques PEP 8",
+  "variables": [
+    {
+      "name": "function_name",
+      "description": "Nom de la fonction à générer",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "calculate_fibonacci"
+    },
+    {
+      "name": "description",
+      "description": "Description détaillée de ce que la fonction doit faire",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "Calcule le n-ième nombre de la suite de Fibonacci"
+    },
+    {
+      "name": "parameters",
+      "description": "Liste des paramètres avec leurs types et descriptions",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "n (int): Position dans la suite de Fibonacci (doit être >= 0)"
+    },
+    {
+      "name": "return_type",
+      "description": "Type de retour de la fonction",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "int: Le n-ième nombre de Fibonacci"
+    },
+    {
+      "name": "constraints",
+      "description": "Contraintes techniques spécifiques",
+      "type": "string",
+      "required": false,
+      "default": "Aucune contrainte particulière",
+      "options": null,
+      "example": "Utiliser une approche récursive avec mémoïsation pour optimiser les performances"
+    }
+  ],
+  "category": "code_generation",
+  "tags": [
+    "python",
+    "function",
+    "code_generation"
+  ],
+  "provider_specific": {
+    "openai": "Tu es un expert en développement Python. Écris une fonction Python qui répond à la description suivante :\n\nNom de la fonction : {function_name}\n\nDescription : {description}\n\nParamètres :\n{parameters}\n\nType de retour : {return_type}\n\nContraintes techniques :\n{constraints}\n\nAssure-toi que la fonction est :\n- Bien documentée avec docstrings\n- Optimisée pour la performance\n- Robuste avec gestion d'erreurs\n- Conforme aux bonnes pratiques PEP 8\n\nFournis uniquement le code, sans explications supplémentaires.",
+    "anthropic": "En tant qu'expert Python, génère une fonction qui répond exactement à ces spécifications :\n\nNom : {function_name}\nDescription : {description}\nParamètres : {parameters}\nRetour : {return_type}\nContraintes : {constraints}\n\nSuis les bonnes pratiques Python (PEP 8, docstrings, gestion d'erreurs)."
+  },
+  "examples": [
+    {
+      "function_name": "calculate_fibonacci",
+      "description": "Calcule le n-ième nombre de la suite de Fibonacci",
+      "parameters": "n (int): Position dans la suite de Fibonacci (doit être >= 0)",
+      "return_type": "int: Le n-ième nombre de Fibonacci",
+      "constraints": "Utiliser une approche récursive avec mémoïsation pour optimiser les performances"
+    },
+    {
+      "function_name": "parse_json_file",
+      "description": "Lit et parse un fichier JSON en objet Python",
+      "parameters": "file_path (str): Chemin vers le fichier JSON à parser",
+      "return_type": "dict: Contenu du fichier JSON parsé en dictionnaire Python",
+      "constraints": "Gérer les erreurs de fichier et de format JSON"
+    }
+  ],
+  "created_at": "2025-06-11T18:17:52.285736",
+  "updated_at": "2025-06-11T18:17:52.285739",
+  "created_by": null,
+  "is_public": true,
+  "version": "1.0.0"
+}

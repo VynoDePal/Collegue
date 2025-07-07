@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>{% if is_new %}Nouveau template{% else %}Modifier {{ template.name }}{% endif %}</h2>
+
+<form id="templateForm" method="POST" action="{% if is_new %}/prompts/ui/templates{% else %}/prompts/ui/templates/{{ template.id }}{% endif %}" class="card">
+    {% if not is_new %}
+    <input type="hidden" name="_method" value="PUT">
+    {% endif %}
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="name">Nom</label>
+        <input type="text" id="name" name="name" value="{% if template %}{{ template.name }}{% endif %}" required style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="description">Description</label>
+        <textarea id="description" name="description" rows="2" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">{% if template %}{{ template.description }}{% endif %}</textarea>
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="category">Catégorie</label>
+        <select id="category" name="category" required style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            <option value="">Sélectionnez une catégorie</option>
+            {% for category in categories %}
+            <option value="{{ category.id }}" {% if template and template.category == category.id %}selected{% endif %}>{{ category.name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="template">Template</label>
+        <textarea id="template" name="template" rows="10" required style="width: 100%; padding: 0.5rem; font-family: monospace; box-sizing: border-box;">{% if template %}{{ template.template }}{% endif %}</textarea>
+        <small>Utilisez {variable_name} pour les variables à remplacer</small>
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="tags">Tags (séparés par des virgules)</label>
+        <input type="text" id="tags" name="tags" value="{% if template %}{{ template.tags|join(', ') }}{% endif %}" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label>
+            <input type="checkbox" id="is_public" name="is_public" {% if template and template.is_public %}checked{% endif %}>
+            Public
+        </label>
+    </div>
+    
+    <h3>Variables</h3>
+    <div id="variables-container">
+        {% if template and template.variables %}
+        {% for variable in template.variables %}
+        <div class="variable-item card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <h4>Variable {{ loop.index }}</h4>
+                <button type="button" class="btn" onclick="removeVariable(this)">Supprimer</button>
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Nom</label>
+                <input type="text" name="var_name[]" value="{{ variable.name }}" required style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Description</label>
+                <input type="text" name="var_description[]" value="{{ variable.description }}" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Type</label>
+                <select name="var_type[]" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+                    {% for type in variable_types %}
+                    <option value="{{ type }}" {% if variable.type == type %}selected{% endif %}>{{ type }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
+            <div style="display: flex; gap: 1rem; margin-bottom: 0.5rem;">
+                <div style="flex: 1;">
+                    <label>
+                        <input type="checkbox" name="var_required[]" {% if variable.required %}checked{% endif %}>
+                        Requis
+                    </label>
+                </div>
+                <div style="flex: 2;">
+                    <label>Valeur par défaut</label>
+                    <input type="text" name="var_default[]" value="{{ variable.default }}" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Exemple</label>
+                <input type="text" name="var_example[]" value="{{ variable.example }}" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+    
+    <div style="margin: 1rem 0;">
+        <button type="button" id="add-variable" class="btn">Ajouter une variable</button>
+    </div>
+    
+    <div style="margin-top: 2rem;">
+        <button type="submit" class="btn">{% if is_new %}Créer{% else %}Mettre à jour{% endif %}</button>
+        <a href="/prompts/ui/templates" style="margin-left: 1rem;">Annuler</a>
+    </div>
+</form>
+
+<script>
+    function removeVariable(button) {
+        const variableItem = button.closest('.variable-item');
+        variableItem.remove();
+    }
+    
+    document.getElementById('add-variable').addEventListener('click', function() {
+        const container = document.getElementById('variables-container');
+        const index = container.children.length + 1;
+        
+        const variableItem = document.createElement('div');
+        variableItem.className = 'variable-item card';
+        variableItem.style.marginBottom = '1rem';
+        variableItem.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <h4>Variable ${index}</h4>
+                <button type="button" class="btn" onclick="removeVariable(this)">Supprimer</button>
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Nom</label>
+                <input type="text" name="var_name[]" required style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Description</label>
+                <input type="text" name="var_description[]" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Type</label>
+                <select name="var_type[]" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+                    ${Array.from(document.querySelectorAll('#variables-container .variable-item:first-child select[name="var_type[]"] option')).map(opt => 
+                        `<option value="${opt.value}">${opt.textContent}</option>`
+                    ).join('')}
+                </select>
+            </div>
+            
+            <div style="display: flex; gap: 1rem; margin-bottom: 0.5rem;">
+                <div style="flex: 1;">
+                    <label>
+                        <input type="checkbox" name="var_required[]" checked>
+                        Requis
+                    </label>
+                </div>
+                <div style="flex: 2;">
+                    <label>Valeur par défaut</label>
+                    <input type="text" name="var_default[]" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 0.5rem;">
+                <label>Exemple</label>
+                <input type="text" name="var_example[]" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            </div>
+        `;
+        
+        container.appendChild(variableItem);
+    });
+    
+    // Ajouter une première variable si le conteneur est vide
+    if (document.getElementById('variables-container').children.length === 0) {
+        document.getElementById('add-variable').click();
+    }
+</script>
+{% endblock %}

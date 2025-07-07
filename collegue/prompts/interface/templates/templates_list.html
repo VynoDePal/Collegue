@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>{{ title }}</h2>
+    <a href="/prompts/ui/templates/new" class="btn">Nouveau template</a>
+</div>
+
+<div style="margin-bottom: 1rem;">
+    <select id="categoryFilter" onchange="window.location.href='/prompts/ui/templates?category=' + this.value">
+        <option value="">Toutes les catégories</option>
+        {% for category in categories %}
+        <option value="{{ category.id }}" {% if current_category == category.id %}selected{% endif %}>{{ category.name }}</option>
+        {% endfor %}
+    </select>
+</div>
+
+{% if templates %}
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem;">
+    {% for template in templates %}
+    <div class="card">
+        <h3><a href="/prompts/ui/templates/{{ template.id }}">{{ template.name }}</a></h3>
+        <p>{{ template.description }}</p>
+        <div style="margin-top: 0.5rem;">
+            {% for tag in template.tags %}
+            <span class="tag">{{ tag }}</span>
+            {% endfor %}
+        </div>
+        <div style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+            <a href="/prompts/ui/templates/{{ template.id }}" class="btn">Voir</a>
+            <a href="/prompts/ui/templates/{{ template.id }}/edit" class="btn">Modifier</a>
+            <a href="/prompts/ui/playground?template_id={{ template.id }}" class="btn">Tester</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card">
+    <p>Aucun template trouvé.</p>
+</div>
+{% endif %}
+{% endblock %}

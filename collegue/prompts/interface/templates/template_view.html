@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h2>{{ template.name }}</h2>
+    <div>
+        <a href="/prompts/ui/templates/{{ template.id }}/edit" class="btn">Modifier</a>
+        <a href="/prompts/ui/playground?template_id={{ template.id }}" class="btn">Tester</a>
+    </div>
+</div>
+
+<div class="card">
+    <p>{{ template.description }}</p>
+    
+    <div style="margin-top: 0.5rem; margin-bottom: 1rem;">
+        <span>Catégorie: <strong>{{ template.category }}</strong></span>
+        <span style="margin-left: 1rem;">Version: {{ template.version }}</span>
+        {% if template.is_public %}
+        <span style="margin-left: 1rem;">Public</span>
+        {% else %}
+        <span style="margin-left: 1rem;">Privé</span>
+        {% endif %}
+    </div>
+    
+    {% for tag in template.tags %}
+    <span class="tag">{{ tag }}</span>
+    {% endfor %}
+</div>
+
+<h3>Template</h3>
+<div class="card">
+    <pre style="white-space: pre-wrap; background-color: #f8f8f8; padding: 1rem; border-radius: 4px;">{{ template.template }}</pre>
+</div>
+
+<h3>Variables</h3>
+{% if template.variables %}
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem;">
+    {% for variable in template.variables %}
+    <div class="card">
+        <h4>{{ variable.name }}</h4>
+        <p>{{ variable.description }}</p>
+        <p><strong>Type:</strong> {{ variable.type }}</p>
+        <p><strong>Requis:</strong> {{ variable.required }}</p>
+        {% if variable.default %}
+        <p><strong>Valeur par défaut:</strong> {{ variable.default }}</p>
+        {% endif %}
+        {% if variable.options %}
+        <p><strong>Options:</strong> {{ variable.options|join(", ") }}</p>
+        {% endif %}
+        {% if variable.example %}
+        <p><strong>Exemple:</strong> <code>{{ variable.example }}</code></p>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card">
+    <p>Aucune variable définie.</p>
+</div>
+{% endif %}
+
+{% if template.provider_specific %}
+<h3>Variations par fournisseur</h3>
+<div class="card">
+    {% for provider, text in template.provider_specific.items() %}
+    <h4>{{ provider }}</h4>
+    <pre style="white-space: pre-wrap; background-color: #f8f8f8; padding: 1rem; border-radius: 4px;">{{ text }}</pre>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if template.examples %}
+<h3>Exemples</h3>
+<div class="card">
+    {% for example in template.examples %}
+    <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #eee;">
+        <h4>Exemple {{ loop.index }}</h4>
+        <pre style="white-space: pre-wrap; background-color: #f8f8f8; padding: 1rem; border-radius: 4px;">{{ example|tojson(indent=2) }}</pre>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Historique des exécutions</h2>
+
+{% if history %}
+<div class="card">
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+            <tr style="border-bottom: 1px solid #ddd; text-align: left;">
+                <th style="padding: 0.5rem;">Template</th>
+                <th style="padding: 0.5rem;">Date</th>
+                <th style="padding: 0.5rem;">Fournisseur</th>
+                <th style="padding: 0.5rem;">Statut</th>
+                <th style="padding: 0.5rem;">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in history %}
+            <tr style="border-bottom: 1px solid #eee;">
+                <td style="padding: 0.5rem;">{{ item.template_name }}</td>
+                <td style="padding: 0.5rem;">{{ item.timestamp.strftime('%d/%m/%Y %H:%M') }}</td>
+                <td style="padding: 0.5rem;">{{ item.provider or 'Défaut' }}</td>
+                <td style="padding: 0.5rem;">
+                    {% if item.success %}
+                    <span style="color: green;">Succès</span>
+                    {% else %}
+                    <span style="color: red;">Échec</span>
+                    {% endif %}
+                </td>
+                <td style="padding: 0.5rem;">
+                    <button onclick="showDetails('{{ item.id }}')" class="btn">Détails</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Modal de détails -->
+<div id="details-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); z-index: 1000;">
+    <div style="position: relative; background-color: white; margin: 10% auto; padding: 20px; width: 80%; max-width: 800px; border-radius: 5px; box-shadow: 0 2px 8px rgba(0,0,0,0.2);">
+        <span onclick="closeModal()" style="position: absolute; right: 10px; top: 5px; cursor: pointer; font-size: 1.5rem;">&times;</span>
+        <h3 id="modal-title">Détails de l'exécution</h3>
+        
+        <div style="margin-bottom: 1rem;">
+            <h4>Informations</h4>
+            <div id="modal-info" style="display: grid; grid-template-columns: 1fr 2fr; gap: 0.5rem;"></div>
+        </div>
+        
+        <div style="margin-bottom: 1rem;">
+            <h4>Variables utilisées</h4>
+            <pre id="modal-variables" style="white-space: pre-wrap; background-color: #f8f8f8; padding: 1rem; border-radius: 4px; max-height: 200px; overflow: auto;"></pre>
+        </div>
+        
+        <div style="margin-bottom: 1rem;">
+            <h4>Prompt généré</h4>
+            <pre id="modal-prompt" style="white-space: pre-wrap; background-color: #f8f8f8; padding: 1rem; border-radius: 4px; max-height: 200px; overflow: auto;"></pre>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Données de l'historique 
+    const historyData = {
+        {% for item in history %}
+        '{{ item.id }}': {
+            template_name: '{{ item.template_name }}',
+            template_id: '{{ item.template_id }}',
+            timestamp: '{{ item.timestamp.strftime("%d/%m/%Y %H:%M") }}',
+            provider: '{{ item.provider or "Défaut" }}',
+            success: {{ 'true' if item.success else 'false' }},
+            variables: {{ item.variables|tojson|safe }},
+            formatted_prompt: `{{ item.formatted_prompt|replace('`', '\`')|safe }}`,
+            error: `{{ item.error or '' }}`
+        },
+        {% endfor %}
+    };
+    
+    function showDetails(id) {
+        const item = historyData[id];
+        if (!item) return;
+        
+        // Remplir les informations
+        document.getElementById('modal-title').textContent = `Exécution de "${item.template_name}"`;
+        
+        const infoDiv = document.getElementById('modal-info');
+        infoDiv.innerHTML = `
+            <div>ID Template:</div><div>${item.template_id}</div>
+            <div>Date:</div><div>${item.timestamp}</div>
+            <div>Fournisseur:</div><div>${item.provider}</div>
+            <div>Statut:</div><div>${item.success ? '<span style="color: green;">Succès</span>' : '<span style="color: red;">Échec</span>'}</div>
+            ${item.error ? `<div>Erreur:</div><div style="color: red;">${item.error}</div>` : ''}
+        `;
+        
+        // Afficher les variables
+        document.getElementById('modal-variables').textContent = JSON.stringify(item.variables, null, 2);
+        
+        // Afficher le prompt
+        document.getElementById('modal-prompt').textContent = item.formatted_prompt;
+        
+        // Afficher le modal
+        document.getElementById('details-modal').style.display = 'block';
+    }
+    
+    function closeModal() {
+        document.getElementById('details-modal').style.display = 'none';
+    }
+    
+    // Fermer le modal en cliquant à l'extérieur
+    window.onclick = function(event) {
+        const modal = document.getElementById('details-modal');
+        if (event.target === modal) {
+            closeModal();
+        }
+    }
+</script>
+{% else %}
+<div class="card">
+    <p>Aucun historique d'exécution disponible.</p>
+</div>
+{% endif %}
+{% endblock %}
