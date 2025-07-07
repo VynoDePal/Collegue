@@ -1,0 +1,58 @@
+{
+  "code_generation": {
+    "id": "code_generation",
+    "name": "Génération de code",
+    "description": "Templates pour la génération de code dans différents langages",
+    "parent_id": null,
+    "icon": "code"
+  },
+  "code_explanation": {
+    "id": "code_explanation",
+    "name": "Explication de code",
+    "description": "Templates pour l'explication et l'analyse de code",
+    "parent_id": null,
+    "icon": "help"
+  },
+  "refactoring": {
+    "id": "refactoring",
+    "name": "Refactoring",
+    "description": "Templates pour le refactoring et l'amélioration de code",
+    "parent_id": null,
+    "icon": "refresh"
+  },
+  "documentation": {
+    "id": "documentation",
+    "name": "Documentation",
+    "description": "Templates pour la génération de documentation",
+    "parent_id": null,
+    "icon": "description"
+  },
+  "testing": {
+    "id": "testing",
+    "name": "Tests",
+    "description": "Templates pour la génération de tests",
+    "parent_id": null,
+    "icon": "check_circle"
+  },
+  "project_management": {
+    "id": "project_management",
+    "name": "Gestion de projet",
+    "description": "Templates pour la planification et la gestion de projet",
+    "parent_id": null,
+    "icon": "assignment"
+  },
+  "learning": {
+    "id": "learning",
+    "name": "Apprentissage",
+    "description": "Templates pour l'apprentissage et la formation",
+    "parent_id": null,
+    "icon": "school"
+  },
+  "new_category": {
+    "id": "new_category",
+    "name": "Nouvelle catégorie",
+    "description": "Description de la nouvelle catégorie",
+    "parent_id": null,
+    "icon": null
+  }
+}

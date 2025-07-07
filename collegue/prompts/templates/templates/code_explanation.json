@@ -1,0 +1,66 @@
+{
+  "id": "code_explanation",
+  "name": "Explication de code",
+  "description": "Analyse et explique un extrait de code",
+  "template": "Analyse et explique le code suivant :\n\n```{language}\n{code}\n```\n\nNiveau de détail : {detail_level}\n\nPoints à couvrir :\n- Fonctionnalité principale\n- Structure et organisation\n- Algorithmes et patterns utilisés\n- Points forts et faiblesses\n- Suggestions d'amélioration",
+  "variables": [
+    {
+      "name": "language",
+      "description": "Langage de programmation du code",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "python"
+    },
+    {
+      "name": "code",
+      "description": "Code source à analyser",
+      "type": "code",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n-1)"
+    },
+    {
+      "name": "detail_level",
+      "description": "Niveau de détail de l'explication",
+      "type": "string",
+      "required": false,
+      "default": "standard",
+      "options": [
+        "simple",
+        "standard",
+        "détaillé",
+        "expert"
+      ],
+      "example": "détaillé"
+    }
+  ],
+  "category": "code_explanation",
+  "tags": [
+    "explanation",
+    "analysis",
+    "code_review"
+  ],
+  "provider_specific": {
+    "openai": "En tant qu'expert en développement logiciel, analyse et explique le code suivant avec un niveau de détail {detail_level} :\n\n```{language}\n{code}\n```\n\nCouvre les aspects suivants :\n1. Fonctionnalité principale et objectif du code\n2. Structure et organisation\n3. Algorithmes et patterns de conception utilisés\n4. Points forts du code\n5. Faiblesses potentielles ou risques\n6. Suggestions concrètes d'amélioration"
+  },
+  "examples": [
+    {
+      "language": "python",
+      "code": "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n-1)",
+      "detail_level": "standard"
+    },
+    {
+      "language": "javascript",
+      "code": "function quickSort(arr) {\n    if (arr.length <= 1) return arr;\n    const pivot = arr[0];\n    const left = arr.slice(1).filter(x => x < pivot);\n    const right = arr.slice(1).filter(x => x >= pivot);\n    return [...quickSort(left), pivot, ...quickSort(right)];\n}",
+      "detail_level": "détaillé"
+    }
+  ],
+  "created_at": "2025-06-11T18:17:52.285389",
+  "updated_at": "2025-06-11T18:17:52.285393",
+  "created_by": null,
+  "is_public": true,
+  "version": "1.0.0"
+}

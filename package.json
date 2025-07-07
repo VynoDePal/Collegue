@@ -1,0 +1,44 @@
+{
+  "name": "@modelcontextprotocol/collegue",
+  "version": "1.0.0",
+  "description": "Un assistant de développement intelligent inspiré par Junie de JetBrains, implémenté comme un serveur MCP (Model Context Protocol) avec FastMCP.",
+  "main": "index.js",
+  "bin": {
+    "collegue": "./bin/collegue.js"
+  },
+  "directories": {
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "start": "node ./bin/collegue.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "node -e \"try { require('fs').chmodSync('./bin/collegue.js', '755') } catch (e) { console.error(e) }\""
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "development",
+    "assistant",
+    "code-assistant"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/inspector": "^0.14.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin/",
+    "collegue/",
+    "requirements.txt",
+    ".env.example",
+    "README.md"
+  ]
+}

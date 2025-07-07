@@ -1,0 +1,88 @@
+{
+  "id": "test_generator",
+  "name": "Générateur de tests",
+  "description": "Génère des tests unitaires pour du code existant",
+  "template": "Génère des tests unitaires pour le code suivant en utilisant {framework} :\n\n```{language}\n{code}\n```\n\nScénarios de test à couvrir :\n{test_scenarios}\n\nNiveau de couverture souhaité : {coverage_level}\n\nInclure :\n- Configuration des tests\n- Tests pour les cas normaux\n- Tests pour les cas limites\n- Tests pour les cas d'erreur\n- Mocks et stubs si nécessaire",
+  "variables": [
+    {
+      "name": "framework",
+      "description": "Framework de test à utiliser",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": [
+        "unittest",
+        "pytest",
+        "Jest",
+        "Mocha",
+        "JUnit",
+        "NUnit"
+      ],
+      "example": "pytest"
+    },
+    {
+      "name": "language",
+      "description": "Langage de programmation du code",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "python"
+    },
+    {
+      "name": "code",
+      "description": "Code source à tester",
+      "type": "code",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "def validate_email(email):\n    import re\n    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'\n    if re.match(pattern, email):\n        return True\n    return False"
+    },
+    {
+      "name": "test_scenarios",
+      "description": "Scénarios de test spécifiques à couvrir",
+      "type": "string",
+      "required": false,
+      "default": "- Cas de base\n- Cas limites\n- Gestion des erreurs",
+      "options": null,
+      "example": "- Emails valides avec différents domaines\n- Emails invalides (sans @, sans domaine, etc.)\n- Cas limites (chaîne vide, None, etc.)"
+    },
+    {
+      "name": "coverage_level",
+      "description": "Niveau de couverture de code souhaité",
+      "type": "string",
+      "required": false,
+      "default": "Standard",
+      "options": [
+        "Basique",
+        "Standard",
+        "Complet",
+        "Exhaustif"
+      ],
+      "example": "Complet"
+    }
+  ],
+  "category": "testing",
+  "tags": [
+    "testing",
+    "unit_tests",
+    "test_automation"
+  ],
+  "provider_specific": {
+    "openai": "En tant qu'expert en tests logiciels, génère des tests unitaires complets pour le code suivant en utilisant le framework {framework} :\n\n```{language}\n{code}\n```\n\nScénarios de test à couvrir :\n{test_scenarios}\n\nNiveau de couverture souhaité : {coverage_level}\n\nAssure-toi d'inclure :\n- Configuration appropriée des tests\n- Tests pour les cas normaux/attendus\n- Tests pour les cas limites\n- Tests pour les cas d'erreur et exceptions\n- Mocks et stubs si nécessaire pour isoler les dépendances\n\nLe code de test doit être bien organisé, commenté et suivre les meilleures pratiques du framework {framework}."
+  },
+  "examples": [
+    {
+      "framework": "pytest",
+      "language": "python",
+      "code": "def validate_email(email):\n    import re\n    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'\n    if re.match(pattern, email):\n        return True\n    return False",
+      "test_scenarios": "- Emails valides avec différents domaines\n- Emails invalides (sans @, sans domaine, etc.)\n- Cas limites (chaîne vide, None, etc.)",
+      "coverage_level": "Complet"
+    }
+  ],
+  "created_at": "2025-06-11T18:17:52.285882",
+  "updated_at": "2025-06-11T18:17:52.285884",
+  "created_by": null,
+  "is_public": true,
+  "version": "1.0.0"
+}

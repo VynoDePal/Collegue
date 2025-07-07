@@ -1,0 +1,117 @@
+{
+  "id": "documentation_generator",
+  "name": "Générateur de documentation",
+  "description": "Génère une documentation complète pour du code ou un projet",
+  "template": "Génère une documentation {format} pour le code suivant :\n\n```{language}\n{code}\n```\n\nType de documentation : {doc_type}\nPublic cible : {audience}\nNiveau de détail : {detail_level}\n\nInclure :\n{sections_to_include}",
+  "variables": [
+    {
+      "name": "format",
+      "description": "Format de la documentation",
+      "type": "string",
+      "required": true,
+      "default": "Markdown",
+      "options": [
+        "Markdown",
+        "reStructuredText",
+        "HTML",
+        "Docstring"
+      ],
+      "example": "Markdown"
+    },
+    {
+      "name": "language",
+      "description": "Langage de programmation du code",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "python"
+    },
+    {
+      "name": "code",
+      "description": "Code source à documenter",
+      "type": "code",
+      "required": true,
+      "default": null,
+      "options": null,
+      "example": "class DataProcessor:\n    def __init__(self, config):\n        self.config = config\n        \n    def process(self, data):\n        # Process the data\n        return transformed_data"
+    },
+    {
+      "name": "doc_type",
+      "description": "Type de documentation à générer",
+      "type": "string",
+      "required": true,
+      "default": "API",
+      "options": [
+        "API",
+        "Guide utilisateur",
+        "Guide développeur",
+        "Référence technique"
+      ],
+      "example": "API"
+    },
+    {
+      "name": "audience",
+      "description": "Public cible de la documentation",
+      "type": "string",
+      "required": false,
+      "default": "Tous niveaux",
+      "options": [
+        "Débutants",
+        "Intermédiaires",
+        "Experts",
+        "Tous niveaux"
+      ],
+      "example": "Débutants"
+    },
+    {
+      "name": "detail_level",
+      "description": "Niveau de détail de la documentation",
+      "type": "string",
+      "required": false,
+      "default": "Standard",
+      "options": [
+        "Minimal",
+        "Standard",
+        "Détaillé",
+        "Exhaustif"
+      ],
+      "example": "Détaillé"
+    },
+    {
+      "name": "sections_to_include",
+      "description": "Sections à inclure dans la documentation",
+      "type": "string",
+      "required": false,
+      "default": "- Description générale\n- Paramètres\n- Valeurs de retour\n- Exemples d'utilisation\n- Exceptions",
+      "options": null,
+      "example": "- Description générale\n- Architecture\n- API\n- Exemples d'utilisation\n- Bonnes pratiques\n- Dépannage"
+    }
+  ],
+  "category": "documentation",
+  "tags": [
+    "documentation",
+    "api",
+    "guide",
+    "reference"
+  ],
+  "provider_specific": {
+    "openai": "En tant qu'expert en documentation technique, génère une documentation {format} complète et bien structurée pour le code suivant :\n\n```{language}\n{code}\n```\n\nType de documentation : {doc_type}\nPublic cible : {audience}\nNiveau de détail : {detail_level}\n\nInclure les sections suivantes :\n{sections_to_include}\n\nAssure-toi que la documentation est claire, précise et suit les meilleures pratiques de documentation pour le langage {language}."
+  },
+  "examples": [
+    {
+      "format": "Markdown",
+      "language": "python",
+      "code": "def calculate_statistics(data, metrics=['mean', 'median', 'std']):\n    \"\"\"Calculate statistics for the given data.\"\"\"\n    results = {}\n    if 'mean' in metrics:\n        results['mean'] = sum(data) / len(data)\n    if 'median' in metrics:\n        sorted_data = sorted(data)\n        mid = len(sorted_data) // 2\n        if len(sorted_data) % 2 == 0:\n            results['median'] = (sorted_data[mid-1] + sorted_data[mid]) / 2\n        else:\n            results['median'] = sorted_data[mid]\n    if 'std' in metrics:\n        mean = sum(data) / len(data)\n        variance = sum((x - mean) ** 2 for x in data) / len(data)\n        results['std'] = variance ** 0.5\n    return results",
+      "doc_type": "API",
+      "audience": "Intermédiaires",
+      "detail_level": "Détaillé",
+      "sections_to_include": "- Description générale\n- Paramètres\n- Valeurs de retour\n- Exemples d'utilisation\n- Complexité algorithmique"
+    }
+  ],
+  "created_at": "2025-06-11T18:17:52.285584",
+  "updated_at": "2025-06-11T18:17:52.285587",
+  "created_by": null,
+  "is_public": true,
+  "version": "1.0.0"
+}

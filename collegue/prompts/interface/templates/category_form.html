@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>{% if is_new %}Nouvelle catégorie{% else %}Modifier {{ category.name }}{% endif %}</h2>
+
+<form id="categoryForm" method="POST" action="{% if is_new %}/prompts/ui/categories{% else %}/prompts/ui/categories/{{ category.id }}{% endif %}" class="card">
+    {% if not is_new %}
+    <input type="hidden" name="_method" value="PUT">
+    {% endif %}
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="id">Identifiant</label>
+        <input type="text" id="id" name="id" value="{% if category %}{{ category.id }}{% endif %}" required 
+               style="width: 100%; padding: 0.5rem; box-sizing: border-box;"
+               {% if not is_new %}readonly{% endif %}>
+        {% if is_new %}<small>L'identifiant doit être unique et ne peut pas être modifié ultérieurement</small>{% endif %}
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="name">Nom</label>
+        <input type="text" id="name" name="name" value="{% if category %}{{ category.name }}{% endif %}" required style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="description">Description</label>
+        <textarea id="description" name="description" rows="2" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">{% if category %}{{ category.description }}{% endif %}</textarea>
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="icon">Icône</label>
+        <input type="text" id="icon" name="icon" value="{% if category %}{{ category.icon }}{% endif %}" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+        <small>Nom d'une icône Material Design ou emoji</small>
+    </div>
+    
+    <div style="margin-bottom: 1rem;">
+        <label for="parent_id">Catégorie parente</label>
+        <select id="parent_id" name="parent_id" style="width: 100%; padding: 0.5rem; box-sizing: border-box;">
+            <option value="">Aucune (catégorie racine)</option>
+            {% for cat in categories %}
+                {% if is_new or category.id != cat.id %}
+                <option value="{{ cat.id }}" {% if category and category.parent_id == cat.id %}selected{% endif %}>{{ cat.name }}</option>
+                {% endif %}
+            {% endfor %}
+        </select>
+    </div>
+    
+    <div style="margin-top: 2rem;">
+        <button type="submit" class="btn">{% if is_new %}Créer{% else %}Mettre à jour{% endif %}</button>
+        <a href="/prompts/ui/categories" style="margin-left: 1rem;">Annuler</a>
+    </div>
+</form>
+
+<script>
+    document.getElementById('name').addEventListener('input', function(e) {
+        if (document.getElementById('id').readOnly === false) {
+            // Convertir le nom en un identifiant valide (slug)
+            const slug = e.target.value
+                .toLowerCase()
+                .replace(/[^a-z0-9_]/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_|_$/g, '');
+            
+            document.getElementById('id').value = slug;
+        }
+    });
+</script>
+{% endblock %}

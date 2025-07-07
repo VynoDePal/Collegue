@@ -1,0 +1,68 @@
+services:
+  collegue-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: collegue-app:latest # Assurez-vous que cette image est construite et disponible
+    restart: always
+    networks:
+      - collegue-net
+    environment:
+      # Décommentez et configurez vos variables d'environnement ici ou via un fichier .env
+      # PYTHONUNBUFFERED: 1
+      # OPENAI_API_KEY: "your_openai_api_key"
+      # ANTHROPIC_API_KEY: "your_anthropic_api_key"
+      # LLM_API_KEY: ${LLM_API_KEY}
+      # ... autres variables nécessaires à collegue-app
+      PORT: 4121 # Port interne sur lequel l'application Collegue écoute
+    # Si vous utilisez un fichier .env, décommentez la ligne suivante
+    env_file:
+      - .env
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:4122/_health"] # Utilise HEALTH_PORT (4122)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # Donne du temps à l'application pour démarrer avant de commencer les healthchecks
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m" # Taille maximale de chaque fichier log
+        max-file: "3"   # Nombre de fichiers de log à conserver (rotation)
+
+  nginx:
+    image: nginx:latest
+    restart: always
+    ports:
+      - "8080:80" # Expose le port 8080 publiquement, mappé sur le port 80 de Nginx
+      # Si vous voulez utiliser HTTPS (recommandé en production), vous exposerez le 443
+      # - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro # Monte le fichier de configuration Nginx
+      # Pour HTTPS avec Let's Encrypt, vous monteriez aussi les certificats ici
+      # - ./nginx/certs:/etc/nginx/certs:ro 
+      - nginx_logs:/var/log/nginx # Volume pour les logs Nginx
+    networks:
+      - collegue-net
+    depends_on:
+      collegue-app:
+        condition: service_healthy # Nginx ne démarrera que si collegue-app est healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  collegue-net:
+    driver: bridge
+
+volumes:
+  nginx_logs: # Volume pour persister les logs Nginx
