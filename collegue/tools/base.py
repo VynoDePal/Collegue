@@ -5,6 +5,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, ValidationError
+from pydantic_core import PydanticUndefined
 from datetime import datetime
 import inspect
 import functools
@@ -346,7 +347,7 @@ class BaseTool(ABC):
                     "type": str(field_info.annotation),
                     "required": field_info.is_required(),
                     "description": getattr(field_info, 'description', None) or "Aucune description disponible",
-                    "default": field_info.default if field_info.default is not ... else None
+                    "default": None if field_info.default is PydanticUndefined else field_info.default
                 }
 
         return parameters
