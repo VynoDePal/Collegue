@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "openrouter"  # Provider unique imposé
     # La clé API est désormais chargée depuis le fichier .env ou les variables d'environnement
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"  # Modèle unique imposé
+    LLM_MODEL: str = "moonshotai/kimi-dev-72b:free"  # Modèle unique imposé
     
     # Limites et performances
     MAX_TOKENS: int = 8192
