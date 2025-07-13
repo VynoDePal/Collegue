@@ -10,8 +10,6 @@ services:
     environment:
       # Décommentez et configurez vos variables d'environnement ici ou via un fichier .env
       # PYTHONUNBUFFERED: 1
-      # OPENAI_API_KEY: "your_openai_api_key"
-      # ANTHROPIC_API_KEY: "your_anthropic_api_key"
       # LLM_API_KEY: ${LLM_API_KEY}
       # ... autres variables nécessaires à collegue-app
       PORT: 4121 # Port interne sur lequel l'application Collegue écoute
