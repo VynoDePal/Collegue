@@ -201,7 +201,7 @@ Le serveur MCP utilisera automatiquement les paramètres HOST et PORT définis d
 {
   "mcpServers": {
     "collegue": {
-      "serverUrl": "http://localhost:8080/sse/"
+      "serverUrl": "http://localhost:8080/mcp/"
     }
   }
 }
@@ -212,8 +212,8 @@ Le serveur MCP utilisera automatiquement les paramètres HOST et PORT définis d
 {
   "mcpServers": {
     "collegue": {
-      "type": "sse",
-      "url": "http://localhost:8080/sse/"
+      "type": "streamable-http",
+      "url": "http://localhost:8080/mcp/"
     }
   }
 }
@@ -232,7 +232,7 @@ python -m collegue.app
 Le serveur démarrera automatiquement avec les paramètres HOST et PORT définis dans la configuration. Si vous souhaitez utiliser des paramètres différents pour une session spécifique, vous pouvez toujours utiliser la commande FastMCP directement :
 
 ```bash
-fastmcp run collegue/app.py:app --transport sse --host 127.0.0.1 --port 8080
+fastmcp run collegue/app.py:app --transport streamable-http --host 127.0.0.1 --port 8080
 ```
 
 ### Client Python

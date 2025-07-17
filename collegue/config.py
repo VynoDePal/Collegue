@@ -10,18 +10,18 @@ class Settings(BaseSettings):
     # Informations générales
     APP_NAME: str = "Collègue"
     APP_VERSION: str = "0.1.0"
-    APP_DESCRIPTION: str = "Assistant de développement intelligent inspiré par Junie"
+    APP_DESCRIPTION: str = "Assistant de développement intelligent"
     
     # Configuration du serveur
     HOST: str = "0.0.0.0"
     PORT: int = 4121
     DEBUG: bool = True
     
-    # Configuration des LLMs (usage unique imposé : OpenRouter DeepSeek)
+    # Configuration des LLMs (usage unique imposé : OpenRouter )
     LLM_PROVIDER: str = "openrouter"  # Provider unique imposé
     # La clé API est désormais chargée depuis le fichier .env ou les variables d'environnement
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "moonshotai/kimi-dev-72b:free"  # Modèle unique imposé
+    LLM_MODEL: str = "google/gemini-2.5-flash"  # Modèle unique imposé
     
     # Limites et performances
     MAX_TOKENS: int = 8192

@@ -10,4 +10,4 @@ sleep 3
 
 # Lance l'application principale au premier plan
 echo "Starting main application..."
-exec fastmcp run /app/collegue/app.py:app --transport sse
+exec fastmcp run /app/collegue/app.py:app --transport streamable-http
