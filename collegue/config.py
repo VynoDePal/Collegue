@@ -17,12 +17,13 @@ class Settings(BaseSettings):
     PORT: int = 4121
     DEBUG: bool = True
     
-    # Configuration des LLMs (usage unique imposé : OpenRouter )
+    # Configuration des LLMs (usage unique imposé : MoonshotAI via OpenRouter)
     LLM_PROVIDER: str = "openrouter"  # Provider unique imposé
+    LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     # La clé API est désormais chargée depuis le fichier .env ou les variables d'environnement
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "google/gemini-2.5-flash"  # Modèle unique imposé
-    
+    LLM_MODEL: str = "google/gemini-2.5-flash"  # Modèle MoonshotAI via OpenRouter
+
     # Limites et performances
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
