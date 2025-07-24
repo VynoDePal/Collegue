@@ -22,7 +22,7 @@ class ToolLLMManager:
             provider=LLMProvider.OPENAI,  # OpenRouter compatible avec OpenAI API
             model_name=self.settings.LLM_MODEL,
             api_key=self.settings.LLM_API_KEY,
-            api_base="https://openrouter.ai/api/v1",  # Endpoint fixe pour OpenRouter
+            api_base=self.settings.LLM_BASE_URL,
             max_tokens=self.settings.MAX_TOKENS,
             temperature=0.7,  # Valeur par défaut raisonnable
             additional_params={
