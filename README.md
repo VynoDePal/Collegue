@@ -207,13 +207,17 @@ Le serveur MCP utilisera automatiquement les paramètres HOST et PORT définis d
 }
 ```
 
-+ ### Dans VS Code
++ ### Dans Cursor
 ```bash
 {
   "mcpServers": {
     "collegue": {
-      "type": "streamable-http",
-      "url": "http://localhost:8080/mcp/"
+      "url": "http://localhost:8088/mcp/",
+      "headers": {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json"
+      },
+      "transport": "streamable-http"
     }
   }
 }
