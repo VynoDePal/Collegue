@@ -201,7 +201,7 @@ Le serveur MCP utilisera automatiquement les paramètres HOST et PORT définis d
 {
   "mcpServers": {
     "collegue": {
-      "serverUrl": "http://localhost:8080/mcp/"
+      "serverUrl": "http://localhost:8088/mcp/",
     }
   }
 }
