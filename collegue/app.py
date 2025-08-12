@@ -16,10 +16,47 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-# Initialisation de l'application FastMCP
+# Configuration de l'authentification OAuth native FastMCP
+auth_provider = None
+if settings.OAUTH_ENABLED:
+    from fastmcp.server.auth import BearerAuthProvider
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Configuration avec JWKS URI (prioritaire)
+        if settings.OAUTH_JWKS_URI:
+            auth_provider = BearerAuthProvider(
+                jwks_uri=settings.OAUTH_JWKS_URI,
+                issuer=settings.OAUTH_ISSUER,
+                algorithm=settings.OAUTH_ALGORITHM,
+                audience=settings.OAUTH_AUDIENCE,
+                required_scopes=settings.OAUTH_REQUIRED_SCOPES
+            )
+            logger.info(f"Auth OAuth configurée avec JWKS: {settings.OAUTH_JWKS_URI}")
+        
+        # Configuration avec clé publique
+        elif settings.OAUTH_PUBLIC_KEY:
+            auth_provider = BearerAuthProvider(
+                public_key=settings.OAUTH_PUBLIC_KEY,
+                issuer=settings.OAUTH_ISSUER,
+                algorithm=settings.OAUTH_ALGORITHM,
+                audience=settings.OAUTH_AUDIENCE,
+                required_scopes=settings.OAUTH_REQUIRED_SCOPES
+            )
+            logger.info("Auth OAuth configurée avec clé publique")
+        else:
+            logger.warning("OAuth activé mais ni JWKS_URI ni PUBLIC_KEY configurés")
+    except Exception as e:
+        logger.error(f"Erreur lors de la configuration OAuth: {e}")
+        auth_provider = None
+
+# Initialisation de l'application FastMCP avec auth native
 app = FastMCP(
     host=settings.HOST,
-    port=settings.PORT
+    port=settings.PORT,
+    auth=auth_provider  # Intégration native de l'authentification
 )
 
 # Compatibilité FastAPI → FastMCP
@@ -94,7 +131,17 @@ app_state = {}
 
 # Import et initialisation du ToolLLMManager (gestionnaire LLM centralisé)
 from collegue.core.tool_llm_manager import ToolLLMManager
-app_state["llm_manager"] = ToolLLMManager()
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+try:
+    # L'absence de LLM_API_KEY ne doit pas empêcher le démarrage du serveur.
+    # Les outils qui nécessitent le LLM échoueront à l'exécution avec un message explicite.
+    app_state['llm_manager'] = ToolLLMManager()
+except Exception as _e:
+    _logger.warning(
+        "LLM manager non initialisé (continuation sans LLM): %s",
+        _e
+    )
 
 # Importation des modules
 from collegue.core import register_core
@@ -179,6 +226,42 @@ if "prompt_engine" in app_state and "_template_endpoint" not in app_state:
 )
 async def health_endpoint(): # Renommer la fonction pour éviter tout conflit potentiel
     return "OK"
+
+# Point d'entrée pour le serveur
+# Endpoint de métadonnées pour la découverte OAuth
+@app.get("/.well-known/oauth-authorization-server")
+def get_oauth_metadata():
+    """Expose les métadonnées du serveur d'autorisation OAuth."""
+    if settings.OAUTH_ENABLED and settings.OAUTH_ISSUER:
+        token_endpoint = f"{settings.OAUTH_ISSUER.rstrip('/')}/protocol/openid-connect/token"
+        jwks_uri = f"{settings.OAUTH_ISSUER.rstrip('/')}/protocol/openid-connect/certs"
+        return {
+            "issuer": settings.OAUTH_ISSUER,
+            "token_endpoint": token_endpoint,
+            "jwks_uri": jwks_uri,
+            "scopes_supported": settings.OAUTH_REQUIRED_SCOPES,
+            "response_types_supported": ["token"],
+            "grant_types_supported": ["client_credentials"],
+            "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+        }
+    # Si OAuth n'est pas activé, retourner une ressource vide ou une erreur
+    # pour indiquer que le service n'est pas un serveur d'autorisation.
+    return {}
+
+# Endpoint de découverte OAuth Protected Resource (MCP)
+@app.get("/.well-known/oauth-protected-resource")
+def get_oauth_protected_resource():
+    """Expose les métadonnées de ressource protégée pour MCP.
+    Indique aux clients MCP quel(s) Authorization Server(s) utiliser.
+    """
+    if settings.OAUTH_ENABLED and settings.OAUTH_ISSUER:
+        auth_server = (settings.OAUTH_AUTH_SERVER_PUBLIC or settings.OAUTH_ISSUER).rstrip('/')
+        return {
+            "authorization_servers": [auth_server],
+            "resource_id": settings.OAUTH_AUDIENCE or settings.APP_NAME.lower(),
+            "scopes_supported": settings.OAUTH_REQUIRED_SCOPES,
+        }
+    return {}
 
 # Point d'entrée pour le serveur
 if __name__ == "__main__":
