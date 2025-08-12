@@ -2,7 +2,8 @@
 Configuration - Paramètres de configuration pour le MCP Collègue
 """
 from pydantic_settings import BaseSettings
-from typing import Dict, Any, Optional, List
+from pydantic import field_validator
+from typing import Dict, Any, Optional, List, Union
 
 class Settings(BaseSettings):
     """Paramètres de configuration pour le MCP Collègue."""
@@ -22,7 +23,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     # La clé API est désormais chargée depuis le fichier .env ou les variables d'environnement
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "google/gemini-2.5-flash"  # Modèle MoonshotAI via OpenRouter
+    LLM_MODEL: str = "openai/gpt-5-mini"
 
     # Limites et performances
     MAX_TOKENS: int = 8192
@@ -34,9 +35,46 @@ class Settings(BaseSettings):
     # Langages supportés
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript"]
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # Configuration de l'authentification OAuth
+    # Activer l'authentification OAuth (True/False)
+    OAUTH_ENABLED: bool = False
+    # URL du serveur d'identité OAuth/JWKS
+    OAUTH_JWKS_URI: Optional[str] = None
+    # Émetteur du token (issuer)
+    OAUTH_ISSUER: Optional[str] = None
+    # URL publique de l'Authorization Server pour la découverte client (ex: Windsurf)
+    # Utile si l'issuer interne (dans les tokens) diffère de l'URL publique accessible
+    # depuis l'extérieur (Nginx/host). Exemple:
+    #   - OAUTH_ISSUER = "http://localhost:8080/realms/master" (claim iss Keycloak)
+    #   - OAUTH_AUTH_SERVER_PUBLIC = "http://localhost:4123/realms/master" (URL publique)
+    OAUTH_AUTH_SERVER_PUBLIC: Optional[str] = None
+    # Algorithme de signature des tokens
+    OAUTH_ALGORITHM: str = "RS256"
+    # Audience cible des tokens
+    OAUTH_AUDIENCE: Optional[str] = None
+    # Scopes requis pour accéder aux endpoints
+    # Les scopes peuvent être fournis en chaîne ("read,write") ou directement en liste
+    OAUTH_REQUIRED_SCOPES: Union[str, List[str]] = []
+    
+    @field_validator('OAUTH_REQUIRED_SCOPES', mode='before', check_fields=False)
+    @classmethod
+    def parse_oauth_scopes(cls, v):
+        if isinstance(v, str):
+            # Si c'est une chaîne, la diviser par des virgules et nettoyer les espaces
+            return [scope.strip() for scope in v.split(',') if scope.strip()]
+        elif isinstance(v, list):
+            return v
+        elif v is None:
+            return []
+        # Si la valeur est déjà de type Union attendue par Pydantic
+        return v
+    # Clé publique pour la vérification des tokens (alternative à JWKS)
+    OAUTH_PUBLIC_KEY: Optional[str] = None
+    
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8"
+    }
         
 # Instance globale des paramètres
 settings = Settings()
