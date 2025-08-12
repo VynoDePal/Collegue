@@ -15,7 +15,7 @@ Exemple de réponse:
     "http://localhost:4123/realms/master"
   ],
   "resource_id": "collegue",
-  "scopes_supported": ["read", "write"]
+  "scopes_supported": ["mcp.read", "mcp.write"]
 }
 ```
 
@@ -29,6 +29,40 @@ Pour exposer publiquement la découverte depuis la même origine que MCP
 server (FastAPI) sur le port 4122. Cela évite d'imposer l'exposition directe
 de Collegue pour ces endpoints.
 
+Exemple minimal pour le endpoint MCP (sans réécriture des headers de session):
+
+```nginx
+location /mcp/ {
+    proxy_pass http://collegue_backend;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # Propager explicitement l'en-tête Authorization
+    proxy_set_header Authorization $http_authorization;
+
+    # streamable-http
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 86400s;
+    proxy_set_header Accept-Encoding "";
+
+    # Ne pas réécrire X-Session-ID / MCP-Session-ID
+    proxy_pass_request_headers on;
+}
+```
+
+### Mise à l'échelle et sessions
+
+FastMCP (streamable-http) maintient des sessions en mémoire locale.
+
+- En développement, privilégier __un seul réplica__ (`collegue-app`) pour
+  éviter les erreurs `400 No valid session ID provided`.
+- En production multi-réplicas, mettre en place des __sticky sessions__ côté
+  proxy (p. ex. `ip_hash` dans `upstream`) ou un stockage de session partagé.
+
 ## Configuration Keycloak (DCR)
 
 Dans le realm (`master` par défaut en dev):
@@ -39,15 +73,26 @@ Dans le realm (`master` par défaut en dev):
 - Vérifiez que `/.well-known/openid-configuration` expose
   `registration_endpoint`.
 
+### Provisioning automatique (kc-provisioner)
+
+Le service `kc-provisioner` automatise la post-configuration du client créé
+par DCR (Windsurf):
+
+- Crée les client scopes `mcp.read` et `mcp.write` s'ils sont absents.
+- Les marque comme __Default__ au niveau du realm (inclusion automatique).
+- Active le service account sur le client DCR.
+- Attache `mcp.read` et `mcp.write` au client (idempotent).
+- Gère les `401` (refresh admin token) et les particularités du `client-secret`.
+
 ## Variables d'environnement (exemples)
 
 ```env
 # Côté Collegue (Resource Server)
 OAUTH_ENABLED=true
-OAUTH_ISSUER=http://keycloak:8080/realms/master
+OAUTH_ISSUER=http://localhost:4123/realms/master
 OAUTH_JWKS_URI=http://keycloak:8080/realms/master/protocol/openid-connect/certs
 OAUTH_AUDIENCE=collegue
-OAUTH_REQUIRED_SCOPES=read,write
+OAUTH_REQUIRED_SCOPES=mcp.read,mcp.write
 
 # URL publique de l'Authorization Server (pour découverte côté client)
 OAUTH_AUTH_SERVER_PUBLIC=http://localhost:4123/realms/master
@@ -55,6 +100,28 @@ OAUTH_AUTH_SERVER_PUBLIC=http://localhost:4123/realms/master
 # Côté Keycloak (Docker)
 KEYCLOAK_ADMIN=admin
 KEYCLOAK_ADMIN_PASSWORD=admin
+```
+
+### Configuration finale (local)
+
+Exemple `.env` fonctionnel en local (Keycloak via Docker):
+
+```env
+LLM_API_KEY="<votre_clé>"
+OAUTH_ENABLED=true
+OAUTH_JWKS_URI=http://keycloak:8080/realms/master/protocol/openid-connect/certs
+OAUTH_ISSUER=http://localhost:4123/realms/master
+OAUTH_AUTH_SERVER_PUBLIC=http://localhost:4123/realms/master
+OAUTH_ALGORITHM=RS256
+OAUTH_REQUIRED_SCOPES="mcp.read,mcp.write"
+# Optionnel mais recommandé pour un resource_id ASCII
+OAUTH_AUDIENCE=collegue
+
+# Keycloak (dev)
+KEYCLOAK_ADMIN=<admin>
+KEYCLOAK_ADMIN_PASSWORD=<mot_de_passe>
+PROVISION_CLIENT_ID=windsurf-client
+WAIT_FOR_CLIENT_SECONDS=600
 ```
 
 Pour Windsurf, la configuration MCP doit simplement pointer vers le SSE/HTTP
@@ -72,6 +139,22 @@ du serveur MCP, sans bloc `oauth`:
 
 Windsurf détectera automatiquement l'Authorization Server via
 `/.well-known/oauth-protected-resource`.
+
+## Dépannage
+
+- __401 invalid_token__
+  - Vérifier la propagation de `Authorization` côté Nginx.
+  - Vérifier l'accessibilité du JWKS depuis `collegue-app`:
+    `http://keycloak:8080/realms/master/protocol/openid-connect/certs`.
+  - Vérifier `iss` du token (doit être `http://localhost:4123/realms/master`).
+  - Laisser `OAUTH_AUDIENCE` vide au début, ou aligner `aud` côté Keycloak si
+    vous le définissez.
+  - Si le token n'expose pas `scope`/`scp`, tester avec
+    `OAUTH_REQUIRED_SCOPES=` vide, puis réactiver.
+
+- __400 No valid session ID provided__
+  - Éviter le multi-réplicas sans sticky sessions.
+  - Ne pas réécrire les en-têtes de session (X-Session-ID, MCP-Session-ID).
 # Authentification OAuth pour Collegue MCP
 
 ## Introduction
