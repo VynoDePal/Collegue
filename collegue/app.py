@@ -59,6 +59,48 @@ app = FastMCP(
     auth=auth_provider  # Intégration native de l'authentification
 )
 
+# Configuration MCP au démarrage
+# Note: FastMCP n'a pas de décorateur @app.on_startup, donc nous initialisons directement
+def configure_mcp_params():
+    """
+    Configure les paramètres MCP au démarrage pour le LLM.
+    Les paramètres sont récupérés depuis les variables d'environnement MCP.
+    """
+    import os
+    
+    try:
+        mcp_params = {}
+        
+        # Récupérer depuis les variables d'environnement MCP
+        # (les implémentations MCP passent les params comme env vars)
+        if os.environ.get("MCP_LLM_MODEL"):
+            mcp_params["LLM_MODEL"] = os.environ.get("MCP_LLM_MODEL")
+            logger.info(f"MCP_LLM_MODEL détecté: {os.environ.get('MCP_LLM_MODEL')}")
+        
+        if os.environ.get("MCP_LLM_API_KEY"):
+            mcp_params["LLM_API_KEY"] = os.environ.get("MCP_LLM_API_KEY")
+            logger.info("MCP_LLM_API_KEY détectée")
+        
+        # Mettre à jour la configuration avec les paramètres MCP
+        if mcp_params:
+            settings.update_from_mcp(mcp_params)
+            logger.info("Configuration mise à jour avec les paramètres MCP")
+            
+            # Réinitialiser le ToolLLMManager avec la nouvelle configuration
+            from collegue.core.tool_llm_manager import ToolLLMManager
+            try:
+                global app_state
+                app_state['llm_manager'] = ToolLLMManager()
+                logger.info("ToolLLMManager réinitialisé avec la configuration MCP")
+            except Exception as e:
+                logger.warning(f"Impossible de réinitialiser le LLM manager: {e}")
+    
+    except Exception as e:
+        logger.error(f"Erreur lors de la configuration des paramètres MCP: {e}")
+
+# Appel de la configuration MCP lors de l'import du module
+configure_mcp_params()
+
 # Compatibilité FastAPI → FastMCP
 # De nombreux modules historiques utilisent les décorateurs FastAPI
 # (`@app.get`, `@app.post`, etc.) et `app.include_router`.  
