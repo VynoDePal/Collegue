@@ -2,7 +2,7 @@
 
 ## Problème initial
 
-Le problème concernait une erreur de connexion au serveur MCP avec le transport streamable-http :
+Le problème concernait une erreur de connexion au serveur MCP avec le transport http :
 
 ```
 Error: failed to initialize server: failed to create streamable http client: failed to initialize client: failed to send initialized notification: notification failed with status 400: Bad Request: No valid session ID provided, failed to create streamable http client with oauth: failed to initialize client: failed to register client: registration request failed with status 404: Not Found, failed to create sse client: failed to start client: unexpected status code: 400, failed to create sse client with oauth: failed to start client: failed to register client: registration request failed with status 404: Not Found.
@@ -12,7 +12,7 @@ Error: failed to initialize server: failed to create streamable http client: fai
 
 Après analyse, plusieurs problèmes ont été identifiés :
 
-1. **Incohérence de transport** : Le script `entrypoint.sh` utilisait `--transport http` alors que la configuration dans `docker-compose.yml` spécifiait `MCP_TRANSPORT: streamable-http`.
+1. **Incohérence de transport** : Le script `entrypoint.sh` utilisait `--transport http` alors que la configuration dans `docker-compose.yml` spécifiait `MCP_TRANSPORT: http`.
 
 2. **Configuration nginx inadéquate** : La configuration nginx ne traitait pas spécifiquement le chemin `/mcp/` et ne gérait pas correctement les en-têtes de session.
 
@@ -22,19 +22,16 @@ Après analyse, plusieurs problèmes ont été identifiés :
 
 ### 1. Mise à jour de entrypoint.sh
 
-Modification du transport pour utiliser streamable-http :
+Modification du transport pour utiliser http :
 
 ```bash
-# Avant
+# Configuration correcte
 exec fastmcp run /app/collegue/app.py:app --transport http
-
-# Après
-exec fastmcp run /app/collegue/app.py:app --transport streamable-http
 ```
 
 ### 2. Amélioration de la configuration nginx
 
-Ajout d'une section spécifique pour le chemin `/mcp/` avec une configuration adaptée pour streamable-http et la gestion des sessions :
+Ajout d'une section spécifique pour le chemin `/mcp/` avec une configuration adaptée pour le transport http et la gestion des sessions :
 
 ```nginx
 # Configuration spécifique pour le endpoint MCP
@@ -45,14 +42,14 @@ location /mcp/ {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     
-    # Configuration pour streamable-http
+    # Configuration pour transport http
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_buffering off;
     proxy_cache off;
     proxy_read_timeout 86400s;
     
-    # Headers spécifiques pour MCP streamable-http
+    # Headers spécifiques pour MCP http
     proxy_set_header Accept-Encoding "";
     proxy_set_header X-Forwarded-Host $host;
     proxy_set_header X-Forwarded-Port $server_port;
@@ -80,8 +77,8 @@ Plusieurs améliorations ont été apportées au client dans `test_mcp_session.p
    - Vérification des en-têtes de réponse pour l'ID de session
 
 2. **Initialisation avec transport explicite** :
-   - Ajout de `"transport": "streamable-http"` dans les paramètres d'initialisation
-   - Configuration explicite des en-têtes pour streamable-http
+   - Ajout de `"transport": "http"` dans les paramètres d'initialisation
+   - Configuration explicite des en-têtes pour le transport http
 
 3. **Utilisation cohérente de l'ID de session** :
    - Utilisation de plusieurs en-têtes pour l'ID de session (`X-Session-ID` et `MCP-Session-ID`)
@@ -114,7 +111,7 @@ Pour les clients MCP qui se connectent à ce serveur, utilisez la configuration 
       "Accept": "application/json, text/event-stream",
       "Content-Type": "application/json"
     },
-    "transport": "streamable-http"
+    "transport": "http"
   }
 }
 ```
