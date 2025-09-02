@@ -8,7 +8,7 @@ Collègue est un serveur MCP qui fournit des outils d'assistance au développeme
 
 ## État d'avancement
 
-**Dernière mise à jour: 13/07/2025**
+**Dernière mise à jour: 19/08/2025**
 
 + Configuration initiale ✅
 + - ### Core Engine ✅
@@ -39,10 +39,12 @@ Collègue est un serveur MCP qui fournit des outils d'assistance au développeme
 + Ressources TypeScript ✅
 + Configuration LLMs ✅
 + Optimisation des prompts ✅
-+ - ### Système de prompts personnalisés ✅
-+ Moteur de prompts ✅
-+ Templates de base ✅
-+ Catégories ✅
++ - ### Système de prompts personnalisés amélioré ✅
++ EnhancedPromptEngine avec versioning ✅
++ A/B testing automatique (epsilon-greedy 10%) ✅
++ Optimisation par langage (Python, JS, TS) ✅
++ Templates YAML configurables ✅
++ Migration complète des 5 outils ✅
 + Interface web ✅
 + - ### Intégration clients MCP 🔄
 + Client Python ✅
@@ -61,7 +63,7 @@ Collègue est un serveur MCP qui fournit des outils d'assistance au développeme
 + Tests d'intégration LLM 🔄
 + Documentation mise à jour 🔄
 
-Progression globale: 83% (34/41 sous-tâches terminées)
+Progression globale: 88% (46/52 sous-tâches terminées)
 
 ## Structure du projet
 
@@ -98,13 +100,20 @@ collegue/
 │   └── llm/               # Intégration avec LLMs
 │       ├── providers.py   # Fournisseurs LLM (OpenAI, Anthropic, etc.)
 │       ├── prompts.py     # Système de templates de prompts
-│       └── optimization.py # Stratégies d'optimisation de prompts
-├── prompts/               # Système de prompts personnalisés
-│   ├── engine/            # Moteur de gestion des prompts
-│   │   ├── prompt_engine.py  # Classe principale PromptEngine
-│   │   ├── models.py      # Modèles Pydantic (PromptTemplate, PromptCategory, etc.)
-│   │   └── storage.py     # Gestion du stockage des templates et catégories
-│   ├── interface/         # Interfaces d'accès au système de prompts
+│       └── optimization.py # Optimisation des prompts
+├── prompts/               # Système de prompts personnalisés avancé
+│   ├── engine/            # Moteurs de prompts
+│   │   ├── enhanced_prompt_engine.py  # Moteur principal avec versioning et A/B testing
+│   │   ├── versioning.py             # Gestion des versions de prompts
+│   │   └── optimizer.py              # Optimisation par langage
+│   ├── templates/         # Templates YAML configurables
+│   │   └── tools/         # Templates pour chaque outil
+│   │       ├── code_generation/
+│   │       ├── code_explanation/
+│   │       ├── refactoring/
+│   │       ├── documentation/
+│   │       └── test_generation/
+│   └── interface/         # Interface web pour gestion des prompts
 │   │   ├── api.py         # API REST pour accès programmatique
 │   │   ├── web.py         # Interface web pour gestion des prompts
 │   │   ├── templates/     # Templates Jinja2 pour l'interface web
@@ -233,15 +242,15 @@ Pour démarrer le serveur Collègue MCP :
 python -m collegue.app
 ```
 
-Le serveur démarrera automatiquement avec les paramètres HOST et PORT définis dans la configuration. Si vous souhaitez utiliser des paramètres différents pour une session spécifique, vous pouvez toujours utiliser la commande FastMCP directement :
+Le serveur dmarrera automatiquement avec les paramtres HOST et PORT dfinis dans la configuration. Si vous souhaitez utiliser des paramtres diffrents pour une session spcifique, vous pouvez toujours utiliser la commande FastMCP directement :
 
 ```bash
-fastmcp run collegue/app.py:app --transport streamable-http --host 127.0.0.1 --port 8080
+fastmcp run collegue/app.py:app --transport http --host 127.0.0.1 --port 8080
 ```
 
 ### Client Python
 
-Le client Python permet d'interagir facilement avec le serveur Collègue MCP :
+Le client Python permet d'interagir facilement avec le serveur Collgue MCP :
 
 ```python
 import asyncio
