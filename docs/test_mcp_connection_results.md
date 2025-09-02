@@ -2,7 +2,7 @@
 
 ## Résumé
 
-Ce document présente les résultats des tests effectués sur la connexion MCP (Model Context Protocol) avec le transport streamable-http. Les tests ont été réalisés à l'aide des scripts `test_mcp_connection.py` et `test_mcp_session.py`.
+Ce document présente les résultats des tests effectués sur la connexion MCP (Model Context Protocol) avec le transport http. Les tests ont été réalisés à l'aide des scripts `test_mcp_connection.py` et `test_mcp_session.py`.
 
 ## État Actuel
 
@@ -42,7 +42,7 @@ L'endpoint `/_health` retourne un code 404 lorsqu'il est accédé via nginx, mai
    - protocolVersion
    - capabilities (tools, resources, prompts)
    - clientInfo (name, version)
-   - transport (streamable-http)
+   - transport (http)
 
 2. **Amélioration de la gestion des sessions** : Le script a été amélioré pour extraire l'ID de session de différentes sources (headers, corps de la réponse) et pour l'utiliser de différentes manières dans les requêtes suivantes.
 
@@ -66,7 +66,7 @@ L'endpoint `/_health` retourne un code 404 lorsqu'il est accédé via nginx, mai
       "Accept": "application/json, text/event-stream",
       "Content-Type": "application/json"
     },
-    "transport": "streamable-http"
+    "transport": "http"
   }
 }
 ```

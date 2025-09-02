@@ -1,6 +1,7 @@
 """
 Test Generation - Outil de génération automatique de tests unitaires
 """
+import asyncio
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, validator, field_validator
 import os
@@ -237,7 +238,36 @@ class TestGenerationTool(BaseTool):
         # Utilisation du LLM centralisé si fourni
         if llm_manager is not None:
             try:
-                prompt = self._build_test_generation_prompt(request)
+                # Utiliser le nouveau système de prompts avec prepare_prompt
+                framework = request.test_framework or self._get_default_test_framework(request.language)
+                context = {
+                    "code": request.code,
+                    "language": request.language,
+                    "test_framework": framework,
+                    "include_mocks": str(request.include_mocks),
+                    "coverage_target": str(int(request.coverage_target * 100)) + "%" if request.coverage_target else "80%",
+                    "file_path": request.file_path or "unknown"
+                }
+                
+                # Essayer d'utiliser prepare_prompt (nouveau système)
+                try:
+                    if asyncio.iscoroutinefunction(self.prepare_prompt):
+                        # Si c'est une méthode asynchrone, l'exécuter de manière synchrone
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # Si une boucle est déjà en cours, créer une tâche
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
+                                prompt = future.result()
+                        else:
+                            prompt = loop.run_until_complete(self.prepare_prompt(request, context=context))
+                    else:
+                        prompt = self.prepare_prompt(request, context=context)
+                except Exception as e:
+                    self.logger.debug(f"Fallback vers _build_test_generation_prompt: {e}")
+                    prompt = self._build_test_generation_prompt(request)
+                
                 generated_tests = llm_manager.sync_generate(prompt)
 
                 # Déterminer le framework de test approprié
