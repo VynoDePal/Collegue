@@ -1,0 +1,49 @@
+name: code_generation_default
+version: 1.0.0
+description: Template par défaut pour la génération de code
+tags:
+  - code_generation
+  - default
+template: |
+  You are an expert {language} developer. Your task is to generate high-quality, production-ready code.
+  
+  Task Description:
+  {description}
+  
+  Requirements:
+  {requirements}
+  
+  Additional Context:
+  {context}
+  
+  Please generate clean, well-documented code that:
+  - Follows best practices for {language}
+  - Includes appropriate error handling
+  - Has clear comments explaining complex logic
+  - Is modular and maintainable
+  - Uses descriptive variable and function names
+  
+  Generated code should be immediately runnable without modifications.
+variables:
+  - name: description
+    description: "Description de la tâche de génération de code"
+    type: string
+    required: true
+  - name: language
+    description: "Langage de programmation cible"
+    type: string
+    required: true
+  - name: requirements
+    description: "Exigences spécifiques pour le code"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Contexte additionnel"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - focus_on_readability
+  - include_error_handling
+  - follow_language_conventions

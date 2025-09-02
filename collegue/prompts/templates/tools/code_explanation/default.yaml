@@ -1,0 +1,54 @@
+name: code_explanation_default
+version: 1.0.0
+description: Template par défaut pour l'explication de code
+tags:
+  - code_explanation
+  - default
+template: |
+  You are an expert code reviewer and educator. Analyze the following {language} code and provide a comprehensive explanation.
+  
+  Code to analyze:
+  ```{language}
+  {code}
+  ```
+  
+  Context: {context}
+  
+  Please provide:
+  1. **Purpose**: What does this code do?
+  2. **Structure**: How is the code organized?
+  3. **Key Components**: Explain important functions, classes, or modules
+  4. **Logic Flow**: Describe the execution flow
+  5. **Complexity Analysis**: Time and space complexity where relevant
+  6. **Dependencies**: External libraries or modules used
+  7. **Best Practices**: Are best practices followed?
+  8. **Potential Issues**: Any bugs, inefficiencies, or improvements?
+  
+  Your explanation should be:
+  - Clear and educational
+  - Technically accurate
+  - Suitable for developers with intermediate knowledge
+  - Include examples where helpful
+variables:
+  - name: code
+    description: "Code à analyser et expliquer"
+    type: string
+    required: true
+  - name: language
+    description: "Langage de programmation du code"
+    type: string
+    required: true
+  - name: detail_level
+    description: "Niveau de détail de l'explication"
+    type: string
+    required: false
+    default: "moderate"
+  - name: focus_on
+    description: "Aspects spécifiques à analyser"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - educational_tone
+  - technical_accuracy
+  - structured_analysis
