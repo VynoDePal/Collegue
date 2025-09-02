@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script de test pour vérifier la connexion MCP avec streamable-http
+Script de test pour vérifier la connexion MCP avec transport http
 
 Note importante: D'après le document mcp_configuration_guide.md, il existe un problème connu
 avec la transmission de l'ID de session entre le client et le serveur. L'ID de session est 
@@ -71,7 +71,7 @@ def test_mcp_connection():
                         "name": "Test Client",
                         "version": "1.0.0"
                     },
-                    "transport": "streamable-http"  # Spécifier explicitement le transport
+                    "transport": "http"  # Spécifier explicitement le transport
                 }
             },
             headers={
@@ -139,7 +139,7 @@ def test_mcp_connection():
     
     print("\n🎯 Configuration recommandée pour Windsurf:")
     print("  URL: http://localhost:8088/mcp/")
-    print("  Transport: streamable-http")
+    print("  Transport: http")
     print("  Content-Type: application/json")
     print("  Accept: application/json, text/event-stream")
 

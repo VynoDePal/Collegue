@@ -9,6 +9,7 @@ from pydantic_core import PydanticUndefined
 from datetime import datetime
 import inspect
 import functools
+import asyncio
 
 
 class ToolError(Exception):
@@ -54,16 +55,24 @@ class BaseTool(ABC):
     - Configuration
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, app_state: Optional[Dict[str, Any]] = None):
         """
         Initialise l'outil avec une configuration optionnelle.
 
         Args:
             config: Configuration spécifique à l'outil
+            app_state: État global de l'application contenant les services partagés
         """
         self.config = config or {}
+        self.app_state = app_state or {}
         self.logger = logging.getLogger(f"tools.{self.__class__.__name__}")
         self.metrics: List[ToolMetrics] = []
+        
+        # Services injectés depuis app_state
+        self.prompt_engine = self.app_state.get('prompt_engine')
+        self.llm_manager = self.app_state.get('llm_manager')
+        self.context_manager = self.app_state.get('context_manager')
+        
         self._setup_logging()
         self._validate_config()
 
@@ -125,6 +134,84 @@ class BaseTool(ABC):
             Liste des langages supportés
         """
         return ["python", "javascript", "typescript"]
+    
+    async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
+        """
+        Prépare un prompt optimisé en utilisant le système de prompts amélioré.
+        
+        Args:
+            request: Requête contenant les variables pour le prompt
+            template_name: Nom du template à utiliser (par défaut: nom de l'outil)
+            
+        Returns:
+            Prompt formaté et optimisé
+            
+        Raises:
+            ToolExecutionError: Si le prompt engine n'est pas disponible
+        """
+        # Vérifier la disponibilité du prompt engine
+        if not self.prompt_engine:
+            # Fallback vers la méthode legacy si elle existe
+            if hasattr(self, '_build_prompt'):
+                self.logger.warning("Prompt engine non disponible, utilisation du fallback")
+                return self._build_prompt(request)
+            raise ToolExecutionError("Prompt engine non configuré et pas de méthode fallback")
+        
+        # Import dynamique pour éviter les dépendances circulaires
+        from ..prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
+        
+        # Utiliser EnhancedPromptEngine si disponible
+        if isinstance(self.prompt_engine, EnhancedPromptEngine):
+            tool_name = template_name or self.get_name().lower().replace(' ', '_')
+            language = getattr(request, 'language', None)
+            
+            # Préparer le contexte avec toutes les variables de la requête
+            context = request.model_dump() if hasattr(request, 'model_dump') else {}
+            
+            try:
+                # Utiliser la méthode optimisée
+                if asyncio.iscoroutinefunction(self.prompt_engine.get_optimized_prompt):
+                    prompt, version = await self.prompt_engine.get_optimized_prompt(
+                        tool_name=tool_name,
+                        context=context,
+                        language=language
+                    )
+                else:
+                    # Version synchrone si nécessaire
+                    prompt, version = self.prompt_engine.get_optimized_prompt(
+                        tool_name=tool_name,
+                        context=context,
+                        language=language
+                    )
+                
+                self.logger.info(f"Prompt préparé avec version {version} pour {tool_name}")
+                return prompt
+                
+            except Exception as e:
+                self.logger.warning(f"Erreur lors de la préparation du prompt optimisé: {e}")
+                # Fallback vers méthode legacy
+                if hasattr(self, '_build_prompt'):
+                    return self._build_prompt(request)
+                raise
+        
+        # Utiliser le prompt engine standard
+        else:
+            # Essayer de trouver un template par défaut
+            tool_name = self.get_name().lower().replace(' ', '_')
+            templates = self.prompt_engine.get_templates_by_category(f"tool/{tool_name}")
+            
+            if templates:
+                template = templates[0]
+                context = request.model_dump() if hasattr(request, 'model_dump') else {}
+                prompt = self.prompt_engine.format_prompt(template.id, context)
+                return prompt
+            
+            # Fallback vers méthode legacy
+            if hasattr(self, '_build_prompt'):
+                self.logger.warning(f"Pas de template trouvé pour {tool_name}, utilisation du fallback")
+                return self._build_prompt(request)
+            
+            raise ToolExecutionError(f"Aucun template trouvé pour l'outil {tool_name}")
 
     def validate_language(self, language: str) -> bool:
         """

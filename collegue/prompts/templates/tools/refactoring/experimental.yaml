@@ -1,0 +1,94 @@
+# Template experimental pour refactoring - Version avec approche fonctionnelle
+name: "refactoring_experimental"
+metadata:
+  version: "experimental"
+  author: "EnhancedPromptEngine"
+  description: "Version privilégiant les approches fonctionnelles et immutables"
+  created_at: "2024-12-29"
+  performance_target: "functional_paradigm"
+
+template: |
+  ## Functional Refactoring Approach
+  
+  ### Input Code:
+  ```{language}
+  {code}
+  ```
+  
+  ### Refactoring Goals:
+  {objectives}
+  
+  ### Functional Programming Principles to Apply:
+  
+  1. **Immutability First**
+     - Replace mutable state with immutable data structures
+     - Use pure functions wherever possible
+     - Avoid side effects in core logic
+  
+  2. **Function Composition**
+     - Break down complex operations into smaller functions
+     - Create composable, reusable units
+     - Use higher-order functions effectively
+  
+  3. **Declarative Style**
+     - Replace imperative loops with map/filter/reduce
+     - Use list/dict comprehensions in Python
+     - Prefer expressions over statements
+  
+  4. **Error Handling**
+     - Use Result/Option types or similar patterns
+     - Avoid exceptions in pure functions
+     - Handle errors explicitly in the type system
+  
+  ### Transformation Strategy:
+  
+  **Phase 1: Identify State and Side Effects**
+  - Mark all mutable variables
+  - Identify I/O operations
+  - Find hidden dependencies
+  
+  **Phase 2: Extract Pure Functions**
+  - Isolate business logic
+  - Create deterministic functions
+  - Separate I/O from computation
+  
+  **Phase 3: Restructure Flow**
+  - Use functional pipelines
+  - Apply transformation chains
+  - Implement lazy evaluation where beneficial
+  
+  **Phase 4: Optimize**
+  - Memoize expensive computations
+  - Use generators for large datasets
+  - Apply tail recursion optimization if supported
+  
+  ### Expected Benefits:
+  - Easier testing (pure functions)
+  - Better parallelization potential
+  - Reduced bugs from state mutations
+  - Improved code reasoning
+  
+  Provide functionally refactored code:
+
+variables:
+  - name: code
+    description: "Code to refactor functionally"
+    type: string
+    required: true
+    
+  - name: objectives
+    description: "Specific refactoring objectives"
+    type: string
+    required: true
+    
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+    default: "python"
+
+optimization_hints:
+  - "Focus on functional programming paradigms"
+  - "Emphasize immutability and pure functions"
+  - "Show clear before/after transformations"
+  - "Explain functional concepts applied"

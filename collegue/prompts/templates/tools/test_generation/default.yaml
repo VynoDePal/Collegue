@@ -1,0 +1,70 @@
+name: test_generation_default
+version: 1.0.0
+description: Template par défaut pour la génération de tests unitaires
+tags:
+  - test_generation
+  - default
+template: |
+  You are an expert in test-driven development and testing best practices.
+  
+  Generate comprehensive unit tests for the following {language} code:
+  ```{language}
+  {code}
+  ```
+  
+  Testing Framework: {framework}
+  
+  Context: {context}
+  
+  Generate tests that:
+  1. **Coverage**: Achieve high code coverage (aim for >80%)
+  2. **Edge Cases**: Test boundary conditions and edge cases
+  3. **Error Handling**: Test exception scenarios and error conditions
+  4. **Positive Cases**: Test normal/happy path scenarios
+  5. **Negative Cases**: Test invalid inputs and failure scenarios
+  6. **Mocking**: Use appropriate mocking for external dependencies
+  7. **Assertions**: Use clear and specific assertions
+  8. **Test Names**: Use descriptive test names that explain what is being tested
+  
+  Test structure should:
+  - Follow {framework} conventions and best practices
+  - Be well-organized with setup/teardown when needed
+  - Include test fixtures and parameterized tests where appropriate
+  - Have clear comments explaining complex test scenarios
+  - Be independent and not rely on test execution order
+  - Run quickly and reliably
+  
+  Include both unit tests and integration tests where applicable.
+variables:
+  - name: code
+    description: "Code pour lequel générer des tests"
+    type: string
+    required: true
+  - name: language
+    description: "Langage de programmation du code"
+    type: string
+    required: true
+  - name: test_framework
+    description: "Framework de test à utiliser"
+    type: string
+    required: false
+    default: ""
+  - name: include_mocks
+    description: "Inclure des mocks dans les tests"
+    type: string
+    required: false
+    default: "false"
+  - name: coverage_target
+    description: "Couverture de code cible"
+    type: string
+    required: false
+    default: "80%"
+  - name: context
+    type: string
+    required: false
+    default: ""
+    description: Additional context
+optimization_hints:
+  - comprehensive_coverage
+  - edge_case_testing
+  - clear_assertions

@@ -1,6 +1,7 @@
 """
 Code Explanation - Outil d'explication et d'analyse de code
 """
+import asyncio
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
@@ -147,7 +148,33 @@ class CodeExplanationTool(BaseTool):
         # Utilisation du LLM si disponible
         if llm_manager is not None:
             try:
-                prompt = self._build_explanation_prompt(request, detected_language)
+                # Utiliser le nouveau système de prompts avec prepare_prompt
+                context = {
+                    "code": request.code,
+                    "language": detected_language,
+                    "detail_level": request.detail_level or "medium",
+                    "focus_on": ", ".join(request.focus_on) if request.focus_on else "general aspects"
+                }
+                
+                # Essayer d'utiliser prepare_prompt (nouveau système)
+                try:
+                    if asyncio.iscoroutinefunction(self.prepare_prompt):
+                        # Si c'est une méthode asynchrone, l'exécuter de manière synchrone
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # Si une boucle est déjà en cours, créer une tâche
+                            import concurrent.futures
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
+                                prompt = future.result()
+                        else:
+                            prompt = loop.run_until_complete(self.prepare_prompt(request, context=context))
+                    else:
+                        prompt = self.prepare_prompt(request, context=context)
+                except Exception as e:
+                    self.logger.debug(f"Fallback vers _build_explanation_prompt: {e}")
+                    prompt = self._build_explanation_prompt(request, detected_language)
+                
                 explanation = llm_manager.sync_generate(prompt)
 
                 # Analyse structurelle du code

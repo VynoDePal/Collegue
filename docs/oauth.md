@@ -41,7 +41,7 @@ location /mcp/ {
     # Propager explicitement l'en-tête Authorization
     proxy_set_header Authorization $http_authorization;
 
-    # streamable-http
+    # http transport
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_buffering off;
@@ -56,7 +56,7 @@ location /mcp/ {
 
 ### Mise à l'échelle et sessions
 
-FastMCP (streamable-http) maintient des sessions en mémoire locale.
+FastMCP (transport http) maintient des sessions en mémoire locale.
 
 - En développement, privilégier __un seul réplica__ (`collegue-app`) pour
   éviter les erreurs `400 No valid session ID provided`.
@@ -139,6 +139,91 @@ du serveur MCP, sans bloc `oauth`:
 
 Windsurf détectera automatiquement l'Authorization Server via
 `/.well-known/oauth-protected-resource`.
+
+## HTTPS (production)
+
+Pour sécuriser les tokens OAuth en production, activez HTTPS avec Let's
+Encrypt autour de Nginx.
+
+- Prérequis: un domaine `your.domain.tld` pointant vers votre serveur.
+- Le service dev (`nginx`) reste inchangé. La prod utilise `nginx-https`
+  (profil Compose `prod`).
+
+Étapes rapides:
+
+1. Préparez les dossiers locaux (hôte):
+  - `./certbot/www`
+  - `./letsencrypt`
+2. Démarrez Nginx HTTPS (profil prod):
+  ```bash
+  docker compose --profile prod up -d nginx-https
+  ```
+3. Émettez les certificats Let's Encrypt (webroot):
+  ```bash
+  docker run --rm \
+    -v "$(pwd)/letsencrypt:/etc/letsencrypt" \
+    -v "$(pwd)/certbot/www:/var/www/certbot" \
+    certbot/certbot certonly --webroot \
+    -w /var/www/certbot \
+    -d your.domain.tld \
+    --email you@example.com --agree-tos --non-interactive
+  ```
+4. Rechargez Nginx:
+  ```bash
+  docker compose --profile prod exec nginx-https nginx -s reload
+  ```
+5. Renouvellement (cron/systemd):
+  ```bash
+  docker run --rm \
+    -v "$(pwd)/letsencrypt:/etc/letsencrypt" \
+    -v "$(pwd)/certbot/www:/var/www/certbot" \
+    certbot/certbot renew --quiet
+  docker compose --profile prod exec nginx-https nginx -s reload
+  ```
+  (Optionnel si vous utilisez le service `certbot` du compose qui gère le
+  renouvellement automatiquement; voir ci-dessous.)
+
+Notes:
+- Adaptez `server_name` et chemins des certs dans
+  `nginx/nginx-https.conf.example`.
+- En production, utilisez des URLs publiques HTTPS:
+  - `OAUTH_ISSUER=https://your.domain.tld/realms/master`
+  - `OAUTH_AUTH_SERVER_PUBLIC=https://your.domain.tld/realms/master`
+
+Émission initiale (si aucun certificat n'existe encore):
+- Option A (simple): arrêter tout service sur le port 80 puis exécuter:
+  ```bash
+  docker run --rm -p 80:80 \
+    -v "$(pwd)/letsencrypt:/etc/letsencrypt" \
+    certbot/certbot certonly --standalone \
+    -d your.domain.tld \
+    --email you@example.com --agree-tos --non-interactive
+  ```
+  Ensuite démarrez `nginx-https` (le certificat existe désormais) et
+  laissez le service `certbot` gérer les renouvellements via webroot.
+- Option B: lancer `nginx-https` en commentant temporairement le bloc `server`
+  sur le port 443, émettre via `webroot`, puis décommenter et recharger Nginx.
+
+### Option: service certbot (automatique)
+
+Au lieu d'exécuter `certbot` manuellement, utilisez le service Compose
+`certbot` (profil `prod`) pour l'émission et le renouvellement programmés.
+
+- Variables à définir (via `.env`):
+  - `PUBLIC_DOMAIN=your.domain.tld`
+  - `LETSENCRYPT_EMAIL=you@example.com`
+  - `CERTBOT_STAGING=0` (mettre `1` pour tests)
+- Lancer en production:
+  ```bash
+  docker compose --profile prod up -d nginx-https certbot
+  ```
+- Les volumes `./letsencrypt` et `./certbot/www` sont partagés entre
+  `nginx-https` et `certbot`. Le renouvellement s'exécute automatiquement
+  toutes les 12h. Pour un reload instantané, `certbot` utilise un
+  `--deploy-hook` qui crée un flag: `touch /var/www/certbot/reload.flag`.
+  Le service `nginx-https` surveille ce flag toutes les 2 secondes et déclenche
+  immédiatement `nginx -s reload` puis supprime le flag.
+  Assurez-vous de définir `PUBLIC_DOMAIN` dans `.env`.
 
 ## Dépannage
 

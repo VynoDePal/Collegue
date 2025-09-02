@@ -1,0 +1,65 @@
+name: refactoring_default
+version: 1.0.0
+description: Template par défaut pour le refactoring de code
+tags:
+  - refactoring
+  - default
+template: |
+  You are an expert software architect specializing in code refactoring and optimization.
+  
+  Original {language} code:
+  ```{language}
+  {code}
+  ```
+  
+  Refactoring Goals: {goals}
+  
+  Context: {context}
+  
+  Please refactor this code to:
+  1. Improve readability and maintainability
+  2. Follow {language} best practices and design patterns
+  3. Reduce complexity and eliminate code duplication
+  4. Optimize performance where possible
+  5. Enhance error handling and robustness
+  6. Apply SOLID principles where applicable
+  7. Improve naming conventions and code organization
+  
+  Provide:
+  - The refactored code with clear improvements
+  - Comments explaining significant changes
+  - A brief summary of improvements made
+  - Any breaking changes or migration notes
+  
+  Ensure the refactored code:
+  - Maintains the same functionality
+  - Is backward compatible unless specified otherwise
+  - Is thoroughly tested and production-ready
+variables:
+  - name: code
+    description: "Code à refactoriser"
+    type: string
+    required: true
+  - name: language
+    description: "Langage de programmation du code"
+    type: string
+    required: true
+  - name: refactoring_type
+    description: "Type de refactoring à appliquer"
+    type: string
+    required: true
+  - name: parameters
+    description: "Paramètres spécifiques au refactoring"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Contexte additionnel pour le refactoring"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - clean_code_principles
+  - design_patterns
+  - performance_optimization
+  - solid_principles

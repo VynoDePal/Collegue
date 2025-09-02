@@ -110,7 +110,7 @@ Pour les clients MCP qui se connectent directement au serveur via HTTP, utilisez
       "Accept": "application/json, text/event-stream",
       "Content-Type": "application/json"
     },
-    "transport": "streamable-http"
+    "transport": "http"
   }
 }
 ```

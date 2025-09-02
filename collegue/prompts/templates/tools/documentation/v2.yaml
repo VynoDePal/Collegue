@@ -1,0 +1,102 @@
+# Template v2 pour documentation - Version avec documentation enrichie et exemples
+name: "documentation_v2"
+metadata:
+  version: "2.0"
+  author: "EnhancedPromptEngine"
+  description: "Version enrichie avec exemples d'usage et documentation API complète"
+  created_at: "2024-12-29"
+  performance_target: "comprehensive_docs"
+
+template: |
+  ## Documentation Generation Task
+  
+  ### Code to Document:
+  ```{language}
+  {code}
+  ```
+  
+  ### Documentation Requirements:
+  - Format: {format}
+  - Style: {style}
+  - Depth Level: {depth_level}
+  
+  ### Documentation Structure:
+  
+  #### 1. Overview Section
+  - Purpose and functionality
+  - High-level description
+  - Use cases and scenarios
+  
+  #### 2. API Documentation
+  - Complete function/method signatures
+  - Parameter descriptions with types
+  - Return value documentation
+  - Exceptions/errors that may be raised
+  
+  #### 3. Usage Examples
+  - Basic usage example
+  - Advanced usage scenarios
+  - Edge cases handling
+  - Integration examples
+  
+  #### 4. Implementation Details
+  - Algorithm explanation (if complex)
+  - Performance characteristics
+  - Memory usage considerations
+  - Thread safety (if applicable)
+  
+  #### 5. Related Information
+  - Dependencies and requirements
+  - Related functions/classes
+  - See also references
+  - Version/changelog information
+  
+  ### Special Considerations:
+  - Include type hints in examples
+  - Add doctest-compatible examples where possible
+  - Use proper {format} syntax conventions
+  - Ensure accessibility for different expertise levels
+  
+  ### Quality Criteria:
+  - Completeness: All public APIs documented
+  - Clarity: Clear and unambiguous descriptions
+  - Examples: Practical, runnable code samples
+  - Consistency: Uniform style throughout
+  
+  Generate comprehensive documentation following the above structure:
+
+variables:
+  - name: code
+    description: "Code to generate documentation for"
+    type: string
+    required: true
+    
+  - name: format
+    description: "Documentation format (markdown, rst, html, docstring)"
+    type: string
+    required: true
+    default: "markdown"
+    
+  - name: style
+    description: "Documentation style guide"
+    type: string
+    required: false
+    default: "comprehensive"
+    
+  - name: language
+    description: "Programming language of the code"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: depth_level
+    description: "How detailed the documentation should be"
+    type: string
+    required: false
+    default: "detailed"
+
+optimization_hints:
+  - "Include practical, runnable examples"
+  - "Structure documentation for easy navigation"
+  - "Consider different audience expertise levels"
+  - "Add performance and implementation notes"

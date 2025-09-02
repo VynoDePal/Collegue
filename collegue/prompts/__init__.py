@@ -28,49 +28,23 @@ def register_prompts(app, app_state):
     
     # Importation des composants du système de prompts
     try:
-        # Importer le moteur de prompts
-        from .engine import PromptEngine
+        # Importer le moteur de prompts amélioré
+        from .engine.enhanced_prompt_engine import EnhancedPromptEngine
         
         # Importer l'interface
         from .interface import register_interfaces
         
-        # Initialiser le moteur de prompts et l'ajouter à l'état de l'application
-        prompt_engine = PromptEngine()
+        # Initialiser le moteur de prompts amélioré et l'ajouter à l'état de l'application
+        prompt_engine = EnhancedPromptEngine()
         app_state["prompt_engine"] = prompt_engine
+        
+        logger.info("EnhancedPromptEngine initialisé avec versioning et optimisation")
         
         # Enregistrer les interfaces (API et Web UI)
         register_interfaces(app, app_state)
         
         logger.info("Système de prompts personnalisés enregistré avec succès")
-        
-        # Rétrocompatibilité avec les anciens modules
-        try:
-            from . import template_manager
-            from . import predefined_templates
-            
-            template_manager.register(app, app_state)
-            predefined_templates.register(app, app_state)
-        except Exception as e:
-            logger.warning(f"Modules de prompts anciens non disponibles: {e}")
             
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation du système de prompts: {e}")
-        
-        # Fallback aux modules simples si les nouveaux ne sont pas disponibles
-        modules = ['template_manager.py', 'predefined_templates.py']
-        for module in modules:
-            module_path = os.path.join(current_dir, module)
-            if not os.path.exists(module_path):
-                with open(module_path, 'w') as f:
-                    f.write(f'"""\n{module[:-3].replace("_", " ").title()} - Module à implémenter\n"""\n\ndef register(app, app_state):\n    """Enregistre les fonctionnalités dans l\'application FastMCP."""\n    pass\n')
-        
-        # Importation et enregistrement du système de prompts simplifié
-        try:
-            from . import template_manager
-            from . import predefined_templates
-            
-            # Enregistrement des endpoints et des fonctionnalités
-            template_manager.register(app, app_state)
-            predefined_templates.register(app, app_state)
-        except Exception as err:
-            logger.error(f"Échec de l'initialisation du système de prompts: {err}")
+        # Le système fonctionne avec EnhancedPromptEngine, pas besoin de fallback

@@ -20,6 +20,7 @@
 | T10 | **Fonctionnalités avancées** | 🟢 | ❌ | T01-T05 | 12 | | |
 | T11 | **Adaptation LLM des Outils (OpenRouter DeepSeek)** | 🔴 | ⏳ | T03, T04 | 4 | | Intégration unique du modèle deepseek/deepseek-r1-0528-qwen3-8b pour tous les outils |
 | T12 | **Amélioration des Outils et Mise à Jour des Tests Unitaires** | 🟠 | ❌ | T03, T06, T11 | 6 | | Optimisation des outils existants, nouvelles fonctionnalités et modernisation des tests |
+| T13 | **Migration vers EnhancedPromptEngine avec versioning et optimisation** | 🔴 | ✅ | T03, T05, T12 | 5 | | Migration complète du système de prompts avec versioning, optimisation par langage et templates YAML |
 
 ## Sous-tâches
 
@@ -135,6 +136,19 @@
 | T12.2 | Implémentation des améliorations des outils | 🟠 | ✅ | T12.1 | 3 | | Terminé le 27/06/2025 - Modernisation complète des outils avec héritage BaseTool, validation robuste, prompts optimisés et gestion d'erreurs améliorée |
 | T12.3 | Mise à jour des tests unitaires pour les nouveaux outils et fonctionnalités | 🟠 | ❌ | T12.2 | 1.5 | | Tests unitaires mis à jour et nouveaux tests ajoutés pour couvrir les améliorations |
 
+### T13 - Migration vers EnhancedPromptEngine avec versioning et optimisation
+
+| ID | Sous-tâche | Priorité | Statut | Dépendances | Estimation (jours) | Assigné à | Notes |
+|----|-----------|----------|--------|-------------|-------------------|-----------|-------|
+| T13.1 | Création du système de versioning des prompts (PromptVersionManager) | 🔴 | ✅ | T05 | 0.5 | | Gestion complète des versions avec métriques et sélection automatique |
+| T13.2 | Développement du LanguageOptimizer avec règles par langage | 🔴 | ✅ | T05 | 0.5 | | Optimisation pour Python, JavaScript, TypeScript avec injection de bonnes pratiques |
+| T13.3 | Implémentation d'EnhancedPromptEngine avec versioning et optimisation | 🔴 | ✅ | T13.1, T13.2 | 1 | | A/B testing avec stratégie epsilon-greedy (10% exploration) |
+| T13.4 | Modification de BaseTool pour intégrer prepare_prompt() | 🔴 | ✅ | T13.3 | 0.5 | | Méthode asynchrone avec fallback automatique |
+| T13.5 | Création des templates YAML pour tous les outils | 🔴 | ✅ | T13.3 | 0.5 | | Templates avec variables typées et hints d'optimisation |
+| T13.6 | Migration des 5 outils vers le nouveau système | 🔴 | ✅ | T13.4, T13.5 | 1 | | CodeGeneration, CodeExplanation, Refactoring, Documentation, TestGeneration |
+| T13.7 | Correction des templates YAML et tests | 🟠 | ✅ | T13.6 | 0.5 | | Ajout des descriptions obligatoires pour PromptVariable |
+| T13.8 | Documentation du nouveau système de prompts | 🟡 | ✅ | T13.6 | 0.5 | | Documentation complète dans docs/enhanced_prompt_system.md |
+
 ## Suivi de Progression
 
 | Phase | Tâches Totales | Terminées | En cours | % Complété |
@@ -147,8 +161,9 @@
 | Intégration Clients | 3 | 1         | 0 | 33%        |
 | Fonctionnalités Avancées | 4 | 0         | 0 | 0%         |
 | Adaptation LLM | 6 | 4         | 2 | 67%        |
-| Amélioration des Outils | 3 | 0         | 0 | 0%         |
-| **TOTAL** | **44** | **38**    | **2** | **86%**    |
+| Amélioration des Outils | 3 | 2         | 0 | 67%        |
+| Migration EnhancedPromptEngine | 8 | 8         | 0 | 100%       |
+| **TOTAL** | **52** | **46**    | **2** | **88%**    |
 
 ## Notes Importantes
 

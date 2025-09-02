@@ -1,0 +1,104 @@
+# Template experimental pour documentation - Version narrative avec storytelling
+name: "documentation_experimental"
+metadata:
+  version: "experimental"
+  author: "EnhancedPromptEngine"
+  description: "Version utilisant le storytelling pour une documentation engageante"
+  created_at: "2024-12-29"
+  performance_target: "engagement_focused"
+
+template: |
+  ## Documentation Journey: Understanding Your Code
+  
+  ### The Code We're Exploring:
+  ```{language}
+  {code}
+  ```
+  
+  ### The Story of This Code
+  
+  **Chapter 1: The Purpose**
+  Let me tell you what this code is trying to achieve...
+  
+  Every piece of code has a story - a problem it solves, a need it fulfills. This particular code...
+  
+  **Chapter 2: The Characters (Components)**
+  
+  Our main characters in this code story are:
+  - [Function/Class Name]: The protagonist that...
+  - [Key Variables]: Supporting characters that hold...
+  - [Dependencies]: External allies that provide...
+  
+  **Chapter 3: The Journey (How It Works)**
+  
+  The adventure begins when...
+  1. First, we initialize our environment by...
+  2. Then, the main action happens as...
+  3. Along the way, we handle challenges like...
+  4. Finally, we reach our destination with...
+  
+  **Chapter 4: Behind the Scenes (Technical Details)**
+  
+  Like any good story, there's more than meets the eye:
+  - **The Algorithm**: Under the hood, we're using...
+  - **Performance Notes**: This approach scales...
+  - **Design Decisions**: We chose this path because...
+  
+  **Chapter 5: Practical Usage (Examples)**
+  
+  Here's how you can use this code in your own adventures:
+  
+  ```{language}
+  # Example 1: Basic usage
+  # [Include practical example]
+  
+  # Example 2: Advanced scenario
+  # [Include complex example]
+  ```
+  
+  **Chapter 6: Lessons Learned (Best Practices)**
+  
+  From this code, we can learn:
+  - When to use this pattern...
+  - What to avoid...
+  - How to extend it...
+  
+  **Epilogue: Further Reading**
+  
+  If you enjoyed this journey, you might also explore:
+  - Related concepts...
+  - Similar patterns...
+  - Advanced techniques...
+  
+  Documentation Format: {format}
+  Target Audience: {audience}
+
+variables:
+  - name: code
+    description: "Code to document with storytelling"
+    type: string
+    required: true
+    
+  - name: format
+    description: "Output format for documentation"
+    type: string
+    required: true
+    default: "markdown"
+    
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: audience
+    description: "Target audience for the documentation"
+    type: string
+    required: false
+    default: "developers"
+
+optimization_hints:
+  - "Storytelling makes documentation memorable"
+  - "Narrative structure improves engagement"
+  - "Metaphors help explain complex concepts"
+  - "Personal tone creates connection"

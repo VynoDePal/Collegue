@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script de test avancé pour MCP streamable-http avec gestion de session
+Script de test avancé pour MCP transport http avec gestion de session
 """
 import requests
 import json
@@ -56,7 +56,7 @@ class MCPStreamableClient:
     def initialize(self) -> bool:
         """Initialise la connexion MCP"""
         try:
-            # Configuration spécifique pour streamable-http
+            # Configuration spécifique pour transport http
             init_headers = self.headers.copy()
             init_headers["Accept"] = "application/json, text/event-stream"
             init_headers["Content-Type"] = "application/json"
@@ -79,7 +79,7 @@ class MCPStreamableClient:
                             "name": "Test Client",
                             "version": "1.0.0"
                         },
-                        "transport": "streamable-http"  # Spécifier explicitement le transport
+                        "transport": "http"  # Spécifier explicitement le transport
                     }
                 },
                 headers=init_headers,

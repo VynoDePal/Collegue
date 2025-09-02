@@ -1,0 +1,130 @@
+# Template experimental pour test_generation - Version BDD avec scénarios Gherkin
+name: "test_generation_experimental"
+metadata:
+  version: "experimental"
+  author: "EnhancedPromptEngine"
+  description: "Version BDD (Behavior-Driven Development) avec approche Gherkin"
+  created_at: "2024-12-29"
+  performance_target: "behavior_driven"
+
+template: |
+  ## Behavior-Driven Test Generation
+  
+  ### Code to Test:
+  ```{language}
+  {code}
+  ```
+  
+  ### BDD Test Strategy
+  
+  #### Feature Description:
+  Let's first understand what feature this code implements and define it in business terms.
+  
+  #### User Stories:
+  As a [user/developer/system]
+  I want [functionality]
+  So that [business value]
+  
+  ### Test Scenarios (Gherkin Style):
+  
+  #### Scenario 1: Happy Path
+  ```gherkin
+  Given [initial context/state]
+  When [action is performed]
+  Then [expected outcome]
+  And [additional assertions]
+  ```
+  
+  #### Scenario 2: Edge Cases
+  ```gherkin
+  Given [boundary condition]
+  When [edge case action]
+  Then [should handle gracefully]
+  ```
+  
+  #### Scenario 3: Error Handling
+  ```gherkin
+  Given [error condition setup]
+  When [triggering action]
+  Then [appropriate error response]
+  ```
+  
+  ### Test Implementation ({framework}):
+  
+  #### Test Structure:
+  1. **Arrange (Given)**: Set up the test context
+     - Create test fixtures
+     - Initialize mocks: {mocks}
+     - Prepare test data
+  
+  2. **Act (When)**: Execute the behavior
+     - Call the function/method
+     - Trigger the action
+     - Capture results
+  
+  3. **Assert (Then)**: Verify outcomes
+     - Check return values
+     - Verify state changes
+     - Validate side effects
+     - Ensure error handling
+  
+  #### Test Organization:
+  - Group related scenarios in test classes
+  - Use descriptive test names that read like sentences
+  - Include docstrings explaining the business logic being tested
+  
+  #### Property-Based Testing:
+  Where applicable, include property-based tests:
+  - Invariants that should always hold
+  - Properties of the output
+  - Relationships between inputs and outputs
+  
+  #### Test Data Strategy:
+  - Use realistic test data
+  - Include unicode and special characters
+  - Test with empty, null, and boundary values
+  - Consider data that might break assumptions
+  
+  ### Coverage Goals:
+  - Business logic coverage: 100%
+  - Edge case coverage: Comprehensive
+  - Error path coverage: All identified paths
+  - Integration points: Properly mocked
+  
+  ### Living Documentation:
+  Tests should serve as documentation:
+  - Clear test names explain what the code does
+  - Test scenarios document expected behavior
+  - Assertions clarify business rules
+  
+  Generate BDD-style tests with clear scenarios:
+
+variables:
+  - name: code
+    description: "Code to generate BDD tests for"
+    type: string
+    required: true
+    
+  - name: framework
+    description: "Testing framework (pytest-bdd, behave, unittest)"
+    type: string
+    required: true
+    default: "pytest"
+    
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: mocks
+    description: "Mocking requirements"
+    type: string
+    required: false
+    default: "identify automatically"
+
+optimization_hints:
+  - "BDD approach improves test readability"
+  - "Gherkin scenarios clarify requirements"
+  - "Focus on behavior over implementation"
+  - "Tests as living documentation"

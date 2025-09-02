@@ -1,0 +1,67 @@
+# Template v2 pour code_explanation - Version concise et structurée
+name: "code_explanation_v2"
+metadata:
+  version: "2.0"
+  author: "EnhancedPromptEngine"
+  description: "Version concise avec focus sur la clarté et la structure"
+  created_at: "2024-12-29"
+  performance_target: "clarity_focused"
+
+template: |
+  ## Code Analysis: {language}
+  
+  ```{language}
+  {code}
+  ```
+  
+  ### Quick Summary
+  Provide a one-paragraph overview of what this code does.
+  
+  ### Detailed Breakdown
+  
+  **Purpose:** What problem does this solve?
+  
+  **Key Components:**
+  - List main functions/classes with brief descriptions
+  - Highlight important variables or data structures
+  
+  **Flow & Logic:**
+  1. Step-by-step execution flow
+  2. Decision points and conditions
+  3. Loops and iterations explained
+  
+  **Technical Details:**
+  - Algorithm used: [identify if applicable]
+  - Complexity: Time O(?), Space O(?)
+  - Dependencies: [list external dependencies]
+  
+  **Notable Aspects:**
+  - Best practices followed
+  - Potential improvements
+  - Common pitfalls to avoid
+  
+  Focus: {focus}
+
+variables:
+  - name: code
+    description: "Code snippet to explain"
+    type: string
+    required: true
+    
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: focus
+    description: "Specific aspect to focus on"
+    type: string
+    required: false
+    default: "general overview"
+
+optimization_hints:
+  - "Concise format for quick understanding"
+  - "Structured sections for easy scanning"
+  - "Balance between brevity and completeness"
+  - "Focus on practical understanding"
