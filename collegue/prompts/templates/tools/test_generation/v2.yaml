@@ -1,0 +1,129 @@
+# Template v2 pour test_generation - Version avec stratégies de test avancées
+name: "test_generation_v2"
+metadata:
+  version: "2.0"
+  author: "EnhancedPromptEngine"
+  description: "Version avec stratégies de test complètes et couverture optimale"
+  created_at: "2024-12-29"
+  performance_target: "maximum_coverage"
+
+template: |
+  ## Test Generation Strategy
+  
+  ### Code Under Test:
+  ```{language}
+  {code}
+  ```
+  
+  ### Test Configuration:
+  - Framework: {framework}
+  - Test Style: {test_style}
+  - Mock Strategy: {mock_strategy}
+  - Coverage Target: {coverage_target}%
+  
+  ### Test Planning Phase:
+  
+  #### 1. Test Categories to Generate:
+  - **Unit Tests**: Individual function/method testing
+  - **Integration Tests**: Component interaction testing
+  - **Edge Cases**: Boundary and exceptional scenarios
+  - **Error Handling**: Exception and error path testing
+  - **Performance Tests**: If applicable, basic performance assertions
+  
+  #### 2. Test Coverage Strategy:
+  - **Happy Path** (Normal operation scenarios)
+  - **Sad Path** (Error conditions and failures)
+  - **Boundary Cases** (Min/max values, empty inputs)
+  - **State Transitions** (If stateful)
+  - **Concurrency** (If multi-threaded/async)
+  
+  #### 3. Mock/Stub Requirements:
+  {mocks}
+  - Identify external dependencies
+  - Create appropriate mocks/stubs
+  - Ensure test isolation
+  
+  #### 4. Assertion Strategy:
+  - Verify correct return values
+  - Check state changes
+  - Validate side effects
+  - Ensure proper error handling
+  - Confirm performance constraints
+  
+  ### Test Implementation Guidelines:
+  
+  1. **Test Naming Convention**:
+     - test_<function>_<scenario>_<expected_result>
+     - Clear, descriptive test names
+  
+  2. **Test Structure** (AAA Pattern):
+     - Arrange: Set up test data and environment
+     - Act: Execute the code under test
+     - Assert: Verify the results
+  
+  3. **Data-Driven Testing**:
+     - Use parameterized tests where applicable
+     - Test with various input combinations
+     - Include edge cases in parameters
+  
+  4. **Test Isolation**:
+     - Each test should be independent
+     - Clean up after tests (teardown)
+     - No shared state between tests
+  
+  ### Quality Requirements:
+  - Tests must be deterministic
+  - Fast execution (mock heavy operations)
+  - Clear failure messages
+  - Maintainable and readable
+  - Documentation for complex test scenarios
+  
+  Generate comprehensive test suite following {framework} best practices:
+
+variables:
+  - name: code
+    description: "Code to generate tests for"
+    type: string
+    required: true
+    
+  - name: framework
+    description: "Testing framework to use"
+    type: string
+    required: true
+    default: "pytest"
+    
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: mocks
+    description: "Specific mocking requirements"
+    type: string
+    required: false
+    default: "auto-detect dependencies"
+    
+  - name: coverage_target
+    description: "Target test coverage percentage"
+    type: string
+    required: false
+    default: "90"
+    
+  - name: test_style
+    description: "Testing style (BDD, TDD, traditional)"
+    type: string
+    required: false
+    default: "traditional"
+    
+  - name: mock_strategy
+    description: "How to handle dependencies"
+    type: string
+    required: false
+    default: "mock external only"
+
+optimization_hints:
+  - "Focus on comprehensive coverage strategies"
+  - "Include AAA pattern for test structure"
+  - "Emphasize test isolation and independence"
+  - "Add performance and concurrency considerations"

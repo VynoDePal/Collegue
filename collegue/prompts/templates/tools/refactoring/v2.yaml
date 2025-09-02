@@ -1,0 +1,100 @@
+# Template v2 pour refactoring - Version axée sur patterns
+name: "refactoring_v2"
+metadata:
+  version: "2.0"
+  author: "EnhancedPromptEngine"
+  description: "Version axée sur les design patterns et l'amélioration architecturale"
+  created_at: "2024-12-29"
+  performance_target: "architectural_improvement"
+
+template: |
+  ## Refactoring Analysis and Transformation
+  
+  ### Original Code:
+  ```{language}
+  {code}
+  ```
+  
+  ### Refactoring Objectives:
+  {objectives}
+  
+  ### Analysis Phase:
+  
+  #### Code Smells Detection:
+  - Identify duplications
+  - Find long methods/functions
+  - Detect complex conditionals
+  - Locate tight coupling
+  - Find inappropriate abstractions
+  
+  #### Design Pattern Opportunities:
+  - Which patterns could improve this code?
+  - Are there existing patterns that are misused?
+  - Can we introduce dependency injection?
+  - Would composition over inheritance help?
+  
+  ### Refactoring Strategy:
+  1. **Immediate Improvements** (Low risk, high impact)
+     - Variable/function naming
+     - Extract methods
+     - Remove dead code
+     
+  2. **Structural Changes** (Medium risk, medium impact)
+     - Class reorganization
+     - Interface extraction
+     - Module separation
+     
+  3. **Architectural Enhancements** (Higher risk, high impact)
+     - Pattern implementation
+     - Dependency inversion
+     - Service layer introduction
+  
+  ### Implementation Guidelines:
+  - Maintain backward compatibility: {maintain_compatibility}
+  - Follow {language} conventions
+  - Preserve existing functionality
+  - Improve testability
+  - Enhance maintainability
+  
+  ### Expected Improvements:
+  - Code readability: +{expected_readability_improvement}%
+  - Maintainability index improvement
+  - Reduced cyclomatic complexity
+  - Better separation of concerns
+  
+  Provide refactored code with explanations for each change:
+
+variables:
+  - name: code
+    description: "Code to be refactored"
+    type: string
+    required: true
+    
+  - name: objectives
+    description: "Specific refactoring objectives"
+    type: string
+    required: true
+    
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: maintain_compatibility
+    description: "Whether to maintain backward compatibility"
+    type: string
+    required: false
+    default: "yes"
+    
+  - name: expected_readability_improvement
+    description: "Expected improvement in readability"
+    type: string
+    required: false
+    default: "30"
+
+optimization_hints:
+  - "Focus on design patterns and architectural improvements"
+  - "Provide risk assessment for changes"
+  - "Include metrics for improvement validation"
+  - "Categorize refactoring by impact and risk"
