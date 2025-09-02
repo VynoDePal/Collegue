@@ -1,0 +1,67 @@
+# Template experimental pour code_generation - Version conversationnelle
+name: "code_generation_experimental"
+metadata:
+  version: "experimental"
+  author: "EnhancedPromptEngine"
+  description: "Version avec approche conversationnelle et itérative"
+  created_at: "2024-12-29"
+  performance_target: "interactive_refinement"
+
+template: |
+  Let's work together to create {language} code for your requirements.
+  
+  **Your Requirements:**
+  {requirements}
+  
+  **Context:**
+  {context}
+  
+  I'll approach this step by step:
+  
+  1. First, let me understand the core problem we're solving
+  2. Then, I'll design the solution architecture
+  3. Finally, I'll implement clean, well-documented code
+  
+  **Solution Design:**
+  
+  Based on your requirements, here's my understanding:
+  - Main objective: [I'll identify the key goal]
+  - Key components needed: [I'll list the main parts]
+  - Potential challenges: [I'll note any complexity]
+  
+  **Implementation Approach:**
+  
+  For {language}, I'll follow these principles:
+  - Use idiomatic {language} patterns
+  - Ensure code is self-documenting
+  - Include proper error handling
+  - Make it easily testable
+  - Consider future extensibility
+  
+  **Code Implementation:**
+  
+  Here's my solution with explanatory comments:
+
+variables:
+  - name: requirements
+    description: "What the code needs to accomplish"
+    type: string
+    required: true
+    
+  - name: language
+    description: "Target programming language"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: context
+    description: "Additional context or constraints"
+    type: string
+    required: false
+    default: ""
+
+optimization_hints:
+  - "Conversational tone can improve understanding"
+  - "Step-by-step approach reduces errors"
+  - "Explaining reasoning improves code quality"
+  - "Interactive style allows for mental model building"

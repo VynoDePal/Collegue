@@ -1,0 +1,92 @@
+# Template experimental pour code_explanation - Version avec analyse multi-couches
+name: "code_explanation_experimental"
+metadata:
+  version: "experimental"
+  author: "EnhancedPromptEngine"
+  description: "Version expérimentale avec analyse en profondeur multicouche"
+  created_at: "2024-12-29"
+  performance_target: "deep_understanding"
+
+template: |
+  ## Deep Code Analysis Request
+  
+  ### Code to Analyze:
+  ```{language}
+  {code}
+  ```
+  
+  ### Analysis Layers Required:
+  
+  #### Layer 1: Surface-Level Understanding
+  - What does this code do at a high level?
+  - What are the main components?
+  - What is the primary purpose?
+  
+  #### Layer 2: Technical Deep Dive
+  - Analyze the algorithmic approach
+  - Identify design patterns used
+  - Evaluate time/space complexity
+  - Assess code quality and structure
+  
+  #### Layer 3: Context and Best Practices
+  - How does this fit {language} conventions?
+  - What improvements could be made?
+  - Are there any potential issues or bugs?
+  - Security considerations
+  
+  #### Layer 4: Educational Insights
+  - Key concepts for beginners to understand
+  - Advanced techniques employed
+  - Learning opportunities from this code
+  
+  ### Focus Areas:
+  {focus}
+  
+  ### Analysis Parameters:
+  - Detail Level: {detail_level}
+  - Target Audience: {audience}
+  - Include Examples: {include_examples}
+  
+  Provide a comprehensive, multi-layered explanation that builds understanding progressively.
+
+variables:
+  - name: code
+    description: "Code snippet to explain with deep analysis"
+    type: string
+    required: true
+    
+  - name: language
+    description: "Programming language of the code"
+    type: string
+    required: true
+    default: "python"
+    
+  - name: focus
+    description: "Specific aspects to focus the analysis on"
+    type: string
+    required: false
+    default: "general understanding"
+    
+  - name: detail_level
+    description: "How detailed the explanation should be"
+    type: string
+    required: false
+    default: "comprehensive"
+    
+  - name: audience
+    description: "Target audience for the explanation"
+    type: string
+    required: false
+    default: "intermediate developers"
+    
+  - name: include_examples
+    description: "Whether to include usage examples"
+    type: string
+    required: false
+    default: "yes"
+
+optimization_hints:
+  - "Multi-layered analysis provides deeper understanding"
+  - "Progressive complexity helps different skill levels"
+  - "Focus on educational value alongside technical accuracy"
+  - "Include security and performance considerations"
