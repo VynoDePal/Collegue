@@ -11,17 +11,18 @@ class ToolLLMManager:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or Settings()
         
-        if not self.settings.LLM_API_KEY:
+        # Utilise les propriétés avec priorité MCP > env > default
+        if not self.settings.llm_api_key:
             raise ValueError(
-                "La clé API LLM (LLM_API_KEY) n'est pas configurée. "
-                "Veuillez l'ajouter à votre fichier .env ou à vos variables d'environnement."
+                "La clé API LLM n'est pas configurée. "
+                "Veuillez l'ajouter via mcp_config.json, fichier .env ou variables d'environnement."
             )
 
-        # Configuration unique imposée par la politique projet
+        # Configuration avec les propriétés qui gèrent la priorité MCP
         self.llm_config = LLMConfig(
             provider=LLMProvider.OPENAI,  # OpenRouter compatible avec OpenAI API
-            model_name=self.settings.LLM_MODEL,
-            api_key=self.settings.LLM_API_KEY,
+            model_name=self.settings.llm_model,  # Utilise la propriété avec priorité
+            api_key=self.settings.llm_api_key,    # Utilise la propriété avec priorité
             api_base=self.settings.LLM_BASE_URL,
             max_tokens=self.settings.MAX_TOKENS,
             temperature=0.7,  # Valeur par défaut raisonnable
@@ -34,6 +35,11 @@ class ToolLLMManager:
                 }
             }
         )
+        
+        # Log le modèle utilisé (sans la clé API pour la sécurité)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"ToolLLMManager initialisé avec le modèle: {self.settings.llm_model}")
 
     async def async_generate(self, prompt: str, system_prompt: Optional[str] = None) -> str:
         """Appel asynchrone au LLM pour générer du texte."""
