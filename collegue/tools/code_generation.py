@@ -1,6 +1,7 @@
 """
 Code Generation - Outil de génération de code basé sur une description
 """
+import asyncio
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
@@ -134,7 +135,47 @@ class CodeGenerationTool(BaseTool):
         # Utilisation du LLM centralisé si fourni
         if llm_manager is not None:
             try:
-                prompt = self._build_generation_prompt(request)
+                # Préparation du contexte pour le template
+                template_context = {
+                    'description': request.description,
+                    'language': request.language,
+                    'requirements': '',
+                    'context': ''
+                }
+                
+                # Ajout des contraintes comme requirements
+                if request.constraints:
+                    template_context['requirements'] = ', '.join(request.constraints)
+                
+                # Ajout du contexte supplémentaire
+                if request.context:
+                    if isinstance(request.context, dict):
+                        template_context['context'] = str(request.context)
+                    else:
+                        template_context['context'] = request.context
+                
+                # Utilisation du nouveau système de prompts si disponible
+                if hasattr(self, 'prepare_prompt'):
+                    # Création d'un objet request simplifié pour prepare_prompt
+                    from types import SimpleNamespace
+                    prompt_request = SimpleNamespace(**template_context)
+                    
+                    # Utilisation asynchrone si nécessaire
+                    if asyncio.iscoroutinefunction(self.prepare_prompt):
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # Si une boucle existe déjà, créer une tâche
+                            task = asyncio.create_task(self.prepare_prompt(prompt_request))
+                            prompt = asyncio.run_coroutine_threadsafe(task, loop).result()
+                        else:
+                            # Sinon, exécuter normalement
+                            prompt = asyncio.run(self.prepare_prompt(prompt_request))
+                    else:
+                        prompt = self.prepare_prompt(prompt_request)
+                else:
+                    # Fallback vers l'ancienne méthode
+                    prompt = self._build_generation_prompt(request)
+                
                 generated_code = llm_manager.sync_generate(prompt)
                 explanation = f"Code généré par LLM ({getattr(llm_manager, 'model_name', 'modèle inconnu')}) pour la description fournie."
 
@@ -157,7 +198,8 @@ class CodeGenerationTool(BaseTool):
 
     def _build_generation_prompt(self, request: CodeGenerationRequest) -> str:
         """
-        Construit le prompt pour le LLM.
+        [DEPRECATED] Construit le prompt pour le LLM.
+        Cette méthode est conservée pour la compatibilité mais devrait être remplacée par prepare_prompt().
 
         Args:
             request: Requête de génération
