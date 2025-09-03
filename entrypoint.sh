@@ -10,7 +10,7 @@ sleep 3
 
 # Lance l'application principale au premier plan
 echo "Starting main application..."
-exec python -m fastmcp run /app/collegue/app.py:app \
+exec fastmcp run /app/collegue/app.py:app \
   --transport http \
   --host 0.0.0.0 \
   --port 4121 \
