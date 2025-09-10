@@ -3,13 +3,17 @@ Collègue MCP - Un assistant de développement intelligent inspiré par Junie
 """
 import sys
 import os
+import logging
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fastmcp import FastMCP
 from collegue.config import settings
-import os
-import sys
+from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.server.dependencies import get_http_headers
+
+# Logger module-level
+logger = logging.getLogger(__name__)
 
 # Ajouter le répertoire parent au chemin pour pouvoir importer collegue
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -58,6 +62,42 @@ app = FastMCP(
     port=settings.PORT,
     auth=auth_provider  # Intégration native de l'authentification
 )
+
+# ---------------------------------------------------------------------------
+# Middleware MCP natif pour propager les en-têtes LLM (X-LLM-Model, X-LLM-Api-Key)
+# vers la configuration runtime et réinitialiser le ToolLLMManager si besoin
+# ---------------------------------------------------------------------------
+class LLMHeadersMCPMiddleware(Middleware):
+    async def on_message(self, context: MiddlewareContext, call_next):
+        try:
+            headers = get_http_headers() or {}
+            # Les clés sont généralement en minuscules
+            model = headers.get('x-llm-model') or headers.get('X-LLM-Model')
+            api_key = headers.get('x-llm-api-key') or headers.get('X-LLM-Api-Key')
+
+            mcp_params = {}
+            if model:
+                mcp_params['LLM_MODEL'] = model
+            if api_key:
+                mcp_params['LLM_API_KEY'] = api_key
+
+            if mcp_params:
+                settings.update_from_mcp(mcp_params)
+                try:
+                    from collegue.core.tool_llm_manager import ToolLLMManager
+                    state = globals().get('app_state')
+                    if isinstance(state, dict):
+                        state['llm_manager'] = ToolLLMManager()
+                        logger.info("ToolLLMManager réinitialisé via headers MCP")
+                except Exception as e:
+                    logger.warning(f"Impossible de réinitialiser le LLM manager via headers: {e}")
+        except Exception as e:
+            logger.warning(f"LLMHeadersMCPMiddleware: erreur non bloquante: {e}")
+
+        return await call_next(context)
+
+# Enregistrer le middleware MCP
+app.add_middleware(LLMHeadersMCPMiddleware())
 
 # Configuration MCP au démarrage
 # Note: FastMCP n'a pas de décorateur @app.on_startup, donc nous initialisons directement
