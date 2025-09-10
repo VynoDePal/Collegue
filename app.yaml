@@ -1,0 +1,52 @@
+name: collegue-mcp
+region: fra1                       # ou nyc, lon…
+services:
+  - name: collegue-app             # PRIVATE SERVICE
+    image:
+      registry: collegue
+      repository: collegue-app
+      tag: latest
+      registry_type: DOCR
+    run_command: >
+      python3 /app/collegue/health_server.py &
+      exec fastmcp run /app/collegue/app.py:app --transport http
+    http_port: 4121                # interne, pas exposé
+    internal_ports: [4122]  # Ports supplémentaires exposés en interne
+    envs:
+      - key: PORT
+        value: "4121"
+      - key: HEALTH_PORT
+        value: "4122"
+      - key: OAUTH_ENABLED
+        value: "true"
+      - key: OAUTH_ISSUER
+        value: "https://your.domain.tld/realms/master"
+      - key: OAUTH_AUTH_SERVER_PUBLIC
+        value: "https://your.domain.tld/realms/master"
+      - key: OAUTH_JWKS_URI
+        value: "https://keycloak.your.domain.tld/realms/master/protocol/openid-connect/certs"
+      - key: OAUTH_REQUIRED_SCOPES
+        value: '["mcp.read","mcp.write"]'
+    health_check:
+      http_path: /_health
+      port: 4122
+      initial_delay_seconds: 15
+    instance_count: 1
+    instance_size_slug: basic-xxs  # 512 Mo / 1 vCPU
+
+  - name: nginx                    # WEB SERVICE (public)
+    image:
+      registry: collegue
+      repository: nginx
+      tag: latest
+      registry_type: DOCR
+    http_port: 80
+    routes:
+      - path: /
+    envs:
+      - key: COLLEGUE_APP_SERVICE_HOST   # DO DNS interne
+        value: collegue-app
+      - key: COLLEGUE_APP_SERVICE_PORT
+        value: "4121"
+    instance_count: 1
+    instance_size_slug: basic-xxs
