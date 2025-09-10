@@ -2,14 +2,16 @@
 ToolLLMManager - Gestionnaire centralisé des appels LLM pour tous les outils
 """
 from typing import Optional
-from collegue.config import Settings
+from collegue.config import Settings, settings as global_settings
 from collegue.resources.llm.providers import LLMConfig, LLMProvider, generate_text
 import asyncio
 
 class ToolLLMManager:
     """Gestionnaire unique pour l'appel au LLM OpenRouter DeepSeek via OpenRouter."""
     def __init__(self, settings: Optional[Settings] = None):
-        self.settings = settings or Settings()
+        # Utiliser l'instance globale par défaut afin de bénéficier des mises à jour runtime
+        # (priorité MCP via settings.update_from_mcp)
+        self.settings = settings or global_settings
         
         # Utilise les propriétés avec priorité MCP > env > default
         if not self.settings.llm_api_key:
