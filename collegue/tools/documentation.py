@@ -52,6 +52,10 @@ class DocumentationTool(BaseTool):
         """Retourne la liste des langages supportés."""
         return ["python", "javascript", "typescript", "java", "c#", "go", "rust", "php"]
 
+    def is_long_running(self) -> bool:
+        """Cet outil génère de la documentation complète via LLM et peut prendre du temps."""
+        return True
+
     def get_supported_formats(self) -> List[str]:
         """Retourne les formats de documentation supportés."""
         return ["markdown", "rst", "html", "docstring", "json"]
