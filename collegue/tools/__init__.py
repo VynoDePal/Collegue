@@ -173,11 +173,17 @@ def register_tools(app: FastMCP, app_state: dict):
 
         except Exception as e:
             print(f"Erreur lors de l'enregistrement de '{tool_name}': {e}")
+    
+    # Enregistrer l'outil d'administration centralisé
+    register_admin_tool(app, app_state)
 
 
 def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     """
     Enregistre les endpoints d'un outil dans FastMCP.
+    
+    Note: Les endpoints _info et _metrics ont été supprimés pour simplifier l'interface.
+    Utilisez l'outil collegue_admin pour obtenir les infos et métriques de tous les outils.
 
     Args:
         app: Instance FastMCP
@@ -188,7 +194,7 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     request_model = tool.get_request_model()
     response_model = tool.get_response_model()
 
-    # Endpoint principal de l'outil
+    # Endpoint principal de l'outil uniquement (sans _info et _metrics séparés)
     @app.tool(name=tool_name, description=tool.get_description())
     def tool_endpoint(request: request_model) -> response_model:
         """Endpoint généré automatiquement pour l'outil."""
@@ -211,30 +217,181 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
             tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
             raise
 
-    # Endpoint d'information sur l'outil
-    @app.tool(name=f"{tool_name}_info", description=f"Informations sur l'outil {tool_name}")
-    def tool_info_endpoint() -> ToolInfoResponse:
-        """Endpoint d'information généré automatiquement."""
-        try:
-            info = tool.get_info()
-            return ToolInfoResponse(**info)
-        except Exception as e:
-            tool.logger.error(f"Erreur dans l'endpoint info {tool_name}: {e}")
-            raise
 
-    # Endpoint de métriques
-    @app.tool(name=f"{tool_name}_metrics", description=f"Métriques de l'outil {tool_name}")
-    def tool_metrics_endpoint() -> ToolMetricsResponse:
-        """Endpoint de métriques généré automatiquement."""
+# Modèles pour l'outil d'administration centralisé
+class AdminRequest(BaseModel):
+    """Modèle de requête pour l'outil d'administration."""
+    action: str  # "list", "info", "metrics", "all_info", "all_metrics"
+    tool_name: Optional[str] = None  # Requis pour "info" et "metrics"
+
+
+class AdminResponse(BaseModel):
+    """Modèle de réponse pour l'outil d'administration."""
+    success: bool
+    action: str
+    data: Dict[str, Any]
+    message: Optional[str] = None
+
+
+def register_admin_tool(app: FastMCP, app_state: dict):
+    """
+    Enregistre l'outil d'administration centralisé collegue_admin.
+    Remplace les 10 outils _info et _metrics par un seul outil unifié.
+    
+    Args:
+        app: Instance FastMCP
+        app_state: État de l'application
+    """
+    registry = get_registry()
+    
+    @app.tool(
+        name="collegue_admin",
+        description="Outil d'administration pour obtenir les informations et métriques de tous les outils Collègue. Actions: list, info, metrics, all_info, all_metrics"
+    )
+    def collegue_admin(request: AdminRequest) -> AdminResponse:
+        """Outil d'administration centralisé pour Collègue."""
+        action = request.action.lower()
+        tool_name = request.tool_name
+        
         try:
-            metrics = tool.get_metrics()
-            return ToolMetricsResponse(
-                tool_name=tool_name,
-                total_executions=len(metrics),
-                success_rate=tool._calculate_success_rate(),
-                average_execution_time=sum(m.execution_time for m in metrics) / len(metrics) if metrics else 0,
-                recent_metrics=[m.model_dump() for m in metrics[-10:]]  # 10 dernières métriques
-            )
+            if action == "list":
+                # Liste tous les outils disponibles
+                tools = registry.list_tools()
+                tool_names = []
+                for t in tools:
+                    try:
+                        instance = registry.get_tool_instance(t)
+                        tool_names.append(instance.get_name())
+                    except:
+                        tool_names.append(t)
+                return AdminResponse(
+                    success=True,
+                    action=action,
+                    data={"tools": tool_names, "count": len(tool_names)}
+                )
+            
+            elif action == "info":
+                # Informations sur un outil spécifique
+                if not tool_name:
+                    return AdminResponse(
+                        success=False,
+                        action=action,
+                        data={},
+                        message="tool_name requis pour l'action 'info'"
+                    )
+                
+                # Trouver l'outil par son nom
+                tool_instance = None
+                for t in registry.list_tools():
+                    try:
+                        instance = registry.get_tool_instance(t)
+                        if instance.get_name() == tool_name:
+                            tool_instance = instance
+                            break
+                    except:
+                        pass
+                
+                if not tool_instance:
+                    return AdminResponse(
+                        success=False,
+                        action=action,
+                        data={},
+                        message=f"Outil '{tool_name}' non trouvé"
+                    )
+                
+                info = tool_instance.get_info()
+                return AdminResponse(
+                    success=True,
+                    action=action,
+                    data=info
+                )
+            
+            elif action == "metrics":
+                # Métriques d'un outil spécifique
+                if not tool_name:
+                    return AdminResponse(
+                        success=False,
+                        action=action,
+                        data={},
+                        message="tool_name requis pour l'action 'metrics'"
+                    )
+                
+                # Trouver l'outil par son nom
+                tool_instance = None
+                for t in registry.list_tools():
+                    try:
+                        instance = registry.get_tool_instance(t)
+                        if instance.get_name() == tool_name:
+                            tool_instance = instance
+                            break
+                    except:
+                        pass
+                
+                if not tool_instance:
+                    return AdminResponse(
+                        success=False,
+                        action=action,
+                        data={},
+                        message=f"Outil '{tool_name}' non trouvé"
+                    )
+                
+                metrics = tool_instance.get_metrics()
+                return AdminResponse(
+                    success=True,
+                    action=action,
+                    data={
+                        "tool_name": tool_name,
+                        "total_executions": len(metrics),
+                        "success_rate": tool_instance._calculate_success_rate(),
+                        "average_execution_time": sum(m.execution_time for m in metrics) / len(metrics) if metrics else 0,
+                        "recent_metrics": [m.model_dump() for m in metrics[-10:]]
+                    }
+                )
+            
+            elif action == "all_info":
+                # Informations sur tous les outils
+                all_info = registry.get_tools_info()
+                return AdminResponse(
+                    success=True,
+                    action=action,
+                    data={"tools": all_info, "count": len(all_info)}
+                )
+            
+            elif action == "all_metrics":
+                # Métriques de tous les outils
+                all_metrics = {}
+                for t in registry.list_tools():
+                    try:
+                        instance = registry.get_tool_instance(t)
+                        metrics = instance.get_metrics()
+                        all_metrics[instance.get_name()] = {
+                            "total_executions": len(metrics),
+                            "success_rate": instance._calculate_success_rate(),
+                            "average_execution_time": sum(m.execution_time for m in metrics) / len(metrics) if metrics else 0
+                        }
+                    except Exception as e:
+                        all_metrics[t] = {"error": str(e)}
+                
+                return AdminResponse(
+                    success=True,
+                    action=action,
+                    data={"metrics": all_metrics, "count": len(all_metrics)}
+                )
+            
+            else:
+                return AdminResponse(
+                    success=False,
+                    action=action,
+                    data={},
+                    message=f"Action '{action}' non reconnue. Actions valides: list, info, metrics, all_info, all_metrics"
+                )
+        
         except Exception as e:
-            tool.logger.error(f"Erreur dans l'endpoint metrics {tool_name}: {e}")
-            raise
+            return AdminResponse(
+                success=False,
+                action=action,
+                data={},
+                message=f"Erreur: {str(e)}"
+            )
+    
+    print("Outil 'collegue_admin' enregistré avec succès")
