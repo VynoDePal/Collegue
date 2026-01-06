@@ -23,38 +23,36 @@ if parent_dir not in sys.path:
 # Configuration de l'authentification OAuth native FastMCP
 auth_provider = None
 if settings.OAUTH_ENABLED:
-    from fastmcp.server.auth import BearerAuthProvider
-    import logging
-    
-    logger = logging.getLogger(__name__)
-    
     try:
-        # Configuration avec JWKS URI (prioritaire)
-        if settings.OAUTH_JWKS_URI:
-            auth_provider = BearerAuthProvider(
-                jwks_uri=settings.OAUTH_JWKS_URI,
-                issuer=settings.OAUTH_ISSUER,
-                algorithm=settings.OAUTH_ALGORITHM,
-                audience=settings.OAUTH_AUDIENCE,
-                required_scopes=settings.OAUTH_REQUIRED_SCOPES
-            )
-            logger.info(f"Auth OAuth configurée avec JWKS: {settings.OAUTH_JWKS_URI}")
-        
-        # Configuration avec clé publique
-        elif settings.OAUTH_PUBLIC_KEY:
-            auth_provider = BearerAuthProvider(
-                public_key=settings.OAUTH_PUBLIC_KEY,
-                issuer=settings.OAUTH_ISSUER,
-                algorithm=settings.OAUTH_ALGORITHM,
-                audience=settings.OAUTH_AUDIENCE,
-                required_scopes=settings.OAUTH_REQUIRED_SCOPES
-            )
-            logger.info("Auth OAuth configurée avec clé publique")
-        else:
-            logger.warning("OAuth activé mais ni JWKS_URI ni PUBLIC_KEY configurés")
-    except Exception as e:
-        logger.error(f"Erreur lors de la configuration OAuth: {e}")
-        auth_provider = None
+        from fastmcp.server.auth.providers.jwt import JWTVerifier
+    except ImportError:
+        JWTVerifier = None
+        logger.warning("JWTVerifier non disponible - FastMCP >= 2.14 requis")
+    
+    if JWTVerifier is not None:
+        try:
+            # Configuration avec JWKS URI (prioritaire)
+            if settings.OAUTH_JWKS_URI:
+                auth_provider = JWTVerifier(
+                    jwks_uri=settings.OAUTH_JWKS_URI,
+                    issuer=settings.OAUTH_ISSUER,
+                    audience=settings.OAUTH_AUDIENCE
+                )
+                logger.info(f"Auth OAuth configurée avec JWKS: {settings.OAUTH_JWKS_URI}")
+            
+            # Configuration avec clé publique
+            elif settings.OAUTH_PUBLIC_KEY:
+                auth_provider = JWTVerifier(
+                    public_key=settings.OAUTH_PUBLIC_KEY,
+                    issuer=settings.OAUTH_ISSUER,
+                    audience=settings.OAUTH_AUDIENCE
+                )
+                logger.info("Auth OAuth configurée avec clé publique")
+            else:
+                logger.warning("OAuth activé mais ni JWKS_URI ni PUBLIC_KEY configurés")
+        except Exception as e:
+            logger.error(f"Erreur lors de la configuration OAuth: {e}")
+            auth_provider = None
 
 # Initialisation de l'application FastMCP avec auth native
 app = FastMCP(
