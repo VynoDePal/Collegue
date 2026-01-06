@@ -250,7 +250,7 @@ fastmcp run collegue/app.py:app --transport http --host 127.0.0.1 --port 8080
 
 ### Client Python
 
-Le client Python permet d'interagir facilement avec le serveur Collgue MCP :
+Le client Python permet d'interagir facilement avec le serveur Collègue MCP :
 
 ```python
 import asyncio
@@ -259,13 +259,9 @@ from collegue.client import CollegueClient
 async def main():
     # Connexion au serveur (lance automatiquement le serveur)
     async with CollegueClient() as client:
-        # Créer une session
-        session = await client.create_session()
-        
-        # Analyser un extrait de code
-        code = "def hello(): print('Hello, world!')"
-        analysis = await client.analyze_code(code, "python")
-        print(analysis)
+        # Lister les outils disponibles
+        tools = await client.list_tools()
+        print(f"Outils disponibles: {tools}")
         
         # Générer du code à partir d'une description
         code_gen = await client.generate_code_from_description(
@@ -273,10 +269,21 @@ async def main():
             "python"
         )
         print(code_gen)
+        
+        # Expliquer un extrait de code
+        code = "def hello(): print('Hello, world!')"
+        explanation = await client.explain_code_snippet(
+            code, 
+            language="python", 
+            detail_level="medium"
+        )
+        print(explanation)
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+**Note**: Les sessions sont maintenant gérées automatiquement via le paramètre `session_id` dans chaque outil.
 
 Pour plus de détails sur l'utilisation du client Python, consultez la documentation dans `collegue/client/README.md`.
 
