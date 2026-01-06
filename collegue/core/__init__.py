@@ -14,7 +14,7 @@ def register_core(app, app_state):
     app_state["orchestrator"] = ToolOrchestrator()
     
     # Configuration de l'authentification OAuth
-    # L'authentification est maintenant gérée nativement par FastMCP via BearerAuthProvider
+    # L'authentification est maintenant gérée nativement par FastMCP via JWTVerifier (v2.14+)
     # configuré dans app.py. Le gestionnaire OAuth est conservé pour d'éventuelles
     # fonctionnalités complémentaires (validation de tokens, gestion de sessions, etc.)
     setup_oauth_auth(app, app_state)

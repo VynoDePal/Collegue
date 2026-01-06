@@ -68,6 +68,10 @@ class TestGenerationTool(BaseTool):
         """Retourne la liste des langages supportés."""
         return ["python", "javascript", "typescript", "java", "c#"]
 
+    def is_long_running(self) -> bool:
+        """Cet outil génère des tests complets via LLM et peut prendre du temps."""
+        return True
+
     def get_supported_test_frameworks(self) -> Dict[str, List[str]]:
         """Retourne les frameworks de test supportés par langage."""
         return {

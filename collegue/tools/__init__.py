@@ -184,6 +184,9 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     
     Note: Les endpoints _info et _metrics ont été supprimés pour simplifier l'interface.
     Utilisez l'outil collegue_admin pour obtenir les infos et métriques de tous les outils.
+    
+    Les outils longs (is_long_running=True) sont enregistrés avec task=True pour
+    s'exécuter en tâche de fond avec support de progression (FastMCP v2.14+).
 
     Args:
         app: Instance FastMCP
@@ -193,29 +196,54 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     tool_name = tool.get_name()
     request_model = tool.get_request_model()
     response_model = tool.get_response_model()
+    is_long_running = tool.is_long_running()
 
-    # Endpoint principal de l'outil uniquement (sans _info et _metrics séparés)
-    @app.tool(name=tool_name, description=tool.get_description())
-    def tool_endpoint(request: request_model) -> response_model:
-        """Endpoint généré automatiquement pour l'outil."""
-        try:
-            # Récupération des services depuis app_state
-            parser = app_state.get('parser')
-            llm_manager = app_state.get('llm_manager')
-            context_manager = app_state.get('context_manager')
+    if is_long_running:
+        # Endpoint async avec support background task pour outils longs (FastMCP v2.14+)
+        @app.tool(name=tool_name, description=tool.get_description(), task=True)
+        async def tool_endpoint_async(request: request_model) -> response_model:
+            """Endpoint async généré automatiquement pour l'outil long-running."""
+            try:
+                # Récupération des services depuis app_state
+                parser = app_state.get('parser')
+                llm_manager = app_state.get('llm_manager')
+                context_manager = app_state.get('context_manager')
 
-            # Exécution de l'outil avec les services
-            return tool.execute(
-                request,
-                parser=parser,
-                llm_manager=llm_manager,
-                context_manager=context_manager
-            )
+                # Exécution de l'outil avec les services
+                return tool.execute(
+                    request,
+                    parser=parser,
+                    llm_manager=llm_manager,
+                    context_manager=context_manager
+                )
 
-        except Exception as e:
-            # Log de l'erreur et re-raise
-            tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
-            raise
+            except Exception as e:
+                # Log de l'erreur et re-raise
+                tool.logger.error(f"Erreur dans l'endpoint async {tool_name}: {e}")
+                raise
+    else:
+        # Endpoint synchrone standard pour outils rapides
+        @app.tool(name=tool_name, description=tool.get_description())
+        def tool_endpoint(request: request_model) -> response_model:
+            """Endpoint généré automatiquement pour l'outil."""
+            try:
+                # Récupération des services depuis app_state
+                parser = app_state.get('parser')
+                llm_manager = app_state.get('llm_manager')
+                context_manager = app_state.get('context_manager')
+
+                # Exécution de l'outil avec les services
+                return tool.execute(
+                    request,
+                    parser=parser,
+                    llm_manager=llm_manager,
+                    context_manager=context_manager
+                )
+
+            except Exception as e:
+                # Log de l'erreur et re-raise
+                tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
+                raise
 
 
 # Modèles pour l'outil d'administration centralisé

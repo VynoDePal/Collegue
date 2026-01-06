@@ -135,6 +135,16 @@ class BaseTool(ABC):
         """
         return ["python", "javascript", "typescript"]
     
+    def is_long_running(self) -> bool:
+        """
+        Indique si l'outil est susceptible de prendre du temps (> 10s).
+        Les outils longs seront exécutés comme tâches de fond avec FastMCP task=True.
+        
+        Returns:
+            True si l'outil est long-running, False sinon
+        """
+        return False
+    
     async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
         """
         Prépare un prompt optimisé en utilisant le système de prompts amélioré.
