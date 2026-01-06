@@ -48,6 +48,10 @@ class CodeGenerationTool(BaseTool):
         """Retourne la liste des langages supportés."""
         return ["python", "javascript", "typescript", "java", "c#", "go", "rust"]
 
+    def is_long_running(self) -> bool:
+        """Cet outil utilise un LLM et peut prendre du temps."""
+        return True
+
     def get_usage_description(self) -> str:
         """Description détaillée de l'utilisation de l'outil de génération de code."""
         return ("Outil de génération de code qui peut utiliser une description textuelle pour générer du code dans "
