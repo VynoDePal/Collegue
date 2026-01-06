@@ -42,10 +42,20 @@ async def test_mcp_client():
             for tool in tools:
                 print(f"  - {tool}")
             
-            # Tester l'outil analyze_code s'il existe
-            if "collegue_analyze_code" in tools or "analyze_code" in tools:
-                tool_name = "collegue_analyze_code" if "collegue_analyze_code" in tools else "analyze_code"
-                print(f"\n=== Test de l'outil {tool_name} ===")
+            # Tester les outils principaux disponibles
+            print(f"\n=== Test des outils principaux ===")
+            
+            # Tester collegue_admin
+            if "collegue_admin" in tools:
+                print(f"\nTest de l'outil collegue_admin...")
+                result = await client.call_tool("collegue_admin", {
+                    "action": "list"
+                })
+                print(f"✅ collegue_admin.list: {result.data}")
+            
+            # Tester code_generation
+            if "code_generation" in tools:
+                print(f"\nTest de l'outil code_generation...")
                 python_code = """
 def hello_world():
     print("Hello, world!")
@@ -57,47 +67,36 @@ class TestClass:
     def get_value(self):
         return self.value
 """
-                result = await client.call_tool(tool_name, {
+                result = await client.call_tool("code_generation", {
                     "code": python_code,
                     "language": "python",
-                    "session_id": "test_session",
-                    "file_path": "test_file.py"
+                    "description": "Générer une fonction hello world avec une classe de test",
+                    "session_id": "test_session"
                 })
-                print(f"✅ Analyse réussie:")
+                print(f"✅ Génération de code réussie:")
                 print(json.dumps(result.data, indent=2))
             
-            # Tester l'outil create_session s'il existe
-            create_session_name = "collegue_create_session" if "collegue_create_session" in tools else "create_session"
-            if create_session_name in tools:
-                print(f"\n=== Test de l'outil {create_session_name} ===")
-                session_result = await client.call_tool(create_session_name, {})
-                session = session_result.data
-                print(f"✅ Session créée:")
-                print(json.dumps(session, indent=2))
-                
-                # Tester l'outil get_session_context s'il existe
-                get_context_name = "collegue_get_session_context" if "collegue_get_session_context" in tools else "get_session_context"
-                if get_context_name in tools:
-                    print(f"\n=== Test de l'outil {get_context_name} ===")
-                    context_result = await client.call_tool(get_context_name, {
-                        "session_id": session["session_id"]
-                    })
-                    context = context_result.data
-                    print(f"✅ Contexte récupéré:")
-                    print(json.dumps(context, indent=2))
-            
-            # Tester l'outil suggest_tools_for_query s'il existe
-            suggest_tools_name = "collegue_suggest_tools_for_query" if "collegue_suggest_tools_for_query" in tools else "suggest_tools_for_query"
-            if suggest_tools_name in tools:
-                print(f"\n=== Test de l'outil {suggest_tools_name} ===")
-                session_id = session["session_id"] if "session" in locals() else "test_session"
-                suggestions_result = await client.call_tool(suggest_tools_name, {
-                    "query": "Comment refactorer cette fonction?",
-                    "session_id": session_id
+            # Tester l'outil code_explanation
+            if "code_explanation" in tools:
+                print(f"\n=== Test de l'outil code_explanation ===")
+                result = await client.call_tool("code_explanation", {
+                    "code": python_code,
+                    "language": "python",
+                    "detail_level": "medium",
+                    "session_id": "test_session"
                 })
-                suggestions = suggestions_result.data
-                print(f"✅ Outils suggérés:")
-                print(json.dumps(suggestions, indent=2))
+                print(f"✅ Explication de code réussie:")
+                print(json.dumps(result.data, indent=2))
+            
+            # Tester l'outil collegue_admin avec d'autres actions
+            if "collegue_admin" in tools:
+                print(f"\n=== Test de collegue_admin - all_info ===")
+                result = await client.call_tool("collegue_admin", {
+                    "action": "all_info"
+                })
+                print(f"✅ Informations de tous les outils:")
+                tool_count = result.data.get("count", 0)
+                print(f"  Nombre d'outils: {tool_count}")
     
     except Exception as e:
         print(f"❌ Erreur: {str(e)}")
