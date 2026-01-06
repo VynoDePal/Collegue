@@ -12,6 +12,14 @@ from collegue.config import settings
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_headers
 
+# Import du handler de sampling pour fallback (Windsurf ne supporte pas le sampling MCP)
+try:
+    from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
+    SAMPLING_HANDLER_AVAILABLE = True
+except ImportError:
+    OpenAISamplingHandler = None
+    SAMPLING_HANDLER_AVAILABLE = False
+
 # Logger module-level
 logger = logging.getLogger(__name__)
 
@@ -54,11 +62,28 @@ if settings.OAUTH_ENABLED:
             logger.error(f"Erreur lors de la configuration OAuth: {e}")
             auth_provider = None
 
-# Initialisation de l'application FastMCP avec auth native
+# Configuration du sampling handler fallback
+# Ce handler permet à ctx.sample() de fonctionner côté serveur via OpenRouter
+sampling_handler = None
+if SAMPLING_HANDLER_AVAILABLE and settings.llm_api_key:
+    try:
+        sampling_handler = OpenAISamplingHandler(
+            api_key=settings.llm_api_key,
+            base_url=settings.LLM_BASE_URL,
+            default_model=settings.llm_model
+        )
+        logger.info(f"Sampling handler configuré avec modèle: {settings.llm_model}")
+    except Exception as e:
+        logger.warning(f"Impossible de configurer le sampling handler: {e}")
+        sampling_handler = None
+
+# Initialisation de l'application FastMCP avec auth native et sampling fallback
 app = FastMCP(
     host=settings.HOST,
     port=settings.PORT,
-    auth=auth_provider  # Intégration native de l'authentification
+    auth=auth_provider,  # Intégration native de l'authentification
+    sampling_handler=sampling_handler,  # Fallback pour ctx.sample() si client ne supporte pas
+    sampling_handler_behavior="fallback"  # Utilise le handler seulement si client ne supporte pas
 )
 
 # ---------------------------------------------------------------------------
