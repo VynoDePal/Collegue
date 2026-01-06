@@ -2,7 +2,11 @@
 Authentication - Gestion de l'authentification OAuth pour le MCP Collègue
 """
 from fastmcp import FastMCP
-from fastmcp.server.auth import BearerAuthProvider
+try:
+    from fastmcp.server.auth.providers.jwt import JWTVerifier
+except ImportError:
+    # Fallback pour anciennes versions de FastMCP
+    JWTVerifier = None
 from collegue.config import settings
 from typing import Optional
 import logging
@@ -15,7 +19,7 @@ class OAuthManager:
     
     def __init__(self):
         """Initialise le gestionnaire d'authentification."""
-        self.auth_provider: Optional[BearerAuthProvider] = None
+        self.auth_provider = None  # JWTVerifier ou None
         self._setup_auth()
     
     def _setup_auth(self):
@@ -25,25 +29,25 @@ class OAuthManager:
             return
         
         try:
+            if JWTVerifier is None:
+                logger.error("JWTVerifier non disponible - FastMCP >= 2.14 requis")
+                return
+            
             # Configuration avec JWKS URI (prioritaire)
             if settings.OAUTH_JWKS_URI:
-                self.auth_provider = BearerAuthProvider(
+                self.auth_provider = JWTVerifier(
                     jwks_uri=settings.OAUTH_JWKS_URI,
                     issuer=settings.OAUTH_ISSUER,
-                    algorithm=settings.OAUTH_ALGORITHM,
-                    audience=settings.OAUTH_AUDIENCE,
-                    required_scopes=settings.OAUTH_REQUIRED_SCOPES
+                    audience=settings.OAUTH_AUDIENCE
                 )
                 logger.info(f"Authentification OAuth configurée avec JWKS: {settings.OAUTH_JWKS_URI}")
             
             # Configuration avec clé publique
             elif settings.OAUTH_PUBLIC_KEY:
-                self.auth_provider = BearerAuthProvider(
+                self.auth_provider = JWTVerifier(
                     public_key=settings.OAUTH_PUBLIC_KEY,
                     issuer=settings.OAUTH_ISSUER,
-                    algorithm=settings.OAUTH_ALGORITHM,
-                    audience=settings.OAUTH_AUDIENCE,
-                    required_scopes=settings.OAUTH_REQUIRED_SCOPES
+                    audience=settings.OAUTH_AUDIENCE
                 )
                 logger.info("Authentification OAuth configurée avec clé publique")
             
@@ -54,7 +58,7 @@ class OAuthManager:
             logger.error(f"Erreur lors de la configuration de l'authentification OAuth: {e}")
             self.auth_provider = None
     
-    def get_auth_provider(self) -> Optional[BearerAuthProvider]:
+    def get_auth_provider(self):
         """Retourne le fournisseur d'authentification configuré."""
         return self.auth_provider
     
