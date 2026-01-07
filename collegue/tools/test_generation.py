@@ -344,13 +344,12 @@ class TestGenerationTool(BaseTool):
         
         Args:
             request: Requête de génération de tests validée
-            **kwargs: Services additionnels incluant ctx, progress, llm_manager, parser
+            **kwargs: Services additionnels incluant ctx, llm_manager, parser
         
         Returns:
             TestGenerationResponse: Les tests générés
         """
         ctx = kwargs.get('ctx')
-        progress = kwargs.get('progress')
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
         use_structured_output = kwargs.get('use_structured_output', True)
@@ -365,8 +364,8 @@ class TestGenerationTool(BaseTool):
         system_prompt = f"""Tu es un expert en tests unitaires {request.language} avec {framework}.
 Génère des tests complets, bien structurés et couvrant les cas limites."""
         
-        if progress:
-            await progress.set_message("Génération des tests via LLM...")
+        if ctx:
+            await ctx.info("Génération des tests via LLM...")
         
         try:
             # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
@@ -392,8 +391,8 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                         for cls in llm_result.tested_classes:
                             tested_elements.append({"type": "class", "name": cls})
                         
-                        if progress:
-                            await progress.set_message(f"Structured output: {llm_result.test_count} tests générés")
+                        if ctx:
+                            await ctx.info(f"Structured output: {llm_result.test_count} tests générés")
                         
                         # Génération du chemin de fichier de test
                         test_file_path = None
@@ -422,8 +421,8 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                 temperature=0.5
             )
             
-            if progress:
-                await progress.set_message("Tests générés, analyse...")
+            if ctx:
+                await ctx.info("Tests générés, analyse...")
             
             # Analyse du code pour identifier les éléments testés
             tested_elements = self._extract_tested_elements(request.code, request.language, parser)
