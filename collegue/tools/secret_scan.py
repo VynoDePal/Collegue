@@ -22,9 +22,13 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 
 class SecretScanRequest(BaseModel):
     """Modèle de requête pour le scan de secrets."""
-    target: str = Field(
-        ..., 
-        description="Cible du scan: fichier, dossier, ou contenu de code directement"
+    target: Optional[str] = Field(
+        None, 
+        description="Cible du scan: fichier ou dossier (utiliser 'content' pour passer du code directement)"
+    )
+    content: Optional[str] = Field(
+        None,
+        description="Contenu du code à scanner (alternative à target pour environnements isolés comme MCP)"
     )
     scan_type: str = Field(
         "auto",
@@ -66,6 +70,11 @@ class SecretScanRequest(BaseModel):
         if v not in valid:
             raise ValueError(f"Sévérité '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
+    
+    def model_post_init(self, __context):
+        """Valide que target ou content est fourni."""
+        if not self.target and not self.content:
+            raise ValueError("Vous devez fournir 'target' (chemin) ou 'content' (code à scanner)")
 
 
 class SecretFinding(BaseModel):
@@ -435,34 +444,43 @@ class SecretScanTool(BaseTool):
         include_patterns = request.include_patterns or []
         exclude_patterns = list(self.DEFAULT_EXCLUDES) + (request.exclude_patterns or [])
         
-        # Déterminer le type de scan
-        scan_type = request.scan_type
-        if scan_type == 'auto':
-            if os.path.isfile(request.target):
-                scan_type = 'file'
-            elif os.path.isdir(request.target):
-                scan_type = 'directory'
-            else:
-                scan_type = 'content'
+        # Mode 1: Contenu fourni directement (pour MCP et environnements isolés)
+        if request.content:
+            findings = self._scan_content(request.content, "[content]", request.severity_threshold)
+            files_scanned = 1
         
-        # Exécuter le scan
-        if scan_type == 'file':
-            if not os.path.isfile(request.target):
-                raise ToolValidationError(f"Fichier '{request.target}' inexistant")
-            findings = self._scan_file(request.target, request.severity_threshold, request.max_file_size)
-            files_scanned = 1
+        # Mode 2: Chemin de fichier/dossier
+        elif request.target:
+            # Déterminer le type de scan
+            scan_type = request.scan_type
+            if scan_type == 'auto':
+                if os.path.isfile(request.target):
+                    scan_type = 'file'
+                elif os.path.isdir(request.target):
+                    scan_type = 'directory'
+                else:
+                    # Fallback: traiter comme contenu si le chemin n'existe pas
+                    scan_type = 'content'
             
-        elif scan_type == 'directory':
-            if not os.path.isdir(request.target):
-                raise ToolValidationError(f"Répertoire '{request.target}' inexistant")
-            findings, files_scanned = self._scan_directory(
-                request.target, include_patterns, exclude_patterns,
-                request.severity_threshold, request.max_file_size
-            )
-            
-        elif scan_type == 'content':
-            findings = self._scan_content(request.target, None, request.severity_threshold)
-            files_scanned = 1
+            # Exécuter le scan
+            if scan_type == 'file':
+                if not os.path.isfile(request.target):
+                    raise ToolValidationError(f"Fichier '{request.target}' inexistant. Utilisez 'content' pour passer du code directement.")
+                findings = self._scan_file(request.target, request.severity_threshold, request.max_file_size)
+                files_scanned = 1
+                
+            elif scan_type == 'directory':
+                if not os.path.isdir(request.target):
+                    raise ToolValidationError(f"Répertoire '{request.target}' inexistant. Utilisez 'content' pour passer du code directement.")
+                findings, files_scanned = self._scan_directory(
+                    request.target, include_patterns, exclude_patterns,
+                    request.severity_threshold, request.max_file_size
+                )
+                
+            elif scan_type == 'content':
+                # Traiter target comme du contenu
+                findings = self._scan_content(request.target, None, request.severity_threshold)
+                files_scanned = 1
         
         # Compter par sévérité
         severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}

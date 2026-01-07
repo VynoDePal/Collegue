@@ -13,6 +13,8 @@ import subprocess
 import json
 import os
 import re
+import tempfile
+import shutil
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
@@ -20,9 +22,17 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 
 class RunTestsRequest(BaseModel):
     """Modèle de requête pour l'exécution de tests."""
-    target: str = Field(
-        ..., 
+    target: Optional[str] = Field(
+        None, 
         description="Cible des tests: fichier, dossier, pattern ou 'all' pour tous les tests"
+    )
+    test_content: Optional[str] = Field(
+        None,
+        description="Contenu du fichier de test (alternative à target pour environnements isolés comme MCP)"
+    )
+    source_content: Optional[str] = Field(
+        None,
+        description="Contenu du code source à tester (utilisé avec test_content)"
     )
     language: str = Field(
         ..., 
@@ -69,6 +79,11 @@ class RunTestsRequest(BaseModel):
         if v not in valid_frameworks:
             raise ValueError(f"Framework '{v}' non supporté. Utilisez: {', '.join(valid_frameworks)}")
         return v
+    
+    def model_post_init(self, __context):
+        """Valide que target ou test_content est fourni."""
+        if not self.target and not self.test_content:
+            raise ValueError("Vous devez fournir 'target' (chemin) ou 'test_content' (code de test)")
 
 
 class TestResult(BaseModel):
@@ -403,29 +418,76 @@ class RunTestsTool(BaseTool):
 
     def _execute_core_logic(self, request: RunTestsRequest, **kwargs) -> RunTestsResponse:
         """Exécute les tests et retourne les résultats structurés."""
-        working_dir = request.working_dir or os.getcwd()
-        
-        if not os.path.isdir(working_dir):
-            raise ToolValidationError(f"Répertoire '{working_dir}' inexistant")
-        
-        # Détecter ou utiliser le framework spécifié
-        framework = request.framework or self._detect_framework(request.language, working_dir)
-        
-        # Vérifier que le framework est compatible avec le langage
-        valid_frameworks = self.LANGUAGE_FRAMEWORKS.get(request.language, [])
-        if framework not in valid_frameworks:
-            raise ToolValidationError(
-                f"Framework '{framework}' incompatible avec {request.language}. "
-                f"Utilisez: {', '.join(valid_frameworks)}"
-            )
-        
-        # Construire la commande
-        cmd = self._build_command(request, framework)
-        cmd_str = ' '.join(cmd)
-        
-        self.logger.info(f"Exécution: {cmd_str} dans {working_dir}")
+        temp_dir = None
         
         try:
+            # Mode 1: Contenu fourni directement (pour MCP et environnements isolés)
+            if request.test_content:
+                temp_dir = tempfile.mkdtemp(prefix="collegue_run_tests_")
+                working_dir = temp_dir
+                
+                # Déterminer les noms de fichiers selon le langage
+                if request.language == 'python':
+                    test_filename = "test_module.py"
+                    source_filename = "module_under_test.py"
+                else:  # typescript/javascript
+                    ext = ".ts" if request.language == "typescript" else ".js"
+                    test_filename = f"module.test{ext}"
+                    source_filename = f"module_under_test{ext}"
+                
+                # Écrire le fichier source si fourni
+                if request.source_content:
+                    source_path = os.path.join(temp_dir, source_filename)
+                    with open(source_path, 'w', encoding='utf-8') as f:
+                        f.write(request.source_content)
+                    self.logger.info(f"Code source écrit dans: {source_path}")
+                
+                # Adapter les imports dans le test pour Python
+                test_code = request.test_content
+                if request.language == 'python':
+                    test_code = f"import sys\nsys.path.insert(0, '{temp_dir}')\n" + test_code
+                
+                # Écrire le fichier de test
+                test_path = os.path.join(temp_dir, test_filename)
+                with open(test_path, 'w', encoding='utf-8') as f:
+                    f.write(test_code)
+                self.logger.info(f"Tests écrits dans: {test_path}")
+                
+                # Mettre à jour la cible
+                request_target = test_filename
+            else:
+                working_dir = request.working_dir or os.getcwd()
+                request_target = request.target
+                
+                if not os.path.isdir(working_dir):
+                    raise ToolValidationError(f"Répertoire '{working_dir}' inexistant. Utilisez 'test_content' pour passer le code directement.")
+            
+            # Détecter ou utiliser le framework spécifié
+            framework = request.framework or self._detect_framework(request.language, working_dir)
+            
+            # Vérifier que le framework est compatible avec le langage
+            valid_frameworks = self.LANGUAGE_FRAMEWORKS.get(request.language, [])
+            if framework not in valid_frameworks:
+                raise ToolValidationError(
+                    f"Framework '{framework}' incompatible avec {request.language}. "
+                    f"Utilisez: {', '.join(valid_frameworks)}"
+                )
+            
+            # Construire la commande - créer une requête modifiée pour le target
+            modified_request = RunTestsRequest(
+                target=request_target,
+                language=request.language,
+                framework=request.framework,
+                working_dir=working_dir,
+                timeout=request.timeout,
+                verbose=request.verbose,
+                pattern=request.pattern
+            )
+            cmd = self._build_command(modified_request, framework)
+            cmd_str = ' '.join(cmd)
+            
+            self.logger.info(f"Exécution: {cmd_str} dans {working_dir}")
+            
             # Exécuter la commande
             result = subprocess.run(
                 cmd,
@@ -472,6 +534,15 @@ class RunTestsTool(BaseTool):
         except subprocess.TimeoutExpired:
             raise ToolExecutionError(f"Timeout après {request.timeout}s")
         except FileNotFoundError as e:
-            raise ToolExecutionError(f"Commande non trouvée: {e}. Vérifiez que {framework} est installé.")
+            raise ToolExecutionError(f"Commande non trouvée: {e}. Vérifiez que le framework est installé.")
+        except ToolValidationError:
+            raise
         except Exception as e:
             raise ToolExecutionError(f"Erreur d'exécution: {str(e)}")
+        finally:
+            # Nettoyer le répertoire temporaire
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    self.logger.warning(f"Impossible de supprimer le répertoire temporaire: {e}")
