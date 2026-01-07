@@ -45,6 +45,9 @@ Méthodes recommandées:
 - Refactoring (rename, extract, simplify, optimize, clean, modernize) avec métriques
 - Génération automatique de documentation (Markdown, RST, HTML, docstring, JSON)
 - Génération de tests unitaires (pytest, unittest, Jest, etc.) avec estimation de couverture
+- **Exécution de tests** (run_tests) avec résultats structurés et intégration test_generation
+- **Détection de secrets** (secret_scan) : 30+ patterns (AWS, GCP, OpenAI, GitHub, etc.)
+- **Audit de dépendances** (dependency_guard) : vulnérabilités, typosquatting, blocklist
 - Système de prompts amélioré, A/B testing, optimisation par langage
 - Intégration LLM flexible (OpenRouter recommandé), surcharge par headers MCP
 - Endpoints de santé et découverte OAuth pour intégration SSO
@@ -57,6 +60,9 @@ Méthodes recommandées:
 3) Amélioration continue: refactorer pour lisibilité et performance
 4) Documentation vivante: produire/mettre à jour la doc et docstrings
 5) Qualité logicielle: générer une base de tests pour augmenter la couverture
+6) Sécurité: détecter les secrets exposés avant commit
+7) Supply chain: auditer les dépendances contre les vulnérabilités et packages malveillants
+8) CI/CD: exécuter et valider les tests générés automatiquement
 
 ---
 
@@ -82,7 +88,23 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
 - test_generation
   - Description: Génère des tests unitaires et estime la couverture
-  - Paramètres clés: `code`, `language`, `test_framework?`, `include_mocks?`, `coverage_target?`, `file_path?`, `output_dir?`, `session_id?`
+  - Paramètres clés: `code`, `language`, `test_framework?`, `include_mocks?`, `coverage_target?`, `validate_tests?`, `file_path?`, `output_dir?`, `session_id?`
+  - Nouveau: `validate_tests=true` exécute automatiquement les tests générés via run_tests
+
+- run_tests
+  - Description: Exécute des tests unitaires et retourne des résultats structurés
+  - Paramètres clés: `target`, `language`, `framework?`, `working_dir?`, `timeout?`, `pattern?`, `verbose?`
+  - Frameworks: pytest, unittest, jest, mocha, vitest
+
+- secret_scan
+  - Description: Détecte les secrets exposés dans le code (clés API, tokens, mots de passe)
+  - Paramètres clés: `target?`, `content?`, `language?`, `severity_threshold?`, `exclude_patterns?`
+  - 30+ patterns: AWS, GCP, Azure, OpenAI, GitHub, Stripe, JWT, clés privées, etc.
+
+- dependency_guard
+  - Description: Audite les dépendances pour vulnérabilités et packages malveillants
+  - Paramètres clés: `manifest_path?`, `manifest_content?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
+  - Supporte: requirements.txt, pyproject.toml, package.json
 
 ---
 
@@ -166,6 +188,6 @@ Remarques OAuth:
 
 Build notes:
 - Implémentation principale: `collegue/app.py` (FastMCP) et enregistrement dynamique des outils via `collegue/tools/__init__.py`
-- Outils: `code_explanation`, `code_generation`, `code_documentation`, `code_refactoring`, `test_generation`
+- Outils: `code_explanation`, `code_generation`, `code_documentation`, `code_refactoring`, `test_generation`, `run_tests`, `secret_scan`, `dependency_guard`
 - Santé: `/_health` (via wrapper HTTP de compatibilité)
 - OAuth: `.well-known` endpoints exposés lorsque `OAUTH_ENABLED=true`

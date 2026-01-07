@@ -21,6 +21,7 @@
 | T11 | **Adaptation LLM des Outils (OpenRouter DeepSeek)** | 🔴 | ⏳ | T03, T04 | 4 | | Intégration unique du modèle deepseek/deepseek-r1-0528-qwen3-8b pour tous les outils |
 | T12 | **Amélioration des Outils et Mise à Jour des Tests Unitaires** | 🟠 | ❌ | T03, T06, T11 | 6 | | Optimisation des outils existants, nouvelles fonctionnalités et modernisation des tests |
 | T13 | **Migration vers EnhancedPromptEngine avec versioning et optimisation** | 🔴 | ✅ | T03, T05, T12 | 5 | | Migration complète du système de prompts avec versioning, optimisation par langage et templates YAML |
+| T14 | **Outils de Qualité et Sécurité (Guardrails IA)** | 🔴 | ✅ | T03, T12 | 4 | | Outils pour fiabiliser le code généré par IA : run_tests, secret_scan, dependency_guard (Python + TypeScript) - 80% terminé |
 
 ## Sous-tâches
 
@@ -149,6 +150,16 @@
 | T13.7 | Correction des templates YAML et tests | 🟠 | ✅ | T13.6 | 0.5 | | Ajout des descriptions obligatoires pour PromptVariable |
 | T13.8 | Documentation du nouveau système de prompts | 🟡 | ✅ | T13.6 | 0.5 | | Documentation complète dans docs/enhanced_prompt_system.md |
 
+### T14 - Outils de Qualité et Sécurité (Guardrails IA)
+
+| ID | Sous-tâche | Priorité | Statut | Dépendances | Estimation (jours) | Assigné à | Notes |
+|----|-----------|----------|--------|-------------|-------------------|-----------|-------|
+| T14.1 | Implémentation de l'outil `run_tests` (Python + TypeScript) | 🔴 | ✅ | T03 | 1 | | Exécution de tests unitaires avec résultats structurés (pytest, unittest, jest, mocha) - Terminé le 07/01/2026 |
+| T14.2 | Implémentation de l'outil `secret_scan` (Python + TypeScript) | 🔴 | ✅ | T03 | 1 | | Détection de 30+ types de secrets (AWS, GCP, OpenAI, GitHub, etc.) - Terminé le 07/01/2026 |
+| T14.3 | Implémentation de l'outil `dependency_guard` (Python + TypeScript) | 🔴 | ✅ | T03 | 1 | | Validation des dépendances (existence, vulnérabilités, blocklist/allowlist) - Terminé le 07/01/2026 |
+| T14.4 | Tests unitaires pour les 3 outils de sécurité | 🟠 | ✅ | T14.1-T14.3 | 0.5 | | 24 tests passés avec succès - Terminé le 07/01/2026 |
+| T14.5 | Documentation des outils de sécurité | 🟡 | ❌ | T14.1-T14.3 | 0.5 | | Guide d'utilisation et exemples |
+
 ## Suivi de Progression
 
 | Phase | Tâches Totales | Terminées | En cours | % Complété |
@@ -163,7 +174,8 @@
 | Adaptation LLM | 6 | 4         | 2 | 67%        |
 | Amélioration des Outils | 3 | 2         | 0 | 67%        |
 | Migration EnhancedPromptEngine | 8 | 8         | 0 | 100%       |
-| **TOTAL** | **52** | **46**    | **2** | **88%**    |
+| Outils Qualité/Sécurité | 5 | 4         | 0 | 80%        |
+| **TOTAL** | **57** | **50**    | **2** | **88%**    |
 
 ## Notes Importantes
 
