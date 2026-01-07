@@ -292,13 +292,13 @@ class RefactoringTool(BaseTool):
             RefactoringResponse: Le code refactorisé
         """
         ctx = kwargs.get('ctx')
-        progress = kwargs.get('progress')
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
         use_structured_output = kwargs.get('use_structured_output', True)
         
-        if progress:
-            await progress.set_message("Analyse du code original...")
+        # Log via ctx si disponible
+        if ctx:
+            await ctx.info("Analyse du code original...")
         
         # Analyse du code original
         original_metrics = self._analyze_code_metrics(request.code, request.language)
@@ -308,8 +308,8 @@ class RefactoringTool(BaseTool):
         system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'."""
         
-        if progress:
-            await progress.set_message("Refactoring en cours via LLM...")
+        if ctx:
+            await ctx.info("Refactoring en cours via LLM...")
         
         try:
             # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
@@ -326,8 +326,8 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                     )
                     
                     if isinstance(llm_result, LLMRefactoringResult):
-                        if progress:
-                            await progress.set_message(f"Structured output: {llm_result.changes_count} modifications")
+                        if ctx:
+                            await ctx.info(f"Structured output: {llm_result.changes_count} modifications")
                         
                         # Construire les changes à partir du résultat structuré
                         changes = [{"type": area, "description": f"Amélioration: {area}"} 
@@ -360,8 +360,8 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 temperature=0.5
             )
             
-            if progress:
-                await progress.set_message("Analyse des améliorations...")
+            if ctx:
+                await ctx.info("Analyse des améliorations...")
             
             # Analyse du code refactorisé
             new_metrics = self._analyze_code_metrics(refactored_code, request.language)
