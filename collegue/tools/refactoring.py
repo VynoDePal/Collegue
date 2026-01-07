@@ -27,6 +27,27 @@ class RefactoringResponse(BaseModel):
     improvement_metrics: Optional[Dict[str, Any]] = Field(None, description="Métriques d'amélioration")
 
 
+class LLMRefactoringResult(BaseModel):
+    """
+    Modèle de sortie structurée pour ctx.sample() avec result_type (FastMCP 2.14.1+).
+    
+    Force le LLM à produire une réponse JSON validée par Pydantic.
+    """
+    refactored_code: str = Field(..., description="Code refactoré complet")
+    changes_summary: str = Field(..., description="Résumé des changements effectués")
+    changes_count: int = Field(default=0, description="Nombre de modifications")
+    improved_areas: List[str] = Field(
+        default_factory=list,
+        description="Liste des aspects améliorés (lisibilité, performance, etc.)"
+    )
+    complexity_reduction: float = Field(
+        default=0.0,
+        description="Estimation de la réduction de complexité (0.0 à 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+
+
 class RefactoringTool(BaseTool):
     """Outil de refactoring et d'amélioration de code."""
 
@@ -175,6 +196,10 @@ class RefactoringTool(BaseTool):
 
         return True
 
+    def is_long_running(self) -> bool:
+        """Cet outil utilise un LLM pour le refactoring et peut prendre du temps."""
+        return True
+
     def _execute_core_logic(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         """
         Exécute la logique principale de refactoring.
@@ -250,6 +275,111 @@ class RefactoringTool(BaseTool):
                 return self._perform_local_refactoring(request, parser)
         else:
             # Refactoring local sans LLM
+            return self._perform_local_refactoring(request, parser)
+
+    async def _execute_core_logic_async(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
+        """
+        Version async de la logique de refactoring (FastMCP 2.14+).
+        
+        Utilise ctx.sample() pour les appels LLM avec support structured output (result_type),
+        avec fallback vers ToolLLMManager si ctx non disponible.
+        
+        Args:
+            request: Requête de refactoring validée
+            **kwargs: Services additionnels incluant ctx, progress, llm_manager, parser
+        
+        Returns:
+            RefactoringResponse: Le code refactorisé
+        """
+        ctx = kwargs.get('ctx')
+        progress = kwargs.get('progress')
+        llm_manager = kwargs.get('llm_manager')
+        parser = kwargs.get('parser')
+        use_structured_output = kwargs.get('use_structured_output', True)
+        
+        if progress:
+            await progress.set_message("Analyse du code original...")
+        
+        # Analyse du code original
+        original_metrics = self._analyze_code_metrics(request.code, request.language)
+        
+        # Construire le prompt
+        prompt = self._build_refactoring_prompt(request)
+        system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
+Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'."""
+        
+        if progress:
+            await progress.set_message("Refactoring en cours via LLM...")
+        
+        try:
+            # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
+            if ctx is not None and use_structured_output:
+                try:
+                    self.logger.debug("Utilisation du structured output avec LLMRefactoringResult")
+                    llm_result = await self.sample_llm(
+                        prompt=prompt,
+                        ctx=ctx,
+                        llm_manager=llm_manager,
+                        system_prompt=system_prompt,
+                        result_type=LLMRefactoringResult,
+                        temperature=0.5
+                    )
+                    
+                    if isinstance(llm_result, LLMRefactoringResult):
+                        if progress:
+                            await progress.set_message(f"Structured output: {llm_result.changes_count} modifications")
+                        
+                        # Construire les changes à partir du résultat structuré
+                        changes = [{"type": area, "description": f"Amélioration: {area}"} 
+                                   for area in llm_result.improved_areas]
+                        
+                        # Métriques d'amélioration
+                        improvement_metrics = {
+                            "complexity_reduction": llm_result.complexity_reduction,
+                            "changes_count": llm_result.changes_count,
+                            "improved_areas": llm_result.improved_areas
+                        }
+                        
+                        return RefactoringResponse(
+                            refactored_code=llm_result.refactored_code,
+                            original_code=request.code,
+                            language=request.language,
+                            changes=changes,
+                            explanation=llm_result.changes_summary,
+                            improvement_metrics=improvement_metrics
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
+            
+            # Fallback: génération sans structured output
+            refactored_code = await self.sample_llm(
+                prompt=prompt,
+                ctx=ctx,
+                llm_manager=llm_manager,
+                system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code refactoré.",
+                temperature=0.5
+            )
+            
+            if progress:
+                await progress.set_message("Analyse des améliorations...")
+            
+            # Analyse du code refactorisé
+            new_metrics = self._analyze_code_metrics(refactored_code, request.language)
+            improvement_metrics = self._calculate_improvements(original_metrics, new_metrics)
+            changes = self._identify_changes(request, refactored_code)
+            explanation = self._generate_explanation(request.refactoring_type, changes, improvement_metrics)
+            
+            return RefactoringResponse(
+                refactored_code=refactored_code,
+                original_code=request.code,
+                language=request.language,
+                changes=changes,
+                explanation=explanation,
+                improvement_metrics=improvement_metrics
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._perform_local_refactoring(request, parser)
 
     def _build_refactoring_prompt(self, request: RefactoringRequest) -> str:
