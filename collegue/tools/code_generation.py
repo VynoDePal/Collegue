@@ -25,6 +25,32 @@ class CodeGenerationResponse(BaseModel):
     suggestions: Optional[List[str]] = Field(None, description="Suggestions d'amélioration ou alternatives")
 
 
+class LLMCodeGenerationResult(BaseModel):
+    """
+    Modèle de sortie structurée pour ctx.sample() avec result_type (FastMCP 2.14.1+).
+    
+    Force le LLM à produire une réponse JSON validée par Pydantic.
+    """
+    code: str = Field(..., description="Code généré complet et fonctionnel")
+    language: str = Field(..., description="Langage de programmation utilisé")
+    explanation: str = Field(
+        default="",
+        description="Brève explication du code généré"
+    )
+    imports: List[str] = Field(
+        default_factory=list,
+        description="Liste des imports/dépendances nécessaires"
+    )
+    functions_created: List[str] = Field(
+        default_factory=list,
+        description="Noms des fonctions créées"
+    )
+    classes_created: List[str] = Field(
+        default_factory=list,
+        description="Noms des classes créées"
+    )
+
+
 class CodeGenerationTool(BaseTool):
     """Outil de génération de code basé sur une description."""
 
@@ -204,7 +230,7 @@ class CodeGenerationTool(BaseTool):
         """
         Version async de la logique de génération de code (FastMCP 2.14+).
         
-        Utilise ctx.sample() pour les appels LLM avec support structured output,
+        Utilise ctx.sample() pour les appels LLM avec support structured output (result_type),
         avec fallback vers ToolLLMManager si ctx non disponible.
         
         Args:
@@ -220,23 +246,57 @@ class CodeGenerationTool(BaseTool):
         ctx = kwargs.get('ctx')
         progress = kwargs.get('progress')
         llm_manager = kwargs.get('llm_manager')
+        use_structured_output = kwargs.get('use_structured_output', True)
         
         # Construire le prompt
         prompt = self._build_generation_prompt(request)
         system_prompt = f"""Tu es un expert en programmation {request.language}.
-Génère du code propre, bien documenté et respectant les bonnes pratiques.
-Réponds UNIQUEMENT avec le code, sans explications supplémentaires."""
+Génère du code propre, bien documenté et respectant les bonnes pratiques."""
         
         if progress:
             await progress.set_message("Génération du code via LLM...")
         
         try:
-            # Utiliser sample_llm (ctx.sample() prioritaire, fallback vers llm_manager)
+            # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
+            if ctx is not None and use_structured_output:
+                try:
+                    self.logger.debug("Utilisation du structured output avec LLMCodeGenerationResult")
+                    llm_result = await self.sample_llm(
+                        prompt=prompt,
+                        ctx=ctx,
+                        llm_manager=llm_manager,
+                        system_prompt=system_prompt,
+                        result_type=LLMCodeGenerationResult,
+                        temperature=0.7
+                    )
+                    
+                    # Si on a un résultat structuré, l'utiliser
+                    if isinstance(llm_result, LLMCodeGenerationResult):
+                        if progress:
+                            funcs = len(llm_result.functions_created)
+                            classes = len(llm_result.classes_created)
+                            await progress.set_message(f"Structured output: {funcs} fonctions, {classes} classes")
+                        
+                        # Générer suggestions basées sur le résultat structuré
+                        suggestions = self._get_language_suggestions(request.language)
+                        if llm_result.imports:
+                            suggestions.insert(0, f"Imports requis: {', '.join(llm_result.imports)}")
+                        
+                        return CodeGenerationResponse(
+                            code=llm_result.code,
+                            language=llm_result.language or request.language,
+                            explanation=llm_result.explanation or "Code généré via FastMCP ctx.sample() avec structured output",
+                            suggestions=suggestions
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
+            
+            # Fallback: génération sans structured output
             generated_code = await self.sample_llm(
                 prompt=prompt,
                 ctx=ctx,
                 llm_manager=llm_manager,
-                system_prompt=system_prompt,
+                system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code, sans explications.",
                 temperature=0.7
             )
             
