@@ -236,15 +236,13 @@ class CodeGenerationTool(BaseTool):
         Args:
             request: Requête de génération de code validée
             **kwargs: Services additionnels incluant:
-                - ctx: Context FastMCP pour ctx.sample()
-                - progress: Progress pour reporting
+                - ctx: Context FastMCP pour ctx.sample() et ctx.report_progress()
                 - llm_manager: ToolLLMManager (fallback)
         
         Returns:
             CodeGenerationResponse: Le code généré
         """
         ctx = kwargs.get('ctx')
-        progress = kwargs.get('progress')
         llm_manager = kwargs.get('llm_manager')
         use_structured_output = kwargs.get('use_structured_output', True)
         
@@ -253,8 +251,8 @@ class CodeGenerationTool(BaseTool):
         system_prompt = f"""Tu es un expert en programmation {request.language}.
 Génère du code propre, bien documenté et respectant les bonnes pratiques."""
         
-        if progress:
-            await progress.set_message("Génération du code via LLM...")
+        if ctx:
+            await ctx.info("Génération du code via LLM...")
         
         try:
             # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
@@ -272,10 +270,10 @@ Génère du code propre, bien documenté et respectant les bonnes pratiques."""
                     
                     # Si on a un résultat structuré, l'utiliser
                     if isinstance(llm_result, LLMCodeGenerationResult):
-                        if progress:
+                        if ctx:
                             funcs = len(llm_result.functions_created)
                             classes = len(llm_result.classes_created)
-                            await progress.set_message(f"Structured output: {funcs} fonctions, {classes} classes")
+                            await ctx.info(f"Structured output: {funcs} fonctions, {classes} classes")
                         
                         # Générer suggestions basées sur le résultat structuré
                         suggestions = self._get_language_suggestions(request.language)
@@ -300,8 +298,8 @@ Génère du code propre, bien documenté et respectant les bonnes pratiques."""
                 temperature=0.7
             )
             
-            if progress:
-                await progress.set_message("Code généré, préparation de la réponse...")
+            if ctx:
+                await ctx.info("Code généré, préparation de la réponse...")
             
             explanation = "Code généré via FastMCP ctx.sample()" if ctx else "Code généré via ToolLLMManager"
             suggestions = self._get_language_suggestions(request.language)
