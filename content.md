@@ -93,17 +93,20 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
 - run_tests
   - Description: Exécute des tests unitaires et retourne des résultats structurés
-  - Paramètres clés: `target`, `language`, `framework?`, `working_dir?`, `timeout?`, `pattern?`, `verbose?`
+  - Paramètres clés: `target?`, `test_content?`, `source_content?`, `language`, `framework?`, `working_dir?`, `timeout?`, `pattern?`, `verbose?`
+  - **Important**: Utilisez `test_content` pour passer le code de test directement (recommandé avec MCP)
   - Frameworks: pytest, unittest, jest, mocha, vitest
 
 - secret_scan
   - Description: Détecte les secrets exposés dans le code (clés API, tokens, mots de passe)
-  - Paramètres clés: `target?`, `content?`, `language?`, `severity_threshold?`, `exclude_patterns?`
+  - Paramètres clés: `target?`, `content?`, `scan_type?`, `language?`, `severity_threshold?`, `exclude_patterns?`
+  - **Important**: Utilisez `content` pour passer le code directement (recommandé avec MCP)
   - 30+ patterns: AWS, GCP, Azure, OpenAI, GitHub, Stripe, JWT, clés privées, etc.
 
 - dependency_guard
   - Description: Audite les dépendances pour vulnérabilités et packages malveillants
-  - Paramètres clés: `manifest_path?`, `manifest_content?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
+  - Paramètres clés: `target?`, `manifest_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
+  - **Important**: Utilisez `manifest_content` pour passer le contenu directement (recommandé avec MCP)
   - Supporte: requirements.txt, pyproject.toml, package.json
 
 ---

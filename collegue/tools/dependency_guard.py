@@ -24,9 +24,17 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 
 class DependencyGuardRequest(BaseModel):
     """Modèle de requête pour la validation des dépendances."""
-    target: str = Field(
-        ..., 
+    target: Optional[str] = Field(
+        None, 
         description="Cible: fichier manifest (requirements.txt, package.json) ou répertoire"
+    )
+    manifest_content: Optional[str] = Field(
+        None,
+        description="Contenu du fichier manifest (alternative à target pour environnements isolés comme MCP)"
+    )
+    manifest_type: Optional[str] = Field(
+        None,
+        description="Type de manifest si manifest_content fourni: requirements.txt, package.json, pyproject.toml"
     )
     language: str = Field(
         ..., 
@@ -61,6 +69,11 @@ class DependencyGuardRequest(BaseModel):
         if v not in ['python', 'javascript']:
             raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript")
         return v
+    
+    def model_post_init(self, __context):
+        """Valide que target ou manifest_content est fourni."""
+        if not self.target and not self.manifest_content:
+            raise ValueError("Vous devez fournir 'target' (chemin) ou 'manifest_content' (contenu du fichier)")
 
 
 class DependencyIssue(BaseModel):
@@ -409,47 +422,98 @@ class DependencyGuardTool(BaseTool):
         
         return vulnerabilities
 
+    def _parse_requirements_txt_content(self, content: str) -> List[Dict[str, str]]:
+        """Parse le contenu d'un fichier requirements.txt."""
+        dependencies = []
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('-'):
+                continue
+            match = re.match(r'^([a-zA-Z0-9_-]+)(?:\[.*\])?\s*((?:==|>=|<=|>|<|~=|!=)[^\s;#]+)?', line)
+            if match:
+                name = match.group(1)
+                version = match.group(2) or '*'
+                dependencies.append({'name': name, 'version': version})
+        return dependencies
+
+    def _parse_package_json_content(self, content: str) -> List[Dict[str, str]]:
+        """Parse le contenu d'un fichier package.json."""
+        dependencies = []
+        try:
+            data = json.loads(content)
+            all_deps = {
+                **data.get('dependencies', {}),
+                **data.get('devDependencies', {})
+            }
+            for name, version in all_deps.items():
+                dependencies.append({'name': name, 'version': version})
+        except json.JSONDecodeError as e:
+            raise ToolValidationError(f"Erreur de parsing JSON: {e}")
+        return dependencies
+
     def _execute_core_logic(self, request: DependencyGuardRequest, **kwargs) -> DependencyGuardResponse:
         """Exécute la validation des dépendances."""
         issues = []
         dependencies_info = []
         manifest_file = ""
+        working_dir = os.getcwd()
+        deps = []
         
-        # Trouver le fichier manifest
-        target = request.target
-        if os.path.isdir(target):
-            if request.language == 'python':
-                candidates = ['requirements.txt', 'pyproject.toml', 'setup.py']
-            else:
-                candidates = ['package.json']
+        # Mode 1: Contenu fourni directement (pour MCP et environnements isolés)
+        if request.manifest_content:
+            manifest_type = request.manifest_type or ('package.json' if request.language == 'javascript' else 'requirements.txt')
+            manifest_file = f"[content:{manifest_type}]"
             
-            for candidate in candidates:
-                path = os.path.join(target, candidate)
-                if os.path.exists(path):
-                    target = path
-                    break
+            if manifest_type in ['requirements.txt', 'requirements']:
+                deps = self._parse_requirements_txt_content(request.manifest_content)
+            elif manifest_type in ['package.json', 'package']:
+                deps = self._parse_package_json_content(request.manifest_content)
+            elif manifest_type in ['pyproject.toml', 'pyproject']:
+                # Pour pyproject.toml, on utilise le parsing simplifié
+                deps_match = re.search(r'dependencies\s*=\s*\[(.*?)\]', request.manifest_content, re.DOTALL)
+                if deps_match:
+                    deps_str = deps_match.group(1)
+                    for line in deps_str.split('\n'):
+                        line = line.strip().strip(',').strip('"\'')
+                        if line:
+                            match = re.match(r'^([a-zA-Z0-9_-]+)', line)
+                            if match:
+                                deps.append({'name': match.group(1), 'version': '*'})
             else:
-                raise ToolValidationError(f"Aucun fichier manifest trouvé dans {request.target}")
+                raise ToolValidationError(f"Type de manifest '{manifest_type}' non supporté")
         
-        if not os.path.isfile(target):
-            raise ToolValidationError(f"Fichier '{target}' inexistant")
-        
-        manifest_file = os.path.basename(target)
-        working_dir = os.path.dirname(os.path.abspath(target))
-        
-        # Parser les dépendances
-        if request.language == 'python':
-            if target.endswith('.txt'):
-                deps = self._parse_requirements_txt(target)
-            elif target.endswith('.toml'):
-                deps = self._parse_pyproject_toml(target)
-            else:
-                deps = []
-        else:  # javascript
-            if target.endswith('.json'):
-                deps = self._parse_package_json(target)
-            else:
-                deps = []
+        # Mode 2: Chemin de fichier (mode classique)
+        elif request.target:
+            target = request.target
+            if os.path.isdir(target):
+                if request.language == 'python':
+                    candidates = ['requirements.txt', 'pyproject.toml', 'setup.py']
+                else:
+                    candidates = ['package.json']
+                
+                for candidate in candidates:
+                    path = os.path.join(target, candidate)
+                    if os.path.exists(path):
+                        target = path
+                        break
+                else:
+                    raise ToolValidationError(f"Aucun fichier manifest trouvé dans {request.target}")
+            
+            if not os.path.isfile(target):
+                raise ToolValidationError(f"Fichier '{target}' inexistant. Utilisez 'manifest_content' pour passer le contenu directement.")
+            
+            manifest_file = os.path.basename(target)
+            working_dir = os.path.dirname(os.path.abspath(target))
+            
+            # Parser les dépendances depuis le fichier
+            if request.language == 'python':
+                if target.endswith('.txt'):
+                    deps = self._parse_requirements_txt(target)
+                elif target.endswith('.toml'):
+                    deps = self._parse_pyproject_toml(target)
+            else:  # javascript
+                if target.endswith('.json'):
+                    deps = self._parse_package_json(target)
         
         # Analyser chaque dépendance
         for dep in deps:
