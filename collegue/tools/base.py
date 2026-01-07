@@ -373,6 +373,202 @@ class BaseTool(ABC):
             self.logger.error(f"Erreur inattendue dans {tool_name}: {str(e)}")
             raise ToolExecutionError(error_msg)
 
+    async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
+        """
+        Exécute l'outil de manière asynchrone avec support Progress et Context (FastMCP 2.14+).
+        
+        Cette méthode est utilisée pour les outils long-running avec task=True.
+        Elle supporte:
+        - Progress: Reporting de progression via progress.set_total(), progress.increment()
+        - Context: Accès à ctx.sample() pour appels LLM avec structured output
+        
+        Args:
+            request: Requête à traiter
+            **kwargs: Arguments supplémentaires incluant:
+                - ctx: Context FastMCP pour ctx.sample()
+                - progress: Progress pour reporting de progression
+                - parser, llm_manager, context_manager: Services standard
+        
+        Returns:
+            Réponse de l'outil
+        """
+        start_time = datetime.now()
+        tool_name = self.get_name()
+        progress = kwargs.get('progress')
+        ctx = kwargs.get('ctx')
+        
+        try:
+            self.logger.info(f"Début d'exécution async de {tool_name}")
+            
+            # Reporting de progression: Initialisation
+            if progress:
+                await progress.set_total(4)
+                await progress.set_message(f"Initialisation de {tool_name}...")
+            
+            # Validation de la requête
+            self.validate_request(request)
+            if progress:
+                await progress.increment()
+                await progress.set_message("Validation réussie, préparation...")
+            
+            # Exécution de la logique principale (peut utiliser ctx pour LLM)
+            if progress:
+                await progress.set_message("Exécution en cours...")
+            
+            # Appeler _execute_core_logic_async si disponible, sinon _execute_core_logic
+            if hasattr(self, '_execute_core_logic_async'):
+                result = await self._execute_core_logic_async(request, **kwargs)
+            else:
+                # Fallback vers la version sync dans un thread
+                result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
+            
+            if progress:
+                await progress.increment()
+                await progress.set_message("Traitement terminé, validation...")
+            
+            # Validation de la réponse
+            expected_response = self.get_response_model()
+            if not isinstance(result, expected_response):
+                raise ToolExecutionError(
+                    f"Type de réponse invalide. Attendu: {expected_response.__name__}"
+                )
+            
+            if progress:
+                await progress.increment()
+                await progress.set_message("Finalisation...")
+            
+            execution_time = (datetime.now() - start_time).total_seconds()
+            
+            # Enregistrement des métriques
+            metrics = ToolMetrics(
+                tool_name=tool_name,
+                execution_time=execution_time,
+                success=True,
+                timestamp=start_time,
+                input_size=len(str(request)) if hasattr(request, '__str__') else None,
+                output_size=len(str(result)) if hasattr(result, '__str__') else None
+            )
+            self.metrics.append(metrics)
+            
+            if progress:
+                await progress.increment()
+                await progress.set_message(f"Terminé en {execution_time:.2f}s")
+            
+            self.logger.info(f"Exécution async de {tool_name} réussie en {execution_time:.2f}s")
+            return result
+            
+        except (ToolError, ValidationError) as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            error_msg = str(e)
+            
+            metrics = ToolMetrics(
+                tool_name=tool_name,
+                execution_time=execution_time,
+                success=False,
+                timestamp=start_time,
+                error_message=error_msg
+            )
+            self.metrics.append(metrics)
+            
+            self.logger.error(f"Erreur dans {tool_name}: {error_msg}")
+            raise
+            
+        except Exception as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            error_msg = f"Erreur inattendue: {str(e)}"
+            
+            metrics = ToolMetrics(
+                tool_name=tool_name,
+                execution_time=execution_time,
+                success=False,
+                timestamp=start_time,
+                error_message=error_msg
+            )
+            self.metrics.append(metrics)
+            
+            self.logger.error(f"Erreur inattendue dans {tool_name}: {str(e)}")
+            raise ToolExecutionError(error_msg)
+
+    async def sample_llm(
+        self,
+        prompt: str,
+        ctx=None,
+        llm_manager=None,
+        system_prompt: Optional[str] = None,
+        result_type: Optional[Type[BaseModel]] = None,
+        temperature: float = 0.7
+    ) -> Any:
+        """
+        Appelle le LLM via ctx.sample() (FastMCP 2.14+) ou fallback vers ToolLLMManager.
+        
+        Cette méthode permet d'utiliser le nouveau ctx.sample() de FastMCP tout en
+        conservant la compatibilité avec ToolLLMManager pour les environnements
+        qui ne supportent pas le sampling MCP.
+        
+        Args:
+            prompt: Le prompt à envoyer au LLM
+            ctx: Context FastMCP (si disponible, utilise ctx.sample())
+            llm_manager: ToolLLMManager (fallback si ctx non disponible)
+            system_prompt: Message système optionnel
+            result_type: Type Pydantic pour structured output (FastMCP 2.14.1+)
+            temperature: Température pour la génération
+            
+        Returns:
+            - Si result_type: Instance validée du modèle Pydantic
+            - Sinon: Texte brut de la réponse LLM
+        """
+        # Priorité 1: Utiliser ctx.sample() si Context disponible
+        if ctx is not None:
+            try:
+                self.logger.debug(f"Utilisation de ctx.sample() pour {self.get_name()}")
+                
+                # Construire les messages
+                messages = prompt
+                if system_prompt:
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                
+                # Appel avec ou sans structured output
+                if result_type:
+                    result = await ctx.sample(
+                        messages=messages,
+                        result_type=result_type,
+                        temperature=temperature
+                    )
+                    return result.result  # Objet Pydantic validé
+                else:
+                    result = await ctx.sample(
+                        messages=messages,
+                        temperature=temperature
+                    )
+                    return result.text or ""
+                    
+            except Exception as e:
+                self.logger.warning(f"ctx.sample() a échoué, fallback vers llm_manager: {e}")
+                # Fallback vers ToolLLMManager
+        
+        # Priorité 2: Fallback vers ToolLLMManager
+        if llm_manager is not None:
+            self.logger.debug(f"Utilisation de ToolLLMManager pour {self.get_name()}")
+            text = await llm_manager.async_generate(prompt, system_prompt)
+            
+            # Si result_type demandé, parser la réponse JSON
+            if result_type:
+                import json
+                try:
+                    data = json.loads(text)
+                    return result_type(**data)
+                except (json.JSONDecodeError, ValidationError) as e:
+                    self.logger.warning(f"Impossible de parser en {result_type.__name__}: {e}")
+                    return text
+            return text
+        
+        raise ToolExecutionError(
+            "Aucun backend LLM disponible. Fournissez ctx (FastMCP) ou llm_manager."
+        )
+
     def get_metrics(self) -> List[ToolMetrics]:
         """
         Retourne les métriques collectées par l'outil.
