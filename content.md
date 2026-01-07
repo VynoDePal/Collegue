@@ -99,8 +99,10 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
 - secret_scan
   - Description: Détecte les secrets exposés dans le code (clés API, tokens, mots de passe)
-  - Paramètres clés: `target?`, `content?`, `scan_type?`, `language?`, `severity_threshold?`, `exclude_patterns?`
-  - **Important**: Utilisez `content` pour passer le code directement (recommandé avec MCP)
+  - Paramètres clés: `target?`, `content?`, `files?`, `scan_type?`, `language?`, `severity_threshold?`, `exclude_patterns?`
+  - **RECOMMANDÉ pour MCP**: Utilisez `files` (liste de `{path, content}`) pour scanner tout un projet en batch
+  - Exemple: `files: [{path: "src/app.ts", content: "..."}, {path: ".env", content: "..."}]`
+  - Retourne: résumé détaillé, liste des fichiers affectés, findings avec sévérité
   - 30+ patterns: AWS, GCP, Azure, OpenAI, GitHub, Stripe, JWT, clés privées, etc.
 
 - dependency_guard
