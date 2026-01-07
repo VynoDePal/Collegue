@@ -292,6 +292,74 @@ class DocumentationTool(BaseTool):
             # Génération locale sans LLM
             return self._generate_fallback_documentation(request, code_elements, parser)
 
+    async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
+        """
+        Version async de la logique de génération de documentation (FastMCP 2.14+).
+        
+        Utilise ctx.sample() pour les appels LLM avec fallback vers ToolLLMManager.
+        
+        Args:
+            request: Requête de documentation validée
+            **kwargs: Services additionnels incluant ctx, progress, llm_manager, parser
+        
+        Returns:
+            DocumentationResponse: La documentation générée
+        """
+        ctx = kwargs.get('ctx')
+        progress = kwargs.get('progress')
+        llm_manager = kwargs.get('llm_manager')
+        parser = kwargs.get('parser')
+        
+        if progress:
+            await progress.set_message("Analyse du code...")
+        
+        # Analyse du code pour identifier les éléments à documenter
+        code_elements = self._analyze_code_elements(request.code, request.language, parser)
+        
+        # Construire le prompt
+        prompt = self._build_documentation_prompt(request, code_elements)
+        system_prompt = f"""Tu es un expert en documentation de code {request.language}.
+Génère une documentation claire, complète et bien structurée au format {request.doc_format or 'markdown'}.
+Style de documentation: {request.doc_style or 'standard'}."""
+        
+        if progress:
+            await progress.set_message("Génération de la documentation via LLM...")
+        
+        try:
+            # Utiliser sample_llm (ctx.sample() prioritaire, fallback vers llm_manager)
+            generated_docs = await self.sample_llm(
+                prompt=prompt,
+                ctx=ctx,
+                llm_manager=llm_manager,
+                system_prompt=system_prompt,
+                temperature=0.5
+            )
+            
+            if progress:
+                await progress.set_message("Documentation générée, formatage...")
+            
+            # Post-traitement de la documentation
+            formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
+            
+            # Calcul de la couverture
+            coverage = self._calculate_coverage(code_elements, formatted_docs)
+            
+            # Génération de suggestions
+            suggestions = self._generate_documentation_suggestions(request, code_elements, coverage)
+            
+            return DocumentationResponse(
+                documentation=formatted_docs,
+                language=request.language,
+                format=request.doc_format or "markdown",
+                documented_elements=code_elements,
+                coverage=coverage,
+                suggestions=suggestions
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
+            return self._generate_fallback_documentation(request, code_elements, parser)
+
     def _analyze_code_elements(self, code: str, language: str, parser=None) -> List[Dict[str, str]]:
         """
         Analyse le code pour identifier les éléments à documenter.
