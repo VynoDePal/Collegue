@@ -5,7 +5,8 @@ import os
 import importlib
 import inspect
 from typing import Dict, List, Type, Any, Optional
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
+from fastmcp.dependencies import Progress
 from pydantic import BaseModel
 from .base import BaseTool
 
@@ -199,9 +200,13 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     is_long_running = tool.is_long_running()
 
     if is_long_running:
-        # Endpoint async avec support background task pour outils longs (FastMCP v2.14+)
+        # Endpoint async avec support background task, Progress et Context (FastMCP v2.14+)
         @app.tool(name=tool_name, description=tool.get_description(), task=True)
-        async def tool_endpoint_async(request: request_model) -> response_model:
+        async def tool_endpoint_async(
+            request: request_model,
+            ctx: Context,
+            progress: Progress = Progress()
+        ) -> response_model:
             """Endpoint async généré automatiquement pour l'outil long-running."""
             try:
                 # Récupération des services depuis app_state
@@ -209,12 +214,14 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
                 llm_manager = app_state.get('llm_manager')
                 context_manager = app_state.get('context_manager')
 
-                # Exécution de l'outil avec les services
-                return tool.execute(
+                # Exécution de l'outil avec Context et Progress pour FastMCP 2.14+
+                return await tool.execute_async(
                     request,
                     parser=parser,
                     llm_manager=llm_manager,
-                    context_manager=context_manager
+                    context_manager=context_manager,
+                    ctx=ctx,
+                    progress=progress
                 )
 
             except Exception as e:
@@ -222,9 +229,9 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
                 tool.logger.error(f"Erreur dans l'endpoint async {tool_name}: {e}")
                 raise
     else:
-        # Endpoint synchrone standard pour outils rapides
+        # Endpoint async standard pour outils rapides (avec Context pour ctx.sample)
         @app.tool(name=tool_name, description=tool.get_description())
-        def tool_endpoint(request: request_model) -> response_model:
+        async def tool_endpoint(request: request_model, ctx: Context) -> response_model:
             """Endpoint généré automatiquement pour l'outil."""
             try:
                 # Récupération des services depuis app_state
@@ -232,12 +239,13 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
                 llm_manager = app_state.get('llm_manager')
                 context_manager = app_state.get('context_manager')
 
-                # Exécution de l'outil avec les services
+                # Exécution de l'outil avec Context disponible
                 return tool.execute(
                     request,
                     parser=parser,
                     llm_manager=llm_manager,
-                    context_manager=context_manager
+                    context_manager=context_manager,
+                    ctx=ctx
                 )
 
             except Exception as e:

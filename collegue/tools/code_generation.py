@@ -200,6 +200,63 @@ class CodeGenerationTool(BaseTool):
             # Génération locale si pas de LLM
             return self._generate_fallback_code(request)
 
+    async def _execute_core_logic_async(self, request: CodeGenerationRequest, **kwargs) -> CodeGenerationResponse:
+        """
+        Version async de la logique de génération de code (FastMCP 2.14+).
+        
+        Utilise ctx.sample() pour les appels LLM avec support structured output,
+        avec fallback vers ToolLLMManager si ctx non disponible.
+        
+        Args:
+            request: Requête de génération de code validée
+            **kwargs: Services additionnels incluant:
+                - ctx: Context FastMCP pour ctx.sample()
+                - progress: Progress pour reporting
+                - llm_manager: ToolLLMManager (fallback)
+        
+        Returns:
+            CodeGenerationResponse: Le code généré
+        """
+        ctx = kwargs.get('ctx')
+        progress = kwargs.get('progress')
+        llm_manager = kwargs.get('llm_manager')
+        
+        # Construire le prompt
+        prompt = self._build_generation_prompt(request)
+        system_prompt = f"""Tu es un expert en programmation {request.language}.
+Génère du code propre, bien documenté et respectant les bonnes pratiques.
+Réponds UNIQUEMENT avec le code, sans explications supplémentaires."""
+        
+        if progress:
+            await progress.set_message("Génération du code via LLM...")
+        
+        try:
+            # Utiliser sample_llm (ctx.sample() prioritaire, fallback vers llm_manager)
+            generated_code = await self.sample_llm(
+                prompt=prompt,
+                ctx=ctx,
+                llm_manager=llm_manager,
+                system_prompt=system_prompt,
+                temperature=0.7
+            )
+            
+            if progress:
+                await progress.set_message("Code généré, préparation de la réponse...")
+            
+            explanation = "Code généré via FastMCP ctx.sample()" if ctx else "Code généré via ToolLLMManager"
+            suggestions = self._get_language_suggestions(request.language)
+            
+            return CodeGenerationResponse(
+                code=generated_code,
+                language=request.language,
+                explanation=explanation,
+                suggestions=suggestions
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
+            return self._generate_fallback_code(request)
+
     def _build_generation_prompt(self, request: CodeGenerationRequest) -> str:
         """
         [DEPRECATED] Construit le prompt pour le LLM.

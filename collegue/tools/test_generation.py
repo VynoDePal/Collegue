@@ -45,6 +45,35 @@ class TestGenerationResponse(BaseModel):
     tested_elements: List[Dict[str, str]] = Field(..., description="Éléments testés (fonctions, classes, etc.)")
 
 
+class LLMTestGenerationResult(BaseModel):
+    """
+    Modèle de sortie structurée pour ctx.sample() avec result_type (FastMCP 2.14.1+).
+    
+    Ce modèle force le LLM à produire une réponse JSON validée par Pydantic,
+    garantissant que tous les champs requis sont présents et correctement typés.
+    """
+    test_code: str = Field(..., description="Code de test complet et exécutable")
+    test_count: int = Field(..., description="Nombre de tests générés")
+    coverage_estimate: float = Field(
+        default=0.8,
+        description="Estimation de la couverture de code (0.0 à 1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    tested_functions: List[str] = Field(
+        default_factory=list,
+        description="Liste des noms de fonctions testées"
+    )
+    tested_classes: List[str] = Field(
+        default_factory=list,
+        description="Liste des noms de classes testées"
+    )
+    imports_required: List[str] = Field(
+        default_factory=list,
+        description="Imports nécessaires pour les tests"
+    )
+
+
 class TestGenerationTool(BaseTool):
     """Outil de génération automatique de tests unitaires."""
 
@@ -304,6 +333,122 @@ class TestGenerationTool(BaseTool):
                 return self._generate_fallback_tests(request, parser)
         else:
             # Génération locale si pas de LLM
+            return self._generate_fallback_tests(request, parser)
+
+    async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
+        """
+        Version async de la logique de génération de tests (FastMCP 2.14+).
+        
+        Utilise ctx.sample() pour les appels LLM avec support structured output (result_type),
+        avec fallback vers ToolLLMManager si ctx non disponible.
+        
+        Args:
+            request: Requête de génération de tests validée
+            **kwargs: Services additionnels incluant ctx, progress, llm_manager, parser
+        
+        Returns:
+            TestGenerationResponse: Les tests générés
+        """
+        ctx = kwargs.get('ctx')
+        progress = kwargs.get('progress')
+        llm_manager = kwargs.get('llm_manager')
+        parser = kwargs.get('parser')
+        use_structured_output = kwargs.get('use_structured_output', True)
+        
+        # Validation du langage
+        self.validate_language(request.language)
+        
+        framework = request.test_framework or self._get_default_test_framework(request.language)
+        
+        # Construire le prompt
+        prompt = self._build_test_generation_prompt(request)
+        system_prompt = f"""Tu es un expert en tests unitaires {request.language} avec {framework}.
+Génère des tests complets, bien structurés et couvrant les cas limites."""
+        
+        if progress:
+            await progress.set_message("Génération des tests via LLM...")
+        
+        try:
+            # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
+            if ctx is not None and use_structured_output:
+                try:
+                    self.logger.debug("Utilisation du structured output avec LLMTestGenerationResult")
+                    llm_result = await self.sample_llm(
+                        prompt=prompt,
+                        ctx=ctx,
+                        llm_manager=llm_manager,
+                        system_prompt=system_prompt,
+                        result_type=LLMTestGenerationResult,
+                        temperature=0.5
+                    )
+                    
+                    # Si on a un résultat structuré, l'utiliser
+                    if isinstance(llm_result, LLMTestGenerationResult):
+                        generated_tests = llm_result.test_code
+                        # Construire tested_elements à partir du résultat structuré
+                        tested_elements = []
+                        for func in llm_result.tested_functions:
+                            tested_elements.append({"type": "function", "name": func})
+                        for cls in llm_result.tested_classes:
+                            tested_elements.append({"type": "class", "name": cls})
+                        
+                        if progress:
+                            await progress.set_message(f"Structured output: {llm_result.test_count} tests générés")
+                        
+                        # Génération du chemin de fichier de test
+                        test_file_path = None
+                        if request.file_path and request.output_dir:
+                            test_file_path = self._generate_test_file_path(
+                                request.file_path, request.output_dir, framework
+                            )
+                        
+                        return TestGenerationResponse(
+                            test_code=generated_tests,
+                            language=request.language,
+                            framework=framework,
+                            test_file_path=test_file_path,
+                            estimated_coverage=llm_result.coverage_estimate,
+                            tested_elements=tested_elements
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
+            
+            # Fallback: génération sans structured output
+            generated_tests = await self.sample_llm(
+                prompt=prompt,
+                ctx=ctx,
+                llm_manager=llm_manager,
+                system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code de test, sans explications.",
+                temperature=0.5
+            )
+            
+            if progress:
+                await progress.set_message("Tests générés, analyse...")
+            
+            # Analyse du code pour identifier les éléments testés
+            tested_elements = self._extract_tested_elements(request.code, request.language, parser)
+            
+            # Estimation de la couverture
+            estimated_coverage = self._estimate_coverage(tested_elements, request.code, request.coverage_target)
+            
+            # Génération du chemin de fichier de test si nécessaire
+            test_file_path = None
+            if request.file_path and request.output_dir:
+                test_file_path = self._generate_test_file_path(
+                    request.file_path, request.output_dir, framework
+                )
+            
+            return TestGenerationResponse(
+                test_code=generated_tests,
+                language=request.language,
+                framework=framework,
+                test_file_path=test_file_path,
+                estimated_coverage=estimated_coverage,
+                tested_elements=tested_elements
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._generate_fallback_tests(request, parser)
 
     def _build_test_generation_prompt(self, request: TestGenerationRequest) -> str:
