@@ -8,7 +8,7 @@ Collègue est un serveur MCP qui fournit des outils d'assistance au développeme
 
 ## État d'avancement
 
-**Dernière mise à jour: 19/08/2025**
+**Dernière mise à jour: 07/01/2026**
 
 + Configuration initiale ✅
 + - ### Core Engine ✅
@@ -26,6 +26,11 @@ Collègue est un serveur MCP qui fournit des outils d'assistance au développeme
 + Documentation + info sur l'outil ✅
 + Génération de tests + info sur l'outil ✅
 + Support TypeScript ✅
++ - ### Outils Qualité & Sécurité ✅
++ run_tests (exécution de tests Python/TS) ✅
++ secret_scan (détection de secrets) ✅
++ dependency_guard (audit de dépendances) ✅
++ Intégration test_generation + run_tests ✅
 + - ### Ressources et LLMs ✅
 + Ressources Python ✅
 + + Ressources Frameworks Web (Django, Flask, FastAPI) ✅
@@ -63,7 +68,7 @@ Collègue est un serveur MCP qui fournit des outils d'assistance au développeme
 + Tests d'intégration LLM 🔄
 + Documentation mise à jour 🔄
 
-Progression globale: 88% (46/52 sous-tâches terminées)
+Progression globale: 91% (50/55 sous-tâches terminées)
 
 ## Structure du projet
 
@@ -83,7 +88,10 @@ collegue/
 │   ├── code_explanation.py # Explication de code
 │   ├── refactoring.py     # Refactoring de code
 │   ├── documentation.py   # Documentation automatique
-│   └── test_generation.py # Génération de tests (Python, JavaScript, TypeScript)
+│   ├── test_generation.py # Génération de tests (avec validation optionnelle)
+│   ├── run_tests.py      # Exécution de tests (pytest, jest, mocha, vitest)
+│   ├── secret_scan.py    # Détection de secrets (30+ patterns)
+│   └── dependency_guard.py # Audit de dépendances et vulnérabilités
 ├── resources/             # Ressources de référence
 │   ├── python/            # Ressources Python
 │   │   ├── standard_library.py  # Bibliothèque standard Python
@@ -153,6 +161,9 @@ collegue/
 - **Refactoring** - Transformation de code avec renommage, extraction, simplification et optimisation
 - **Documentation automatique** - Génération de documentation en plusieurs formats (Markdown, RST, HTML)
 - **Génération de tests** - Création automatique de tests unitaires pour Python (unittest, pytest) et JavaScript (Jest, Mocha)
+- **Exécution de tests** - Exécuter des tests et obtenir des résultats structurés (run_tests)
+- **Détection de secrets** - Scanner le code pour détecter les secrets exposés (secret_scan)
+- **Audit de dépendances** - Vérifier les vulnérabilités et packages malveillants (dependency_guard)
 - **Ressources de développement** - Accès à des références de bibliothèques standard, frameworks et bonnes pratiques pour Python et JavaScript
 - **Intégration LLM** - Support pour plusieurs fournisseurs LLM (OpenAI, Anthropic, Local, HuggingFace, Azure)
 - **Optimisation de prompts** - Stratégies d'optimisation de prompts pour différents fournisseurs LLM

@@ -1,7 +1,11 @@
 """
 Test Generation - Outil de génération automatique de tests unitaires
+
+Intègre optionnellement run_tests pour valider les tests générés.
 """
 import asyncio
+import tempfile
+import shutil
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, validator, field_validator
 import os
@@ -19,6 +23,8 @@ class TestGenerationRequest(BaseModel):
     output_dir: Optional[str] = Field(None, description="Répertoire de sortie pour les tests générés")
     include_mocks: Optional[bool] = Field(False, description="Inclure des mocks dans les tests")
     coverage_target: Optional[float] = Field(0.8, description="Couverture de code cible (0.0-1.0)", ge=0.0, le=1.0)
+    validate_tests: Optional[bool] = Field(False, description="Valider les tests générés en les exécutant avec run_tests")
+    working_dir: Optional[str] = Field(None, description="Répertoire de travail pour la validation (défaut: répertoire temporaire)")
 
     @field_validator('language')
     def validate_language_field(cls, v):
@@ -35,6 +41,18 @@ class TestGenerationRequest(BaseModel):
         return v
 
 
+class TestValidationResult(BaseModel):
+    """Résultat de la validation des tests générés."""
+    validated: bool = Field(..., description="True si les tests ont été validés")
+    success: bool = Field(..., description="True si tous les tests passent")
+    total: int = Field(0, description="Nombre total de tests")
+    passed: int = Field(0, description="Nombre de tests passés")
+    failed: int = Field(0, description="Nombre de tests échoués")
+    errors: int = Field(0, description="Nombre d'erreurs")
+    error_message: Optional[str] = Field(None, description="Message d'erreur si la validation a échoué")
+    duration: float = Field(0.0, description="Durée d'exécution en secondes")
+
+
 class TestGenerationResponse(BaseModel):
     """Modèle de réponse pour la génération de tests unitaires."""
     test_code: str = Field(..., description="Code de test généré")
@@ -43,6 +61,7 @@ class TestGenerationResponse(BaseModel):
     test_file_path: Optional[str] = Field(None, description="Chemin du fichier de test généré")
     estimated_coverage: float = Field(..., description="Estimation de la couverture de code")
     tested_elements: List[Dict[str, str]] = Field(..., description="Éléments testés (fonctions, classes, etc.)")
+    validation_result: Optional[TestValidationResult] = Field(None, description="Résultat de validation si validate_tests=True")
 
 
 class LLMTestGenerationResult(BaseModel):
@@ -251,6 +270,116 @@ class TestGenerationTool(BaseTool):
         """Retourne les clés de configuration requises."""
         return []  # Aucune configuration obligatoire
 
+    def _validate_generated_tests(
+        self, 
+        test_code: str, 
+        language: str, 
+        framework: str,
+        source_code: str,
+        working_dir: Optional[str] = None
+    ) -> TestValidationResult:
+        """
+        Valide les tests générés en les exécutant avec run_tests.
+        
+        Args:
+            test_code: Code des tests générés
+            language: Langage de programmation
+            framework: Framework de test
+            source_code: Code source original à tester
+            working_dir: Répertoire de travail (optionnel)
+        
+        Returns:
+            TestValidationResult: Résultat de la validation
+        """
+        from .run_tests import RunTestsTool, RunTestsRequest
+        
+        temp_dir = None
+        try:
+            # Créer un répertoire temporaire pour les tests
+            temp_dir = tempfile.mkdtemp(prefix="collegue_test_validation_")
+            
+            # Déterminer les extensions et noms de fichiers
+            if language == "python":
+                source_ext = ".py"
+                test_prefix = "test_"
+                source_filename = "module_under_test.py"
+                test_filename = "test_module_under_test.py"
+            elif language in ["javascript", "typescript"]:
+                source_ext = ".ts" if language == "typescript" else ".js"
+                test_prefix = ""
+                source_filename = f"module_under_test{source_ext}"
+                test_filename = f"module_under_test.test{source_ext}"
+            else:
+                # Langages non supportés pour validation
+                return TestValidationResult(
+                    validated=False,
+                    success=False,
+                    error_message=f"Validation non supportée pour le langage: {language}"
+                )
+            
+            # Écrire le code source
+            source_path = os.path.join(temp_dir, source_filename)
+            with open(source_path, 'w', encoding='utf-8') as f:
+                f.write(source_code)
+            
+            # Écrire le code de test
+            test_path = os.path.join(temp_dir, test_filename)
+            
+            # Adapter les imports dans le test pour pointer vers le module temporaire
+            adapted_test_code = test_code
+            if language == "python":
+                # Remplacer les imports génériques par l'import du module temporaire
+                adapted_test_code = f"import sys\nsys.path.insert(0, '{temp_dir}')\n" + test_code
+                # Remplacer les imports du module original par module_under_test
+                adapted_test_code = adapted_test_code.replace(
+                    "from module_test import", 
+                    "from module_under_test import"
+                )
+            
+            with open(test_path, 'w', encoding='utf-8') as f:
+                f.write(adapted_test_code)
+            
+            self.logger.info(f"Tests écrits dans: {test_path}")
+            
+            # Exécuter les tests avec run_tests
+            run_tests_tool = RunTestsTool()
+            run_request = RunTestsRequest(
+                target=test_filename,
+                language=language,
+                framework=framework,
+                working_dir=temp_dir,
+                timeout=60,  # Timeout court pour validation
+                verbose=False
+            )
+            
+            run_response = run_tests_tool._execute_core_logic(run_request)
+            
+            return TestValidationResult(
+                validated=True,
+                success=run_response.success,
+                total=run_response.total,
+                passed=run_response.passed,
+                failed=run_response.failed,
+                errors=run_response.errors,
+                duration=run_response.duration,
+                error_message=run_response.stderr if not run_response.success else None
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la validation des tests: {e}")
+            return TestValidationResult(
+                validated=False,
+                success=False,
+                error_message=str(e)
+            )
+        finally:
+            # Nettoyer le répertoire temporaire
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    self.logger.warning(f"Impossible de supprimer le répertoire temporaire: {e}")
+
     def _execute_core_logic(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
         """
         Exécute la logique principale de génération de tests.
@@ -268,10 +397,8 @@ class TestGenerationTool(BaseTool):
         # Validation du langage
         self.validate_language(request.language)
 
-        # Utilisation du LLM centralisé si fourni
         if llm_manager is not None:
             try:
-                # Utiliser le nouveau système de prompts avec prepare_prompt
                 framework = request.test_framework or self._get_default_test_framework(request.language)
                 context = {
                     "code": request.code,
@@ -282,13 +409,10 @@ class TestGenerationTool(BaseTool):
                     "file_path": request.file_path or "unknown"
                 }
                 
-                # Essayer d'utiliser prepare_prompt (nouveau système)
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        # Si c'est une méthode asynchrone, l'exécuter de manière synchrone
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
-                            # Si une boucle est déjà en cours, créer une tâche
                             import concurrent.futures
                             with concurrent.futures.ThreadPoolExecutor() as executor:
                                 future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
@@ -303,36 +427,40 @@ class TestGenerationTool(BaseTool):
                 
                 generated_tests = llm_manager.sync_generate(prompt)
 
-                # Déterminer le framework de test approprié
                 framework = request.test_framework or self._get_default_test_framework(request.language)
-
-                # Analyse du code pour identifier les éléments test��s
                 tested_elements = self._extract_tested_elements(request.code, request.language, parser)
-
-                # Estimation de la couverture
                 estimated_coverage = self._estimate_coverage(tested_elements, request.code, request.coverage_target)
-
-                # Génération du chemin de fichier de test si nécessaire
                 test_file_path = None
                 if request.file_path and request.output_dir:
                     test_file_path = self._generate_test_file_path(
                         request.file_path, request.output_dir, framework
                     )
 
+                # Validation optionnelle des tests générés
+                validation_result = None
+                if request.validate_tests:
+                    self.logger.info("Validation des tests générés avec run_tests...")
+                    validation_result = self._validate_generated_tests(
+                        test_code=generated_tests,
+                        language=request.language,
+                        framework=framework,
+                        source_code=request.code,
+                        working_dir=request.working_dir
+                    )
+                
                 return TestGenerationResponse(
                     test_code=generated_tests,
                     language=request.language,
                     framework=framework,
                     test_file_path=test_file_path,
                     estimated_coverage=estimated_coverage,
-                    tested_elements=tested_elements
+                    tested_elements=tested_elements,
+                    validation_result=validation_result
                 )
             except Exception as e:
                 self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
-                # Fallback vers génération locale en cas d'erreur LLM
                 return self._generate_fallback_tests(request, parser)
         else:
-            # Génération locale si pas de LLM
             return self._generate_fallback_tests(request, parser)
 
     async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
@@ -401,13 +529,27 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                                 request.file_path, request.output_dir, framework
                             )
                         
+                        # Validation optionnelle des tests générés
+                        validation_result = None
+                        if request.validate_tests:
+                            if ctx:
+                                await ctx.info("Validation des tests générés...")
+                            validation_result = self._validate_generated_tests(
+                                test_code=generated_tests,
+                                language=request.language,
+                                framework=framework,
+                                source_code=request.code,
+                                working_dir=request.working_dir
+                            )
+                        
                         return TestGenerationResponse(
                             test_code=generated_tests,
                             language=request.language,
                             framework=framework,
                             test_file_path=test_file_path,
                             estimated_coverage=llm_result.coverage_estimate,
-                            tested_elements=tested_elements
+                            tested_elements=tested_elements,
+                            validation_result=validation_result
                         )
                 except Exception as e:
                     self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
@@ -437,13 +579,27 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                     request.file_path, request.output_dir, framework
                 )
             
+            # Validation optionnelle des tests générés
+            validation_result = None
+            if request.validate_tests:
+                if ctx:
+                    await ctx.info("Validation des tests générés...")
+                validation_result = self._validate_generated_tests(
+                    test_code=generated_tests,
+                    language=request.language,
+                    framework=framework,
+                    source_code=request.code,
+                    working_dir=request.working_dir
+                )
+            
             return TestGenerationResponse(
                 test_code=generated_tests,
                 language=request.language,
                 framework=framework,
                 test_file_path=test_file_path,
                 estimated_coverage=estimated_coverage,
-                tested_elements=tested_elements
+                tested_elements=tested_elements,
+                validation_result=validation_result
             )
             
         except Exception as e:

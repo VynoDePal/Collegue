@@ -214,13 +214,10 @@ class RefactoringTool(BaseTool):
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
 
-        # Analyse du code original
         original_metrics = self._analyze_code_metrics(request.code, request.language)
 
-        # Utilisation du LLM si disponible
         if llm_manager is not None:
             try:
-                # Utiliser le nouveau système de prompts avec prepare_prompt
                 context = {
                     "code": request.code,
                     "language": request.language,
@@ -229,13 +226,10 @@ class RefactoringTool(BaseTool):
                     "file_path": request.file_path or "unknown"
                 }
                 
-                # Essayer d'utiliser prepare_prompt (nouveau système)
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        # Si c'est une méthode asynchrone, l'exécuter de manière synchrone
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
-                            # Si une boucle est déjà en cours, créer une tâche
                             import concurrent.futures
                             with concurrent.futures.ThreadPoolExecutor() as executor:
                                 future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
@@ -249,14 +243,8 @@ class RefactoringTool(BaseTool):
                     prompt = self._build_refactoring_prompt(request)
                 
                 refactored_code = llm_manager.sync_generate(prompt)
-
-                # Analyse du code refactorisé
                 new_metrics = self._analyze_code_metrics(refactored_code, request.language)
-
-                # Calcul des améliorations
                 improvement_metrics = self._calculate_improvements(original_metrics, new_metrics)
-
-                # Identification des changements
                 changes = self._identify_changes(request, refactored_code)
 
                 explanation = self._generate_explanation(request.refactoring_type, changes, improvement_metrics)
@@ -274,7 +262,6 @@ class RefactoringTool(BaseTool):
                 self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
                 return self._perform_local_refactoring(request, parser)
         else:
-            # Refactoring local sans LLM
             return self._perform_local_refactoring(request, parser)
 
     async def _execute_core_logic_async(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:

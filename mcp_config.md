@@ -8,7 +8,7 @@ Permettre aux utilisateurs de configurer leur modèle LLM et clé API directemen
 {
   "collegue": {
     "serverUrl": "http://localhost:8088/mcp/",
-    "LLM_MODEL": "google/gemini-2.0-flash-exp:free",
+    "LLM_MODEL": "google/gemini-2.5-flash",
     "LLM_API_KEY": "sk-or-v1-xxxxx"
   }
 }
@@ -107,7 +107,7 @@ FastMCP transmet les paramètres personnalisés via les métadonnées de transpo
 ### Modèles OpenRouter Populaires
 ```json
 // Gratuits
-"google/gemini-2.0-flash-exp:free"
+"google/gemini-2.5-flash"
 "meta-llama/llama-3.2-11b-vision-instruct:free"
 
 // Économiques
