@@ -59,7 +59,6 @@ class ToolRegistry:
                 try:
                     module = importlib.import_module(f'collegue.tools.{module_name}')
 
-                    # Recherche des classes qui héritent de BaseTool
                     for name, obj in inspect.getmembers(module):
                         if (inspect.isclass(obj) and
                             issubclass(obj, BaseTool) and
@@ -82,7 +81,6 @@ class ToolRegistry:
 
         self._tools[tool_class.__name__] = tool_class
 
-        # Créer une instance si une configuration est fournie
         if config is not None:
             self._instances[tool_class.__name__] = tool_class(config)
 
@@ -123,7 +121,6 @@ class ToolRegistry:
         info = {}
         for name, tool_class in self._tools.items():
             try:
-                # Créer une instance temporaire pour récupérer les infos
                 temp_instance = tool_class({})
                 info[name] = temp_instance.get_info()
             except Exception as e:
@@ -153,20 +150,13 @@ def register_tools(app: FastMCP, app_state: dict):
     """
     registry = get_registry()
 
-    # Configuration par défaut pour les outils
     default_config = app_state.get('tools_config', {})
 
     for tool_name in registry.list_tools():
         try:
             tool_class = registry.get_tool_class(tool_name)
-
-            # Configuration spécifique à l'outil
             tool_config = default_config.get(tool_name.lower(), {})
-
-            # Créer une instance avec la configuration
             tool_instance = registry.get_tool_instance(tool_name, tool_config)
-
-            # Enregistrer les endpoints de l'outil dans FastMCP
             _register_tool_endpoints(app, tool_instance, app_state)
 
             print(f"Outil '{tool_name}' enregistré avec succès")
@@ -174,7 +164,6 @@ def register_tools(app: FastMCP, app_state: dict):
         except Exception as e:
             print(f"Erreur lors de l'enregistrement de '{tool_name}': {e}")
     
-    # Enregistrer l'outil d'administration centralisé
     register_admin_tool(app, app_state)
 
 
@@ -199,7 +188,6 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     is_long_running = tool.is_long_running()
 
     if is_long_running:
-        # Endpoint async avec support background task et Context (FastMCP v2.14+)
         @app.tool(name=tool_name, description=tool.get_description(), task=True)
         async def tool_endpoint_async(
             request: request_model,
@@ -207,12 +195,9 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
         ) -> response_model:
             """Endpoint async généré automatiquement pour l'outil long-running."""
             try:
-                # Récupération des services depuis app_state
                 parser = app_state.get('parser')
                 llm_manager = app_state.get('llm_manager')
                 context_manager = app_state.get('context_manager')
-
-                # Exécution de l'outil avec Context pour FastMCP 2.14+
                 return await tool.execute_async(
                     request,
                     parser=parser,
@@ -222,21 +207,16 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
                 )
 
             except Exception as e:
-                # Log de l'erreur et re-raise
                 tool.logger.error(f"Erreur dans l'endpoint async {tool_name}: {e}")
                 raise
     else:
-        # Endpoint async standard pour outils rapides (avec Context pour ctx.sample)
         @app.tool(name=tool_name, description=tool.get_description())
         async def tool_endpoint(request: request_model, ctx: Context) -> response_model:
             """Endpoint généré automatiquement pour l'outil."""
             try:
-                # Récupération des services depuis app_state
                 parser = app_state.get('parser')
                 llm_manager = app_state.get('llm_manager')
                 context_manager = app_state.get('context_manager')
-
-                # Exécution de l'outil avec Context disponible
                 return tool.execute(
                     request,
                     parser=parser,
@@ -246,12 +226,10 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
                 )
 
             except Exception as e:
-                # Log de l'erreur et re-raise
                 tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
                 raise
 
 
-# Modèles pour l'outil d'administration centralisé
 class AdminRequest(BaseModel):
     """Modèle de requête pour l'outil d'administration."""
     action: str  # "list", "info", "metrics", "all_info", "all_metrics"
@@ -288,7 +266,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
         
         try:
             if action == "list":
-                # Liste tous les outils disponibles
                 tools = registry.list_tools()
                 tool_names = []
                 for t in tools:
@@ -304,7 +281,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
                 )
             
             elif action == "info":
-                # Informations sur un outil spécifique
                 if not tool_name:
                     return AdminResponse(
                         success=False,
@@ -313,7 +289,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
                         message="tool_name requis pour l'action 'info'"
                     )
                 
-                # Trouver l'outil par son nom
                 tool_instance = None
                 for t in registry.list_tools():
                     try:
@@ -340,7 +315,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
                 )
             
             elif action == "metrics":
-                # Métriques d'un outil spécifique
                 if not tool_name:
                     return AdminResponse(
                         success=False,
@@ -349,7 +323,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
                         message="tool_name requis pour l'action 'metrics'"
                     )
                 
-                # Trouver l'outil par son nom
                 tool_instance = None
                 for t in registry.list_tools():
                     try:
@@ -382,7 +355,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
                 )
             
             elif action == "all_info":
-                # Informations sur tous les outils
                 all_info = registry.get_tools_info()
                 return AdminResponse(
                     success=True,
@@ -391,7 +363,6 @@ def register_admin_tool(app: FastMCP, app_state: dict):
                 )
             
             elif action == "all_metrics":
-                # Métriques de tous les outils
                 all_metrics = {}
                 for t in registry.list_tools():
                     try:

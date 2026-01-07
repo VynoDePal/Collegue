@@ -267,7 +267,6 @@ class BaseTool(ABC):
                         f"Type de requête invalide. Attendu: {expected_model.__name__}"
                     )
 
-            # Validation supplémentaire pour le langage si présent
             if hasattr(request, 'language') and request.language:
                 self.validate_language(request.language)
 
@@ -309,14 +308,8 @@ class BaseTool(ABC):
 
         try:
             self.logger.info(f"Début d'exécution de {tool_name}")
-
-            # Validation de la requête
             self.validate_request(request)
-
-            # Exécution de la logique principale
             result = self._execute_core_logic(request, **kwargs)
-
-            # Validation de la réponse
             expected_response = self.get_response_model()
             if not isinstance(result, expected_response):
                 raise ToolExecutionError(
@@ -324,8 +317,6 @@ class BaseTool(ABC):
                 )
 
             execution_time = (datetime.now() - start_time).total_seconds()
-
-            # Enregistrement des métriques
             metrics = ToolMetrics(
                 tool_name=tool_name,
                 execution_time=execution_time,
@@ -342,8 +333,6 @@ class BaseTool(ABC):
         except (ToolError, ValidationError) as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             error_msg = str(e)
-
-            # Enregistrement des métriques d'erreur
             metrics = ToolMetrics(
                 tool_name=tool_name,
                 execution_time=execution_time,
@@ -359,8 +348,6 @@ class BaseTool(ABC):
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             error_msg = f"Erreur inattendue: {str(e)}"
-
-            # Enregistrement des métriques d'erreur
             metrics = ToolMetrics(
                 tool_name=tool_name,
                 execution_time=execution_time,
@@ -398,12 +385,8 @@ class BaseTool(ABC):
         
         try:
             self.logger.info(f"Début d'exécution async de {tool_name}")
-            
-            # Reporting de progression: Initialisation (0/4)
             if ctx:
                 await ctx.report_progress(progress=0, total=total_steps)
-            
-            # Validation de la requête
             self.validate_request(request)
             if ctx:
                 await ctx.report_progress(progress=1, total=total_steps)
@@ -417,8 +400,6 @@ class BaseTool(ABC):
             
             if ctx:
                 await ctx.report_progress(progress=3, total=total_steps)
-            
-            # Validation de la réponse
             expected_response = self.get_response_model()
             if not isinstance(result, expected_response):
                 raise ToolExecutionError(
@@ -426,8 +407,6 @@ class BaseTool(ABC):
                 )
             
             execution_time = (datetime.now() - start_time).total_seconds()
-            
-            # Enregistrement des métriques
             metrics = ToolMetrics(
                 tool_name=tool_name,
                 execution_time=execution_time,

@@ -203,13 +203,11 @@ class CodeGenerationTool(BaseTool):
                     else:
                         prompt = self.prepare_prompt(prompt_request)
                 else:
-                    # Fallback vers l'ancienne méthode
                     prompt = self._build_generation_prompt(request)
                 
                 generated_code = llm_manager.sync_generate(prompt)
                 explanation = f"Code généré par LLM ({getattr(llm_manager, 'model_name', 'modèle inconnu')}) pour la description fournie."
 
-                # Suggestions basées sur le langage
                 suggestions = self._get_language_suggestions(request.language)
 
                 return CodeGenerationResponse(
@@ -220,10 +218,8 @@ class CodeGenerationTool(BaseTool):
                 )
             except Exception as e:
                 self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
-                # Fallback vers génération locale en cas d'erreur LLM
                 return self._generate_fallback_code(request)
         else:
-            # Génération locale si pas de LLM
             return self._generate_fallback_code(request)
 
     async def _execute_core_logic_async(self, request: CodeGenerationRequest, **kwargs) -> CodeGenerationResponse:
@@ -246,7 +242,6 @@ class CodeGenerationTool(BaseTool):
         llm_manager = kwargs.get('llm_manager')
         use_structured_output = kwargs.get('use_structured_output', True)
         
-        # Construire le prompt
         prompt = self._build_generation_prompt(request)
         system_prompt = f"""Tu es un expert en programmation {request.language}.
 Génère du code propre, bien documenté et respectant les bonnes pratiques."""

@@ -268,10 +268,8 @@ class TestGenerationTool(BaseTool):
         # Validation du langage
         self.validate_language(request.language)
 
-        # Utilisation du LLM centralisé si fourni
         if llm_manager is not None:
             try:
-                # Utiliser le nouveau système de prompts avec prepare_prompt
                 framework = request.test_framework or self._get_default_test_framework(request.language)
                 context = {
                     "code": request.code,
@@ -282,13 +280,10 @@ class TestGenerationTool(BaseTool):
                     "file_path": request.file_path or "unknown"
                 }
                 
-                # Essayer d'utiliser prepare_prompt (nouveau système)
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        # Si c'est une méthode asynchrone, l'exécuter de manière synchrone
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
-                            # Si une boucle est déjà en cours, créer une tâche
                             import concurrent.futures
                             with concurrent.futures.ThreadPoolExecutor() as executor:
                                 future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
@@ -303,16 +298,9 @@ class TestGenerationTool(BaseTool):
                 
                 generated_tests = llm_manager.sync_generate(prompt)
 
-                # Déterminer le framework de test approprié
                 framework = request.test_framework or self._get_default_test_framework(request.language)
-
-                # Analyse du code pour identifier les éléments test��s
                 tested_elements = self._extract_tested_elements(request.code, request.language, parser)
-
-                # Estimation de la couverture
                 estimated_coverage = self._estimate_coverage(tested_elements, request.code, request.coverage_target)
-
-                # Génération du chemin de fichier de test si nécessaire
                 test_file_path = None
                 if request.file_path and request.output_dir:
                     test_file_path = self._generate_test_file_path(
@@ -329,10 +317,8 @@ class TestGenerationTool(BaseTool):
                 )
             except Exception as e:
                 self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
-                # Fallback vers génération locale en cas d'erreur LLM
                 return self._generate_fallback_tests(request, parser)
         else:
-            # Génération locale si pas de LLM
             return self._generate_fallback_tests(request, parser)
 
     async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:

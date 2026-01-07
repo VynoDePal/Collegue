@@ -228,13 +228,10 @@ class DocumentationTool(BaseTool):
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
 
-        # Analyse du code pour identifier les éléments à documenter
         code_elements = self._analyze_code_elements(request.code, request.language, parser)
 
-        # Utilisation du LLM si disponible
         if llm_manager is not None:
             try:
-                # Utiliser le nouveau système de prompts avec prepare_prompt
                 context = {
                     "code": request.code,
                     "language": request.language,
@@ -246,13 +243,10 @@ class DocumentationTool(BaseTool):
                     "code_elements": str(code_elements[:5]) if code_elements else "[]"  # Limiter pour éviter un prompt trop long
                 }
                 
-                # Essayer d'utiliser prepare_prompt (nouveau système)
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        # Si c'est une méthode asynchrone, l'exécuter de manière synchrone
                         loop = asyncio.get_event_loop()
                         if loop.is_running():
-                            # Si une boucle est déjà en cours, créer une tâche
                             import concurrent.futures
                             with concurrent.futures.ThreadPoolExecutor() as executor:
                                 future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
@@ -270,10 +264,7 @@ class DocumentationTool(BaseTool):
                 # Post-traitement de la documentation
                 formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
 
-                # Calcul de la couverture
                 coverage = self._calculate_coverage(code_elements, formatted_docs)
-
-                # Génération de suggestions
                 suggestions = self._generate_documentation_suggestions(request, code_elements, coverage)
 
                 return DocumentationResponse(
@@ -289,7 +280,6 @@ class DocumentationTool(BaseTool):
                 self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
                 return self._generate_fallback_documentation(request, code_elements, parser)
         else:
-            # Génération locale sans LLM
             return self._generate_fallback_documentation(request, code_elements, parser)
 
     async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:

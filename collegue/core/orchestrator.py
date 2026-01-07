@@ -125,7 +125,6 @@ class ToolOrchestrator:
         if tool is None:
             return {"valid": False, "error": f"Outil non trouvé: {tool_name}"}
         
-        # Vérifier les arguments requis
         missing_args = [arg for arg in tool["required_args"] if arg not in args]
         if missing_args:
             return {
@@ -134,7 +133,6 @@ class ToolOrchestrator:
                 "missing_args": missing_args
             }
         
-        # Vérifier les arguments non reconnus
         valid_args = set(tool["required_args"] + tool["optional_args"])
         unknown_args = [arg for arg in args if arg not in valid_args and arg != "context"]
         
@@ -549,7 +547,6 @@ class ToolOrchestrator:
         if tool is None:
             return False, ["Tool not found"]
         
-        # Vérifier les arguments requis
         missing_args = [arg for arg in tool["required_args"] if arg not in args]
         
         return len(missing_args) == 0, missing_args
