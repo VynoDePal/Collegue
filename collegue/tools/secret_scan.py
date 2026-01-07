@@ -20,23 +20,33 @@ from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 
 
+class FileContent(BaseModel):
+    """Un fichier avec son chemin et contenu pour le scan batch."""
+    path: str = Field(..., description="Chemin relatif du fichier")
+    content: str = Field(..., description="Contenu du fichier")
+
+
 class SecretScanRequest(BaseModel):
     """Modèle de requête pour le scan de secrets."""
     target: Optional[str] = Field(
         None, 
-        description="Cible du scan: fichier ou dossier (utiliser 'content' pour passer du code directement)"
+        description="Cible du scan: fichier ou dossier (utiliser 'content' ou 'files' pour MCP)"
     )
     content: Optional[str] = Field(
         None,
-        description="Contenu du code à scanner (alternative à target pour environnements isolés comme MCP)"
+        description="Contenu d'un seul fichier à scanner"
+    )
+    files: Optional[List[FileContent]] = Field(
+        None,
+        description="Liste de fichiers à scanner en batch [{path, content}, ...] - RECOMMANDÉ pour MCP"
     )
     scan_type: str = Field(
         "auto",
-        description="Type de scan: 'file', 'directory', 'content', ou 'auto' (auto-détecté)"
+        description="Type de scan: 'file', 'directory', 'content', 'batch' ou 'auto'"
     )
     language: Optional[str] = Field(
         None, 
-        description="Langage du code (pour optimiser les patterns)"
+        description="Langage du code (optionnel, pour filtrer les patterns)"
     )
     include_patterns: Optional[List[str]] = Field(
         None,
@@ -59,7 +69,7 @@ class SecretScanRequest(BaseModel):
     
     @field_validator('scan_type')
     def validate_scan_type(cls, v):
-        valid = ['auto', 'file', 'directory', 'content']
+        valid = ['auto', 'file', 'directory', 'content', 'batch']
         if v not in valid:
             raise ValueError(f"Type de scan '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
@@ -72,9 +82,12 @@ class SecretScanRequest(BaseModel):
         return v
     
     def model_post_init(self, __context):
-        """Valide que target ou content est fourni."""
-        if not self.target and not self.content:
-            raise ValueError("Vous devez fournir 'target' (chemin) ou 'content' (code à scanner)")
+        """Valide qu'au moins une source de données est fournie."""
+        if not self.target and not self.content and not self.files:
+            raise ValueError(
+                "Vous devez fournir 'target' (chemin), 'content' (code), "
+                "ou 'files' (liste de fichiers pour scan batch)"
+            )
 
 
 class SecretFinding(BaseModel):
@@ -98,6 +111,10 @@ class SecretScanResponse(BaseModel):
     medium: int = Field(0, description="Nombre de secrets moyenne sévérité")
     low: int = Field(0, description="Nombre de secrets basse sévérité")
     files_scanned: int = Field(..., description="Nombre de fichiers scannés")
+    files_with_secrets: List[str] = Field(
+        default_factory=list,
+        description="Liste des fichiers contenant des secrets"
+    )
     findings: List[SecretFinding] = Field(
         default_factory=list,
         description="Liste des secrets trouvés (max 100)"
@@ -220,7 +237,21 @@ class SecretScanTool(BaseTool):
         return SecretScanResponse
 
     def get_supported_languages(self) -> List[str]:
-        return ["python", "typescript", "javascript", "java", "go", "rust", "ruby", "php"]
+        # Secret scan fonctionne sur n'importe quel type de fichier texte
+        # Les secrets peuvent être dans du code, des configs, des fichiers env, etc.
+        return [
+            "python", "typescript", "javascript", "java", "go", "rust", "ruby", "php",
+            "json", "yaml", "yml", "toml", "xml", "html", "css", "scss",
+            "markdown", "md", "txt", "text", "env", "config", "ini", "properties",
+            "dockerfile", "docker", "shell", "bash", "sh", "zsh", "powershell",
+            "sql", "graphql", "terraform", "tf", "hcl", "any"
+        ]
+    
+    def validate_language(self, language: str) -> bool:
+        """Override: accepte n'importe quel langage pour le scan de secrets."""
+        # Pour secret_scan, on accepte n'importe quel langage car les secrets
+        # peuvent être dans n'importe quel type de fichier
+        return True
 
     def is_long_running(self) -> bool:
         return False  # Le scan est généralement rapide
@@ -439,17 +470,49 @@ class SecretScanTool(BaseTool):
         """Exécute le scan de secrets."""
         findings = []
         files_scanned = 0
+        files_with_secrets = []
         
         # Préparer les patterns
         include_patterns = request.include_patterns or []
         exclude_patterns = list(self.DEFAULT_EXCLUDES) + (request.exclude_patterns or [])
         
-        # Mode 1: Contenu fourni directement (pour MCP et environnements isolés)
-        if request.content:
+        # Mode 1: BATCH - Liste de fichiers (RECOMMANDÉ pour MCP)
+        if request.files:
+            self.logger.info(f"Scan batch de {len(request.files)} fichier(s)")
+            for file_item in request.files:
+                # Vérifier les patterns d'inclusion/exclusion
+                if not self._should_scan_file(file_item.path, include_patterns, exclude_patterns):
+                    self.logger.debug(f"Fichier ignoré (pattern): {file_item.path}")
+                    continue
+                
+                # Vérifier la taille
+                if len(file_item.content) > request.max_file_size:
+                    self.logger.debug(f"Fichier ignoré (trop grand): {file_item.path}")
+                    continue
+                
+                # Scanner le contenu
+                file_findings = self._scan_content(
+                    file_item.content, 
+                    file_item.path, 
+                    request.severity_threshold
+                )
+                
+                if file_findings:
+                    files_with_secrets.append(file_item.path)
+                    for finding in file_findings:
+                        finding.file = file_item.path
+                    findings.extend(file_findings)
+                
+                files_scanned += 1
+        
+        # Mode 2: Contenu unique fourni directement
+        elif request.content:
             findings = self._scan_content(request.content, "[content]", request.severity_threshold)
             files_scanned = 1
+            if findings:
+                files_with_secrets.append("[content]")
         
-        # Mode 2: Chemin de fichier/dossier
+        # Mode 3: Chemin de fichier/dossier (accès système de fichiers requis)
         elif request.target:
             # Déterminer le type de scan
             scan_type = request.scan_type
@@ -490,15 +553,21 @@ class SecretScanTool(BaseTool):
         # Limiter le nombre de findings retournés
         limited_findings = findings[:100]
         
-        # Construire le résumé
+        # Construire le résumé détaillé
         if not findings:
             summary = f"✅ Aucun secret détecté dans {files_scanned} fichier(s) scanné(s)."
         else:
-            summary = (
-                f"⚠️ {len(findings)} secret(s) détecté(s) dans {files_scanned} fichier(s) scanné(s). "
-                f"Critique: {severity_counts['critical']}, Haute: {severity_counts['high']}, "
-                f"Moyenne: {severity_counts['medium']}, Basse: {severity_counts['low']}."
-            )
+            files_affected = len(files_with_secrets)
+            summary_parts = [
+                f"⚠️ {len(findings)} secret(s) détecté(s) dans {files_affected} fichier(s) sur {files_scanned} scanné(s).",
+                f"Sévérité: Critique({severity_counts['critical']}), Haute({severity_counts['high']}), "
+                f"Moyenne({severity_counts['medium']}), Basse({severity_counts['low']})."
+            ]
+            if files_with_secrets:
+                summary_parts.append(f"Fichiers affectés: {', '.join(files_with_secrets[:10])}")
+                if len(files_with_secrets) > 10:
+                    summary_parts.append(f"... et {len(files_with_secrets) - 10} autres fichiers.")
+            summary = " ".join(summary_parts)
         
         return SecretScanResponse(
             clean=len(findings) == 0,
@@ -508,6 +577,7 @@ class SecretScanTool(BaseTool):
             medium=severity_counts['medium'],
             low=severity_counts['low'],
             files_scanned=files_scanned,
+            files_with_secrets=files_with_secrets,
             findings=limited_findings,
             scan_summary=summary
         )
