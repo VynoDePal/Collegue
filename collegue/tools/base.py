@@ -375,18 +375,17 @@ class BaseTool(ABC):
 
     async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
         """
-        Exécute l'outil de manière asynchrone avec support Progress et Context (FastMCP 2.14+).
+        Exécute l'outil de manière asynchrone avec support Context (FastMCP 2.14+).
         
         Cette méthode est utilisée pour les outils long-running avec task=True.
         Elle supporte:
-        - Progress: Reporting de progression via progress.set_total(), progress.increment()
-        - Context: Accès à ctx.sample() pour appels LLM avec structured output
+        - ctx.report_progress(): Reporting de progression via Context
+        - ctx.sample(): Appels LLM avec structured output
         
         Args:
             request: Requête à traiter
             **kwargs: Arguments supplémentaires incluant:
-                - ctx: Context FastMCP pour ctx.sample()
-                - progress: Progress pour reporting de progression
+                - ctx: Context FastMCP pour ctx.sample() et ctx.report_progress()
                 - parser, llm_manager, context_manager: Services standard
         
         Returns:
@@ -394,26 +393,20 @@ class BaseTool(ABC):
         """
         start_time = datetime.now()
         tool_name = self.get_name()
-        progress = kwargs.get('progress')
         ctx = kwargs.get('ctx')
+        total_steps = 4
         
         try:
             self.logger.info(f"Début d'exécution async de {tool_name}")
             
-            # Reporting de progression: Initialisation
-            if progress:
-                await progress.set_total(4)
-                await progress.set_message(f"Initialisation de {tool_name}...")
+            # Reporting de progression: Initialisation (0/4)
+            if ctx:
+                await ctx.report_progress(progress=0, total=total_steps)
             
             # Validation de la requête
             self.validate_request(request)
-            if progress:
-                await progress.increment()
-                await progress.set_message("Validation réussie, préparation...")
-            
-            # Exécution de la logique principale (peut utiliser ctx pour LLM)
-            if progress:
-                await progress.set_message("Exécution en cours...")
+            if ctx:
+                await ctx.report_progress(progress=1, total=total_steps)
             
             # Appeler _execute_core_logic_async si disponible, sinon _execute_core_logic
             if hasattr(self, '_execute_core_logic_async'):
@@ -422,9 +415,8 @@ class BaseTool(ABC):
                 # Fallback vers la version sync dans un thread
                 result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
             
-            if progress:
-                await progress.increment()
-                await progress.set_message("Traitement terminé, validation...")
+            if ctx:
+                await ctx.report_progress(progress=3, total=total_steps)
             
             # Validation de la réponse
             expected_response = self.get_response_model()
@@ -432,10 +424,6 @@ class BaseTool(ABC):
                 raise ToolExecutionError(
                     f"Type de réponse invalide. Attendu: {expected_response.__name__}"
                 )
-            
-            if progress:
-                await progress.increment()
-                await progress.set_message("Finalisation...")
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
@@ -450,9 +438,8 @@ class BaseTool(ABC):
             )
             self.metrics.append(metrics)
             
-            if progress:
-                await progress.increment()
-                await progress.set_message(f"Terminé en {execution_time:.2f}s")
+            if ctx:
+                await ctx.report_progress(progress=total_steps, total=total_steps)
             
             self.logger.info(f"Exécution async de {tool_name} réussie en {execution_time:.2f}s")
             return result

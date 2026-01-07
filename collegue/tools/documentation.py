@@ -300,18 +300,17 @@ class DocumentationTool(BaseTool):
         
         Args:
             request: Requête de documentation validée
-            **kwargs: Services additionnels incluant ctx, progress, llm_manager, parser
+            **kwargs: Services additionnels incluant ctx, llm_manager, parser
         
         Returns:
             DocumentationResponse: La documentation générée
         """
         ctx = kwargs.get('ctx')
-        progress = kwargs.get('progress')
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
         
-        if progress:
-            await progress.set_message("Analyse du code...")
+        if ctx:
+            await ctx.info("Analyse du code...")
         
         # Analyse du code pour identifier les éléments à documenter
         code_elements = self._analyze_code_elements(request.code, request.language, parser)
@@ -322,8 +321,8 @@ class DocumentationTool(BaseTool):
 Génère une documentation claire, complète et bien structurée au format {request.doc_format or 'markdown'}.
 Style de documentation: {request.doc_style or 'standard'}."""
         
-        if progress:
-            await progress.set_message("Génération de la documentation via LLM...")
+        if ctx:
+            await ctx.info("Génération de la documentation via LLM...")
         
         try:
             # Utiliser sample_llm (ctx.sample() prioritaire, fallback vers llm_manager)
@@ -335,8 +334,8 @@ Style de documentation: {request.doc_style or 'standard'}."""
                 temperature=0.5
             )
             
-            if progress:
-                await progress.set_message("Documentation générée, formatage...")
+            if ctx:
+                await ctx.info("Documentation générée, formatage...")
             
             # Post-traitement de la documentation
             formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
