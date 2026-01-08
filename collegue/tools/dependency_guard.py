@@ -36,7 +36,7 @@ class DependencyGuardRequest(BaseModel):
     )
     lock_content: Optional[str] = Field(
         None,
-        description="Contenu du fichier lock (package-lock.json) - REQUIS pour npm audit en mode MCP"
+        description="Contenu de package-lock.json - REQUIS pour JS/TS avec check_vulnerabilities=true"
     )
     manifest_type: Optional[str] = Field(
         None,
@@ -80,6 +80,16 @@ class DependencyGuardRequest(BaseModel):
         """Valide que target ou manifest_content est fourni."""
         if not self.target and not self.manifest_content:
             raise ValueError("Vous devez fournir 'target' (chemin) ou 'manifest_content' (contenu du fichier)")
+        
+        # Pour JS/TS avec check_vulnerabilities, lock_content est requis en mode MCP
+        if self.manifest_content and self.check_vulnerabilities:
+            lang = self.language.strip().lower()
+            if lang in ['typescript', 'javascript', 'js', 'ts', 'javascript']:
+                if not self.lock_content:
+                    raise ValueError(
+                        "Pour détecter les vulnérabilités JS/TS, vous devez fournir 'lock_content' "
+                        "(contenu de package-lock.json). Utilisez l'outil filesystem pour le lire."
+                    )
 
 
 class DependencyIssue(BaseModel):
@@ -398,10 +408,16 @@ class DependencyGuardTool(BaseTool):
         return vulnerabilities
 
     def _check_npm_audit(self, working_dir: str) -> List[Dict[str, Any]]:
-        """Exécute npm audit pour trouver les vulnérabilités."""
+        """Exécute npm audit pour trouver les vulnérabilités.
+        
+        Args:
+            working_dir: Répertoire contenant package.json et package-lock.json
+        """
         vulnerabilities = []
         
         try:
+            # Exécuter npm audit
+            self.logger.info("Exécution de npm audit --json...")
             result = subprocess.run(
                 ['npm', 'audit', '--json'],
                 capture_output=True,
@@ -415,16 +431,39 @@ class DependencyGuardTool(BaseTool):
                 
                 # npm audit v7+ format
                 for name, advisory in data.get('vulnerabilities', {}).items():
+                    # Extraire les informations de vulnérabilité
+                    via = advisory.get('via', [])
+                    if isinstance(via, list) and len(via) > 0:
+                        first_via = via[0]
+                        if isinstance(first_via, dict):
+                            vuln_id = first_via.get('url', '')
+                            description = first_via.get('title', 'Vulnérabilité connue')
+                        else:
+                            vuln_id = ''
+                            description = str(first_via)
+                    else:
+                        vuln_id = ''
+                        description = str(via)
+                    
                     vulnerabilities.append({
                         'package': name,
                         'version': advisory.get('range', '*'),
-                        'vulnerability_id': advisory.get('via', [{}])[0].get('url', '') if isinstance(advisory.get('via', []), list) else '',
+                        'vulnerability_id': vuln_id,
                         'severity': advisory.get('severity', 'unknown'),
-                        'description': advisory.get('via', [{}])[0].get('title', '') if isinstance(advisory.get('via', []), list) else str(advisory.get('via', '')),
+                        'description': description,
                         'fix_available': advisory.get('fixAvailable', False)
                     })
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-            pass
+                
+                self.logger.info(f"npm audit: {len(vulnerabilities)} vulnérabilité(s) détectée(s)")
+                
+        except subprocess.TimeoutExpired:
+            self.logger.warning("npm audit timeout - opération annulée")
+        except FileNotFoundError:
+            self.logger.warning("npm non trouvé - installez Node.js")
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"Erreur parsing npm audit JSON: {e}")
+        except Exception as e:
+            self.logger.warning(f"Erreur npm audit: {e}")
         
         return vulnerabilities
 
@@ -485,30 +524,16 @@ class DependencyGuardTool(BaseTool):
                 elif manifest_type in ['package.json', 'package']:
                     deps = self._parse_package_json_content(request.manifest_content)
                     # Pour npm audit, créer un répertoire temporaire avec package.json et lock
-                    if request.check_vulnerabilities:
+                    if request.check_vulnerabilities and request.lock_content:
                         temp_dir = tempfile.mkdtemp(prefix="collegue_dep_guard_")
                         pkg_path = os.path.join(temp_dir, 'package.json')
                         with open(pkg_path, 'w', encoding='utf-8') as f:
                             f.write(request.manifest_content)
-                        
-                        if request.lock_content:
-                            lock_path = os.path.join(temp_dir, 'package-lock.json')
-                            with open(lock_path, 'w', encoding='utf-8') as f:
-                                f.write(request.lock_content)
-                            working_dir = temp_dir
-                            self.logger.info(f"Répertoire temporaire créé pour npm audit: {temp_dir}")
-                        else:
-                            self.logger.warning("lock_content non fourni - npm audit sera limité")
-                            # Ajouter un avertissement dans les issues
-                            issues.append(DependencyIssue(
-                                package="[npm audit]",
-                                version=None,
-                                issue_type='warning',
-                                severity='low',
-                                message="package-lock.json non fourni - impossible de détecter toutes les vulnérabilités",
-                                recommendation="Passez le contenu de package-lock.json via le paramètre 'lock_content' pour une analyse complète"
-                            ))
-                            working_dir = temp_dir
+                        lock_path = os.path.join(temp_dir, 'package-lock.json')
+                        with open(lock_path, 'w', encoding='utf-8') as f:
+                            f.write(request.lock_content)
+                        working_dir = temp_dir
+                        self.logger.info(f"Répertoire temporaire créé pour npm audit: {temp_dir}")
                         
                 elif manifest_type in ['pyproject.toml', 'pyproject']:
                     # Pour pyproject.toml, on utilise le parsing simplifié
