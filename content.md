@@ -106,9 +106,10 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
   - 30+ patterns: AWS, GCP, Azure, OpenAI, GitHub, Stripe, JWT, clés privées, etc.
 
 - dependency_guard
-  - Description: Audite les dépendances pour vulnérabilités et packages malveillants
-  - Paramètres clés: `target?`, `manifest_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
-  - **Important**: Utilisez `manifest_content` pour passer le contenu directement (recommandé avec MCP)
+  - Description: Audite les dépendances pour vulnérabilités (npm audit / pip-audit) et packages malveillants
+  - Paramètres clés: `target?`, `manifest_content?`, `lock_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
+  - **IMPORTANT pour MCP**: Passez `manifest_content` ET `lock_content` (package-lock.json) pour détecter les vulnérabilités
+  - Exemple: `manifest_content: "<package.json>", lock_content: "<package-lock.json>"`
   - Supporte: requirements.txt, pyproject.toml, package.json
 
 ---
