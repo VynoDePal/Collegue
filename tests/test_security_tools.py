@@ -297,8 +297,7 @@ numpy
     def test_detect_deprecated_packages(self):
         """Teste la détection de packages dépréciés."""
         request = DependencyGuardRequest(
-            manifest_content='pycrypto==2.6.1\nnose==1.3.7',
-            manifest_type='requirements.txt',
+            content='pycrypto==2.6.1\nnose==1.3.7',
             language='python',
             check_existence=False,
             check_vulnerabilities=False
@@ -318,8 +317,7 @@ numpy
     def test_blocklist_check(self):
         """Teste la vérification de la blocklist."""
         request = DependencyGuardRequest(
-            manifest_content='django==4.0\nflask==2.0',
-            manifest_type='requirements.txt',
+            content='django==4.0\nflask==2.0',
             language='python',
             check_existence=False,
             check_vulnerabilities=False,
@@ -337,8 +335,7 @@ numpy
     def test_allowlist_check(self):
         """Teste la vérification de l'allowlist."""
         request = DependencyGuardRequest(
-            manifest_content='django==4.0\nflask==2.0\nrequests==2.28',
-            manifest_type='requirements.txt',
+            content='django==4.0\nflask==2.0\nrequests==2.28',
             language='python',
             check_existence=False,
             check_vulnerabilities=False,
@@ -357,8 +354,7 @@ numpy
         """Teste la détection de packages malveillants connus."""
         # 'request' est un typosquat connu de 'requests'
         request = DependencyGuardRequest(
-            manifest_content='request==1.0',
-            manifest_type='requirements.txt',
+            content='request==1.0',
             language='python',
             check_existence=False,
             check_vulnerabilities=False
