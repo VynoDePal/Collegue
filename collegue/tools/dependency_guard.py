@@ -28,20 +28,14 @@ class DependencyGuardRequest(BaseModel):
     """Modèle de requête pour la validation des dépendances.
     
     NOTE: Cet outil utilise l'API OSV de Google pour scanner les vulnérabilités.
-    Il fonctionne en environnement MCP/Docker isolé sans accès aux fichiers de l'hôte.
-    Passez le contenu des fichiers via manifest_content et/ou lock_content.
+    Passez le contenu du fichier via 'content'. Le type est auto-détecté.
+    
+    Pour JS/TS: passez le contenu de package-lock.json (contient les versions exactes).
+    Pour Python: passez le contenu de requirements.txt ou pyproject.toml.
     """
-    manifest_content: Optional[str] = Field(
-        None,
-        description="Contenu du fichier manifest (package.json, requirements.txt, pyproject.toml)"
-    )
-    lock_content: Optional[str] = Field(
-        None,
-        description="Contenu de package-lock.json. REQUIS pour JS/TS avec check_vulnerabilities=true"
-    )
-    manifest_type: Optional[str] = Field(
-        None,
-        description="Type de manifest: requirements.txt, package.json, pyproject.toml, package-lock.json"
+    content: str = Field(
+        ...,
+        description="Contenu du fichier de dépendances (package-lock.json, requirements.txt, pyproject.toml). Le type est auto-détecté."
     )
     language: str = Field(
         ..., 
@@ -72,25 +66,6 @@ class DependencyGuardRequest(BaseModel):
         if v not in ['python', 'javascript']:
             raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript")
         return v
-    
-    def model_post_init(self, __context):
-        """Valide que le contenu est fourni."""
-        if not self.manifest_content and not self.lock_content:
-            raise ValueError(
-                "Vous devez fournir 'manifest_content' et/ou 'lock_content'.\n"
-                "Pour JS/TS: utilisez lock_content (minifié avec jq).\n"
-                "Pour Python: utilisez manifest_content avec le contenu de requirements.txt ou pyproject.toml."
-            )
-        
-        # Pour JS/TS, le lock est requis pour les vulnérabilités
-        lang = self.language.strip().lower()
-        if lang in ['typescript', 'javascript', 'js', 'ts']:
-            if self.check_vulnerabilities and not self.lock_content:
-                raise ValueError(
-                    "Pour détecter les vulnérabilités JS/TS, 'lock_content' est requis.\n"
-                    "Minifiez le fichier package-lock.json avec:\n"
-                    "  jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json"
-                )
 
 
 class DependencyIssue(BaseModel):
@@ -104,35 +79,20 @@ class DependencyIssue(BaseModel):
     cve_ids: Optional[List[str]] = Field(None, description="IDs CVE si vulnérabilité")
 
 
-class DependencyInfo(BaseModel):
-    """Information sur une dépendance."""
-    name: str = Field(..., description="Nom du package")
-    version_spec: str = Field(..., description="Spécification de version demandée")
-    resolved_version: Optional[str] = Field(None, description="Version résolue")
-    latest_version: Optional[str] = Field(None, description="Dernière version disponible")
-    is_outdated: bool = Field(False, description="True si une version plus récente existe")
-    status: str = Field("ok", description="Statut: ok, warning, error")
-
-
 class DependencyGuardResponse(BaseModel):
     """Modèle de réponse pour la validation des dépendances."""
-    valid: bool = Field(..., description="True si toutes les dépendances sont valides")
-    total_dependencies: int = Field(..., description="Nombre total de dépendances")
-    issues_count: int = Field(..., description="Nombre de problèmes détectés")
-    critical_issues: int = Field(0, description="Problèmes critiques")
-    high_issues: int = Field(0, description="Problèmes haute sévérité")
-    medium_issues: int = Field(0, description="Problèmes moyenne sévérité")
-    low_issues: int = Field(0, description="Problèmes basse sévérité")
-    dependencies: List[DependencyInfo] = Field(
-        default_factory=list,
-        description="Liste des dépendances analysées"
-    )
+    valid: bool = Field(..., description="True si aucune vulnérabilité critique/haute")
+    summary: str = Field(..., description="Résumé de l'analyse")
+    total_dependencies: int = Field(..., description="Nombre total de dépendances analysées")
+    vulnerabilities: int = Field(0, description="Nombre de vulnérabilités détectées")
+    critical: int = Field(0, description="Vulnérabilités critiques")
+    high: int = Field(0, description="Vulnérabilités hautes")
+    medium: int = Field(0, description="Vulnérabilités moyennes")
+    low: int = Field(0, description="Vulnérabilités basses")
     issues: List[DependencyIssue] = Field(
         default_factory=list,
-        description="Liste des problèmes détectés"
+        description="Liste des problèmes détectés (vulnérabilités, packages bloqués, etc.)"
     )
-    manifest_file: str = Field(..., description="Fichier manifest analysé")
-    summary: str = Field(..., description="Résumé de l'analyse")
 
 
 class DependencyGuardTool(BaseTool):
@@ -214,39 +174,27 @@ class DependencyGuardTool(BaseTool):
     def get_examples(self) -> List[Dict[str, Any]]:
         return [
             {
-                "title": "Vérifier des dépendances Python",
+                "title": "Vérifier des dépendances Python (requirements.txt)",
                 "request": {
-                    "manifest_content": "django>=4.0\nrequests>=2.28\nflask>=2.0",
-                    "manifest_type": "requirements.txt",
+                    "content": "django>=4.0\nrequests>=2.28\nflask>=2.0",
                     "language": "python"
                 }
             },
             {
-                "title": "Vérifier des vulnérabilités JS/TS (lock_content minifié)",
+                "title": "Vérifier des vulnérabilités JS/TS (package-lock.json)",
                 "request": {
-                    "lock_content": "{ ... contenu minifié de package-lock.json ... }",
+                    "content": "{ \"lockfileVersion\": 3, \"packages\": { ... } }",
                     "language": "typescript",
                     "check_vulnerabilities": True
                 },
-                "note": "Minifiez avec: jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json"
+                "note": "Passez le contenu complet de package-lock.json"
             },
             {
                 "title": "Vérifier avec allowlist",
                 "request": {
-                    "manifest_content": "django>=4.0\nrequests>=2.28",
-                    "manifest_type": "requirements.txt",
+                    "content": "django>=4.0\nrequests>=2.28",
                     "language": "python",
                     "allowlist": ["django", "flask", "fastapi", "requests"]
-                }
-            },
-            {
-                "title": "Vérifier JS avec manifest et lock",
-                "request": {
-                    "manifest_content": "{ \"dependencies\": { \"lodash\": \"^4.17.0\" } }",
-                    "lock_content": "{ ... contenu de package-lock.json ... }",
-                    "manifest_type": "package.json",
-                    "language": "javascript",
-                    "check_vulnerabilities": True
                 }
             }
         ]
@@ -721,59 +669,66 @@ class DependencyGuardTool(BaseTool):
             raise ToolValidationError(f"Erreur de parsing JSON: {e}")
         return dependencies
 
+    def _detect_content_type(self, content: str, language: str) -> str:
+        """Auto-détecte le type de fichier à partir du contenu."""
+        content_stripped = content.strip()
+        
+        # Détection JSON (package.json ou package-lock.json)
+        if content_stripped.startswith('{'):
+            try:
+                data = json.loads(content_stripped)
+                # package-lock.json a "lockfileVersion" ou "packages" avec des sous-objets
+                if 'lockfileVersion' in data or (isinstance(data.get('packages'), dict) and len(data.get('packages', {})) > 1):
+                    return 'package-lock.json'
+                # package.json a "dependencies" ou "devDependencies"
+                if 'dependencies' in data or 'devDependencies' in data:
+                    return 'package.json'
+            except json.JSONDecodeError:
+                pass
+        
+        # Détection TOML (pyproject.toml)
+        if '[project]' in content or '[tool.' in content or 'dependencies = [' in content:
+            return 'pyproject.toml'
+        
+        # Défaut selon le langage
+        if language == 'python':
+            return 'requirements.txt'
+        return 'package.json'
+
     def _execute_core_logic(self, request: DependencyGuardRequest, **kwargs) -> DependencyGuardResponse:
         """Exécute la validation des dépendances."""
         issues = []
-        dependencies_info = []
-        manifest_file = ""
         deps = []
         
-        # Traitement du contenu fourni (manifest_content et/ou lock_content)
-        # Cas spécial : Lock content seul (JS/TS) - utilise l'API OSV directement
-        if not request.manifest_content and request.lock_content:
-            manifest_type = 'package-lock.json'
-            manifest_file = "[content:package-lock.json]"
-            deps = self._parse_package_lock_content(request.lock_content)
-
-        # Cas classique : Manifest content fourni
+        # Auto-détection du type de fichier
+        content_type = self._detect_content_type(request.content, request.language)
+        manifest_file = f"[content:{content_type}]"
+        self.logger.info(f"Type de fichier détecté: {content_type}")
+        
+        # Parser le contenu selon le type détecté
+        if content_type == 'package-lock.json':
+            deps = self._parse_package_lock_content(request.content)
+        elif content_type == 'package.json':
+            deps = self._parse_package_json_content(request.content)
+        elif content_type == 'requirements.txt':
+            deps = self._parse_requirements_txt_content(request.content)
+        elif content_type == 'pyproject.toml':
+            deps_match = re.search(r'dependencies\s*=\s*\[(.*?)\]', request.content, re.DOTALL)
+            if deps_match:
+                deps_str = deps_match.group(1)
+                for line in deps_str.split('\n'):
+                    line = line.strip().strip(',').strip('"\'')
+                    if line:
+                        match = re.match(r'^([a-zA-Z0-9_-]+)', line)
+                        if match:
+                            deps.append({'name': match.group(1), 'version': '*'})
         else:
-            manifest_type = request.manifest_type or ('package.json' if request.language == 'javascript' else 'requirements.txt')
-            manifest_file = f"[content:{manifest_type}]"
-            
-            if manifest_type in ['requirements.txt', 'requirements']:
-                deps = self._parse_requirements_txt_content(request.manifest_content)
-                    
-            elif manifest_type in ['package.json', 'package']:
-                deps = self._parse_package_json_content(request.manifest_content)
-                    
-            elif manifest_type in ['pyproject.toml', 'pyproject']:
-                # Pour pyproject.toml, on utilise le parsing simplifié
-                deps_match = re.search(r'dependencies\s*=\s*\[(.*?)\]', request.manifest_content, re.DOTALL)
-                if deps_match:
-                    deps_str = deps_match.group(1)
-                    for line in deps_str.split('\n'):
-                        line = line.strip().strip(',').strip('"\'')
-                        if line:
-                            match = re.match(r'^([a-zA-Z0-9_-]+)', line)
-                            if match:
-                                deps.append({'name': match.group(1), 'version': '*'})
-            
-            elif manifest_type == 'package-lock.json':
-                # Déjà traité plus haut
-                pass
-
-            else:
-                raise ToolValidationError(f"Type de manifest '{manifest_type}' non supporté")
+            raise ToolValidationError(f"Type de fichier '{content_type}' non supporté")
         
         # Analyser chaque dépendance
         for dep in deps:
             name = dep['name']
             version = dep['version']
-            dep_info = DependencyInfo(
-                name=name,
-                version_spec=version,
-                status='ok'
-            )
             
             # Vérifier blocklist
             if request.blocklist and name.lower() in [b.lower() for b in request.blocklist]:
@@ -785,7 +740,6 @@ class DependencyGuardTool(BaseTool):
                     message=f"Package '{name}' est dans la liste noire",
                     recommendation=f"Supprimez ce package ou trouvez une alternative"
                 ))
-                dep_info.status = 'error'
             
             # Vérifier allowlist
             if request.allowlist and name.lower() not in [a.lower() for a in request.allowlist]:
@@ -797,7 +751,6 @@ class DependencyGuardTool(BaseTool):
                     message=f"Package '{name}' n'est pas dans la liste blanche",
                     recommendation=f"Ajoutez '{name}' à l'allowlist ou supprimez-le"
                 ))
-                dep_info.status = 'warning'
             
             # Vérifier packages malveillants connus
             malicious = self.KNOWN_MALICIOUS_PACKAGES.get(request.language, [])
@@ -810,7 +763,6 @@ class DependencyGuardTool(BaseTool):
                     message=f"Package '{name}' est connu comme malveillant ou typosquat",
                     recommendation="Supprimez immédiatement ce package!"
                 ))
-                dep_info.status = 'error'
             
             # Vérifier packages dépréciés
             deprecated = self.DEPRECATED_PACKAGES.get(request.language, {})
@@ -824,7 +776,6 @@ class DependencyGuardTool(BaseTool):
                     message=f"Package '{name}' est déprécié",
                     recommendation=f"Utilisez {replacement} à la place"
                 ))
-                dep_info.status = 'warning' if dep_info.status == 'ok' else dep_info.status
             
             # Vérifier existence sur le registre
             if request.check_existence:
@@ -842,25 +793,15 @@ class DependencyGuardTool(BaseTool):
                         message=f"Package '{name}' n'existe pas sur le registre officiel",
                         recommendation="Vérifiez l'orthographe. Ce package pourrait être une hallucination IA ou un typosquat."
                     ))
-                    dep_info.status = 'error'
-                elif check.get('latest_version'):
-                    dep_info.latest_version = check['latest_version']
-                    # Vérifier si outdated (simpliste)
-                    if version.startswith('=='):
-                        current = version[2:]
-                        if current != check['latest_version']:
-                            dep_info.is_outdated = True
-            
-            dependencies_info.append(dep_info)
         
         # Vérifier vulnérabilités via API OSV (pas besoin de fichiers locaux)
         if request.check_vulnerabilities:
             ecosystem = 'PyPI' if request.language == 'python' else 'npm'
             
-            # Extraire toutes les dépendances avec versions du lock_content si disponible
+            # Pour JS/TS avec package-lock.json, extraire toutes les dépendances transitives
             all_deps = deps.copy()
-            if request.lock_content and request.language != 'python':
-                all_deps = self._extract_all_packages_from_lock(request.lock_content)
+            if content_type == 'package-lock.json' and request.language != 'python':
+                all_deps = self._extract_all_packages_from_lock(request.content)
             
             vulns = self._check_osv_vulnerabilities(all_deps, ecosystem)
             
@@ -899,14 +840,12 @@ class DependencyGuardTool(BaseTool):
         
         return DependencyGuardResponse(
             valid=total_issues == 0 or (severity_counts['critical'] == 0 and severity_counts['high'] == 0),
+            summary=summary,
             total_dependencies=total_deps,
-            issues_count=total_issues,
-            critical_issues=severity_counts['critical'],
-            high_issues=severity_counts['high'],
-            medium_issues=severity_counts['medium'],
-            low_issues=severity_counts['low'],
-            dependencies=dependencies_info,
-            issues=issues,
-            manifest_file=manifest_file,
-            summary=summary
+            vulnerabilities=total_issues,
+            critical=severity_counts['critical'],
+            high=severity_counts['high'],
+            medium=severity_counts['medium'],
+            low=severity_counts['low'],
+            issues=issues
         )

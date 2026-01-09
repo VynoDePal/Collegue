@@ -106,19 +106,19 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
   - 30+ patterns: AWS, GCP, Azure, OpenAI, GitHub, Stripe, JWT, clés privées, etc.
 
 - dependency_guard
-  - Description: Audite les dépendances pour vulnérabilités via **API OSV de Google** (gratuite, rapide) et détecte les packages malveillants
+  - Description: Audite les dépendances pour vulnérabilités via **API OSV de Google** et détecte les packages malveillants
   - **Paramètres**:
+    - `content` (requis): Contenu du fichier de dépendances (type auto-détecté)
     - `language` (requis): `python` ou `typescript`/`javascript`
-    - `manifest_content`: Contenu du manifest (**requis pour Python**: requirements.txt ou pyproject.toml)
-    - `lock_content`: Contenu de package-lock.json (**requis pour JS/TS**)
     - `check_vulnerabilities?`: Vérifier les CVEs via API OSV (défaut: true)
     - `check_existence?`: Vérifier que les packages existent sur le registre (défaut: true)
     - `blocklist?`: Liste noire de packages interdits
     - `allowlist?`: Liste blanche de packages autorisés
   - **Usage**:
-    - **Python**: `{ "language": "python", "manifest_content": "<requirements.txt>" }`
-    - **JS/TS**: `{ "language": "typescript", "lock_content": "<package-lock.json>" }`
-  - **Avantages API OSV**: Pas de npm/node requis, scan rapide (~10s pour 500+ packages)
+    - **Python**: `{ "content": "<requirements.txt>", "language": "python" }`
+    - **JS/TS**: `{ "content": "<package-lock.json>", "language": "typescript" }`
+  - Le type de fichier est auto-détecté (package-lock.json, requirements.txt, pyproject.toml)
+  - **Avantages**: Scan rapide (~10s pour 500+ packages), pas de npm/node requis
 
 ---
 
