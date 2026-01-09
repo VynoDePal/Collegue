@@ -107,9 +107,10 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
 - dependency_guard
   - Description: Audite les dépendances pour vulnérabilités (npm audit / pip-audit) et packages malveillants
-  - Paramètres clés: `target?`, `manifest_content?`, `lock_content`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
-  - **REQUIS pour JS/TS**: `lock_content` (contenu de package-lock.json) est obligatoire pour détecter les vulnérabilités
-  - Exemple: `manifest_content: "<package.json>", lock_content: "<package-lock.json>"`
+  - Paramètres clés: `target?`, `manifest_content?`, `lock_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
+  - **RECOMMANDÉ pour JS/TS**: Utilisez `target` (chemin du projet) pour éviter les problèmes de taille avec package-lock.json
+  - Alternative: `manifest_content` + `lock_content` (package-lock.json peut être très volumineux)
+  - Exemple: `target: "/chemin/du/projet"` ou `manifest_content: "<package.json>", lock_content: "<package-lock.json>"`
   - Supporte: requirements.txt, pyproject.toml, package.json
 
 ---
