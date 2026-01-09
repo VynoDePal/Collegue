@@ -70,14 +70,6 @@ Méthodes recommandées:
 
 Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
-- code_explanation
-  - Description: Analyse et explique du code multi-langages
-  - Paramètres clés: `code`, `language?`, `detail_level?`, `focus_on?`, `session_id?`
-
-- code_generation
-  - Description: Génère du code à partir d’une description textuelle
-  - Paramètres clés: `description`, `language`, `context?`, `constraints?`, `file_path?`, `session_id?`
-
 - code_documentation
   - Description: Génère automatiquement de la documentation (Markdown, RST, HTML, docstring, JSON)
   - Paramètres clés: `code`, `language`, `doc_style?`, `doc_format?`, `include_examples?`, `focus_on?`, `file_path?`, `session_id?`
@@ -173,16 +165,6 @@ Remarques OAuth:
 
 ## Examples
 
-- Explication de code (Python):
-```json
-{ "tool": "code_explanation", "request": { "code": "def fibonacci(n):\n    if n <= 1: return n\n    return fibonacci(n-1) + fibonacci(n-2)", "language": "python", "detail_level": "detailed" } }
-```
-
-- Génération de code (TypeScript):
-```json
-{ "tool": "code_generation", "request": { "description": "Contrôleur REST pour gérer les utilisateurs (CRUD)", "language": "typescript", "constraints": ["types stricts", "gestion d'erreurs"] } }
-```
-
 - Refactoring (simplify):
 ```json
 { "tool": "code_refactoring", "request": { "code": "if (user.age > 18) { if (user.hasLicense) { if (user.hasInsurance) { return true } } } return false", "language": "javascript", "refactoring_type": "simplify" } }
@@ -202,6 +184,6 @@ Remarques OAuth:
 
 Build notes:
 - Implémentation principale: `collegue/app.py` (FastMCP) et enregistrement dynamique des outils via `collegue/tools/__init__.py`
-- Outils: `code_explanation`, `code_generation`, `code_documentation`, `code_refactoring`, `test_generation`, `run_tests`, `secret_scan`, `dependency_guard`
+- Outils: `code_documentation`, `code_refactoring`, `test_generation`, `run_tests`, `secret_scan`, `dependency_guard`
 - Santé: `/_health` (via wrapper HTTP de compatibilité)
 - OAuth: `.well-known` endpoints exposés lorsque `OAUTH_ENABLED=true`
