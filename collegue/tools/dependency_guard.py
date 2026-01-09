@@ -25,22 +25,25 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 
 
 class DependencyGuardRequest(BaseModel):
-    """Modèle de requête pour la validation des dépendances."""
-    target: Optional[str] = Field(
-        None, 
-        description="Cible: fichier manifest (requirements.txt, package.json) ou répertoire"
-    )
+    """Modèle de requête pour la validation des dépendances.
+    
+    NOTE: En environnement MCP/Docker isolé, les fichiers de l'hôte ne sont pas accessibles.
+    Utilisez manifest_content et/ou lock_content pour passer le contenu des fichiers.
+    
+    Pour les gros fichiers package-lock.json, minifiez-les avec:
+        jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json
+    """
     manifest_content: Optional[str] = Field(
         None,
-        description="Contenu du fichier manifest (alternative à target pour environnements isolés comme MCP)"
+        description="Contenu du fichier manifest (package.json, requirements.txt, pyproject.toml)"
     )
     lock_content: Optional[str] = Field(
         None,
-        description="Contenu de package-lock.json - REQUIS pour JS/TS avec check_vulnerabilities=true"
+        description="Contenu de package-lock.json (minifié recommandé). REQUIS pour JS/TS avec check_vulnerabilities=true"
     )
     manifest_type: Optional[str] = Field(
         None,
-        description="Type de manifest si manifest_content fourni: requirements.txt, package.json, pyproject.toml"
+        description="Type de manifest: requirements.txt, package.json, pyproject.toml, package-lock.json"
     )
     language: str = Field(
         ..., 
@@ -77,20 +80,23 @@ class DependencyGuardRequest(BaseModel):
         return v
     
     def model_post_init(self, __context):
-        """Valide que target ou contenu est fourni."""
-        if not self.target and not self.manifest_content and not self.lock_content:
-            raise ValueError("Vous devez fournir 'target', 'manifest_content' ou 'lock_content'")
+        """Valide que le contenu est fourni."""
+        if not self.manifest_content and not self.lock_content:
+            raise ValueError(
+                "Vous devez fournir 'manifest_content' et/ou 'lock_content'.\n"
+                "Pour JS/TS: utilisez lock_content (minifié avec jq).\n"
+                "Pour Python: utilisez manifest_content avec le contenu de requirements.txt ou pyproject.toml."
+            )
         
-        # Pour JS/TS en mode MCP (sans target)
-        if not self.target:
-            lang = self.language.strip().lower()
-            if lang in ['typescript', 'javascript', 'js', 'ts']:
-                # Pour les vulnérabilités, le lock est vital
-                if self.check_vulnerabilities and not self.lock_content:
-                    raise ValueError(
-                        "Pour détecter les vulnérabilités JS/TS en mode isolé, 'lock_content' est requis. "
-                        "Astuce: Si le fichier est trop gros, minifiez-le avec jq sur l'hôte avant l'envoi."
-                    )
+        # Pour JS/TS, le lock est requis pour les vulnérabilités
+        lang = self.language.strip().lower()
+        if lang in ['typescript', 'javascript', 'js', 'ts']:
+            if self.check_vulnerabilities and not self.lock_content:
+                raise ValueError(
+                    "Pour détecter les vulnérabilités JS/TS, 'lock_content' est requis.\n"
+                    "Minifiez le fichier package-lock.json avec:\n"
+                    "  jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json"
+                )
 
 
 class DependencyIssue(BaseModel):
@@ -214,34 +220,38 @@ class DependencyGuardTool(BaseTool):
     def get_examples(self) -> List[Dict[str, Any]]:
         return [
             {
-                "title": "Vérifier un requirements.txt",
+                "title": "Vérifier des dépendances Python",
                 "request": {
-                    "target": "requirements.txt",
+                    "manifest_content": "django>=4.0\nrequests>=2.28\nflask>=2.0",
+                    "manifest_type": "requirements.txt",
                     "language": "python"
                 }
             },
             {
-                "title": "Vérifier un package.json",
+                "title": "Vérifier des vulnérabilités JS/TS (lock_content minifié)",
                 "request": {
-                    "target": "package.json",
-                    "language": "typescript"
-                }
+                    "lock_content": "{ ... contenu minifié de package-lock.json ... }",
+                    "language": "typescript",
+                    "check_vulnerabilities": True
+                },
+                "note": "Minifiez avec: jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json"
             },
             {
                 "title": "Vérifier avec allowlist",
                 "request": {
-                    "target": "requirements.txt",
+                    "manifest_content": "django>=4.0\nrequests>=2.28",
+                    "manifest_type": "requirements.txt",
                     "language": "python",
                     "allowlist": ["django", "flask", "fastapi", "requests"]
                 }
             },
             {
-                "title": "Vérifier uniquement les vulnérabilités",
+                "title": "Vérifier JS avec manifest et lock",
                 "request": {
-                    "target": ".",
-                    "language": "python",
-                    "check_existence": False,
-                    "check_versions": False,
+                    "manifest_content": "{ \"dependencies\": { \"lodash\": \"^4.17.0\" } }",
+                    "lock_content": "{ ... contenu de package-lock.json ... }",
+                    "manifest_type": "package.json",
+                    "language": "javascript",
                     "check_vulnerabilities": True
                 }
             }
@@ -533,50 +543,48 @@ class DependencyGuardTool(BaseTool):
         deps = []
         
         try:
-            # Mode 1: Contenu fourni directement (pour MCP et environnements isolés)
-            if request.manifest_content or (request.lock_content and not request.target):
-                # Cas spécial : Lock content seul (JS/TS)
-                if not request.manifest_content and request.lock_content:
-                    manifest_type = 'package-lock.json'
-                    manifest_file = "[content:package-lock.json]"
-                    deps = self._parse_package_lock_content(request.lock_content)
+            # Traitement du contenu fourni (manifest_content et/ou lock_content)
+            # Cas spécial : Lock content seul (JS/TS)
+            if not request.manifest_content and request.lock_content:
+                manifest_type = 'package-lock.json'
+                manifest_file = "[content:package-lock.json]"
+                deps = self._parse_package_lock_content(request.lock_content)
+                
+                if request.check_vulnerabilities:
+                    temp_dir = tempfile.mkdtemp(prefix="collegue_dep_guard_")
+                    # 1. Écrire le lockfile
+                    lock_path = os.path.join(temp_dir, 'package-lock.json')
+                    with open(lock_path, 'w', encoding='utf-8') as f:
+                        f.write(request.lock_content)
                     
-                    if request.check_vulnerabilities:
-                        temp_dir = tempfile.mkdtemp(prefix="collegue_dep_guard_")
-                        # 1. Écrire le lockfile
-                        lock_path = os.path.join(temp_dir, 'package-lock.json')
-                        with open(lock_path, 'w', encoding='utf-8') as f:
-                            f.write(request.lock_content)
+                    # 2. Générer un package.json dummy pour satisfaire npm audit
+                    try:
+                        lock_data = json.loads(request.lock_content)
+                        pkg_name = lock_data.get('name', 'audit-temp')
+                        pkg_version = lock_data.get('version', '1.0.0')
+                    except:
+                        pkg_name = 'audit-temp'
+                        pkg_version = '1.0.0'
                         
-                        # 2. Générer un package.json dummy pour satisfaire npm audit
-                        # On essaie de récupérer le nom/version du lockfile, sinon défauts
-                        try:
-                            lock_data = json.loads(request.lock_content)
-                            pkg_name = lock_data.get('name', 'audit-temp')
-                            pkg_version = lock_data.get('version', '1.0.0')
-                        except:
-                            pkg_name = 'audit-temp'
-                            pkg_version = '1.0.0'
-                            
-                        dummy_pkg = {
-                            "name": pkg_name,
-                            "version": pkg_version,
-                            "description": "Generated by Collegue for audit",
-                            "license": "ISC",
-                            "dependencies": {},
-                            "devDependencies": {}
-                        }
+                    dummy_pkg = {
+                        "name": pkg_name,
+                        "version": pkg_version,
+                        "description": "Generated by Collegue for audit",
+                        "license": "ISC",
+                        "dependencies": {},
+                        "devDependencies": {}
+                    }
+                    
+                    pkg_path = os.path.join(temp_dir, 'package.json')
+                    with open(pkg_path, 'w', encoding='utf-8') as f:
+                        json.dump(dummy_pkg, f, indent=2)
                         
-                        pkg_path = os.path.join(temp_dir, 'package.json')
-                        with open(pkg_path, 'w', encoding='utf-8') as f:
-                            json.dump(dummy_pkg, f, indent=2)
-                            
-                        working_dir = temp_dir
-                        self.logger.info(f"Audit mode Lock-Only: temp dir créé {temp_dir}")
+                    working_dir = temp_dir
+                    self.logger.info(f"Audit mode Lock-Only: temp dir créé {temp_dir}")
 
-                # Cas classique : Manifest content fourni
-                else:
-                    manifest_type = request.manifest_type or ('package.json' if request.language == 'javascript' else 'requirements.txt')
+            # Cas classique : Manifest content fourni
+            else:
+                manifest_type = request.manifest_type or ('package.json' if request.language == 'javascript' else 'requirements.txt')
                 manifest_file = f"[content:{manifest_type}]"
                 
                 if manifest_type in ['requirements.txt', 'requirements']:
@@ -616,49 +624,11 @@ class DependencyGuardTool(BaseTool):
                                     deps.append({'name': match.group(1), 'version': '*'})
                 
                 elif manifest_type == 'package-lock.json':
-                    # Déjà traité plus haut dans le bloc "Cas spécial : Lock content seul"
+                    # Déjà traité plus haut
                     pass
 
                 else:
                     raise ToolValidationError(f"Type de manifest '{manifest_type}' non supporté")
-            
-            # Mode 2: Chemin de fichier (mode classique)
-            elif request.target:
-                target = request.target
-                if os.path.isdir(target):
-                    if request.language == 'python':
-                        candidates = ['requirements.txt', 'pyproject.toml', 'setup.py']
-                    else:
-                        candidates = ['package.json']
-                    
-                    for candidate in candidates:
-                        path = os.path.join(target, candidate)
-                        if os.path.exists(path):
-                            target = path
-                            break
-                    else:
-                        raise ToolValidationError(f"Aucun fichier manifest trouvé dans {request.target}")
-                
-                if not os.path.isfile(target):
-                    raise ToolValidationError(
-                        f"Fichier '{target}' introuvable. "
-                        "NOTE: En environnement Docker/MCP isolé, le conteneur ne voit pas le système de fichiers de l'hôte. "
-                        "Utilisez 'manifest_content' (et 'lock_content' pour JS) pour passer le contenu des fichiers, "
-                        "ou montez le volume du projet dans le conteneur."
-                    )
-                
-                manifest_file = os.path.basename(target)
-                working_dir = os.path.dirname(os.path.abspath(target))
-                
-                # Parser les dépendances depuis le fichier
-                if request.language == 'python':
-                    if target.endswith('.txt'):
-                        deps = self._parse_requirements_txt(target)
-                    elif target.endswith('.toml'):
-                        deps = self._parse_pyproject_toml(target)
-                else:  # javascript
-                    if target.endswith('.json'):
-                        deps = self._parse_package_json(target)
             
             # Analyser chaque dépendance
             for dep in deps:
