@@ -116,11 +116,11 @@ class TestPromptWebInterface(unittest.TestCase):
         """Test de la page de visualisation d'un template."""
         # Créer un nouveau template avec un ID connu pour le test
         template_data = self.test_template.model_dump(exclude_unset=True)
-        template_data["id"] = "code_explanation"  # Utiliser un ID qui existe dans l'application
+        template_data["id"] = "test_template_view"  # ID de test
         self.engine.create_template(template_data)
         
         # Tester la page de visualisation d'un template
-        response = self.client.get("/prompts/ui/templates/code_explanation")
+        response = self.client.get("/prompts/ui/templates/test_template_view")
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         
@@ -169,11 +169,11 @@ class TestPromptWebInterface(unittest.TestCase):
         """Test de la page d'édition de catégorie."""
         # Créer une nouvelle catégorie avec un ID connu pour le test
         category_data = self.test_category.model_dump(exclude_unset=True)
-        category_data["id"] = "code_generation"  # Utiliser un ID qui existe dans l'application
+        category_data["id"] = "test_category_edit"  # ID de test
         self.engine.create_category(category_data)
         
         # Tester la page d'édition de catégorie
-        response = self.client.get("/prompts/ui/categories/code_generation/edit")
+        response = self.client.get("/prompts/ui/categories/test_category_edit/edit")
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         
