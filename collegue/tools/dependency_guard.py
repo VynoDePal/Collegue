@@ -49,15 +49,11 @@ class DependencyGuardRequest(BaseModel):
     )
     check_vulnerabilities: Optional[bool] = Field(
         True,
-        description="Vérifier les vulnérabilités connues (CVEs) via npm audit / pip-audit"
+        description="Vérifier les vulnérabilités connues (CVEs) via l'API OSV de Google"
     )
     check_existence: Optional[bool] = Field(
         True,
         description="Vérifier que les packages existent sur le registre"
-    )
-    check_versions: Optional[bool] = Field(
-        True,
-        description="Vérifier les versions (obsolètes, dépréciées)"
     )
     allowlist: Optional[List[str]] = Field(
         None,

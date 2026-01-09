@@ -107,15 +107,18 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
 - dependency_guard
   - Description: Audite les dépendances pour vulnérabilités via **API OSV de Google** (gratuite, rapide) et détecte les packages malveillants
-  - Paramètres clés: `manifest_content?`, `lock_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
-  - **NOTE**: Cet outil fonctionne en environnement isolé (Docker/MCP) sans accès aux fichiers de l'hôte.
-  - **Pour Python**: Passez `manifest_content` avec le contenu de requirements.txt ou pyproject.toml
-  - **Pour JS/TS**: Passez `lock_content` avec le contenu complet de package-lock.json
-    ```json
-    { "lock_content": "<contenu de package-lock.json>", "language": "typescript", "check_vulnerabilities": true }
-    ```
-  - Supporte: requirements.txt, pyproject.toml, package.json, package-lock.json
-  - **Avantages API OSV**: Pas de npm/node requis, fonctionne en conteneur isolé, scan rapide (~10s pour 500+ packages)
+  - **Paramètres**:
+    - `language` (requis): `python` ou `typescript`/`javascript`
+    - `manifest_content`: Contenu du manifest (**requis pour Python**: requirements.txt ou pyproject.toml)
+    - `lock_content`: Contenu de package-lock.json (**requis pour JS/TS**)
+    - `check_vulnerabilities?`: Vérifier les CVEs via API OSV (défaut: true)
+    - `check_existence?`: Vérifier que les packages existent sur le registre (défaut: true)
+    - `blocklist?`: Liste noire de packages interdits
+    - `allowlist?`: Liste blanche de packages autorisés
+  - **Usage**:
+    - **Python**: `{ "language": "python", "manifest_content": "<requirements.txt>" }`
+    - **JS/TS**: `{ "language": "typescript", "lock_content": "<package-lock.json>" }`
+  - **Avantages API OSV**: Pas de npm/node requis, scan rapide (~10s pour 500+ packages)
 
 ---
 
