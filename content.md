@@ -107,15 +107,16 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
 
 - dependency_guard
   - Description: Audite les dépendances pour vulnérabilités (npm audit / pip-audit) et packages malveillants
-  - Paramètres clés: `target?`, `manifest_content?`, `lock_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
-  - **RECOMMANDÉ pour JS/TS (Local)**: Si l'outil a accès au disque (pas d'isolation Docker), utilisez `target` (chemin du projet).
-  - **POUR JS/TS (Docker/Isolé)**: Si `target` échoue (fichier introuvable), vous DEVEZ fournir `manifest_content` ET `lock_content`.
-  - **GROS PROJETS**: Si `package-lock.json` est trop volumineux (>1000 lignes), **minifiez-le** avant l'envoi :
-    - Commande: `cat package-lock.json | jq 'del(.packages[].resolved, .packages[].integrity, .packages[].engines, .packages[].funding)'`
-    - Ou via Node: `node -e 'const fs=require("fs");const l=JSON.parse(fs.readFileSync("package-lock.json"));delete l.packages;console.log(JSON.stringify(l))'` (Attention: npm audit a besoin de la structure `packages` mais sans les métadonnées lourdes).
-    - Utilisez le JSON minifié dans `lock_content`.
-  - Exemple: `manifest_content: "<package.json>", lock_content: "<minified-lock.json>"`
-  - Supporte: requirements.txt, pyproject.toml, package.json
+  - Paramètres clés: `manifest_content?`, `lock_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
+  - **NOTE**: Cet outil fonctionne uniquement avec le contenu des fichiers passé en paramètres (pas de chemins de fichiers).
+  - **Pour Python**: Passez `manifest_content` avec le contenu de requirements.txt ou pyproject.toml
+  - **Pour JS/TS**: Passez `lock_content` avec le contenu de package-lock.json (minifié recommandé)
+  - **MINIFICATION REQUISE** pour les gros package-lock.json:
+    ```bash
+    jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json
+    ```
+    Cette commande réduit la taille de ~50% tout en gardant l'arbre complet des dépendances nécessaire pour npm audit.
+  - Supporte: requirements.txt, pyproject.toml, package.json, package-lock.json
 
 ---
 

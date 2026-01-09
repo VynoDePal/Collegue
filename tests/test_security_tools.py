@@ -296,103 +296,79 @@ numpy
     
     def test_detect_deprecated_packages(self):
         """Teste la détection de packages dépréciés."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write('pycrypto==2.6.1\nnose==1.3.7\n')
-            f.flush()
-            
-            try:
-                request = DependencyGuardRequest(
-                    target=f.name,
-                    language='python',
-                    check_existence=False,
-                    check_vulnerabilities=False
-                )
-                
-                response = self.tool._execute_core_logic(request)
-                
-                # Devrait trouver pycrypto et nose comme dépréciés
-                deprecated_issues = [i for i in response.issues if i.issue_type == 'deprecated']
-                deprecated_packages = [i.package for i in deprecated_issues]
-                
-                self.assertIn('pycrypto', deprecated_packages)
-                self.assertIn('nose', deprecated_packages)
-            finally:
-                os.unlink(f.name)
+        request = DependencyGuardRequest(
+            manifest_content='pycrypto==2.6.1\nnose==1.3.7',
+            manifest_type='requirements.txt',
+            language='python',
+            check_existence=False,
+            check_vulnerabilities=False
+        )
+        
+        response = self.tool._execute_core_logic(request)
+        
+        # Devrait trouver pycrypto et nose comme dépréciés
+        deprecated_issues = [i for i in response.issues if i.issue_type == 'deprecated']
+        deprecated_packages = [i.package for i in deprecated_issues]
+        
+        self.assertIn('pycrypto', deprecated_packages)
+        self.assertIn('nose', deprecated_packages)
         
         print("✅ Détection packages dépréciés")
     
     def test_blocklist_check(self):
         """Teste la vérification de la blocklist."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write('django==4.0\nflask==2.0\n')
-            f.flush()
-            
-            try:
-                request = DependencyGuardRequest(
-                    target=f.name,
-                    language='python',
-                    check_existence=False,
-                    check_vulnerabilities=False,
-                    blocklist=['flask']
-                )
-                
-                response = self.tool._execute_core_logic(request)
-                
-                blocked_issues = [i for i in response.issues if i.issue_type == 'blocked']
-                self.assertEqual(len(blocked_issues), 1)
-                self.assertEqual(blocked_issues[0].package, 'flask')
-            finally:
-                os.unlink(f.name)
+        request = DependencyGuardRequest(
+            manifest_content='django==4.0\nflask==2.0',
+            manifest_type='requirements.txt',
+            language='python',
+            check_existence=False,
+            check_vulnerabilities=False,
+            blocklist=['flask']
+        )
+        
+        response = self.tool._execute_core_logic(request)
+        
+        blocked_issues = [i for i in response.issues if i.issue_type == 'blocked']
+        self.assertEqual(len(blocked_issues), 1)
+        self.assertEqual(blocked_issues[0].package, 'flask')
         
         print("✅ Vérification blocklist")
     
     def test_allowlist_check(self):
         """Teste la vérification de l'allowlist."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write('django==4.0\nflask==2.0\nrequests==2.28\n')
-            f.flush()
-            
-            try:
-                request = DependencyGuardRequest(
-                    target=f.name,
-                    language='python',
-                    check_existence=False,
-                    check_vulnerabilities=False,
-                    allowlist=['django', 'requests']  # flask non autorisé
-                )
-                
-                response = self.tool._execute_core_logic(request)
-                
-                not_allowed = [i for i in response.issues if i.issue_type == 'not_allowed']
-                self.assertEqual(len(not_allowed), 1)
-                self.assertEqual(not_allowed[0].package, 'flask')
-            finally:
-                os.unlink(f.name)
+        request = DependencyGuardRequest(
+            manifest_content='django==4.0\nflask==2.0\nrequests==2.28',
+            manifest_type='requirements.txt',
+            language='python',
+            check_existence=False,
+            check_vulnerabilities=False,
+            allowlist=['django', 'requests']  # flask non autorisé
+        )
+        
+        response = self.tool._execute_core_logic(request)
+        
+        not_allowed = [i for i in response.issues if i.issue_type == 'not_allowed']
+        self.assertEqual(len(not_allowed), 1)
+        self.assertEqual(not_allowed[0].package, 'flask')
         
         print("✅ Vérification allowlist")
     
     def test_malicious_package_detection(self):
         """Teste la détection de packages malveillants connus."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            # 'request' est un typosquat connu de 'requests'
-            f.write('request==1.0\n')
-            f.flush()
-            
-            try:
-                request = DependencyGuardRequest(
-                    target=f.name,
-                    language='python',
-                    check_existence=False,
-                    check_vulnerabilities=False
-                )
-                
-                response = self.tool._execute_core_logic(request)
-                
-                malicious_issues = [i for i in response.issues if i.issue_type == 'malicious']
-                self.assertGreater(len(malicious_issues), 0)
-                self.assertEqual(malicious_issues[0].severity, 'critical')
-            finally:
-                os.unlink(f.name)
+        # 'request' est un typosquat connu de 'requests'
+        request = DependencyGuardRequest(
+            manifest_content='request==1.0',
+            manifest_type='requirements.txt',
+            language='python',
+            check_existence=False,
+            check_vulnerabilities=False
+        )
+        
+        response = self.tool._execute_core_logic(request)
+        
+        malicious_issues = [i for i in response.issues if i.issue_type == 'malicious']
+        self.assertGreater(len(malicious_issues), 0)
+        self.assertEqual(malicious_issues[0].severity, 'critical')
         
         print("✅ Détection packages malveillants")
 
