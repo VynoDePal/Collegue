@@ -17,8 +17,8 @@ import os
 import re
 import json
 import subprocess
-import tempfile
-import shutil
+import urllib.request
+import urllib.error
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
@@ -27,11 +27,9 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 class DependencyGuardRequest(BaseModel):
     """Modèle de requête pour la validation des dépendances.
     
-    NOTE: En environnement MCP/Docker isolé, les fichiers de l'hôte ne sont pas accessibles.
-    Utilisez manifest_content et/ou lock_content pour passer le contenu des fichiers.
-    
-    Pour les gros fichiers package-lock.json, minifiez-les avec:
-        jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json
+    NOTE: Cet outil utilise l'API OSV de Google pour scanner les vulnérabilités.
+    Il fonctionne en environnement MCP/Docker isolé sans accès aux fichiers de l'hôte.
+    Passez le contenu des fichiers via manifest_content et/ou lock_content.
     """
     manifest_content: Optional[str] = Field(
         None,
@@ -39,7 +37,7 @@ class DependencyGuardRequest(BaseModel):
     )
     lock_content: Optional[str] = Field(
         None,
-        description="Contenu de package-lock.json (minifié recommandé). REQUIS pour JS/TS avec check_vulnerabilities=true"
+        description="Contenu de package-lock.json. REQUIS pour JS/TS avec check_vulnerabilities=true"
     )
     manifest_type: Optional[str] = Field(
         None,
@@ -444,65 +442,259 @@ class DependencyGuardTool(BaseTool):
         
         return vulnerabilities
 
-    def _check_npm_audit(self, working_dir: str) -> List[Dict[str, Any]]:
-        """Exécute npm audit pour trouver les vulnérabilités.
+    def _check_osv_vulnerabilities(self, deps: List[Dict[str, str]], ecosystem: str = "npm") -> List[Dict[str, Any]]:
+        """Vérifie les vulnérabilités via l'API batch OSV de Google (gratuite, rapide).
         
         Args:
-            working_dir: Répertoire contenant package.json et package-lock.json
+            deps: Liste de dépendances [{'name': 'pkg', 'version': '1.0.0'}, ...]
+            ecosystem: 'npm' pour JS/TS, 'PyPI' pour Python
+            
+        Returns:
+            Liste de vulnérabilités trouvées
         """
         vulnerabilities = []
+        OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
+        OSV_VULN_URL = "https://api.osv.dev/v1/vulns/"
+        
+        # Préparer les requêtes batch (max 1000 par appel)
+        queries = []
+        dep_map = {}  # Pour retrouver le package depuis l'index
+        
+        for i, dep in enumerate(deps):
+            name = dep['name']
+            version = self._extract_version(dep.get('version', '*'))
+            if not version or version == '*':
+                continue
+            
+            queries.append({
+                "package": {"name": name, "ecosystem": ecosystem},
+                "version": version
+            })
+            dep_map[len(queries) - 1] = {'name': name, 'version': version}
+        
+        if not queries:
+            return vulnerabilities
+        
+        self.logger.info(f"Vérification OSV batch pour {len(queries)} packages ({ecosystem})...")
         
         try:
-            # Exécuter npm audit
-            self.logger.info("Exécution de npm audit --json...")
-            result = subprocess.run(
-                ['npm', 'audit', '--json'],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=working_dir
+            # Appel batch unique à l'API OSV
+            batch_data = {"queries": queries}
+            req = urllib.request.Request(
+                OSV_BATCH_URL,
+                data=json.dumps(batch_data).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
             )
             
-            if result.stdout:
-                data = json.loads(result.stdout)
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode('utf-8'))
+            
+            # Collecter les IDs de vulnérabilités uniques et leurs packages associés
+            vuln_to_packages = {}  # vuln_id -> [{'name': pkg, 'version': ver}, ...]
+            
+            for idx, result_item in enumerate(result.get('results', [])):
+                if idx not in dep_map:
+                    continue
+                pkg_info = dep_map[idx]
                 
-                # npm audit v7+ format
-                for name, advisory in data.get('vulnerabilities', {}).items():
-                    # Extraire les informations de vulnérabilité
-                    via = advisory.get('via', [])
-                    if isinstance(via, list) and len(via) > 0:
-                        first_via = via[0]
-                        if isinstance(first_via, dict):
-                            vuln_id = first_via.get('url', '')
-                            description = first_via.get('title', 'Vulnérabilité connue')
-                        else:
-                            vuln_id = ''
-                            description = str(first_via)
-                    else:
-                        vuln_id = ''
-                        description = str(via)
+                for vuln in result_item.get('vulns', []):
+                    vuln_id = vuln.get('id', '')
+                    if vuln_id:
+                        if vuln_id not in vuln_to_packages:
+                            vuln_to_packages[vuln_id] = []
+                        vuln_to_packages[vuln_id].append(pkg_info)
+            
+            # Récupérer les détails pour les vulnérabilités uniques
+            self.logger.info(f"Récupération des détails pour {len(vuln_to_packages)} vulnérabilités uniques...")
+            
+            for vuln_id, packages in vuln_to_packages.items():
+                try:
+                    # Récupérer les détails de la vulnérabilité
+                    vuln_req = urllib.request.Request(f"{OSV_VULN_URL}{vuln_id}")
+                    with urllib.request.urlopen(vuln_req, timeout=10) as resp:
+                        vuln_details = json.loads(resp.read().decode('utf-8'))
                     
-                    vulnerabilities.append({
-                        'package': name,
-                        'version': advisory.get('range', '*'),
-                        'vulnerability_id': vuln_id,
-                        'severity': advisory.get('severity', 'unknown'),
-                        'description': description,
-                        'fix_available': advisory.get('fixAvailable', False)
-                    })
-                
-                self.logger.info(f"npm audit: {len(vulnerabilities)} vulnérabilité(s) détectée(s)")
-                
-        except subprocess.TimeoutExpired:
-            self.logger.warning("npm audit timeout - opération annulée")
-        except FileNotFoundError:
-            self.logger.warning("npm non trouvé - installez Node.js")
+                    # Extraire la sévérité
+                    severity = self._extract_osv_severity(vuln_details)
+                    
+                    # Extraire la description
+                    description = vuln_details.get('summary', vuln_details.get('details', ''))[:200]
+                    if not description:
+                        description = f"Vulnérabilité {vuln_id}"
+                    
+                    # Extraire les aliases (CVE)
+                    aliases = vuln_details.get('aliases', [])
+                    cve_id = next((a for a in aliases if a.startswith('CVE-')), vuln_id)
+                    
+                    # Trouver les versions corrigées
+                    fix_versions = []
+                    for affected in vuln_details.get('affected', []):
+                        for range_info in affected.get('ranges', []):
+                            for event in range_info.get('events', []):
+                                if 'fixed' in event:
+                                    fix_versions.append(event['fixed'])
+                    
+                    # Ajouter une entrée pour chaque package affecté
+                    for pkg_info in packages:
+                        vulnerabilities.append({
+                            'package': pkg_info['name'],
+                            'version': pkg_info['version'],
+                            'vulnerability_id': cve_id,
+                            'severity': severity,
+                            'description': description,
+                            'fix_versions': fix_versions or ['dernière version stable']
+                        })
+                        
+                except Exception as e:
+                    self.logger.debug(f"Erreur récupération détails {vuln_id}: {e}")
+                    # Fallback: ajouter sans détails
+                    for pkg_info in packages:
+                        vulnerabilities.append({
+                            'package': pkg_info['name'],
+                            'version': pkg_info['version'],
+                            'vulnerability_id': vuln_id,
+                            'severity': 'medium',
+                            'description': f"Vulnérabilité {vuln_id}",
+                            'fix_versions': ['dernière version stable']
+                        })
+                    
+        except urllib.error.URLError as e:
+            self.logger.warning(f"OSV batch API error: {e}")
         except json.JSONDecodeError as e:
-            self.logger.warning(f"Erreur parsing npm audit JSON: {e}")
+            self.logger.warning(f"OSV JSON error: {e}")
         except Exception as e:
-            self.logger.warning(f"Erreur npm audit: {e}")
+            self.logger.warning(f"OSV check error: {e}")
         
+        self.logger.info(f"OSV: {len(vulnerabilities)} vulnérabilité(s) détectée(s)")
         return vulnerabilities
+
+    def _extract_osv_severity(self, vuln_details: dict) -> str:
+        """Extrait la sévérité d'une vulnérabilité OSV."""
+        # 1. database_specific.severity (GHSA)
+        db_specific = vuln_details.get('database_specific', {})
+        if 'severity' in db_specific:
+            sev = str(db_specific['severity']).upper()
+            if sev == 'CRITICAL':
+                return 'critical'
+            elif sev == 'HIGH':
+                return 'high'
+            elif sev in ('MODERATE', 'MEDIUM'):
+                return 'medium'
+            elif sev == 'LOW':
+                return 'low'
+        
+        # 2. ecosystem_specific.severity
+        for affected in vuln_details.get('affected', []):
+            eco_specific = affected.get('ecosystem_specific', {})
+            if 'severity' in eco_specific:
+                sev = str(eco_specific['severity']).upper()
+                if sev == 'CRITICAL':
+                    return 'critical'
+                elif sev == 'HIGH':
+                    return 'high'
+                elif sev in ('MODERATE', 'MEDIUM'):
+                    return 'medium'
+                elif sev == 'LOW':
+                    return 'low'
+        
+        # 3. severity[].score (CVSS)
+        for sev_info in vuln_details.get('severity', []):
+            score_str = sev_info.get('score', '')
+            if score_str:
+                try:
+                    # Extraire le score numérique
+                    if score_str.replace('.', '').replace('-', '').isdigit():
+                        score = float(score_str)
+                    else:
+                        continue
+                    if score >= 9.0:
+                        return 'critical'
+                    elif score >= 7.0:
+                        return 'high'
+                    elif score >= 4.0:
+                        return 'medium'
+                    else:
+                        return 'low'
+                except:
+                    pass
+        
+        return 'medium'  # Défaut
+
+    def _extract_version(self, version_spec: str) -> str:
+        """Extrait une version exacte d'un spécificateur de version.
+        
+        Args:
+            version_spec: Spécificateur comme '==1.0.0', '^1.0.0', '>=1.0.0', '1.0.0'
+            
+        Returns:
+            Version extraite ou chaîne vide
+        """
+        if not version_spec or version_spec == '*':
+            return ''
+        
+        # Nettoyer les préfixes courants
+        version = version_spec.strip()
+        for prefix in ['==', '>=', '<=', '>', '<', '~=', '!=', '^', '~']:
+            if version.startswith(prefix):
+                version = version[len(prefix):]
+                break
+        
+        # Extraire uniquement les chiffres et points
+        match = re.match(r'^(\d+(?:\.\d+)*(?:-[a-zA-Z0-9.]+)?)', version)
+        if match:
+            return match.group(1)
+        
+        return version.strip()
+
+    def _extract_all_packages_from_lock(self, lock_content: str) -> List[Dict[str, str]]:
+        """Extrait TOUTES les dépendances avec leurs versions exactes du package-lock.json.
+        
+        Args:
+            lock_content: Contenu du package-lock.json
+            
+        Returns:
+            Liste de toutes les dépendances avec versions exactes
+        """
+        deps = []
+        try:
+            data = json.loads(lock_content)
+            
+            # Format lockfile v2/v3 (packages)
+            packages = data.get('packages', {})
+            for path, info in packages.items():
+                if not path:  # Skip root package ""
+                    continue
+                # Extraire le nom du package du chemin (node_modules/pkg ou node_modules/@scope/pkg)
+                parts = path.split('node_modules/')
+                if len(parts) > 1:
+                    name = parts[-1]
+                    version = info.get('version', '')
+                    if name and version:
+                        deps.append({'name': name, 'version': version})
+            
+            # Fallback: Format lockfile v1 (dependencies)
+            if not deps:
+                def extract_deps_v1(dependencies: dict, prefix: str = ''):
+                    for name, info in dependencies.items():
+                        if isinstance(info, dict):
+                            version = info.get('version', '')
+                            if version:
+                                deps.append({'name': name, 'version': version})
+                            # Dépendances imbriquées
+                            if 'dependencies' in info:
+                                extract_deps_v1(info['dependencies'])
+                
+                if 'dependencies' in data:
+                    extract_deps_v1(data['dependencies'])
+            
+            self.logger.info(f"Extrait {len(deps)} packages du lockfile pour scan OSV")
+            
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"Erreur parsing package-lock.json: {e}")
+        except Exception as e:
+            self.logger.warning(f"Erreur extraction packages: {e}")
+        
+        return deps
 
     def _parse_requirements_txt_content(self, content: str) -> List[Dict[str, str]]:
         """Parse le contenu d'un fichier requirements.txt."""
@@ -538,244 +730,187 @@ class DependencyGuardTool(BaseTool):
         issues = []
         dependencies_info = []
         manifest_file = ""
-        working_dir = os.getcwd()
-        temp_dir = None
         deps = []
         
-        try:
-            # Traitement du contenu fourni (manifest_content et/ou lock_content)
-            # Cas spécial : Lock content seul (JS/TS)
-            if not request.manifest_content and request.lock_content:
-                manifest_type = 'package-lock.json'
-                manifest_file = "[content:package-lock.json]"
-                deps = self._parse_package_lock_content(request.lock_content)
-                
-                if request.check_vulnerabilities:
-                    temp_dir = tempfile.mkdtemp(prefix="collegue_dep_guard_")
-                    # 1. Écrire le lockfile
-                    lock_path = os.path.join(temp_dir, 'package-lock.json')
-                    with open(lock_path, 'w', encoding='utf-8') as f:
-                        f.write(request.lock_content)
-                    
-                    # 2. Générer un package.json dummy pour satisfaire npm audit
-                    try:
-                        lock_data = json.loads(request.lock_content)
-                        pkg_name = lock_data.get('name', 'audit-temp')
-                        pkg_version = lock_data.get('version', '1.0.0')
-                    except:
-                        pkg_name = 'audit-temp'
-                        pkg_version = '1.0.0'
-                        
-                    dummy_pkg = {
-                        "name": pkg_name,
-                        "version": pkg_version,
-                        "description": "Generated by Collegue for audit",
-                        "license": "ISC",
-                        "dependencies": {},
-                        "devDependencies": {}
-                    }
-                    
-                    pkg_path = os.path.join(temp_dir, 'package.json')
-                    with open(pkg_path, 'w', encoding='utf-8') as f:
-                        json.dump(dummy_pkg, f, indent=2)
-                        
-                    working_dir = temp_dir
-                    self.logger.info(f"Audit mode Lock-Only: temp dir créé {temp_dir}")
+        # Traitement du contenu fourni (manifest_content et/ou lock_content)
+        # Cas spécial : Lock content seul (JS/TS) - utilise l'API OSV directement
+        if not request.manifest_content and request.lock_content:
+            manifest_type = 'package-lock.json'
+            manifest_file = "[content:package-lock.json]"
+            deps = self._parse_package_lock_content(request.lock_content)
 
-            # Cas classique : Manifest content fourni
+        # Cas classique : Manifest content fourni
+        else:
+            manifest_type = request.manifest_type or ('package.json' if request.language == 'javascript' else 'requirements.txt')
+            manifest_file = f"[content:{manifest_type}]"
+            
+            if manifest_type in ['requirements.txt', 'requirements']:
+                deps = self._parse_requirements_txt_content(request.manifest_content)
+                    
+            elif manifest_type in ['package.json', 'package']:
+                deps = self._parse_package_json_content(request.manifest_content)
+                    
+            elif manifest_type in ['pyproject.toml', 'pyproject']:
+                # Pour pyproject.toml, on utilise le parsing simplifié
+                deps_match = re.search(r'dependencies\s*=\s*\[(.*?)\]', request.manifest_content, re.DOTALL)
+                if deps_match:
+                    deps_str = deps_match.group(1)
+                    for line in deps_str.split('\n'):
+                        line = line.strip().strip(',').strip('"\'')
+                        if line:
+                            match = re.match(r'^([a-zA-Z0-9_-]+)', line)
+                            if match:
+                                deps.append({'name': match.group(1), 'version': '*'})
+            
+            elif manifest_type == 'package-lock.json':
+                # Déjà traité plus haut
+                pass
+
             else:
-                manifest_type = request.manifest_type or ('package.json' if request.language == 'javascript' else 'requirements.txt')
-                manifest_file = f"[content:{manifest_type}]"
-                
-                if manifest_type in ['requirements.txt', 'requirements']:
-                    deps = self._parse_requirements_txt_content(request.manifest_content)
-                    # Pour pip-audit, créer un fichier temporaire
-                    if request.check_vulnerabilities:
-                        temp_dir = tempfile.mkdtemp(prefix="collegue_dep_guard_")
-                        req_path = os.path.join(temp_dir, 'requirements.txt')
-                        with open(req_path, 'w', encoding='utf-8') as f:
-                            f.write(request.manifest_content)
-                        working_dir = temp_dir
-                        
-                elif manifest_type in ['package.json', 'package']:
-                    deps = self._parse_package_json_content(request.manifest_content)
-                    # Pour npm audit, créer un répertoire temporaire avec package.json et lock
-                    if request.check_vulnerabilities and request.lock_content:
-                        temp_dir = tempfile.mkdtemp(prefix="collegue_dep_guard_")
-                        pkg_path = os.path.join(temp_dir, 'package.json')
-                        with open(pkg_path, 'w', encoding='utf-8') as f:
-                            f.write(request.manifest_content)
-                        lock_path = os.path.join(temp_dir, 'package-lock.json')
-                        with open(lock_path, 'w', encoding='utf-8') as f:
-                            f.write(request.lock_content)
-                        working_dir = temp_dir
-                        self.logger.info(f"Répertoire temporaire créé pour npm audit: {temp_dir}")
-                        
-                elif manifest_type in ['pyproject.toml', 'pyproject']:
-                    # Pour pyproject.toml, on utilise le parsing simplifié
-                    deps_match = re.search(r'dependencies\s*=\s*\[(.*?)\]', request.manifest_content, re.DOTALL)
-                    if deps_match:
-                        deps_str = deps_match.group(1)
-                        for line in deps_str.split('\n'):
-                            line = line.strip().strip(',').strip('"\'')
-                            if line:
-                                match = re.match(r'^([a-zA-Z0-9_-]+)', line)
-                                if match:
-                                    deps.append({'name': match.group(1), 'version': '*'})
-                
-                elif manifest_type == 'package-lock.json':
-                    # Déjà traité plus haut
-                    pass
-
-                else:
-                    raise ToolValidationError(f"Type de manifest '{manifest_type}' non supporté")
+                raise ToolValidationError(f"Type de manifest '{manifest_type}' non supporté")
+        
+        # Analyser chaque dépendance
+        for dep in deps:
+            name = dep['name']
+            version = dep['version']
+            dep_info = DependencyInfo(
+                name=name,
+                version_spec=version,
+                status='ok'
+            )
             
-            # Analyser chaque dépendance
-            for dep in deps:
-                name = dep['name']
-                version = dep['version']
-                dep_info = DependencyInfo(
-                    name=name,
-                    version_spec=version,
-                    status='ok'
-                )
-                
-                # Vérifier blocklist
-                if request.blocklist and name.lower() in [b.lower() for b in request.blocklist]:
-                    issues.append(DependencyIssue(
-                        package=name,
-                        version=version,
-                        issue_type='blocked',
-                        severity='high',
-                        message=f"Package '{name}' est dans la liste noire",
-                        recommendation=f"Supprimez ce package ou trouvez une alternative"
-                    ))
-                    dep_info.status = 'error'
-                
-                # Vérifier allowlist
-                if request.allowlist and name.lower() not in [a.lower() for a in request.allowlist]:
-                    issues.append(DependencyIssue(
-                        package=name,
-                        version=version,
-                        issue_type='not_allowed',
-                        severity='medium',
-                        message=f"Package '{name}' n'est pas dans la liste blanche",
-                        recommendation=f"Ajoutez '{name}' à l'allowlist ou supprimez-le"
-                    ))
-                    dep_info.status = 'warning'
-                
-                # Vérifier packages malveillants connus
-                malicious = self.KNOWN_MALICIOUS_PACKAGES.get(request.language, [])
-                if name.lower() in [m.lower() for m in malicious]:
-                    issues.append(DependencyIssue(
-                        package=name,
-                        version=version,
-                        issue_type='malicious',
-                        severity='critical',
-                        message=f"Package '{name}' est connu comme malveillant ou typosquat",
-                        recommendation="Supprimez immédiatement ce package!"
-                    ))
-                    dep_info.status = 'error'
-                
-                # Vérifier packages dépréciés
-                deprecated = self.DEPRECATED_PACKAGES.get(request.language, {})
-                if name.lower() in [d.lower() for d in deprecated.keys()]:
-                    replacement = deprecated.get(name, 'une alternative')
-                    issues.append(DependencyIssue(
-                        package=name,
-                        version=version,
-                        issue_type='deprecated',
-                        severity='low',
-                        message=f"Package '{name}' est déprécié",
-                        recommendation=f"Utilisez {replacement} à la place"
-                    ))
-                    dep_info.status = 'warning' if dep_info.status == 'ok' else dep_info.status
-                
-                # Vérifier existence sur le registre
-                if request.check_existence:
-                    if request.language == 'python':
-                        check = self._check_pypi_existence(name)
-                    else:
-                        check = self._check_npm_existence(name)
-                    
-                    if check.get('exists') is False:
-                        issues.append(DependencyIssue(
-                            package=name,
-                            version=version,
-                            issue_type='not_found',
-                            severity='critical',
-                            message=f"Package '{name}' n'existe pas sur le registre officiel",
-                            recommendation="Vérifiez l'orthographe. Ce package pourrait être une hallucination IA ou un typosquat."
-                        ))
-                        dep_info.status = 'error'
-                    elif check.get('latest_version'):
-                        dep_info.latest_version = check['latest_version']
-                        # Vérifier si outdated (simpliste)
-                        if version.startswith('=='):
-                            current = version[2:]
-                            if current != check['latest_version']:
-                                dep_info.is_outdated = True
-                
-                dependencies_info.append(dep_info)
+            # Vérifier blocklist
+            if request.blocklist and name.lower() in [b.lower() for b in request.blocklist]:
+                issues.append(DependencyIssue(
+                    package=name,
+                    version=version,
+                    issue_type='blocked',
+                    severity='high',
+                    message=f"Package '{name}' est dans la liste noire",
+                    recommendation=f"Supprimez ce package ou trouvez une alternative"
+                ))
+                dep_info.status = 'error'
             
-            # Vérifier vulnérabilités
-            if request.check_vulnerabilities:
+            # Vérifier allowlist
+            if request.allowlist and name.lower() not in [a.lower() for a in request.allowlist]:
+                issues.append(DependencyIssue(
+                    package=name,
+                    version=version,
+                    issue_type='not_allowed',
+                    severity='medium',
+                    message=f"Package '{name}' n'est pas dans la liste blanche",
+                    recommendation=f"Ajoutez '{name}' à l'allowlist ou supprimez-le"
+                ))
+                dep_info.status = 'warning'
+            
+            # Vérifier packages malveillants connus
+            malicious = self.KNOWN_MALICIOUS_PACKAGES.get(request.language, [])
+            if name.lower() in [m.lower() for m in malicious]:
+                issues.append(DependencyIssue(
+                    package=name,
+                    version=version,
+                    issue_type='malicious',
+                    severity='critical',
+                    message=f"Package '{name}' est connu comme malveillant ou typosquat",
+                    recommendation="Supprimez immédiatement ce package!"
+                ))
+                dep_info.status = 'error'
+            
+            # Vérifier packages dépréciés
+            deprecated = self.DEPRECATED_PACKAGES.get(request.language, {})
+            if name.lower() in [d.lower() for d in deprecated.keys()]:
+                replacement = deprecated.get(name, 'une alternative')
+                issues.append(DependencyIssue(
+                    package=name,
+                    version=version,
+                    issue_type='deprecated',
+                    severity='low',
+                    message=f"Package '{name}' est déprécié",
+                    recommendation=f"Utilisez {replacement} à la place"
+                ))
+                dep_info.status = 'warning' if dep_info.status == 'ok' else dep_info.status
+            
+            # Vérifier existence sur le registre
+            if request.check_existence:
                 if request.language == 'python':
-                    vulns = self._check_pip_audit(working_dir)
+                    check = self._check_pypi_existence(name)
                 else:
-                    vulns = self._check_npm_audit(working_dir)
+                    check = self._check_npm_existence(name)
                 
-                for vuln in vulns:
-                    severity = vuln.get('severity', 'high')
-                    if severity not in ['low', 'medium', 'high', 'critical']:
-                        severity = 'high'
-                    
+                if check.get('exists') is False:
                     issues.append(DependencyIssue(
-                        package=vuln['package'],
-                        version=vuln.get('version'),
-                        issue_type='vulnerable',
-                        severity=severity,
-                        message=vuln.get('description', 'Vulnérabilité connue'),
-                        recommendation=f"Mettez à jour vers une version corrigée: {vuln.get('fix_versions', ['dernière version'])}",
-                        cve_ids=[vuln.get('vulnerability_id')] if vuln.get('vulnerability_id') else None
+                        package=name,
+                        version=version,
+                        issue_type='not_found',
+                        severity='critical',
+                        message=f"Package '{name}' n'existe pas sur le registre officiel",
+                        recommendation="Vérifiez l'orthographe. Ce package pourrait être une hallucination IA ou un typosquat."
                     ))
+                    dep_info.status = 'error'
+                elif check.get('latest_version'):
+                    dep_info.latest_version = check['latest_version']
+                    # Vérifier si outdated (simpliste)
+                    if version.startswith('=='):
+                        current = version[2:]
+                        if current != check['latest_version']:
+                            dep_info.is_outdated = True
             
-            # Compter par sévérité
-            severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-            for issue in issues:
-                severity_counts[issue.severity] = severity_counts.get(issue.severity, 0) + 1
+            dependencies_info.append(dep_info)
+        
+        # Vérifier vulnérabilités via API OSV (pas besoin de fichiers locaux)
+        if request.check_vulnerabilities:
+            ecosystem = 'PyPI' if request.language == 'python' else 'npm'
             
-            # Construire le résumé
-            total_deps = len(deps)
-            total_issues = len(issues)
+            # Extraire toutes les dépendances avec versions du lock_content si disponible
+            all_deps = deps.copy()
+            if request.lock_content and request.language != 'python':
+                all_deps = self._extract_all_packages_from_lock(request.lock_content)
             
-            if total_issues == 0:
-                summary = f"✅ {total_deps} dépendance(s) analysée(s), aucun problème détecté."
-            else:
-                summary = (
-                    f"⚠️ {total_deps} dépendance(s) analysée(s), {total_issues} problème(s) détecté(s). "
-                    f"Critique: {severity_counts['critical']}, Haute: {severity_counts['high']}, "
-                    f"Moyenne: {severity_counts['medium']}, Basse: {severity_counts['low']}."
-                )
+            vulns = self._check_osv_vulnerabilities(all_deps, ecosystem)
             
-            return DependencyGuardResponse(
-                valid=total_issues == 0 or (severity_counts['critical'] == 0 and severity_counts['high'] == 0),
-                total_dependencies=total_deps,
-                issues_count=total_issues,
-                critical_issues=severity_counts['critical'],
-                high_issues=severity_counts['high'],
-                medium_issues=severity_counts['medium'],
-                low_issues=severity_counts['low'],
-                dependencies=dependencies_info,
-                issues=issues,
-                manifest_file=manifest_file,
-                summary=summary
+            for vuln in vulns:
+                severity = vuln.get('severity', 'high')
+                if severity not in ['low', 'medium', 'high', 'critical']:
+                    severity = 'high'
+                
+                issues.append(DependencyIssue(
+                    package=vuln['package'],
+                    version=vuln.get('version'),
+                    issue_type='vulnerable',
+                    severity=severity,
+                    message=vuln.get('description', 'Vulnérabilité connue'),
+                    recommendation=f"Mettez à jour vers une version corrigée: {vuln.get('fix_versions', ['dernière version'])}",
+                    cve_ids=[vuln.get('vulnerability_id')] if vuln.get('vulnerability_id') else None
+                ))
+        
+        # Compter par sévérité
+        severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+        for issue in issues:
+            severity_counts[issue.severity] = severity_counts.get(issue.severity, 0) + 1
+        
+        # Construire le résumé
+        total_deps = len(deps)
+        total_issues = len(issues)
+        
+        if total_issues == 0:
+            summary = f"✅ {total_deps} dépendance(s) analysée(s), aucun problème détecté."
+        else:
+            summary = (
+                f"⚠️ {total_deps} dépendance(s) analysée(s), {total_issues} problème(s) détecté(s). "
+                f"Critique: {severity_counts['critical']}, Haute: {severity_counts['high']}, "
+                f"Moyenne: {severity_counts['medium']}, Basse: {severity_counts['low']}."
             )
         
-        finally:
-            # Nettoyer le répertoire temporaire
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception as e:
-                    self.logger.warning(f"Impossible de supprimer le répertoire temporaire: {e}")
+        return DependencyGuardResponse(
+            valid=total_issues == 0 or (severity_counts['critical'] == 0 and severity_counts['high'] == 0),
+            total_dependencies=total_deps,
+            issues_count=total_issues,
+            critical_issues=severity_counts['critical'],
+            high_issues=severity_counts['high'],
+            medium_issues=severity_counts['medium'],
+            low_issues=severity_counts['low'],
+            dependencies=dependencies_info,
+            issues=issues,
+            manifest_file=manifest_file,
+            summary=summary
+        )
