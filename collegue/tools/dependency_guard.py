@@ -81,14 +81,15 @@ class DependencyGuardRequest(BaseModel):
         if not self.target and not self.manifest_content:
             raise ValueError("Vous devez fournir 'target' (chemin) ou 'manifest_content' (contenu du fichier)")
         
-        # Pour JS/TS en mode MCP, lock_content est TOUJOURS requis
+        # Pour JS/TS en mode MCP, lock_content est requis
         if self.manifest_content:
             lang = self.language.strip().lower()
             if lang in ['typescript', 'javascript', 'js', 'ts']:
                 if not self.lock_content:
                     raise ValueError(
-                        "Pour les projets JS/TS, vous devez fournir 'lock_content' "
-                        "(contenu de package-lock.json). Lisez ce fichier avec l'outil filesystem."
+                        "Pour les projets JS/TS, utilisez 'target' pour spécifier le chemin du projet "
+                        "ou fournissez 'lock_content' (package-lock.json). "
+                        "Recommandé: utilisez 'target' pour éviter les problèmes de taille."
                     )
 
 
