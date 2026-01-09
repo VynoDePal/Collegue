@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, validator, field_validator
 import os
 import pathlib
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
+from ._run_tests import RunTestsTool, RunTestsRequest
 
 
 class TestGenerationRequest(BaseModel):
@@ -291,8 +292,6 @@ class TestGenerationTool(BaseTool):
         Returns:
             TestValidationResult: Résultat de la validation
         """
-        from .run_tests import RunTestsTool, RunTestsRequest
-        
         temp_dir = None
         try:
             # Créer un répertoire temporaire pour les tests

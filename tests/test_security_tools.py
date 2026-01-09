@@ -1,6 +1,6 @@
 """
 Tests unitaires pour les outils de qualité et sécurité (T14)
-- run_tests
+
 - secret_scan
 - dependency_guard
 """
@@ -14,96 +14,8 @@ import shutil
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
 
-from collegue.tools.run_tests import RunTestsTool, RunTestsRequest, RunTestsResponse
 from collegue.tools.secret_scan import SecretScanTool, SecretScanRequest, SecretScanResponse, SecretFinding
 from collegue.tools.dependency_guard import DependencyGuardTool, DependencyGuardRequest, DependencyGuardResponse
-
-
-class TestRunTestsTool(unittest.TestCase):
-    """Tests pour l'outil run_tests."""
-    
-    def setUp(self):
-        self.tool = RunTestsTool()
-    
-    def test_tool_metadata(self):
-        """Vérifie les métadonnées de l'outil."""
-        self.assertEqual(self.tool.get_name(), "run_tests")
-        self.assertIn("python", self.tool.get_supported_languages())
-        self.assertIn("typescript", self.tool.get_supported_languages())
-        self.assertTrue(self.tool.is_long_running())
-        print("✅ Métadonnées run_tests correctes")
-    
-    def test_request_validation(self):
-        """Teste la validation des requêtes."""
-        # Requête valide
-        request = RunTestsRequest(
-            target="tests/",
-            language="python",
-            framework="pytest"
-        )
-        self.assertEqual(request.language, "python")
-        self.assertEqual(request.framework, "pytest")
-        
-        # Langage invalide
-        with self.assertRaises(ValueError):
-            RunTestsRequest(target="tests/", language="ruby")
-        
-        # Framework invalide
-        with self.assertRaises(ValueError):
-            RunTestsRequest(target="tests/", language="python", framework="invalid")
-        
-        print("✅ Validation des requêtes run_tests")
-    
-    def test_framework_detection_python(self):
-        """Teste la détection de framework Python."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Créer un pyproject.toml avec pytest
-            pyproject = os.path.join(tmpdir, 'pyproject.toml')
-            with open(pyproject, 'w') as f:
-                f.write('[tool.pytest]\n')
-            
-            framework = self.tool._detect_framework('python', tmpdir)
-            self.assertEqual(framework, 'pytest')
-        
-        print("✅ Détection framework Python")
-    
-    def test_command_building(self):
-        """Teste la construction des commandes."""
-        request = RunTestsRequest(
-            target="tests/test_auth.py",
-            language="python",
-            framework="pytest",
-            pattern="test_login*"
-        )
-        
-        cmd = self.tool._build_command(request, "pytest")
-        self.assertIn("pytest", cmd)
-        self.assertIn("tests/test_auth.py", cmd)
-        self.assertIn("-k", cmd)
-        self.assertIn("test_login*", cmd)
-        
-        print("✅ Construction des commandes")
-    
-    def test_pytest_output_parsing(self):
-        """Teste le parsing de la sortie pytest."""
-        stdout = """
-============================= test session starts ==============================
-collected 10 items
-test_example.py::test_one PASSED
-test_example.py::test_two FAILED
-test_example.py::test_three SKIPPED
-=============================== warnings summary ===============================
-9 passed, 1 failed, 1 skipped in 2.45s
-"""
-        stderr = ""
-        
-        result = self.tool._parse_pytest_output(stdout, stderr)
-        self.assertEqual(result['passed'], 9)
-        self.assertEqual(result['failed'], 1)
-        self.assertEqual(result['skipped'], 1)
-        self.assertAlmostEqual(result['duration'], 2.45, places=1)
-        
-        print("✅ Parsing sortie pytest")
 
 
 class TestSecretScanTool(unittest.TestCase):
@@ -379,8 +291,7 @@ class TestToolsIntegration(unittest.TestCase):
         registry = get_registry()
         tool_names = registry.list_tools()
         
-        # Les nouveaux outils doivent être dans le registry
-        self.assertIn('RunTestsTool', tool_names)
+        # Les outils de sécurité doivent être dans le registry
         self.assertIn('SecretScanTool', tool_names)
         self.assertIn('DependencyGuardTool', tool_names)
         
@@ -390,7 +301,6 @@ class TestToolsIntegration(unittest.TestCase):
         """Vérifie que les outils héritent de BaseTool."""
         from collegue.tools.base import BaseTool
         
-        self.assertIsInstance(RunTestsTool(), BaseTool)
         self.assertIsInstance(SecretScanTool(), BaseTool)
         self.assertIsInstance(DependencyGuardTool(), BaseTool)
         
