@@ -12,7 +12,7 @@ ENV HEALTH_PORT 4122
 WORKDIR /app
 
 # 4. Met à jour les paquets et installe les dépendances système si nécessaire
-RUN apt-get update && apt-get install -y --no-install-recommends curl gcc libffi-dev musl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends curl gcc libffi-dev musl-dev nodejs npm && rm -rf /var/lib/apt/lists/*
 
 # 5. Copier les fichiers de dépendances et les scripts d'entrée/santé
 COPY requirements.txt .
