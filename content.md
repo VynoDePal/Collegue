@@ -106,17 +106,16 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
   - 30+ patterns: AWS, GCP, Azure, OpenAI, GitHub, Stripe, JWT, clés privées, etc.
 
 - dependency_guard
-  - Description: Audite les dépendances pour vulnérabilités (npm audit / pip-audit) et packages malveillants
+  - Description: Audite les dépendances pour vulnérabilités via **API OSV de Google** (gratuite, rapide) et détecte les packages malveillants
   - Paramètres clés: `manifest_content?`, `lock_content?`, `manifest_type?`, `language`, `check_vulnerabilities?`, `blocklist?`, `allowlist?`
-  - **NOTE**: Cet outil fonctionne uniquement avec le contenu des fichiers passé en paramètres (pas de chemins de fichiers).
+  - **NOTE**: Cet outil fonctionne en environnement isolé (Docker/MCP) sans accès aux fichiers de l'hôte.
   - **Pour Python**: Passez `manifest_content` avec le contenu de requirements.txt ou pyproject.toml
-  - **Pour JS/TS**: Passez `lock_content` avec le contenu de package-lock.json (minifié recommandé)
-  - **MINIFICATION REQUISE** pour les gros package-lock.json:
-    ```bash
-    jq 'del(.packages[].integrity, .packages[].resolved, .packages[].funding, .packages[].engines)' package-lock.json
+  - **Pour JS/TS**: Passez `lock_content` avec le contenu complet de package-lock.json
+    ```json
+    { "lock_content": "<contenu de package-lock.json>", "language": "typescript", "check_vulnerabilities": true }
     ```
-    Cette commande réduit la taille de ~50% tout en gardant l'arbre complet des dépendances nécessaire pour npm audit.
   - Supporte: requirements.txt, pyproject.toml, package.json, package-lock.json
+  - **Avantages API OSV**: Pas de npm/node requis, fonctionne en conteneur isolé, scan rapide (~10s pour 500+ packages)
 
 ---
 
