@@ -48,6 +48,9 @@ Méthodes recommandées:
 - **Génération de tests** avec validation automatique intégrée
 - **Détection de secrets** (secret_scan) : 30+ patterns (AWS, GCP, OpenAI, GitHub, etc.)
 - **Audit de dépendances** (dependency_guard) : vulnérabilités, typosquatting, blocklist
+- **Analyse d'impact** (impact_analysis) : anticipe les effets d'un changement avant implémentation
+- **Vérification de cohérence** (repo_consistency_check) : détecte les hallucinations IA (code mort, imports inutilisés)
+- **Scan IaC sécurisé** (iac_guardrails_scan) : Terraform/K8s/Dockerfile avec règles Pod Security Standards
 - Système de prompts amélioré, A/B testing, optimisation par langage
 - Intégration LLM flexible (OpenRouter recommandé), surcharge par headers MCP
 - Endpoints de santé et découverte OAuth pour intégration SSO
@@ -105,6 +108,46 @@ Collègue expose les outils MCP suivants (via `collegue/tools/`):
     - **JS/TS**: `{ "content": "<package-lock.json>", "language": "typescript" }`
   - Le type de fichier est auto-détecté (package-lock.json, requirements.txt, pyproject.toml)
   - **Avantages**: Scan rapide (~10s pour 500+ packages), pas de npm/node requis
+
+- impact_analysis (**NOUVEAU**)
+  - Description: Analyse l'impact d'un changement de code avant implémentation
+  - **Problème résolu**: L'IA génère souvent des changements sans anticiper leurs impacts
+  - **Paramètres**:
+    - `change_intent` (requis): Description du changement prévu (ex: "renommer UserService en AuthService")
+    - `files` (requis): Liste de fichiers `[{path, content, language?}, ...]`
+    - `diff?`: Diff unifié optionnel
+    - `entry_points?`: Points d'entrée importants
+    - `confidence_mode?`: `conservative`, `balanced` (défaut), `aggressive`
+  - **Retourne**: fichiers impactés, risques (breaking change, sécurité, migration), requêtes de recherche IDE, tests à lancer
+  - **Valeur**: Guide la stratégie avant de coder, réduit les itérations
+
+- repo_consistency_check (**NOUVEAU**)
+  - Description: Détecte les incohérences typiques générées par l'IA dans le code
+  - **Problème résolu**: L'IA génère des "hallucinations silencieuses" (code qui compile mais contient des incohérences)
+  - **Paramètres**:
+    - `files` (requis): Liste de fichiers `[{path, content, language?}, ...]`
+    - `language?`: `python`, `typescript`, `javascript`, `auto` (défaut)
+    - `checks?`: `unused_imports`, `unused_vars`, `dead_code`, `duplication`, `signature_mismatch`, `unresolved_symbol`
+    - `mode?`: `fast` (défaut) ou `deep`
+    - `min_confidence?`: 0-100 (défaut: 60)
+  - **Retourne**: liste d'issues avec sévérité, confiance, suggestions de fix
+  - **Valeur**: Transforme les hallucinations en diagnostics actionnables
+
+- iac_guardrails_scan (**NOUVEAU**)
+  - Description: Scanne Terraform/K8s/Dockerfile pour détecter les configurations dangereuses
+  - **Problème résolu**: L'IA génère souvent des IaC avec des defaults dangereux (privilèges excessifs, ports ouverts)
+  - **Paramètres**:
+    - `files` (requis): Liste de fichiers IaC `[{path, content}, ...]`
+    - `policy_profile?`: `baseline` (défaut) ou `strict`
+    - `platform?`: `{cloud?: "aws"|"gcp"|"azure", k8s_version?: "1.28"}`
+    - `custom_policies?`: Policies personnalisées (regex ou yaml-rules)
+    - `output_format?`: `json` (défaut) ou `sarif`
+  - **Règles intégrées**:
+    - **Kubernetes**: Pod Security Standards (privileged, hostNetwork, hostPID, capabilities, runAsNonRoot, etc.)
+    - **Terraform**: Security groups 0.0.0.0/0, S3 public, RDS public, IAM wildcards, secrets hardcodés
+    - **Dockerfile**: USER root, latest tag, curl|sh, secrets ENV
+  - **Retourne**: findings avec sévérité, remediation, références, sortie SARIF optionnelle
+  - **Valeur**: Rend l'IA utilisable pour IaC sans "roulette russe" sécurité
 
 ---
 
@@ -178,6 +221,6 @@ Remarques OAuth:
 
 Build notes:
 - Implémentation principale: `collegue/app.py` (FastMCP) et enregistrement dynamique des outils via `collegue/tools/__init__.py`
-- Outils: `code_documentation`, `code_refactoring`, `test_generation`, `secret_scan`, `dependency_guard`
+- Outils: `code_documentation`, `code_refactoring`, `test_generation`, `secret_scan`, `dependency_guard`, `impact_analysis`, `repo_consistency_check`, `iac_guardrails_scan`
 - Santé: `/_health` (via wrapper HTTP de compatibilité)
 - OAuth: `.well-known` endpoints exposés lorsque `OAUTH_ENABLED=true`
