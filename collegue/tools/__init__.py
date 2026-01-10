@@ -52,7 +52,7 @@ class ToolRegistry:
 
         for filename in os.listdir(current_dir):
             if (filename.endswith('.py') and
-                not filename.startswith('__') and
+                not filename.startswith('_') and
                 filename != 'base.py'):
 
                 module_name = filename[:-3]
@@ -62,7 +62,8 @@ class ToolRegistry:
                     for name, obj in inspect.getmembers(module):
                         if (inspect.isclass(obj) and
                             issubclass(obj, BaseTool) and
-                            obj != BaseTool):
+                            obj != BaseTool and
+                            obj.__module__ == module.__name__):
                             self._tools[obj.__name__] = obj
 
                 except ImportError as e:

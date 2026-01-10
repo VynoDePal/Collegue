@@ -7,7 +7,7 @@
 ## Objectifs
 
 1. Créer un assistant de développement intelligent qui comprend le contexte du code
-2. Fournir des outils d'analyse, de refactoring et de génération de code
+2. Fournir des outils d'analyse, de refactoring, sécurité, etc.
 3. Permettre l'utilisation de prompts personnalisés pour des tâches spécifiques
 4. Offrir une intégration simple avec les environnements de développement existants
 
