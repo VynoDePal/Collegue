@@ -13,6 +13,8 @@ Bénéfice: Moins de breaking changes, meilleure couverture de tests.
 """
 import re
 import ast
+import asyncio
+import json
 from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
@@ -52,12 +54,23 @@ class ImpactAnalysisRequest(BaseModel):
         "balanced",
         description="Mode de confiance: 'conservative' (moins de faux positifs), 'balanced', 'aggressive' (plus exhaustif)"
     )
+    analysis_depth: str = Field(
+        "fast",
+        description="Profondeur: 'fast' (heuristiques, ~10ms) ou 'deep' (enrichissement IA, +2-3s)"
+    )
     
     @field_validator('confidence_mode')
     def validate_confidence_mode(cls, v):
         valid = ['conservative', 'balanced', 'aggressive']
         if v not in valid:
             raise ValueError(f"Mode '{v}' invalide. Utilisez: {', '.join(valid)}")
+        return v
+    
+    @field_validator('analysis_depth')
+    def validate_analysis_depth(cls, v):
+        valid = ['fast', 'deep']
+        if v not in valid:
+            raise ValueError(f"Depth '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
 
 
@@ -98,6 +111,13 @@ class FollowupAction(BaseModel):
     rationale: str = Field(..., description="Pourquoi cette action")
 
 
+class LLMInsight(BaseModel):
+    """Un insight généré par l'IA en mode deep."""
+    category: str = Field(..., description="Catégorie: semantic, architectural, business, suggestion")
+    insight: str = Field(..., description="L'insight détaillé")
+    confidence: str = Field("medium", description="Confiance: low, medium, high")
+
+
 class ImpactAnalysisResponse(BaseModel):
     """Modèle de réponse pour l'analyse d'impact."""
     change_summary: str = Field(..., description="Résumé du changement analysé")
@@ -122,6 +142,19 @@ class ImpactAnalysisResponse(BaseModel):
         description="Actions de suivi"
     )
     analysis_summary: str = Field(..., description="Résumé de l'analyse")
+    # Champs enrichis par IA (mode deep uniquement)
+    llm_insights: Optional[List[LLMInsight]] = Field(
+        None,
+        description="Insights IA (mode deep uniquement): analyse sémantique, risques business, suggestions"
+    )
+    semantic_summary: Optional[str] = Field(
+        None,
+        description="Résumé sémantique du changement par l'IA (mode deep)"
+    )
+    analysis_depth_used: str = Field(
+        "fast",
+        description="Profondeur d'analyse utilisée: fast ou deep"
+    )
 
 
 class ImpactAnalysisTool(BaseTool):
@@ -534,9 +567,126 @@ class ImpactAnalysisTool(BaseTool):
         
         return followups
 
+    async def _deep_analysis_with_llm(
+        self, 
+        request: ImpactAnalysisRequest,
+        static_results: Dict[str, Any],
+        llm_manager=None,
+        ctx=None
+    ) -> Tuple[Optional[List[LLMInsight]], Optional[str]]:
+        """
+        Enrichit l'analyse avec le LLM (mode deep).
+        
+        Retourne (insights, semantic_summary) ou (None, None) si erreur.
+        """
+        try:
+            # Utiliser le llm_manager passé ou celui de l'instance
+            manager = llm_manager or self.llm_manager
+            if not manager:
+                self.logger.warning("LLM manager non disponible pour analyse deep")
+                return None, None
+            
+            # Préparer le contexte pour le LLM
+            files_summary = []
+            for f in request.files[:5]:  # Limiter pour ne pas exploser le contexte
+                preview = f.content[:500] + "..." if len(f.content) > 500 else f.content
+                files_summary.append(f"## {f.path}\n```\n{preview}\n```")
+            
+            static_risks = [f"- {r['category']}: {r['note']}" for r in static_results.get('risks', [])]
+            static_impacts = [f"- {i['path']}: {i['reason']}" for i in static_results.get('impacted_files', [])]
+            
+            prompt = f"""Analyse l'impact du changement suivant sur la codebase.
+
+## Changement prévu
+{request.change_intent}
+
+{f"## Diff" + chr(10) + request.diff[:1000] if request.diff else ""}
+
+## Fichiers concernés
+{chr(10).join(files_summary)}
+
+## Analyse statique (heuristiques)
+### Fichiers impactés détectés:
+{chr(10).join(static_impacts[:10]) if static_impacts else "Aucun détecté"}
+
+### Risques détectés:
+{chr(10).join(static_risks[:10]) if static_risks else "Aucun détecté"}
+
+---
+
+Fournis une analyse enrichie au format JSON strict:
+{{
+  "semantic_summary": "Résumé concis de ce que fait réellement ce changement et son impact global",
+  "insights": [
+    {{
+      "category": "semantic|architectural|business|suggestion",
+      "insight": "L'insight détaillé",
+      "confidence": "low|medium|high"
+    }}
+  ]
+}}
+
+Catégories d'insights:
+- **semantic**: Compréhension du sens réel du changement (au-delà de la syntaxe)
+- **architectural**: Impact sur l'architecture (couplage, cohésion, patterns)
+- **business**: Risques business (UX, données utilisateur, régressions fonctionnelles)
+- **suggestion**: Recommandations d'amélioration ou alternatives
+
+Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+
+            # Appeler le LLM
+            response = await manager.async_generate(prompt)
+            
+            if not response:
+                return None, None
+            
+            # Parser la réponse JSON
+            try:
+                # Nettoyer la réponse (enlever les backticks markdown si présents)
+                clean_response = response.strip()
+                if clean_response.startswith("```"):
+                    clean_response = clean_response.split("\n", 1)[1]
+                if clean_response.endswith("```"):
+                    clean_response = clean_response.rsplit("```", 1)[0]
+                clean_response = clean_response.strip()
+                
+                data = json.loads(clean_response)
+                
+                semantic_summary = data.get("semantic_summary", "")
+                raw_insights = data.get("insights", [])
+                
+                insights = []
+                for item in raw_insights[:10]:  # Limiter
+                    if isinstance(item, dict) and "insight" in item:
+                        insights.append(LLMInsight(
+                            category=item.get("category", "suggestion"),
+                            insight=item["insight"],
+                            confidence=item.get("confidence", "medium")
+                        ))
+                
+                self.logger.info(f"Analyse deep: {len(insights)} insights générés")
+                return insights, semantic_summary
+                
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"Erreur parsing réponse LLM: {e}")
+                # Fallback: utiliser la réponse brute comme résumé
+                return [LLMInsight(
+                    category="suggestion",
+                    insight=response[:500],
+                    confidence="low"
+                )], None
+                
+        except Exception as e:
+            self.logger.error(f"Erreur analyse deep: {e}")
+            return None, None
+
     def _execute_core_logic(self, request: ImpactAnalysisRequest, **kwargs) -> ImpactAnalysisResponse:
         """Exécute l'analyse d'impact."""
         self.logger.info(f"Analyse d'impact: {request.change_intent[:50]}...")
+        
+        # Récupérer les services depuis kwargs
+        llm_manager = kwargs.get('llm_manager') or self.llm_manager
+        ctx = kwargs.get('ctx')
         
         # Extraire les identifiants et endpoints
         identifiers = self._extract_identifiers_from_intent(request.change_intent)
@@ -599,6 +749,44 @@ class ImpactAnalysisTool(BaseTool):
             if critical_risks:
                 risk_summary = f" ⚠️ {len(critical_risks)} risque(s) important(s) détecté(s)."
         
+        # Mode deep: enrichissement IA
+        llm_insights = None
+        semantic_summary = None
+        analysis_depth_used = "fast"
+        
+        if request.analysis_depth == "deep":
+            self.logger.info("Mode deep: enrichissement IA en cours...")
+            analysis_depth_used = "deep"
+            
+            # Préparer les résultats statiques pour le LLM
+            static_results = {
+                'impacted_files': [
+                    {'path': f.path, 'reason': f.reason, 'confidence': f.confidence}
+                    for f in impacted_files[:10]
+                ],
+                'risks': [
+                    {'category': r.category, 'note': r.note, 'severity': r.severity}
+                    for r in risks[:10]
+                ]
+            }
+            
+            # Appeler l'analyse LLM (async)
+            try:
+                coro = self._deep_analysis_with_llm(request, static_results, llm_manager, ctx)
+                try:
+                    loop = asyncio.get_running_loop()
+                    # Déjà dans un contexte async - utiliser un thread
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, coro)
+                        llm_insights, semantic_summary = future.result(timeout=30)
+                except RuntimeError:
+                    # Pas de loop en cours - on peut utiliser asyncio.run
+                    llm_insights, semantic_summary = asyncio.run(coro)
+            except Exception as e:
+                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
+                # Continuer sans insights IA
+        
         analysis_summary = (
             f"Analyse de '{request.change_intent[:50]}...': "
             f"{len(impacted_files)} fichier(s) potentiellement impacté(s), "
@@ -606,12 +794,18 @@ class ImpactAnalysisTool(BaseTool):
             f"{len(tests)} test(s) recommandé(s).{risk_summary}"
         )
         
+        if analysis_depth_used == "deep" and llm_insights:
+            analysis_summary += f" 🤖 {len(llm_insights)} insight(s) IA."
+        
         return ImpactAnalysisResponse(
             change_summary=request.change_intent,
-            impacted_files=impacted_files[:50],  # Limiter
+            impacted_files=impacted_files[:50],
             risk_notes=risks,
             search_queries=search_queries[:20],
             tests_to_run=tests[:15],
             followups=followups[:10],
-            analysis_summary=analysis_summary
+            analysis_summary=analysis_summary,
+            llm_insights=llm_insights,
+            semantic_summary=semantic_summary,
+            analysis_depth_used=analysis_depth_used
         )
