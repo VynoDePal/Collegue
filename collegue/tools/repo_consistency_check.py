@@ -16,7 +16,9 @@ Bénéfice: Meilleure fiabilité des patches IA, réduction de dette technique.
 """
 import re
 import ast
+import asyncio
 import hashlib
+import json
 from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from collections import defaultdict
 from pydantic import BaseModel, Field, field_validator
@@ -53,6 +55,20 @@ class ConsistencyCheckRequest(BaseModel):
         "fast",
         description="Mode: 'fast' (heuristiques rapides) ou 'deep' (analyse plus complète)"
     )
+    analysis_depth: str = Field(
+        "fast",
+        description="Profondeur IA: 'fast' (heuristiques seules) ou 'deep' (enrichissement LLM avec scoring)"
+    )
+    auto_chain: bool = Field(
+        False,
+        description="Si True et score refactoring > seuil, déclenche automatiquement code_refactoring"
+    )
+    refactoring_threshold: float = Field(
+        0.7,
+        description="Seuil de score (0.0-1.0) pour déclencher auto_chain",
+        ge=0.0,
+        le=1.0
+    )
     min_confidence: int = Field(
         60,
         description="Confiance minimum (0-100) pour reporter un issue",
@@ -65,6 +81,13 @@ class ConsistencyCheckRequest(BaseModel):
         valid = ['fast', 'deep']
         if v not in valid:
             raise ValueError(f"Mode '{v}' invalide. Utilisez: {', '.join(valid)}")
+        return v
+    
+    @field_validator('analysis_depth')
+    def validate_analysis_depth(cls, v):
+        valid = ['fast', 'deep']
+        if v not in valid:
+            raise ValueError(f"Depth '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
     
     @field_validator('checks')
@@ -92,6 +115,24 @@ class ConsistencyIssue(BaseModel):
     engine: str = Field("embedded-rules", description="Moteur utilisé")
 
 
+class LLMInsight(BaseModel):
+    """Un insight généré par l'IA en mode deep."""
+    category: str = Field(..., description="Catégorie: pattern, architecture, debt, suggestion")
+    insight: str = Field(..., description="L'insight détaillé")
+    confidence: str = Field("medium", description="Confiance: low, medium, high")
+    affected_files: List[str] = Field(default_factory=list, description="Fichiers concernés")
+
+
+class SuggestedAction(BaseModel):
+    """Une action suggérée (potentiellement auto-exécutable)."""
+    tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
+    action_type: str = Field(..., description="Type: refactor, cleanup, restructure")
+    rationale: str = Field(..., description="Pourquoi cette action")
+    priority: str = Field("medium", description="Priorité: low, medium, high, critical")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Paramètres pour le tool")
+    score: float = Field(0.0, description="Score de pertinence (0.0-1.0)", ge=0.0, le=1.0)
+
+
 class ConsistencyCheckResponse(BaseModel):
     """Modèle de réponse pour la vérification de cohérence."""
     valid: bool = Field(..., description="True si aucun problème trouvé")
@@ -106,6 +147,36 @@ class ConsistencyCheckResponse(BaseModel):
     files_analyzed: int = Field(..., description="Nombre de fichiers analysés")
     checks_performed: List[str] = Field(..., description="Checks exécutés")
     analysis_summary: str = Field(..., description="Résumé de l'analyse")
+    # Champs enrichis par IA (mode deep)
+    analysis_depth_used: str = Field("fast", description="Profondeur d'analyse utilisée")
+    llm_insights: Optional[List[LLMInsight]] = Field(
+        None,
+        description="Insights IA (mode deep): patterns, architecture, dette technique"
+    )
+    # Scoring et actions suggérées
+    refactoring_score: float = Field(
+        0.0,
+        description="Score de refactoring recommandé (0.0-1.0)",
+        ge=0.0,
+        le=1.0
+    )
+    refactoring_priority: str = Field(
+        "none",
+        description="Priorité: none, suggested, recommended, critical"
+    )
+    suggested_actions: List[SuggestedAction] = Field(
+        default_factory=list,
+        description="Actions suggérées (tools à appeler)"
+    )
+    # Résultat du chaînage automatique (si auto_chain=True)
+    auto_refactoring_triggered: bool = Field(
+        False,
+        description="True si le refactoring automatique a été déclenché"
+    )
+    auto_refactoring_result: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Résultat du refactoring automatique (si déclenché)"
+    )
 
 
 class RepoConsistencyCheckTool(BaseTool):
@@ -635,6 +706,284 @@ class RepoConsistencyCheckTool(BaseTool):
         
         return issues
 
+    def _calculate_refactoring_score(self, issues: List[ConsistencyIssue]) -> Tuple[float, str]:
+        """Calcule le score de refactoring basé sur les issues détectées."""
+        if not issues:
+            return 0.0, "none"
+        
+        # Pondération par sévérité
+        weights = {'high': 0.4, 'medium': 0.25, 'low': 0.1, 'info': 0.05}
+        total_weight = sum(weights.get(i.severity, 0.1) for i in issues)
+        
+        # Normaliser (max ~10 issues high = score 1.0)
+        score = min(1.0, total_weight / 4.0)
+        
+        # Déterminer la priorité
+        if score >= 0.8:
+            priority = "critical"
+        elif score >= 0.6:
+            priority = "recommended"
+        elif score >= 0.3:
+            priority = "suggested"
+        else:
+            priority = "none"
+        
+        return score, priority
+
+    def _generate_suggested_actions(
+        self, 
+        issues: List[ConsistencyIssue], 
+        files: List[FileInput],
+        score: float
+    ) -> List[SuggestedAction]:
+        """Génère les actions suggérées basées sur les issues."""
+        actions = []
+        
+        # Grouper les issues par type
+        issue_types = {}
+        for issue in issues:
+            issue_types.setdefault(issue.kind, []).append(issue)
+        
+        # Action de cleanup général si beaucoup d'issues
+        if len(issues) >= 5:
+            # Trouver le fichier avec le plus d'issues
+            file_issues = {}
+            for issue in issues:
+                file_issues.setdefault(issue.path, []).append(issue)
+            
+            worst_file = max(file_issues.items(), key=lambda x: len(x[1]))
+            file_content = next((f.content for f in files if f.path == worst_file[0]), "")
+            
+            actions.append(SuggestedAction(
+                tool_name="code_refactoring",
+                action_type="cleanup",
+                rationale=f"Fichier '{worst_file[0]}' a {len(worst_file[1])} problèmes de cohérence",
+                priority="high" if len(worst_file[1]) >= 5 else "medium",
+                params={
+                    "code": file_content[:5000],  # Limiter
+                    "language": self._detect_language(worst_file[0]),
+                    "refactoring_type": "clean",
+                    "file_path": worst_file[0]
+                },
+                score=score
+            ))
+        
+        # Actions spécifiques par type d'issue
+        if 'dead_code' in issue_types and len(issue_types['dead_code']) >= 2:
+            actions.append(SuggestedAction(
+                tool_name="code_refactoring",
+                action_type="cleanup",
+                rationale=f"{len(issue_types['dead_code'])} fonctions/classes mortes détectées",
+                priority="medium",
+                params={"refactoring_type": "clean"},
+                score=min(1.0, len(issue_types['dead_code']) * 0.2)
+            ))
+        
+        if 'duplication' in issue_types:
+            actions.append(SuggestedAction(
+                tool_name="code_refactoring",
+                action_type="restructure",
+                rationale=f"{len(issue_types['duplication'])} bloc(s) de code dupliqué(s)",
+                priority="medium",
+                params={"refactoring_type": "extract"},
+                score=min(1.0, len(issue_types['duplication']) * 0.25)
+            ))
+        
+        return actions[:5]  # Limiter
+
+    async def _deep_analysis_with_llm(
+        self,
+        request: ConsistencyCheckRequest,
+        issues: List[ConsistencyIssue],
+        llm_manager=None
+    ) -> Tuple[Optional[List[LLMInsight]], float, str]:
+        """
+        Enrichit l'analyse avec le LLM (mode deep).
+        
+        Retourne (insights, refactoring_score, priority) ou (None, score_heuristique, priority).
+        """
+        try:
+            manager = llm_manager or self.llm_manager
+            if not manager:
+                self.logger.warning("LLM manager non disponible pour analyse deep")
+                score, priority = self._calculate_refactoring_score(issues)
+                return None, score, priority
+            
+            # Préparer le contexte
+            files_summary = []
+            for f in request.files[:5]:
+                preview = f.content[:400] + "..." if len(f.content) > 400 else f.content
+                files_summary.append(f"### {f.path}\n```\n{preview}\n```")
+            
+            issues_summary = []
+            for issue in issues[:15]:
+                issues_summary.append(
+                    f"- [{issue.severity.upper()}] {issue.kind} @ {issue.path}:{issue.line or '?'}: {issue.message}"
+                )
+            
+            prompt = f"""Analyse les incohérences détectées dans ce code et fournis des insights.
+
+## Fichiers analysés
+{chr(10).join(files_summary)}
+
+## Issues détectées ({len(issues)} total)
+{chr(10).join(issues_summary) if issues_summary else "Aucune issue détectée"}
+
+---
+
+Fournis une analyse enrichie au format JSON strict:
+{{
+  "refactoring_score": 0.0-1.0,
+  "insights": [
+    {{
+      "category": "pattern|architecture|debt|suggestion",
+      "insight": "Description détaillée",
+      "confidence": "low|medium|high",
+      "affected_files": ["file1.py", "file2.ts"]
+    }}
+  ]
+}}
+
+Catégories d'insights:
+- **pattern**: Anti-patterns détectés (god class, spaghetti code, etc.)
+- **architecture**: Problèmes structurels (couplage, cohésion, responsabilités)
+- **debt**: Dette technique (complexité, maintenabilité)
+- **suggestion**: Recommandations d'amélioration
+
+Le `refactoring_score` doit refléter l'urgence d'un refactoring:
+- 0.0-0.3: Code acceptable, améliorations optionnelles
+- 0.3-0.6: Refactoring suggéré pour améliorer la maintenabilité
+- 0.6-0.8: Refactoring recommandé, risques de bugs
+- 0.8-1.0: Refactoring critique, dette technique élevée
+
+Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+
+            response = await manager.async_generate(prompt)
+            
+            if not response:
+                score, priority = self._calculate_refactoring_score(issues)
+                return None, score, priority
+            
+            # Parser la réponse
+            try:
+                clean_response = response.strip()
+                if clean_response.startswith("```"):
+                    clean_response = clean_response.split("\n", 1)[1]
+                if clean_response.endswith("```"):
+                    clean_response = clean_response.rsplit("```", 1)[0]
+                clean_response = clean_response.strip()
+                
+                data = json.loads(clean_response)
+                
+                llm_score = float(data.get("refactoring_score", 0.0))
+                llm_score = max(0.0, min(1.0, llm_score))
+                
+                # Combiner avec le score heuristique
+                heuristic_score, _ = self._calculate_refactoring_score(issues)
+                final_score = (llm_score * 0.6) + (heuristic_score * 0.4)
+                
+                # Priorité basée sur le score final
+                if final_score >= 0.8:
+                    priority = "critical"
+                elif final_score >= 0.6:
+                    priority = "recommended"
+                elif final_score >= 0.3:
+                    priority = "suggested"
+                else:
+                    priority = "none"
+                
+                # Parser les insights
+                insights = []
+                for item in data.get("insights", [])[:10]:
+                    if isinstance(item, dict) and "insight" in item:
+                        insights.append(LLMInsight(
+                            category=item.get("category", "suggestion"),
+                            insight=item["insight"],
+                            confidence=item.get("confidence", "medium"),
+                            affected_files=item.get("affected_files", [])
+                        ))
+                
+                self.logger.info(f"Analyse deep: {len(insights)} insights, score={final_score:.2f}")
+                return insights, final_score, priority
+                
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"Erreur parsing réponse LLM: {e}")
+                score, priority = self._calculate_refactoring_score(issues)
+                return None, score, priority
+                
+        except Exception as e:
+            self.logger.error(f"Erreur analyse deep: {e}")
+            score, priority = self._calculate_refactoring_score(issues)
+            return None, score, priority
+
+    async def _execute_auto_chain_refactoring(
+        self,
+        request: ConsistencyCheckRequest,
+        issues: List[ConsistencyIssue],
+        suggested_actions: List[SuggestedAction],
+        llm_manager=None,
+        ctx=None
+    ) -> Optional[Dict[str, Any]]:
+        """Exécute automatiquement le refactoring si le seuil est atteint."""
+        try:
+            # Importer le tool de refactoring
+            from .refactoring import RefactoringTool, RefactoringRequest
+            
+            # Trouver la meilleure action
+            if not suggested_actions:
+                return None
+            
+            best_action = max(suggested_actions, key=lambda a: a.score)
+            
+            if best_action.tool_name != "code_refactoring":
+                return None
+            
+            # Préparer la requête de refactoring
+            params = best_action.params
+            if not params.get("code"):
+                # Prendre le premier fichier avec des issues
+                file_with_issues = next(
+                    (f for f in request.files 
+                     if any(i.path == f.path for i in issues)),
+                    request.files[0] if request.files else None
+                )
+                if not file_with_issues:
+                    return None
+                params["code"] = file_with_issues.content[:5000]
+                params["language"] = file_with_issues.language or self._detect_language(file_with_issues.path)
+                params["file_path"] = file_with_issues.path
+            
+            refactoring_request = RefactoringRequest(
+                code=params.get("code", ""),
+                language=params.get("language", "python"),
+                refactoring_type=params.get("refactoring_type", "clean"),
+                file_path=params.get("file_path"),
+                parameters={"context": "auto-triggered from repo_consistency_check"}
+            )
+            
+            # Exécuter le refactoring
+            refactoring_tool = RefactoringTool(app_state=self.app_state)
+            result = refactoring_tool.execute(
+                refactoring_request,
+                llm_manager=llm_manager,
+                ctx=ctx
+            )
+            
+            self.logger.info(f"Auto-refactoring exécuté sur {params.get('file_path', 'fichier')}")
+            
+            return {
+                "file_path": params.get("file_path"),
+                "refactoring_type": params.get("refactoring_type"),
+                "original_code_preview": params.get("code", "")[:200] + "...",
+                "refactored_code_preview": result.refactored_code[:200] + "..." if result.refactored_code else None,
+                "changes_count": len(result.changes),
+                "explanation": result.explanation
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Erreur auto-chain refactoring: {e}")
+            return None
+
     def _execute_core_logic(self, request: ConsistencyCheckRequest, **kwargs) -> ConsistencyCheckResponse:
         """Exécute la vérification de cohérence."""
         self.logger.info(f"Vérification de cohérence sur {len(request.files)} fichier(s)")
@@ -685,6 +1034,64 @@ class RepoConsistencyCheckTool(BaseTool):
             'info': severity_counts['info'],
         }
         
+        # Récupérer les services depuis kwargs
+        llm_manager = kwargs.get('llm_manager') or self.llm_manager
+        ctx = kwargs.get('ctx')
+        
+        # Mode deep: enrichissement IA
+        llm_insights = None
+        analysis_depth_used = "fast"
+        refactoring_score = 0.0
+        refactoring_priority = "none"
+        
+        if request.analysis_depth == "deep":
+            self.logger.info("Mode deep: enrichissement IA en cours...")
+            analysis_depth_used = "deep"
+            
+            try:
+                coro = self._deep_analysis_with_llm(request, all_issues, llm_manager)
+                try:
+                    loop = asyncio.get_running_loop()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, coro)
+                        llm_insights, refactoring_score, refactoring_priority = future.result(timeout=30)
+                except RuntimeError:
+                    llm_insights, refactoring_score, refactoring_priority = asyncio.run(coro)
+            except Exception as e:
+                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
+                refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
+        else:
+            # Mode fast: scoring heuristique uniquement
+            refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
+        
+        # Générer les actions suggérées
+        suggested_actions = self._generate_suggested_actions(all_issues, request.files, refactoring_score)
+        
+        # Auto-chain: déclencher le refactoring si seuil atteint
+        auto_refactoring_triggered = False
+        auto_refactoring_result = None
+        
+        if request.auto_chain and refactoring_score >= request.refactoring_threshold and suggested_actions:
+            self.logger.info(f"Auto-chain: score {refactoring_score:.2f} >= seuil {request.refactoring_threshold}")
+            try:
+                coro = self._execute_auto_chain_refactoring(
+                    request, all_issues, suggested_actions, llm_manager, ctx
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, coro)
+                        auto_refactoring_result = future.result(timeout=60)
+                except RuntimeError:
+                    auto_refactoring_result = asyncio.run(coro)
+                
+                if auto_refactoring_result:
+                    auto_refactoring_triggered = True
+            except Exception as e:
+                self.logger.warning(f"Erreur auto-chain: {e}")
+        
         # Construire le résumé
         if not all_issues:
             analysis_summary = f"✅ Aucune incohérence détectée dans {len(request.files)} fichier(s)."
@@ -695,11 +1102,26 @@ class RepoConsistencyCheckTool(BaseTool):
                 f"Basse({severity_counts['low']}), Info({severity_counts['info']})."
             )
         
+        if analysis_depth_used == "deep":
+            analysis_summary += f" 🤖 Score refactoring: {refactoring_score:.0%} ({refactoring_priority})."
+            if llm_insights:
+                analysis_summary += f" {len(llm_insights)} insight(s) IA."
+        
+        if auto_refactoring_triggered:
+            analysis_summary += " 🔧 Refactoring auto-déclenché."
+        
         return ConsistencyCheckResponse(
             valid=len(all_issues) == 0,
             summary=summary,
-            issues=all_issues[:100],  # Limiter
+            issues=all_issues[:100],
             files_analyzed=len(request.files),
             checks_performed=checks,
-            analysis_summary=analysis_summary
+            analysis_summary=analysis_summary,
+            analysis_depth_used=analysis_depth_used,
+            llm_insights=llm_insights,
+            refactoring_score=refactoring_score,
+            refactoring_priority=refactoring_priority,
+            suggested_actions=suggested_actions,
+            auto_refactoring_triggered=auto_refactoring_triggered,
+            auto_refactoring_result=auto_refactoring_result
         )
