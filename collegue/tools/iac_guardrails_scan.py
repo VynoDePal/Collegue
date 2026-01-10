@@ -14,6 +14,8 @@ Bénéfice: Rend l'IA utilisable pour IaC sans "roulette russe" sécurité.
 """
 import re
 import yaml
+import asyncio
+import json
 from typing import Optional, Dict, Any, List, Type, Tuple
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
@@ -61,6 +63,20 @@ class IacGuardrailsRequest(BaseModel):
         "json",
         description="Format de sortie: 'json' ou 'sarif'"
     )
+    analysis_depth: str = Field(
+        "fast",
+        description="Profondeur IA: 'fast' (règles seules) ou 'deep' (enrichissement LLM avec scoring)"
+    )
+    auto_chain: bool = Field(
+        False,
+        description="Si True et security_score < seuil, déclenche automatiquement la remédiation"
+    )
+    remediation_threshold: float = Field(
+        0.5,
+        description="Seuil de security_score (0.0-1.0) sous lequel déclencher auto_chain",
+        ge=0.0,
+        le=1.0
+    )
     
     @field_validator('policy_profile')
     def validate_profile(cls, v):
@@ -75,6 +91,13 @@ class IacGuardrailsRequest(BaseModel):
         for engine in v:
             if engine not in valid:
                 raise ValueError(f"Engine '{engine}' invalide. Utilisez: {', '.join(valid)}")
+        return v
+    
+    @field_validator('analysis_depth')
+    def validate_analysis_depth(cls, v):
+        valid = ['fast', 'deep']
+        if v not in valid:
+            raise ValueError(f"Depth '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
 
 
@@ -92,6 +115,25 @@ class IacFinding(BaseModel):
     engine: str = Field("embedded-rules", description="Moteur qui a détecté")
 
 
+class LLMSecurityInsight(BaseModel):
+    """Un insight de sécurité généré par l'IA en mode deep."""
+    category: str = Field(..., description="Catégorie: vulnerability, misconfiguration, compliance, best_practice")
+    insight: str = Field(..., description="L'insight détaillé")
+    risk_level: str = Field("medium", description="Niveau de risque: low, medium, high, critical")
+    affected_resources: List[str] = Field(default_factory=list, description="Ressources concernées")
+    compliance_frameworks: List[str] = Field(default_factory=list, description="Standards impactés: CIS, SOC2, HIPAA, etc.")
+
+
+class RemediationAction(BaseModel):
+    """Une action de remédiation suggérée (potentiellement auto-exécutable)."""
+    tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
+    action_type: str = Field(..., description="Type: fix_config, add_security, remove_exposure")
+    rationale: str = Field(..., description="Pourquoi cette action")
+    priority: str = Field("medium", description="Priorité: low, medium, high, critical")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Paramètres pour le tool")
+    score: float = Field(0.0, description="Score de pertinence (0.0-1.0)", ge=0.0, le=1.0)
+
+
 class IacGuardrailsResponse(BaseModel):
     """Modèle de réponse pour le scan IaC."""
     passed: bool = Field(..., description="True si aucun problème critique/high")
@@ -107,6 +149,42 @@ class IacGuardrailsResponse(BaseModel):
     rules_evaluated: int = Field(..., description="Nombre de règles évaluées")
     scan_summary: str = Field(..., description="Résumé du scan")
     sarif: Optional[Dict] = Field(None, description="Sortie SARIF si demandée")
+    # Champs enrichis par IA (mode deep)
+    analysis_depth_used: str = Field("fast", description="Profondeur d'analyse utilisée")
+    llm_insights: Optional[List[LLMSecurityInsight]] = Field(
+        None,
+        description="Insights IA (mode deep): vulnérabilités, compliance, best practices"
+    )
+    # Scoring sécurité
+    security_score: float = Field(
+        1.0,
+        description="Score de sécurité global (0.0=critique, 1.0=sécurisé)",
+        ge=0.0,
+        le=1.0
+    )
+    compliance_score: float = Field(
+        1.0,
+        description="Score de conformité (0.0=non conforme, 1.0=conforme)",
+        ge=0.0,
+        le=1.0
+    )
+    risk_level: str = Field(
+        "low",
+        description="Niveau de risque global: low, medium, high, critical"
+    )
+    suggested_remediations: List[RemediationAction] = Field(
+        default_factory=list,
+        description="Actions de remédiation suggérées"
+    )
+    # Résultat du chaînage automatique
+    auto_remediation_triggered: bool = Field(
+        False,
+        description="True si la remédiation automatique a été déclenchée"
+    )
+    auto_remediation_result: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Résultat de la remédiation automatique (si déclenchée)"
+    )
 
 
 class IacGuardrailsScanTool(BaseTool):
@@ -756,6 +834,271 @@ class IacGuardrailsScanTool(BaseTool):
             }]
         }
 
+    def _calculate_security_scores(self, findings: List[IacFinding]) -> Tuple[float, float, str]:
+        """Calcule les scores de sécurité et compliance basés sur les findings."""
+        if not findings:
+            return 1.0, 1.0, "low"
+        
+        # Pondération par sévérité
+        severity_weights = {'critical': 0.4, 'high': 0.25, 'medium': 0.1, 'low': 0.05}
+        total_weight = sum(severity_weights.get(f.severity, 0.05) for f in findings)
+        
+        # Score de sécurité (1.0 = parfait, 0.0 = critique)
+        security_score = max(0.0, 1.0 - (total_weight / 2.0))
+        
+        # Score de compliance (basé sur les règles K8S/TF qui mappent aux standards)
+        compliance_related = [f for f in findings if f.rule_id.startswith(('K8S-', 'TF-'))]
+        compliance_score = max(0.0, 1.0 - (len(compliance_related) * 0.1))
+        
+        # Niveau de risque global
+        critical_count = sum(1 for f in findings if f.severity == 'critical')
+        high_count = sum(1 for f in findings if f.severity == 'high')
+        
+        if critical_count > 0:
+            risk_level = "critical"
+        elif high_count >= 2:
+            risk_level = "high"
+        elif high_count > 0 or len(findings) >= 5:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+        
+        return security_score, compliance_score, risk_level
+
+    def _generate_remediation_actions(
+        self,
+        findings: List[IacFinding],
+        files: List[FileInput],
+        security_score: float
+    ) -> List[RemediationAction]:
+        """Génère les actions de remédiation suggérées."""
+        actions = []
+        
+        # Grouper par fichier
+        file_findings = {}
+        for f in findings:
+            file_findings.setdefault(f.path, []).append(f)
+        
+        # Générer une action par fichier avec des problèmes critiques/high
+        for filepath, file_issues in file_findings.items():
+            critical_high = [f for f in file_issues if f.severity in ('critical', 'high')]
+            if not critical_high:
+                continue
+            
+            file_content = next((f.content for f in files if f.path == filepath), "")
+            file_type = self._detect_file_type(filepath, file_content)
+            
+            # Construire les remédiations à appliquer
+            remediations = [f"{f.title}: {f.remediation}" for f in critical_high[:3]]
+            
+            actions.append(RemediationAction(
+                tool_name="code_refactoring",
+                action_type="fix_config",
+                rationale=f"{len(critical_high)} problème(s) critique(s)/haut(s) dans {filepath}",
+                priority="critical" if any(f.severity == 'critical' for f in critical_high) else "high",
+                params={
+                    "code": file_content[:5000],
+                    "language": file_type,
+                    "refactoring_type": "clean",
+                    "file_path": filepath,
+                    "instructions": "; ".join(remediations)
+                },
+                score=1.0 - security_score
+            ))
+        
+        return actions[:5]
+
+    async def _deep_analysis_with_llm(
+        self,
+        request: IacGuardrailsRequest,
+        findings: List[IacFinding],
+        llm_manager=None
+    ) -> Tuple[Optional[List[LLMSecurityInsight]], float, float, str]:
+        """
+        Enrichit l'analyse avec le LLM (mode deep).
+        
+        Retourne (insights, security_score, compliance_score, risk_level).
+        """
+        try:
+            manager = llm_manager or self.llm_manager
+            if not manager:
+                self.logger.warning("LLM manager non disponible pour analyse deep")
+                return None, *self._calculate_security_scores(findings)
+            
+            # Préparer le contexte
+            files_summary = []
+            for f in request.files[:3]:
+                file_type = self._detect_file_type(f.path, f.content)
+                preview = f.content[:500] + "..." if len(f.content) > 500 else f.content
+                files_summary.append(f"### {f.path} ({file_type})\n```\n{preview}\n```")
+            
+            findings_summary = []
+            for finding in findings[:10]:
+                findings_summary.append(
+                    f"- [{finding.severity.upper()}] {finding.rule_id}: {finding.title} @ {finding.path}"
+                )
+            
+            cloud = request.platform.get('cloud', 'aws') if request.platform else 'aws'
+            
+            prompt = f"""Analyse les configurations IaC et les problèmes de sécurité détectés.
+
+## Fichiers IaC analysés
+{chr(10).join(files_summary)}
+
+## Findings ({len(findings)} total)
+{chr(10).join(findings_summary) if findings_summary else "Aucun finding détecté"}
+
+## Contexte
+- Cloud provider: {cloud}
+- Profil: {request.policy_profile}
+
+---
+
+Fournis une analyse de sécurité enrichie au format JSON strict:
+{{
+  "security_score": 0.0-1.0,
+  "compliance_score": 0.0-1.0,
+  "risk_level": "low|medium|high|critical",
+  "insights": [
+    {{
+      "category": "vulnerability|misconfiguration|compliance|best_practice",
+      "insight": "Description détaillée du problème ou de la recommandation",
+      "risk_level": "low|medium|high|critical",
+      "affected_resources": ["resource1", "resource2"],
+      "compliance_frameworks": ["CIS", "SOC2", "HIPAA"]
+    }}
+  ]
+}}
+
+Catégories d'insights:
+- **vulnerability**: Failles de sécurité exploitables
+- **misconfiguration**: Configurations incorrectes ou dangereuses
+- **compliance**: Non-conformité aux standards (CIS, SOC2, HIPAA, PCI-DSS)
+- **best_practice**: Recommandations d'amélioration
+
+Scores:
+- `security_score`: 1.0 = sécurisé, 0.0 = critique
+- `compliance_score`: 1.0 = conforme, 0.0 = non conforme
+
+Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+
+            response = await manager.async_generate(prompt)
+            
+            if not response:
+                return None, *self._calculate_security_scores(findings)
+            
+            # Parser la réponse
+            try:
+                clean_response = response.strip()
+                if clean_response.startswith("```"):
+                    clean_response = clean_response.split("\n", 1)[1]
+                if clean_response.endswith("```"):
+                    clean_response = clean_response.rsplit("```", 1)[0]
+                clean_response = clean_response.strip()
+                
+                data = json.loads(clean_response)
+                
+                llm_security = float(data.get("security_score", 0.5))
+                llm_compliance = float(data.get("compliance_score", 0.5))
+                llm_risk = data.get("risk_level", "medium")
+                
+                # Combiner avec les scores heuristiques
+                heur_security, heur_compliance, _ = self._calculate_security_scores(findings)
+                final_security = (llm_security * 0.6) + (heur_security * 0.4)
+                final_compliance = (llm_compliance * 0.6) + (heur_compliance * 0.4)
+                
+                # Niveau de risque basé sur le score final
+                if final_security < 0.3:
+                    risk_level = "critical"
+                elif final_security < 0.5:
+                    risk_level = "high"
+                elif final_security < 0.7:
+                    risk_level = "medium"
+                else:
+                    risk_level = "low"
+                
+                # Parser les insights
+                insights = []
+                for item in data.get("insights", [])[:10]:
+                    if isinstance(item, dict) and "insight" in item:
+                        insights.append(LLMSecurityInsight(
+                            category=item.get("category", "best_practice"),
+                            insight=item["insight"],
+                            risk_level=item.get("risk_level", "medium"),
+                            affected_resources=item.get("affected_resources", []),
+                            compliance_frameworks=item.get("compliance_frameworks", [])
+                        ))
+                
+                self.logger.info(f"Analyse deep: {len(insights)} insights, security={final_security:.2f}")
+                return insights, final_security, final_compliance, risk_level
+                
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"Erreur parsing réponse LLM: {e}")
+                return None, *self._calculate_security_scores(findings)
+                
+        except Exception as e:
+            self.logger.error(f"Erreur analyse deep: {e}")
+            return None, *self._calculate_security_scores(findings)
+
+    async def _execute_auto_remediation(
+        self,
+        request: IacGuardrailsRequest,
+        findings: List[IacFinding],
+        remediations: List[RemediationAction],
+        llm_manager=None,
+        ctx=None
+    ) -> Optional[Dict[str, Any]]:
+        """Exécute automatiquement la remédiation si le seuil est atteint."""
+        try:
+            from .refactoring import RefactoringTool, RefactoringRequest
+            
+            if not remediations:
+                return None
+            
+            # Prendre l'action avec le score le plus élevé
+            best_action = max(remediations, key=lambda a: a.score)
+            
+            if best_action.tool_name != "code_refactoring":
+                return None
+            
+            params = best_action.params
+            if not params.get("code"):
+                return None
+            
+            refactoring_request = RefactoringRequest(
+                code=params.get("code", ""),
+                language=params.get("language", "yaml"),
+                refactoring_type=params.get("refactoring_type", "clean"),
+                file_path=params.get("file_path"),
+                parameters={
+                    "context": "auto-triggered from iac_guardrails_scan",
+                    "security_fix": True,
+                    "instructions": params.get("instructions", "")
+                }
+            )
+            
+            refactoring_tool = RefactoringTool(app_state=self.app_state)
+            result = refactoring_tool.execute(
+                refactoring_request,
+                llm_manager=llm_manager,
+                ctx=ctx
+            )
+            
+            self.logger.info(f"Auto-remediation exécutée sur {params.get('file_path', 'fichier')}")
+            
+            return {
+                "file_path": params.get("file_path"),
+                "issues_fixed": len([f for f in findings if f.path == params.get("file_path")]),
+                "original_preview": params.get("code", "")[:200] + "...",
+                "remediated_preview": result.refactored_code[:200] + "..." if result.refactored_code else None,
+                "changes_count": len(result.changes),
+                "explanation": result.explanation
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Erreur auto-remediation: {e}")
+            return None
+
     def _execute_core_logic(self, request: IacGuardrailsRequest, **kwargs) -> IacGuardrailsResponse:
         """Exécute le scan IaC."""
         self.logger.info(f"Scan IaC de {len(request.files)} fichier(s) avec profil '{request.policy_profile}'")
@@ -818,6 +1161,65 @@ class IacGuardrailsScanTool(BaseTool):
             'skipped': 0,
         }
         
+        # Récupérer les services depuis kwargs
+        llm_manager = kwargs.get('llm_manager') or self.llm_manager
+        ctx = kwargs.get('ctx')
+        
+        # Mode deep: enrichissement IA
+        llm_insights = None
+        analysis_depth_used = "fast"
+        security_score = 1.0
+        compliance_score = 1.0
+        risk_level = "low"
+        
+        if request.analysis_depth == "deep":
+            self.logger.info("Mode deep: enrichissement IA sécurité en cours...")
+            analysis_depth_used = "deep"
+            
+            try:
+                coro = self._deep_analysis_with_llm(request, unique_findings, llm_manager)
+                try:
+                    loop = asyncio.get_running_loop()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, coro)
+                        llm_insights, security_score, compliance_score, risk_level = future.result(timeout=30)
+                except RuntimeError:
+                    llm_insights, security_score, compliance_score, risk_level = asyncio.run(coro)
+            except Exception as e:
+                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
+                security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
+        else:
+            # Mode fast: scoring heuristique uniquement
+            security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
+        
+        # Générer les actions de remédiation
+        suggested_remediations = self._generate_remediation_actions(unique_findings, request.files, security_score)
+        
+        # Auto-chain: déclencher la remédiation si seuil atteint
+        auto_remediation_triggered = False
+        auto_remediation_result = None
+        
+        if request.auto_chain and security_score < request.remediation_threshold and suggested_remediations:
+            self.logger.info(f"Auto-remediation: security_score {security_score:.2f} < seuil {request.remediation_threshold}")
+            try:
+                coro = self._execute_auto_remediation(
+                    request, unique_findings, suggested_remediations, llm_manager, ctx
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, coro)
+                        auto_remediation_result = future.result(timeout=60)
+                except RuntimeError:
+                    auto_remediation_result = asyncio.run(coro)
+                
+                if auto_remediation_result:
+                    auto_remediation_triggered = True
+            except Exception as e:
+                self.logger.warning(f"Erreur auto-remediation: {e}")
+        
         # Construire le résumé
         if passed and not unique_findings:
             scan_summary = f"✅ Aucun problème de sécurité détecté dans {len(request.files)} fichier(s) IaC."
@@ -833,6 +1235,14 @@ class IacGuardrailsScanTool(BaseTool):
                 f"Moyenne({severity_counts['medium']}), Basse({severity_counts['low']})."
             )
         
+        if analysis_depth_used == "deep":
+            scan_summary += f" 🔒 Score sécurité: {security_score:.0%}, Compliance: {compliance_score:.0%} (risque: {risk_level})."
+            if llm_insights:
+                scan_summary += f" {len(llm_insights)} insight(s) IA."
+        
+        if auto_remediation_triggered:
+            scan_summary += " 🔧 Remédiation auto-déclenchée."
+        
         # Générer SARIF si demandé
         sarif_output = None
         if request.output_format == 'sarif':
@@ -841,9 +1251,17 @@ class IacGuardrailsScanTool(BaseTool):
         return IacGuardrailsResponse(
             passed=passed,
             summary=summary,
-            findings=unique_findings[:100],  # Limiter
+            findings=unique_findings[:100],
             files_scanned=len(request.files),
             rules_evaluated=rules_count,
             scan_summary=scan_summary,
-            sarif=sarif_output
+            sarif=sarif_output,
+            analysis_depth_used=analysis_depth_used,
+            llm_insights=llm_insights,
+            security_score=security_score,
+            compliance_score=compliance_score,
+            risk_level=risk_level,
+            suggested_remediations=suggested_remediations,
+            auto_remediation_triggered=auto_remediation_triggered,
+            auto_remediation_result=auto_remediation_result
         )
