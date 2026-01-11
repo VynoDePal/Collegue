@@ -3,20 +3,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: collegue-app:latest # Assurez-vous que cette image est construite et disponible
+    image: collegue-app:latest
     restart: always
     networks:
       - collegue-net
     environment:
-      # Décommentez et configurez vos variables d'environnement ici ou via un fichier .env
       PYTHONUNBUFFERED: 1
-      # LLM_API_KEY: ${LLM_API_KEY}
-      # ... autres variables nécessaires à collegue-app
-      PORT: 4121 # Port interne sur lequel l'application Collegue écoute
-      # Configuration pour http
+      PORT: 4121
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
-    # Si vous utilisez un fichier .env, décommentez la ligne suivante
     env_file:
       - .env
     deploy:
@@ -27,16 +22,16 @@ services:
       restart_policy:
         condition: on-failure
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4122/_health"] # Utilise HEALTH_PORT (4122)
+      test: ["CMD", "curl", "-f", "http://localhost:4122/_health"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s # Donne du temps à l'application pour démarrer avant de commencer les healthchecks
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
-        max-size: "10m" # Taille maximale de chaque fichier log
-        max-file: "3"   # Nombre de fichiers de log à conserver (rotation)
+        max-size: "10m"
+        max-file: "3"
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.3.2
@@ -52,7 +47,6 @@ services:
       - "4123:8080"
     networks:
       - collegue-net
-    # healthcheck removed: keycloak image may not include curl/wget
 
   kc-provisioner:
     build:
@@ -79,117 +73,24 @@ services:
       dockerfile: Dockerfile
     restart: always
     ports:
-      - "8088:80" # Expose le port 8088 publiquement, mappé sur le port 80 de Nginx
-      # Si vous voulez utiliser HTTPS (recommandé en production), vous exposerez le 443
-      # - "443:443"
+      - "8088:80"
     volumes:
-      # Pour HTTPS avec Let's Encrypt, vous monteriez aussi les certificats ici
-      # - ./nginx/certs:/etc/nginx/certs:ro 
-      - nginx_logs:/var/log/nginx # Volume pour les logs Nginx
+      - nginx_logs:/var/log/nginx
     networks:
       - collegue-net
     depends_on:
       collegue-app:
-        condition: service_healthy # Nginx ne démarrera que si collegue-app est healthy
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  # nginx-https:
-  #   image: nginx:latest
-  #   profiles:
-  #     - prod
-  #   restart: always
-  #   ports:
-  #     - "80:80"   # HTTP (ACME challenge + redirection)
-  #     - "443:443" # HTTPS (production)
-  #   volumes:
-  #     - ./nginx/nginx-https.conf.example:/etc/nginx/nginx.conf:ro
-  #     - ./certbot/www:/var/www/certbot
-  #     - ./letsencrypt:/etc/letsencrypt
-  #     - nginx_logs:/var/log/nginx
-  #   environment:
-  #     PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
-  #   entrypoint: /bin/sh
-  #   command:
-  #     - -c
-  #     - |
-  #       set -e
-  #       nginx -g 'daemon off;' &
-  #       pid=$!
-  #       echo "[nginx-https] watcher de flag démarré, PID nginx=$pid"
-  #       FLAG="/var/www/certbot/reload.flag"
-  #       while kill -0 "$pid" 2>/dev/null; do
-  #         if [ -f "$FLAG" ]; then
-  #           echo "[nginx-https] flag de reload détecté -> nginx -s reload"
-  #           rm -f "$FLAG" || true
-  #           nginx -s reload || true
-  #         fi
-  #         sleep 2
-  #       done
-  #       wait "$pid"
-  #   networks:
-  #     - collegue-net
-  #   depends_on:
-  #     collegue-app:
-  #       condition: service_healthy
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "3"
-
-  # certbot:
-  #   image: certbot/certbot:latest
-  #   profiles:
-  #     - prod
-  #   restart: always
-  #   environment:
-  #     PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
-  #     LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
-  #     CERTBOT_STAGING: ${CERTBOT_STAGING:-0}
-  #   volumes:
-  #     - ./letsencrypt:/etc/letsencrypt
-  #     - ./certbot/www:/var/www/certbot
-  #   entrypoint: /bin/sh
-  #   command:
-  #     - -c
-  #     - |
-  #       trap exit TERM
-  #       while :; do
-  #         if [ -z "${PUBLIC_DOMAIN}" ] || [ -z "${LETSENCRYPT_EMAIL}" ]; then
-  #           echo "[certbot] PUBLIC_DOMAIN et LETSENCRYPT_EMAIL doivent être définis" >&2
-  #           sleep 3600; continue
-  #         fi
-  #         if [ ! -f "/etc/letsencrypt/live/${PUBLIC_DOMAIN}/fullchain.pem" ]; then
-  #           echo "[certbot] Émission du certificat pour ${PUBLIC_DOMAIN}..."
-  #           if [ "${CERTBOT_STAGING}" = "1" ]; then STAGING="--staging"; else STAGING=""; fi
-  #           certbot certonly --webroot -w /var/www/certbot \
-  #             -d "${PUBLIC_DOMAIN}" \
-  #             --email "${LETSENCRYPT_EMAIL}" --agree-tos --non-interactive $STAGING \
-  #             --deploy-hook "touch /var/www/certbot/reload.flag" || true
-  #         else
-  #           echo "[certbot] Renouvellement des certificats..."
-  #           certbot renew --webroot -w /var/www/certbot --quiet \
-  #             --deploy-hook "touch /var/www/certbot/reload.flag" || true
-  #         fi
-  #         sleep 12h & wait $!
-  #       done
-  #   depends_on:
-  #     - nginx-https
-  #   networks:
-  #     - collegue-net
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "3"
 
 networks:
   collegue-net:
     driver: bridge
 
 volumes:
-  nginx_logs: # Volume pour persister les logs Nginx
+  nginx_logs:
