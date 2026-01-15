@@ -39,6 +39,10 @@ def register_resources(app, app_state):
         # Ressources LLM
         from .llm import register as register_llm
         register_llm(app, app_state)
+
+        # Ressources Git
+        from .git import register as register_git
+        register_git(app, app_state)
         
         print("✅ Toutes les ressources ont été chargées avec succès")
         
