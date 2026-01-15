@@ -245,3 +245,6 @@ cython_debug/
 collegue/prompts/templates/templates/
 collegue/prompts/versions/versions.json
 
+# AI
+.ai/
+
