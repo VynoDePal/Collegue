@@ -5,11 +5,6 @@
 echo "Starting health server..."
 python3 /app/collegue/health_server.py &
 
-# Configuration Git pour éviter l'erreur "dubious ownership" avec les volumes montés
-if command -v git >/dev/null 2>&1; then
-    git config --global --add safe.directory /app
-fi
-
 # Attend un petit peu pour laisser le temps au serveur de santé de démarrer
 sleep 3
 
