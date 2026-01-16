@@ -17,20 +17,41 @@ except ImportError:
 
 
 class GitHubRequest(BaseModel):
-    """Modèle de requête pour les opérations GitHub."""
+    """Modèle de requête pour les opérations GitHub.
+    
+    PARAMÈTRES REQUIS PAR COMMANDE:
+    - list_repos: owner (optionnel, liste vos repos si omis)
+    - get_repo: owner + repo
+    - list_prs: owner + repo
+    - get_pr: owner + repo + pr_number
+    - pr_files: owner + repo + pr_number
+    - pr_comments: owner + repo + pr_number
+    - list_issues: owner + repo
+    - get_issue: owner + repo + issue_number
+    - repo_branches: owner + repo
+    - repo_commits: owner + repo
+    - search_code: query (owner/repo optionnels pour filtrer)
+    - list_workflows: owner + repo
+    """
     command: str = Field(
         ...,
-        description="Commande: list_repos, get_repo, list_prs, get_pr, list_issues, get_issue, pr_files, pr_comments, repo_branches, repo_commits, search_code"
+        description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, list_prs, get_pr, list_issues, get_issue, pr_files, pr_comments, repo_branches, repo_commits, search_code, list_workflows"
     )
-    owner: Optional[str] = Field(None, description="Propriétaire du repo (user ou org)")
-    repo: Optional[str] = Field(None, description="Nom du repository")
-    pr_number: Optional[int] = Field(None, description="Numéro de la PR")
-    issue_number: Optional[int] = Field(None, description="Numéro de l'issue")
-    branch: Optional[str] = Field(None, description="Nom de la branche")
-    state: str = Field("open", description="État: open, closed, all")
-    query: Optional[str] = Field(None, description="Requête de recherche")
-    limit: int = Field(30, description="Limite de résultats", ge=1, le=100)
-    token: Optional[str] = Field(None, description="GitHub token (utilise GITHUB_TOKEN si non fourni)")
+    owner: Optional[str] = Field(
+        None, 
+        description="REQUIS pour la plupart des commandes. Propriétaire du repo (username ou organisation). Ex: 'microsoft', 'facebook', 'modelcontextprotocol'"
+    )
+    repo: Optional[str] = Field(
+        None, 
+        description="REQUIS avec owner pour get_repo, list_prs, list_issues, etc. Nom du repository. Ex: 'vscode', 'react', 'servers'"
+    )
+    pr_number: Optional[int] = Field(None, description="Numéro de la PR (requis pour get_pr, pr_files, pr_comments)")
+    issue_number: Optional[int] = Field(None, description="Numéro de l'issue (requis pour get_issue)")
+    branch: Optional[str] = Field(None, description="Nom de la branche pour filtrer les commits")
+    state: str = Field("open", description="Filtre par état: 'open', 'closed', ou 'all'")
+    query: Optional[str] = Field(None, description="Requête de recherche (requis pour search_code)")
+    limit: int = Field(30, description="Nombre max de résultats (1-100)", ge=1, le=100)
+    token: Optional[str] = Field(None, description="Token GitHub (utilise automatiquement GITHUB_TOKEN de l'environnement si non fourni)")
     
     @field_validator('command')
     @classmethod
@@ -184,7 +205,11 @@ class GitHubOpsTool(BaseTool):
         return "github_ops"
     
     def get_description(self) -> str:
-        return "Interagit avec GitHub: repos, PRs, issues, branches, CI/CD, recherche de code"
+        return (
+            "Interagit avec l'API GitHub. IMPORTANT: Pour list_prs, list_issues, get_repo, "
+            "vous DEVEZ fournir 'owner' ET 'repo' (ex: owner='microsoft', repo='vscode'). "
+            "Commandes: list_repos, get_repo, list_prs, get_pr, list_issues, repo_branches, search_code"
+        )
     
     def get_request_model(self) -> Type[BaseModel]:
         return GitHubRequest
@@ -204,7 +229,14 @@ class GitHubOpsTool(BaseTool):
         }
         if gh_token:
             headers["Authorization"] = f"Bearer {gh_token}"
+            self.logger.debug(f"Token GitHub configuré (longueur: {len(gh_token)})")
+        else:
+            self.logger.warning("Aucun token GitHub configuré - accès limité aux repos publics")
         return headers
+    
+    def _has_token(self, token: Optional[str] = None) -> bool:
+        """Vérifie si un token est disponible."""
+        return bool(token or os.environ.get('GITHUB_TOKEN'))
     
     def _api_get(self, endpoint: str, token: Optional[str] = None, params: Optional[Dict] = None) -> Any:
         """Effectue une requête GET à l'API GitHub."""
@@ -220,7 +252,16 @@ class GitHubOpsTool(BaseTool):
             if response.status_code == 404:
                 raise ToolExecutionError(f"Ressource introuvable: {endpoint}")
             elif response.status_code == 401:
-                raise ToolExecutionError("Token GitHub invalide ou expiré")
+                has_token = self._has_token(token)
+                if has_token:
+                    raise ToolExecutionError(
+                        "Token GitHub invalide ou expiré. Vérifiez que GITHUB_TOKEN est correct dans la config MCP env."
+                    )
+                else:
+                    raise ToolExecutionError(
+                        "Authentification requise. Configurez GITHUB_TOKEN dans le bloc 'env' de votre config MCP. "
+                        "Pour les repos publics, fournissez owner explicitement (ex: owner='microsoft')."
+                    )
             elif response.status_code == 403:
                 remaining = response.headers.get('X-RateLimit-Remaining', '?')
                 raise ToolExecutionError(f"Rate limit GitHub atteint. Restant: {remaining}")
