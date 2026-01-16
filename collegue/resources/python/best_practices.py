@@ -3,6 +3,7 @@ Best Practices Python - Ressources pour les bonnes pratiques en Python
 """
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
+import json
 
 class PythonBestPractice(BaseModel):
     """Modèle pour une bonne pratique Python."""
@@ -130,32 +131,20 @@ def get_best_practices_by_category(category: str) -> List[str]:
 def register_best_practices(app, app_state):
     """Enregistre les ressources des bonnes pratiques Python."""
     
-    @app.get("/resources/python/best-practices")
-    async def list_python_best_practices():
+    @app.resource("collegue://python/best-practices/index")
+    def get_best_practices_index() -> str:
         """Liste toutes les bonnes pratiques Python disponibles."""
-        return {"practices": get_all_best_practices()}
+        return json.dumps(get_all_best_practices())
     
-    @app.get("/resources/python/best-practices/category/{category}")
-    async def list_best_practices_by_category(category: str):
+    @app.resource("collegue://python/best-practices/category/{category}")
+    def get_best_practices_by_category_resource(category: str) -> str:
         """Liste les bonnes pratiques d'une catégorie spécifique."""
-        return {"practices": get_best_practices_by_category(category)}
+        return json.dumps(get_best_practices_by_category(category))
     
-    @app.get("/resources/python/best-practices/{practice_id}")
-    async def get_best_practice_info(practice_id: str):
+    @app.resource("collegue://python/best-practices/{practice_id}")
+    def get_best_practice_resource(practice_id: str) -> str:
         """Récupère les informations d'une bonne pratique spécifique."""
         practice = get_best_practice(practice_id)
         if practice:
-            return practice.model_dump()
-        return {"error": f"Bonne pratique {practice_id} non trouvée"}
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "python_best_practices",
-            {
-                "description": "Bonnes pratiques Python",
-                "practices": get_all_best_practices(),
-                "get_practice": get_best_practice,
-                "get_by_category": get_best_practices_by_category
-            }
-        )
+            return practice.model_dump_json()
+        return json.dumps({"error": f"Bonne pratique {practice_id} non trouvée"})

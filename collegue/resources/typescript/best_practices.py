@@ -5,6 +5,7 @@ Ce module fournit des recommandations et bonnes pratiques pour le développement
 """
 from fastmcp import FastMCP
 from typing import Dict, Any, List
+import json
 
 # Bonnes pratiques générales TypeScript
 GENERAL_BEST_PRACTICES = {
@@ -375,48 +376,45 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
-    @app.resource("ts://best_practices/general")
-    def typescript_general_best_practices():
+    @app.resource("collegue://typescript/best_practices/general")
+    def typescript_general_best_practices() -> str:
         """Fournit des bonnes pratiques générales pour TypeScript."""
-        return GENERAL_BEST_PRACTICES
+        return json.dumps(GENERAL_BEST_PRACTICES)
     
-    @app.resource("ts://best_practices/functions")
-    def typescript_function_best_practices():
+    @app.resource("collegue://typescript/best_practices/functions")
+    def typescript_function_best_practices() -> str:
         """Fournit des bonnes pratiques pour les fonctions TypeScript."""
-        return FUNCTION_BEST_PRACTICES
+        return json.dumps(FUNCTION_BEST_PRACTICES)
     
-    @app.resource("ts://best_practices/classes")
-    def typescript_class_best_practices():
+    @app.resource("collegue://typescript/best_practices/classes")
+    def typescript_class_best_practices() -> str:
         """Fournit des bonnes pratiques pour les classes TypeScript."""
-        return CLASS_BEST_PRACTICES
+        return json.dumps(CLASS_BEST_PRACTICES)
     
-    @app.resource("ts://best_practices/generics")
-    def typescript_generics_best_practices():
+    @app.resource("collegue://typescript/best_practices/generics")
+    def typescript_generics_best_practices() -> str:
         """Fournit des bonnes pratiques pour les génériques TypeScript."""
-        return GENERICS_BEST_PRACTICES
+        return json.dumps(GENERICS_BEST_PRACTICES)
     
-    @app.resource("ts://best_practices/tooling")
-    def typescript_tooling_best_practices():
+    @app.resource("collegue://typescript/best_practices/tooling")
+    def typescript_tooling_best_practices() -> str:
         """Fournit des bonnes pratiques pour la configuration et les outils TypeScript."""
-        return TOOLING_BEST_PRACTICES
+        return json.dumps(TOOLING_BEST_PRACTICES)
     
-    @app.resource("ts://best_practices/{category}/{practice_id}")
-    def typescript_best_practice_example(category: str = None, practice_id: str = None) -> Dict[str, Any]:
+    @app.resource("collegue://typescript/best_practices/{category}/{practice_id}")
+    def typescript_best_practice_example(category: str, practice_id: str = None) -> str:
         """
         Fournit un exemple de bonne pratique TypeScript spécifique.
         
         Args:
             category: Catégorie de bonnes pratiques (ex: 'general', 'function', 'class', 'generics', 'tooling')
             practice_id: Identifiant de la bonne pratique
-            
-        Returns:
-            Dict[str, Any]: Exemple et informations sur la bonne pratique demandée
         """
         if not category:
-            return {
+            return json.dumps({
                 "error": "Category is required",
                 "available_categories": ["general", "function", "class", "generics", "tooling"]
-            }
+            })
         
         # Sélectionner la catégorie
         if category.lower() == "general":
@@ -430,20 +428,20 @@ def register(app: FastMCP, app_state: dict):
         elif category.lower() == "tooling":
             practices = TOOLING_BEST_PRACTICES
         else:
-            return {
+            return json.dumps({
                 "error": f"Category '{category}' not found",
                 "available_categories": ["general", "function", "class", "generics", "tooling"]
-            }
+            })
         
         # Si practice_id est fourni, retourner cette pratique spécifique
         if practice_id:
             if practice_id in practices:
-                return practices[practice_id]
+                return json.dumps(practices[practice_id])
             else:
-                return {
+                return json.dumps({
                     "error": f"Practice '{practice_id}' not found in category '{category}'",
                     "available_practices": list(practices.keys())
-                }
+                })
         
         # Sinon, retourner toutes les pratiques de la catégorie
-        return practices
+        return json.dumps(practices)
