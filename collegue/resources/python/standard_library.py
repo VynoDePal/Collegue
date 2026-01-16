@@ -109,26 +109,15 @@ def get_all_modules() -> List[str]:
 def register_stdlib(app, app_state):
     """Enregistre les ressources de la bibliothèque standard Python."""
     
-    @app.get("/resources/python/stdlib/modules")
-    async def list_stdlib_modules():
+    @app.resource("collegue://python/stdlib/index")
+    def get_stdlib_index() -> str:
         """Liste tous les modules de la bibliothèque standard Python disponibles."""
-        return {"modules": get_all_modules()}
-    
-    @app.get("/resources/python/stdlib/module/{module_name}")
-    async def get_stdlib_module(module_name: str):
-        """Récupère les informations d'un module spécifique."""
+        return json.dumps(get_all_modules())
+
+    @app.resource("collegue://python/stdlib/{module_name}")
+    def get_stdlib_module_resource(module_name: str) -> str:
+        """Récupère les informations d'un module spécifique de la bibliothèque standard."""
         module = get_module_reference(module_name)
         if module:
-            return module.model_dump()
-        return {"error": f"Module {module_name} non trouvé"}
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "python_stdlib",
-            {
-                "description": "Bibliothèque standard Python",
-                "modules": get_all_modules(),
-                "get_module": get_module_reference
-            }
-        )
+            return module.model_dump_json()
+        return json.dumps({"error": f"Module {module_name} non trouvé"})
