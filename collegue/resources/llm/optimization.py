@@ -154,35 +154,15 @@ def optimize_prompt(prompt: str, optimization_id: str, provider: Optional[str] =
 def register_optimization(app, app_state):
     """Enregistre les ressources d'optimisation des prompts LLM."""
     
-    @app.get("/resources/llm/optimizations")
-    async def list_prompt_optimizations():
+    @app.resource("collegue://llm/optimizations/index")
+    def get_prompt_optimizations_index() -> str:
         """Liste toutes les optimisations de prompts disponibles."""
-        return {"optimizations": get_all_optimizations()}
+        return json.dumps(get_all_optimizations())
     
-    @app.get("/resources/llm/optimizations/{optimization_id}")
-    async def get_optimization_info(optimization_id: str):
+    @app.resource("collegue://llm/optimizations/{optimization_id}")
+    def get_optimization_resource(optimization_id: str) -> str:
         """Récupère les informations d'une optimisation spécifique."""
         optimization = get_optimization(optimization_id)
         if optimization:
-            return optimization.model_dump()
-        return {"error": f"Optimisation {optimization_id} non trouvée"}
-    
-    @app.post("/resources/llm/optimize")
-    async def optimize_prompt_endpoint(prompt: str, optimization_id: str, provider: Optional[str] = None, examples: Optional[str] = None):
-        """Optimise un prompt en utilisant la stratégie spécifiée."""
-        optimized = optimize_prompt(prompt, optimization_id, provider, examples)
-        if optimized:
-            return {"optimized_prompt": optimized}
-        return {"error": f"Erreur lors de l'optimisation du prompt avec {optimization_id}"}
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "llm_optimizations",
-            {
-                "description": "Optimisations de prompts pour LLM",
-                "optimizations": get_all_optimizations(),
-                "get_optimization": get_optimization,
-                "optimize_prompt": optimize_prompt
-            }
-        )
+            return optimization.model_dump_json()
+        return json.dumps({"error": f"Optimisation {optimization_id} non trouvée"})
