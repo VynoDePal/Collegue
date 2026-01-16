@@ -137,25 +137,6 @@ register_tools(app, app_state)
 register_resources(app, app_state)
 register_prompts(app, app_state)
 
-if "resource_manager" in app_state:
-    rm = app_state["resource_manager"]
-    registered = app_state.setdefault("_registered_resources", set())
-
-    for _rid in rm.list_resources():
-        if _rid in registered:
-            continue
-
-        @app.resource(
-            f"resource:/{_rid}",
-            name=_rid,
-            description=f"Ressource pour {_rid}",
-            mime_type="application/json"
-        )
-        async def _make():
-            return rm.get_resource(_rid)
-
-        registered.add(_rid)
-
 if "prompt_engine" in app_state:
     pe = app_state["prompt_engine"]
     registered_prompts = app_state.setdefault("_registered_prompts", set())
