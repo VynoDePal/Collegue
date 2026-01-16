@@ -4,6 +4,8 @@ Frameworks Python - Ressources pour les frameworks Python populaires
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 
+import json
+
 class PythonFrameworkReference(BaseModel):
     """Modèle pour une référence de framework Python."""
     name: str
@@ -127,32 +129,20 @@ def get_frameworks_by_category(category: str) -> List[str]:
 def register_frameworks(app, app_state):
     """Enregistre les ressources des frameworks Python."""
     
-    @app.get("/resources/python/frameworks")
-    async def list_python_frameworks():
+    @app.resource("collegue://python/frameworks/index")
+    def get_frameworks_index() -> str:
         """Liste tous les frameworks Python disponibles."""
-        return {"frameworks": get_all_frameworks()}
+        return json.dumps(get_all_frameworks())
     
-    @app.get("/resources/python/frameworks/category/{category}")
-    async def list_frameworks_by_category(category: str):
+    @app.resource("collegue://python/frameworks/category/{category}")
+    def get_frameworks_by_category_resource(category: str) -> str:
         """Liste les frameworks d'une catégorie spécifique."""
-        return {"frameworks": get_frameworks_by_category(category)}
+        return json.dumps(get_frameworks_by_category(category))
     
-    @app.get("/resources/python/frameworks/{framework_name}")
-    async def get_framework_info(framework_name: str):
+    @app.resource("collegue://python/frameworks/{framework_name}")
+    def get_framework_resource(framework_name: str) -> str:
         """Récupère les informations d'un framework spécifique."""
         framework = get_framework_reference(framework_name)
         if framework:
-            return framework.model_dump()
-        return {"error": f"Framework {framework_name} non trouvé"}
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "python_frameworks",
-            {
-                "description": "Frameworks Python populaires",
-                "frameworks": get_all_frameworks(),
-                "get_framework": get_framework_reference,
-                "get_by_category": get_frameworks_by_category
-            }
-        )
+            return framework.model_dump_json()
+        return json.dumps({"error": f"Framework {framework_name} non trouvé"})

@@ -5,6 +5,7 @@ Ce module fournit des informations sur les frameworks et bibliothèques populair
 """
 from fastmcp import FastMCP
 from typing import Dict, Any, List
+import json
 
 # Frameworks frontend TypeScript
 FRONTEND_FRAMEWORKS = {
@@ -430,58 +431,55 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
-    @app.resource("ts://frameworks/frontend")
-    def typescript_frontend_frameworks():
+    @app.resource("collegue://typescript/frameworks/frontend")
+    def typescript_frontend_frameworks() -> str:
         """Fournit des informations sur les frameworks frontend TypeScript."""
-        return FRONTEND_FRAMEWORKS
+        return json.dumps(FRONTEND_FRAMEWORKS)
     
-    @app.resource("ts://frameworks/backend")
-    def typescript_backend_frameworks():
+    @app.resource("collegue://typescript/frameworks/backend")
+    def typescript_backend_frameworks() -> str:
         """Fournit des informations sur les frameworks backend TypeScript."""
-        return BACKEND_FRAMEWORKS
+        return json.dumps(BACKEND_FRAMEWORKS)
     
-    @app.resource("ts://frameworks/state_management")
-    def typescript_state_management():
+    @app.resource("collegue://typescript/frameworks/state_management")
+    def typescript_state_management() -> str:
         """Fournit des informations sur les bibliothèques de gestion d'état TypeScript."""
-        return STATE_MANAGEMENT
+        return json.dumps(STATE_MANAGEMENT)
     
-    @app.resource("ts://frameworks/testing")
-    def typescript_testing_libraries():
+    @app.resource("collegue://typescript/frameworks/testing")
+    def typescript_testing_libraries() -> str:
         """Fournit des informations sur les bibliothèques de test TypeScript."""
-        return TESTING_LIBRARIES
+        return json.dumps(TESTING_LIBRARIES)
     
-    @app.resource("ts://frameworks/{framework_name}")
-    def typescript_framework_example(framework_name: str = None) -> Dict[str, Any]:
+    @app.resource("collegue://typescript/frameworks/{framework_name}")
+    def typescript_framework_example(framework_name: str) -> str:
         """
         Fournit un exemple d'utilisation pour un framework TypeScript spécifique.
         
         Args:
             framework_name: Nom du framework TypeScript (ex: 'Angular', 'React', 'NestJS', etc.)
-            
-        Returns:
-            Dict[str, Any]: Exemple et informations sur le framework demandé
         """
         if not framework_name:
-            return {"error": "Framework name is required"}
+            return json.dumps({"error": "Framework name is required"})
         
         # Rechercher dans les frameworks frontend
         for name, info in FRONTEND_FRAMEWORKS.items():
             if framework_name.lower() in name.lower():
-                return info
+                return json.dumps(info)
         
         # Rechercher dans les frameworks backend
         for name, info in BACKEND_FRAMEWORKS.items():
             if framework_name.lower() in name.lower():
-                return info
+                return json.dumps(info)
         
         # Rechercher dans les bibliothèques de gestion d'état
         for name, info in STATE_MANAGEMENT.items():
             if framework_name.lower() in name.lower():
-                return info
+                return json.dumps(info)
         
         # Rechercher dans les bibliothèques de test
         for name, info in TESTING_LIBRARIES.items():
             if framework_name.lower() in name.lower():
-                return info
+                return json.dumps(info)
         
-        return {"error": f"Framework '{framework_name}' not found"}
+        return json.dumps({"error": f"Framework '{framework_name}' not found"})

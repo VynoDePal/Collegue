@@ -140,32 +140,20 @@ def get_apis_by_type(api_type: str) -> List[str]:
 def register_stdlib(app, app_state):
     """Enregistre les ressources de la bibliothèque standard JavaScript."""
     
-    @app.get("/resources/javascript/stdlib/apis")
-    async def list_js_apis():
+    @app.resource("collegue://javascript/stdlib/index")
+    def get_js_stdlib_index() -> str:
         """Liste toutes les APIs JavaScript disponibles."""
-        return {"apis": get_all_apis()}
+        return json.dumps(get_all_apis())
     
-    @app.get("/resources/javascript/stdlib/apis/type/{api_type}")
-    async def list_apis_by_type(api_type: str):
+    @app.resource("collegue://javascript/stdlib/type/{api_type}")
+    def get_js_apis_by_type_resource(api_type: str) -> str:
         """Liste les APIs d'un type spécifique."""
-        return {"apis": get_apis_by_type(api_type)}
+        return json.dumps(get_apis_by_type(api_type))
     
-    @app.get("/resources/javascript/stdlib/api/{api_name}")
-    async def get_api_info(api_name: str):
+    @app.resource("collegue://javascript/stdlib/{api_name}")
+    def get_js_api_resource(api_name: str) -> str:
         """Récupère les informations d'une API spécifique."""
         api = get_api_reference(api_name)
         if api:
-            return api.model_dump()
-        return {"error": f"API {api_name} non trouvée"}
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "javascript_stdlib",
-            {
-                "description": "APIs JavaScript standard",
-                "apis": get_all_apis(),
-                "get_api": get_api_reference,
-                "get_by_type": get_apis_by_type
-            }
-        )
+            return api.model_dump_json()
+        return json.dumps({"error": f"API {api_name} non trouvée"})

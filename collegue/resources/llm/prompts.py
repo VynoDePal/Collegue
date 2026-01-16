@@ -125,41 +125,20 @@ def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optiona
 def register_prompts(app, app_state):
     """Enregistre les ressources des prompts LLM."""
     
-    @app.get("/resources/llm/prompts")
-    async def list_prompt_templates():
+    @app.resource("collegue://llm/prompts/index")
+    def get_prompt_templates_index() -> str:
         """Liste tous les templates de prompts disponibles."""
-        return {"templates": get_all_templates()}
+        return json.dumps(get_all_templates())
     
-    @app.get("/resources/llm/prompts/category/{category}")
-    async def list_templates_by_category(category: str):
+    @app.resource("collegue://llm/prompts/category/{category}")
+    def get_templates_by_category_resource(category: str) -> str:
         """Liste les templates d'une catégorie spécifique."""
-        return {"templates": get_templates_by_category(category)}
+        return json.dumps(get_templates_by_category(category))
     
-    @app.get("/resources/llm/prompts/{template_id}")
-    async def get_template_info(template_id: str):
+    @app.resource("collegue://llm/prompts/{template_id}")
+    def get_template_resource(template_id: str) -> str:
         """Récupère les informations d'un template spécifique."""
         template = get_prompt_template(template_id)
         if template:
-            return template.model_dump()
-        return {"error": f"Template {template_id} non trouvé"}
-    
-    @app.post("/resources/llm/prompts/{template_id}/format")
-    async def format_prompt_template(template_id: str, variables: Dict[str, Any], provider: Optional[str] = None):
-        """Formate un template de prompt avec les variables fournies."""
-        formatted = format_prompt(template_id, variables, provider)
-        if formatted:
-            return {"formatted_prompt": formatted}
-        return {"error": f"Erreur lors du formatage du template {template_id}"}
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "llm_prompts",
-            {
-                "description": "Templates de prompts pour LLM",
-                "templates": get_all_templates(),
-                "get_template": get_prompt_template,
-                "get_by_category": get_templates_by_category,
-                "format_prompt": format_prompt
-            }
-        )
+            return template.model_dump_json()
+        return json.dumps({"error": f"Template {template_id} non trouvé"})

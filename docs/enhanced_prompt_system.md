@@ -136,6 +136,16 @@ Les métriques sont automatiquement collectées:
 5. **Test Generation** (`test_generation/`)
    - `default.yaml`: Création de tests unitaires
 
+### Workflows Agentiques
+
+1. **Debug & Fix Agent** (`debug_agent/`)
+   - `debug_fix.yaml`: Workflow autonome Sentry -> Postgres -> GitHub PR
+   - **Capabilities**:
+     - Analyse de stacktrace (Sentry)
+     - Inspection de données (Postgres)
+     - Correction de code et Pull Request (GitHub)
+   - **Usage**: `start_debug_session`
+
 ## Migration depuis l'ancien système
 
 ### Étapes de migration
