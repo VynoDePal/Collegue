@@ -5,6 +5,7 @@ Permet à Collègue d'interagir avec GitHub sans changer de fenêtre.
 """
 import logging
 import os
+import base64
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
@@ -24,40 +25,56 @@ class GitHubRequest(BaseModel):
     - get_repo: owner + repo
     - list_prs: owner + repo
     - get_pr: owner + repo + pr_number
+    - create_pr: owner + repo + title + head + base
     - pr_files: owner + repo + pr_number
     - pr_comments: owner + repo + pr_number
     - list_issues: owner + repo
     - get_issue: owner + repo + issue_number
+    - create_issue: owner + repo + title + body
     - repo_branches: owner + repo
+    - create_branch: owner + repo + branch + from_branch (ou sha)
+    - update_file: owner + repo + path + message + content + branch
     - repo_commits: owner + repo
     - search_code: query (owner/repo optionnels pour filtrer)
     - list_workflows: owner + repo
     """
     command: str = Field(
         ...,
-        description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, list_prs, get_pr, list_issues, get_issue, pr_files, pr_comments, repo_branches, repo_commits, search_code, list_workflows"
+        description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, create_pr, list_prs, get_pr, create_issue, list_issues, get_issue, pr_files, pr_comments, create_branch, update_file, repo_branches, repo_commits, search_code, list_workflows"
     )
     owner: Optional[str] = Field(
         None, 
-        description="REQUIS pour la plupart des commandes. Propriétaire du repo (username ou organisation). Ex: 'microsoft', 'facebook', 'modelcontextprotocol'"
+        description="REQUIS pour la plupart des commandes. Propriétaire du repo (username ou organisation)."
     )
     repo: Optional[str] = Field(
         None, 
-        description="REQUIS avec owner pour get_repo, list_prs, list_issues, etc. Nom du repository. Ex: 'vscode', 'react', 'servers'"
+        description="REQUIS avec owner pour get_repo, list_prs, list_issues, etc. Nom du repository."
     )
+    # Paramètres existants
     pr_number: Optional[int] = Field(None, description="Numéro de la PR (requis pour get_pr, pr_files, pr_comments)")
     issue_number: Optional[int] = Field(None, description="Numéro de l'issue (requis pour get_issue)")
-    branch: Optional[str] = Field(None, description="Nom de la branche pour filtrer les commits")
+    branch: Optional[str] = Field(None, description="Nom de la branche (pour filtrer ou créer)")
     state: str = Field("open", description="Filtre par état: 'open', 'closed', ou 'all'")
     query: Optional[str] = Field(None, description="Requête de recherche (requis pour search_code)")
     limit: int = Field(30, description="Nombre max de résultats (1-100)", ge=1, le=100)
     token: Optional[str] = Field(None, description="Token GitHub (utilise automatiquement GITHUB_TOKEN de l'environnement si non fourni)")
+
+    # Nouveaux paramètres pour l'écriture
+    title: Optional[str] = Field(None, description="Titre pour create_pr ou create_issue")
+    body: Optional[str] = Field(None, description="Description pour create_pr ou create_issue")
+    head: Optional[str] = Field(None, description="Branche source pour create_pr (ex: 'feature-branch')")
+    base: Optional[str] = Field(None, description="Branche cible pour create_pr (ex: 'main')")
+    path: Optional[str] = Field(None, description="Chemin du fichier pour update_file")
+    content: Optional[str] = Field(None, description="Nouveau contenu du fichier pour update_file")
+    message: Optional[str] = Field(None, description="Message de commit pour update_file")
+    from_branch: Optional[str] = Field(None, description="Branche source pour create_branch (défaut: default branch du repo)")
     
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
-        valid = ['list_repos', 'get_repo', 'list_prs', 'get_pr', 'list_issues', 
-                 'get_issue', 'pr_files', 'pr_comments', 'repo_branches', 
+        valid = ['list_repos', 'get_repo', 'list_prs', 'get_pr', 'create_pr',
+                 'list_issues', 'get_issue', 'create_issue', 'pr_files', 'pr_comments', 
+                 'repo_branches', 'create_branch', 'update_file',
                  'repo_commits', 'search_code', 'list_workflows', 'workflow_runs']
         if v not in valid:
             raise ValueError(f"Commande invalide. Valides: {valid}")
@@ -491,6 +508,156 @@ class GitHubOpsTool(BaseTool):
             score=i.get('score', 0)
         ) for i in items[:limit]]
     
+    def _api_post(self, endpoint: str, data: Dict, token: Optional[str] = None) -> Any:
+        """Effectue une requête POST à l'API GitHub."""
+        if not HAS_REQUESTS:
+            raise ToolExecutionError("requests non installé. Installez avec: pip install requests")
+        
+        url = f"{self.API_BASE}{endpoint}"
+        headers = self._get_headers(token)
+        
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            
+            if response.status_code == 404:
+                raise ToolExecutionError(f"Ressource introuvable: {endpoint}")
+            elif response.status_code == 401:
+                raise ToolExecutionError("Token GitHub invalide ou expiré (requis pour l'écriture)")
+            elif response.status_code == 403:
+                raise ToolExecutionError("Permission refusée (scope insuffisant ?)")
+            elif response.status_code >= 400:
+                raise ToolExecutionError(f"Erreur API GitHub {response.status_code}: {response.text[:200]}")
+            
+            return response.json()
+        except requests.RequestException as e:
+            raise ToolExecutionError(f"Erreur réseau GitHub: {e}")
+
+    def _api_put(self, endpoint: str, data: Dict, token: Optional[str] = None) -> Any:
+        """Effectue une requête PUT à l'API GitHub."""
+        if not HAS_REQUESTS:
+            raise ToolExecutionError("requests non installé")
+        
+        url = f"{self.API_BASE}{endpoint}"
+        headers = self._get_headers(token)
+        
+        try:
+            response = requests.put(url, headers=headers, json=data, timeout=30)
+            
+            if response.status_code >= 400:
+                raise ToolExecutionError(f"Erreur API GitHub {response.status_code}: {response.text[:200]}")
+            
+            return response.json()
+        except requests.RequestException as e:
+            raise ToolExecutionError(f"Erreur réseau GitHub: {e}")
+
+    def _create_pr(self, owner: str, repo: str, title: str, head: str, base: str, body: Optional[str], token: Optional[str]) -> PRInfo:
+        """Crée une Pull Request."""
+        data = {
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": body or ""
+        }
+        resp = self._api_post(f"/repos/{owner}/{repo}/pulls", data, token)
+        return PRInfo(
+            number=resp['number'],
+            title=resp['title'],
+            state=resp['state'],
+            html_url=resp['html_url'],
+            user=resp['user']['login'],
+            base_branch=resp['base']['ref'],
+            head_branch=resp['head']['ref'],
+            created_at=resp['created_at'],
+            updated_at=resp['updated_at'],
+            draft=resp.get('draft', False)
+        )
+
+    def _create_issue(self, owner: str, repo: str, title: str, body: Optional[str], token: Optional[str]) -> IssueInfo:
+        """Crée une Issue."""
+        data = {
+            "title": title,
+            "body": body or ""
+        }
+        resp = self._api_post(f"/repos/{owner}/{repo}/issues", data, token)
+        return IssueInfo(
+            number=resp['number'],
+            title=resp['title'],
+            state=resp['state'],
+            html_url=resp['html_url'],
+            user=resp['user']['login'],
+            created_at=resp['created_at'],
+            updated_at=resp['updated_at'],
+            body=resp.get('body')
+        )
+
+    def _get_branch_sha(self, owner: str, repo: str, branch: str, token: Optional[str]) -> str:
+        """Récupère le SHA d'une branche."""
+        try:
+            resp = self._api_get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}", token)
+            return resp['object']['sha']
+        except ToolExecutionError:
+            raise ToolExecutionError(f"Branche source '{branch}' introuvable")
+
+    def _create_branch(self, owner: str, repo: str, branch: str, from_branch: Optional[str], token: Optional[str]) -> BranchInfo:
+        """Crée une nouvelle branche."""
+        # 1. Obtenir le SHA de la branche source
+        if not from_branch:
+            # Récupérer la branche par défaut
+            repo_info = self._get_repo(owner, repo, token)
+            from_branch = repo_info.default_branch
+        
+        sha = self._get_branch_sha(owner, repo, from_branch, token)
+        
+        # 2. Créer la ref
+        data = {
+            "ref": f"refs/heads/{branch}",
+            "sha": sha
+        }
+        resp = self._api_post(f"/repos/{owner}/{repo}/git/refs", data, token)
+        
+        return BranchInfo(
+            name=branch,
+            sha=resp['object']['sha'],
+            protected=False
+        )
+
+    def _update_file(self, owner: str, repo: str, path: str, message: str, content: str, branch: Optional[str], token: Optional[str]) -> Dict:
+        """Crée ou met à jour un fichier."""
+        # 1. Vérifier si le fichier existe pour avoir le SHA (update)
+        sha = None
+        try:
+            url = f"/repos/{owner}/{repo}/contents/{path}"
+            if branch:
+                url += f"?ref={branch}"
+            
+            current = self._api_get(url, token)
+            sha = current['sha']
+        except ToolExecutionError as e:
+            if "introuvable" not in str(e) and "404" not in str(e):
+                raise e
+            # Si 404, c'est une création, sha reste None
+            
+        # 2. Encoder le contenu en base64
+        content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+        
+        # 3. Préparer les données
+        data = {
+            "message": message,
+            "content": content_b64
+        }
+        if sha:
+            data["sha"] = sha
+        if branch:
+            data["branch"] = branch
+            
+        # 4. Envoyer le PUT
+        resp = self._api_put(f"/repos/{owner}/{repo}/contents/{path}", data, token)
+        
+        return {
+            "content": resp['content'],
+            "commit": resp['commit']
+        }
+
     def _execute_core_logic(self, request: GitHubRequest, **kwargs) -> GitHubResponse:
         """Exécute la logique principale."""
         
@@ -636,5 +803,49 @@ class GitHubOpsTool(BaseTool):
                 search_results=results
             )
         
+        elif request.command == 'create_pr':
+            if not request.owner or not request.repo or not request.title or not request.head or not request.base:
+                raise ToolExecutionError("owner, repo, title, head, base requis pour create_pr")
+            pr = self._create_pr(request.owner, request.repo, request.title, request.head, request.base, request.body, request.token)
+            return GitHubResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ PR créée: {pr.html_url}",
+                pr=pr
+            )
+
+        elif request.command == 'create_issue':
+            if not request.owner or not request.repo or not request.title:
+                raise ToolExecutionError("owner, repo, title requis pour create_issue")
+            issue = self._create_issue(request.owner, request.repo, request.title, request.body, request.token)
+            return GitHubResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Issue créée: {issue.html_url}",
+                issue=issue
+            )
+
+        elif request.command == 'create_branch':
+            if not request.owner or not request.repo or not request.branch:
+                raise ToolExecutionError("owner, repo, branch requis pour create_branch")
+            b_info = self._create_branch(request.owner, request.repo, request.branch, request.from_branch, request.token)
+            return GitHubResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Branche '{request.branch}' créée",
+                branches=[b_info]
+            )
+
+        elif request.command == 'update_file':
+            if not request.owner or not request.repo or not request.path or not request.message or request.content is None:
+                raise ToolExecutionError("owner, repo, path, message, content requis pour update_file")
+            result = self._update_file(request.owner, request.repo, request.path, request.message, request.content, request.branch, request.token)
+            return GitHubResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Fichier '{request.path}' mis à jour",
+                files=[FileChange(filename=request.path, status="updated", additions=0, deletions=0)]
+            )
+
         else:
             raise ToolExecutionError(f"Commande inconnue: {request.command}")
