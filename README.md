@@ -6,7 +6,7 @@ Un assistant de développement intelligent et serveur MCP (Model Context Protoco
 
 Configurez votre IDE pour utiliser Collègue via le wrapper NPM officiel. Cela connecte votre IDE au serveur public par défaut.
 
-### Windsurf / Cursor / Claude Desktop
+### Windsurf / Cursor / Claude Desktop / Antigravity
 
 Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/windsurf/mcp_config.json` ou équivalent) :
 
