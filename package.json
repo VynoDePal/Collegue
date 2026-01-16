@@ -1,7 +1,7 @@
 {
-  "name": "@modelcontextprotocol/collegue",
-  "version": "1.0.0",
-  "description": "Un assistant de développement intelligent inspiré par Junie de JetBrains, implémenté comme un serveur MCP (Model Context Protocol) avec FastMCP.",
+  "name": "@collegue/mcp",
+  "version": "1.0.1",
+  "description": "Un assistant de développement intelligent et serveur MCP fournissant des outils d'analyse de code, refactoring, documentation, sécurité et bien plus.",
   "main": "index.js",
   "bin": {
     "collegue": "./bin/collegue.js"
@@ -21,7 +21,9 @@
     "ai",
     "development",
     "assistant",
-    "code-assistant"
+    "code-assistant",
+    "mcp-server",
+    "mcp-collegue"
   ],
   "author": "",
   "license": "ISC",
@@ -36,9 +38,6 @@
   },
   "files": [
     "bin/",
-    "collegue/",
-    "requirements.txt",
-    ".env.example",
     "README.md"
   ]
 }
