@@ -125,13 +125,13 @@ Une nouvelle approche utilisant NPX pour exécuter le client Collegue est mainte
     "command": "npx",
     "args": [
       "-y",
-      "@modelcontextprotocol/collegue"
+      "@collegue/mcp@latest"
     ]
   }
 }
 ```
 
-Cette configuration utilise NPX pour exécuter le package `@modelcontextprotocol/collegue`, qui agit comme un client local communiquant avec le serveur MCP.
+Cette configuration utilise NPX pour exécuter le package `@collegue/mcp@latest`, qui agit comme un client local communiquant avec le serveur MCP.
 
 #### Avantages de l'Approche NPX
 

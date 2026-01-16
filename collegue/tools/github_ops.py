@@ -11,6 +11,11 @@ from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
 
 try:
+    from fastmcp.server.dependencies import get_http_headers
+except Exception:
+    get_http_headers = None
+
+try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
@@ -217,6 +222,12 @@ class GitHubOpsTool(BaseTool):
     """
     
     API_BASE = "https://api.github.com"
+
+    def _get_token_from_http_headers(self) -> Optional[str]:
+        if get_http_headers is None:
+            return None
+        headers = get_http_headers() or {}
+        return headers.get("x-github-token") or headers.get("x-collegue-github-token")
     
     def get_name(self) -> str:
         return "github_ops"
@@ -239,7 +250,7 @@ class GitHubOpsTool(BaseTool):
     
     def _get_headers(self, token: Optional[str] = None) -> Dict[str, str]:
         """Construit les headers pour l'API GitHub."""
-        gh_token = token or os.environ.get('GITHUB_TOKEN')
+        gh_token = token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28"
@@ -253,7 +264,7 @@ class GitHubOpsTool(BaseTool):
     
     def _has_token(self, token: Optional[str] = None) -> bool:
         """Vérifie si un token est disponible."""
-        return bool(token or os.environ.get('GITHUB_TOKEN'))
+        return bool(token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers())
     
     def _api_get(self, endpoint: str, token: Optional[str] = None, params: Optional[Dict] = None) -> Any:
         """Effectue une requête GET à l'API GitHub."""
@@ -276,8 +287,9 @@ class GitHubOpsTool(BaseTool):
                     )
                 else:
                     raise ToolExecutionError(
-                        "Authentification requise. Configurez GITHUB_TOKEN dans le bloc 'env' de votre config MCP. "
-                        "Pour les repos publics, fournissez owner explicitement (ex: owner='microsoft')."
+                        "Authentification requise. Fournissez request.token, ou configurez GITHUB_TOKEN côté serveur, "
+                        "ou envoyez un header X-GitHub-Token via mcp-remote. Pour les repos publics, fournissez owner "
+                        "explicitement (ex: owner='microsoft')."
                     )
             elif response.status_code == 403:
                 remaining = response.headers.get('X-RateLimit-Remaining', '?')
