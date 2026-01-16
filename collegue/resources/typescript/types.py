@@ -5,6 +5,7 @@ Ce module fournit des informations sur les types et interfaces standard de TypeS
 """
 from fastmcp import FastMCP
 from typing import Dict, Any, List
+import json
 
 # Types primitifs TypeScript
 PRIMITIVE_TYPES = {
@@ -254,62 +255,56 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
-    @app.resource("ts://types")
-    def typescript_types():
+    @app.resource("collegue://typescript/types")
+    def typescript_types() -> str:
         """Fournit des informations sur les types primitifs et complexes de TypeScript."""
-        return {
+        return json.dumps({
             "primitive_types": PRIMITIVE_TYPES,
             "complex_types": COMPLEX_TYPES
-        }
+        })
     
-    @app.resource("ts://interfaces")
-    def typescript_interfaces():
+    @app.resource("collegue://typescript/interfaces")
+    def typescript_interfaces() -> str:
         """Fournit des informations sur les interfaces TypeScript."""
-        return INTERFACES
+        return json.dumps(INTERFACES)
     
-    @app.resource("ts://generics")
-    def typescript_generics():
+    @app.resource("collegue://typescript/generics")
+    def typescript_generics() -> str:
         """Fournit des informations sur les génériques TypeScript."""
-        return GENERICS
+        return json.dumps(GENERICS)
     
-    @app.resource("ts://type_utilities")
-    def typescript_type_utilities():
+    @app.resource("collegue://typescript/type_utilities")
+    def typescript_type_utilities() -> str:
         """Fournit des informations sur les utilitaires de types TypeScript."""
-        return TYPE_UTILITIES
+        return json.dumps(TYPE_UTILITIES)
     
-    @app.resource("ts://type_examples/{type_name}")
-    def typescript_type_examples(type_name: str = None) -> Dict[str, Any]:
+    @app.resource("collegue://typescript/type_examples/{type_name}")
+    def typescript_type_examples(type_name: str) -> str:
         """
         Fournit des exemples d'utilisation pour un type TypeScript spécifique.
         
         Args:
             type_name: Nom du type TypeScript (ex: 'string', 'array', 'interface', etc.)
-            
-        Returns:
-            Dict[str, Any]: Exemples et informations sur le type demandé
         """
-        if not type_name:
-            return {"error": "Type name is required"}
-        
         # Rechercher dans les types primitifs
         if type_name.lower() in PRIMITIVE_TYPES:
-            return PRIMITIVE_TYPES[type_name.lower()]
+            return json.dumps(PRIMITIVE_TYPES[type_name.lower()])
         
         # Rechercher dans les types complexes
         if type_name.lower() in COMPLEX_TYPES:
-            return COMPLEX_TYPES[type_name.lower()]
+            return json.dumps(COMPLEX_TYPES[type_name.lower()])
         
         # Rechercher dans les interfaces
         if type_name.lower() in INTERFACES:
-            return INTERFACES[type_name.lower()]
+            return json.dumps(INTERFACES[type_name.lower()])
         
         # Rechercher dans les génériques
         if type_name.lower() in GENERICS:
-            return GENERICS[type_name.lower()]
+            return json.dumps(GENERICS[type_name.lower()])
         
         # Rechercher dans les utilitaires de types
         utility_name = f"{type_name}<T>" if not type_name.endswith(">") else type_name
         if utility_name in TYPE_UTILITIES:
-            return TYPE_UTILITIES[utility_name]
+            return json.dumps(TYPE_UTILITIES[utility_name])
         
-        return {"error": f"Type '{type_name}' not found"}
+        return json.dumps({"error": f"Type '{type_name}' not found"})
