@@ -15,7 +15,7 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
   "mcpServers": {
     "collegue": {
       "command": "npx",
-      "args": ["-y", "@collegue/mcp"]
+      "args": ["-y", "@collegue/mcp@latest"]
     }
   }
 }
@@ -95,7 +95,7 @@ Les outils d'intégration se configurent via le bloc `env` de la configuration M
   "mcpServers": {
     "collegue": {
       "command": "npx",
-      "args": ["-y", "@collegue/mcp"],
+      "args": ["-y", "@collegue/mcp@latest"],
       "env": {
         "POSTGRES_URL": "postgresql://user:password@host:5432/database",
         "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx",
