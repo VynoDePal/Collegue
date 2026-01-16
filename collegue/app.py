@@ -9,8 +9,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from fastmcp import FastMCP
 from collegue.config import settings
-from fastmcp.server.middleware import Middleware, MiddlewareContext
-from fastmcp.server.dependencies import get_http_headers
 
 try:
     from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
@@ -77,82 +75,7 @@ app = FastMCP(
     sampling_handler_behavior="fallback"  # Utilise le handler seulement si client ne supporte pas
 )
 
-# ---------------------------------------------------------------------------
-# Middleware MCP natif pour propager les en-têtes LLM (X-LLM-Model, X-LLM-Api-Key)
-# vers la configuration runtime et réinitialiser le ToolLLMManager si besoin
-# ---------------------------------------------------------------------------
-class LLMHeadersMCPMiddleware(Middleware):
-    async def on_message(self, context: MiddlewareContext, call_next):
-        try:
-            headers = get_http_headers() or {}
-            model = headers.get('x-llm-model') or headers.get('X-LLM-Model')
-            api_key = headers.get('x-llm-api-key') or headers.get('X-LLM-Api-Key')
 
-            mcp_params = {}
-            if model:
-                mcp_params['LLM_MODEL'] = model
-            if api_key:
-                mcp_params['LLM_API_KEY'] = api_key
-
-            if mcp_params:
-                settings.update_from_mcp(mcp_params)
-                try:
-                    from collegue.core.tool_llm_manager import ToolLLMManager
-                    state = globals().get('app_state')
-                    if isinstance(state, dict):
-                        state['llm_manager'] = ToolLLMManager()
-                        logger.info("ToolLLMManager réinitialisé via headers MCP")
-                except Exception as e:
-                    logger.warning(f"Impossible de réinitialiser le LLM manager via headers: {e}")
-        except Exception as e:
-            logger.warning(f"LLMHeadersMCPMiddleware: erreur non bloquante: {e}")
-
-        return await call_next(context)
-
-app.add_middleware(LLMHeadersMCPMiddleware())
-
-def configure_mcp_params():
-    """
-    Configure les paramètres MCP au démarrage pour le LLM.
-    Les paramètres sont récupérés depuis les variables d'environnement MCP.
-    """
-    import os
-    
-    try:
-        mcp_params = {}
-        
-        if os.environ.get("MCP_LLM_MODEL"):
-            mcp_params["LLM_MODEL"] = os.environ.get("MCP_LLM_MODEL")
-            logger.info(f"MCP_LLM_MODEL détecté: {os.environ.get('MCP_LLM_MODEL')}")
-        
-        if os.environ.get("MCP_LLM_API_KEY"):
-            mcp_params["LLM_API_KEY"] = os.environ.get("MCP_LLM_API_KEY")
-            logger.info("MCP_LLM_API_KEY détectée")
-        
-        if mcp_params:
-            settings.update_from_mcp(mcp_params)
-            logger.info("Configuration mise à jour avec les paramètres MCP")
-            
-            from collegue.core.tool_llm_manager import ToolLLMManager
-            try:
-                global app_state
-                app_state['llm_manager'] = ToolLLMManager()
-                logger.info("ToolLLMManager réinitialisé avec la configuration MCP")
-            except Exception as e:
-                logger.warning(f"Impossible de réinitialiser le LLM manager: {e}")
-    
-    except Exception as e:
-        logger.error(f"Erreur lors de la configuration des paramètres MCP: {e}")
-
-configure_mcp_params()
-
-# Compatibilité FastAPI → FastMCP
-# De nombreux modules historiques utilisent les décorateurs FastAPI
-# (`@app.get`, `@app.post`, etc.) et `app.include_router`.  
-# FastMCP n'expose que `@app.resource`/`@app.tool`.  
-# Nous ajoutons donc de petits wrapper afin d'éviter les erreurs sans
-# devoir réécrire immédiatement tous les modules.
-# ---------------------------------------------------------------------------
 
 def _http_method(method: str):
     def _decorator(path: str, **kwargs):
@@ -214,9 +137,6 @@ register_tools(app, app_state)
 register_resources(app, app_state)
 register_prompts(app, app_state)
 
-# ---------------------------------------------------------------------------
-# Exposer les ressources du ResourceManager comme ressources MCP natives
-# ---------------------------------------------------------------------------
 if "resource_manager" in app_state:
     rm = app_state["resource_manager"]
     registered = app_state.setdefault("_registered_resources", set())
@@ -236,9 +156,6 @@ if "resource_manager" in app_state:
 
         registered.add(_rid)
 
-# ---------------------------------------------------------------------------
-# Exposer les templates du PromptEngine comme prompts MCP
-# ---------------------------------------------------------------------------
 if "prompt_engine" in app_state:
     pe = app_state["prompt_engine"]
     registered_prompts = app_state.setdefault("_registered_prompts", set())
