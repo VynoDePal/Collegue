@@ -19,19 +19,36 @@ except ImportError:
 
 
 class PostgresRequest(BaseModel):
-    """Modèle de requête pour les opérations PostgreSQL."""
+    """Modèle de requête pour les opérations PostgreSQL.
+    
+    PARAMÈTRES REQUIS PAR COMMANDE:
+    - list_schemas: aucun paramètre requis
+    - list_tables: schema_name (défaut: 'public')
+    - describe_table: table_name
+    - indexes: table_name
+    - foreign_keys: table_name
+    - table_stats: table_name
+    - sample_data: table_name
+    - query: query (requête SQL SELECT uniquement)
+    """
     command: str = Field(
         ...,
-        description="Commande: list_tables, describe_table, query, list_schemas, table_stats, indexes, foreign_keys, sample_data"
+        description="Commande PostgreSQL. describe_table/indexes/sample_data nécessitent table_name. query nécessite le paramètre query. Commandes: list_schemas, list_tables, describe_table, query, table_stats, indexes, foreign_keys, sample_data"
     )
     connection_string: Optional[str] = Field(
         None,
-        description="URI PostgreSQL (ex: postgresql://user:pass@host:5432/db). Utilise POSTGRES_URL si non fourni."
+        description="URI PostgreSQL (utilise automatiquement POSTGRES_URL de l'environnement si non fourni)"
     )
-    table_name: Optional[str] = Field(None, description="Nom de la table (pour describe_table, sample_data, etc.)")
-    schema_name: Optional[str] = Field("public", description="Nom du schéma (défaut: public)")
-    query: Optional[str] = Field(None, description="Requête SQL (pour command=query, lecture seule)")
-    limit: int = Field(100, description="Limite de lignes pour les résultats", ge=1, le=1000)
+    table_name: Optional[str] = Field(
+        None, 
+        description="REQUIS pour describe_table, indexes, foreign_keys, table_stats, sample_data. Nom de la table à inspecter"
+    )
+    schema_name: Optional[str] = Field("public", description="Schéma PostgreSQL (défaut: 'public')")
+    query: Optional[str] = Field(
+        None, 
+        description="REQUIS pour command='query'. Requête SQL SELECT uniquement (INSERT/UPDATE/DELETE interdits)"
+    )
+    limit: int = Field(100, description="Nombre max de lignes retournées (1-1000)", ge=1, le=1000)
     
     @field_validator('command')
     @classmethod

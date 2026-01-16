@@ -17,19 +17,38 @@ except ImportError:
 
 
 class SentryRequest(BaseModel):
-    """Modèle de requête pour les opérations Sentry."""
+    """Modèle de requête pour les opérations Sentry.
+    
+    PARAMÈTRES REQUIS PAR COMMANDE:
+    - list_projects: organization (utilise SENTRY_ORG si non fourni)
+    - list_issues: organization (+ project optionnel pour filtrer)
+    - get_issue: issue_id
+    - issue_events: issue_id (récupère les stacktraces)
+    - issue_tags: issue_id
+    - project_stats: organization + project
+    - list_releases: organization (+ project optionnel)
+    """
     command: str = Field(
         ...,
-        description="Commande: list_projects, list_issues, get_issue, issue_events, project_stats, list_releases"
+        description="Commande Sentry. list_issues nécessite organization. get_issue/issue_events nécessitent issue_id. Commandes: list_projects, list_issues, get_issue, issue_events, project_stats, list_releases, issue_tags"
     )
-    organization: Optional[str] = Field(None, description="Slug de l'organisation Sentry")
-    project: Optional[str] = Field(None, description="Slug du projet")
-    issue_id: Optional[str] = Field(None, description="ID de l'issue Sentry")
-    query: Optional[str] = Field(None, description="Filtres de recherche (ex: is:unresolved, level:error)")
-    time_range: str = Field("24h", description="Période: 1h, 24h, 7d, 14d, 30d")
-    limit: int = Field(25, description="Limite de résultats", ge=1, le=100)
-    token: Optional[str] = Field(None, description="Auth token Sentry (utilise SENTRY_AUTH_TOKEN si non fourni)")
-    sentry_url: Optional[str] = Field(None, description="URL Sentry self-hosted (défaut: sentry.io)")
+    organization: Optional[str] = Field(
+        None, 
+        description="REQUIS pour la plupart des commandes. Slug de l'organisation Sentry (utilise SENTRY_ORG de l'environnement si non fourni)"
+    )
+    project: Optional[str] = Field(
+        None, 
+        description="Slug du projet Sentry (requis pour project_stats, optionnel pour filtrer list_issues)"
+    )
+    issue_id: Optional[str] = Field(
+        None, 
+        description="REQUIS pour get_issue, issue_events, issue_tags. ID numérique de l'issue Sentry"
+    )
+    query: Optional[str] = Field(None, description="Filtres de recherche Sentry (ex: 'is:unresolved', 'level:error')")
+    time_range: str = Field("24h", description="Période d'analyse: '1h', '24h', '7d', '14d', '30d'")
+    limit: int = Field(25, description="Nombre max de résultats (1-100)", ge=1, le=100)
+    token: Optional[str] = Field(None, description="Token Sentry (utilise automatiquement SENTRY_AUTH_TOKEN de l'environnement si non fourni)")
+    sentry_url: Optional[str] = Field(None, description="URL Sentry self-hosted (défaut: https://sentry.io)")
     
     @field_validator('command')
     @classmethod

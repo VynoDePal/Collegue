@@ -19,21 +19,34 @@ except ImportError:
 
 
 class KubernetesRequest(BaseModel):
-    """Modèle de requête pour les opérations Kubernetes."""
+    """Modèle de requête pour les opérations Kubernetes.
+    
+    PARAMÈTRES REQUIS PAR COMMANDE:
+    - list_namespaces, list_nodes: aucun paramètre requis
+    - list_pods, list_deployments, list_services, list_events, list_configmaps, list_secrets: namespace (défaut: 'default')
+    - get_pod, get_deployment, pod_logs: name + namespace
+    - describe_resource: name + resource_type + namespace
+    """
     command: str = Field(
         ...,
-        description="Commande: list_pods, get_pod, pod_logs, list_deployments, get_deployment, list_services, list_namespaces, list_events, describe_resource, list_configmaps, list_secrets"
+        description="Commande K8s. get_pod/pod_logs nécessitent 'name'. describe_resource nécessite 'name' ET 'resource_type'. Commandes: list_pods, get_pod, pod_logs, list_deployments, get_deployment, list_services, list_namespaces, list_events, list_nodes, describe_resource, list_configmaps, list_secrets"
     )
-    namespace: str = Field("default", description="Namespace Kubernetes")
-    name: Optional[str] = Field(None, description="Nom de la ressource")
-    resource_type: Optional[str] = Field(None, description="Type de ressource pour describe (pod, deployment, service, etc.)")
-    container: Optional[str] = Field(None, description="Nom du container pour les logs")
-    tail_lines: int = Field(100, description="Nombre de lignes de logs", ge=1, le=5000)
-    previous: bool = Field(False, description="Logs du container précédent (crashé)")
-    label_selector: Optional[str] = Field(None, description="Sélecteur de labels (ex: app=nginx)")
-    field_selector: Optional[str] = Field(None, description="Sélecteur de champs")
-    kubeconfig: Optional[str] = Field(None, description="Chemin vers kubeconfig (utilise défaut si non fourni)")
-    context: Optional[str] = Field(None, description="Contexte Kubernetes à utiliser")
+    namespace: str = Field("default", description="Namespace Kubernetes (défaut: 'default')")
+    name: Optional[str] = Field(
+        None, 
+        description="REQUIS pour get_pod, pod_logs, get_deployment, describe_resource. Nom de la ressource K8s"
+    )
+    resource_type: Optional[str] = Field(
+        None, 
+        description="REQUIS pour describe_resource. Type: 'pod', 'deployment', 'service', 'configmap', 'secret'"
+    )
+    container: Optional[str] = Field(None, description="Nom du container spécifique pour pod_logs (optionnel si un seul container)")
+    tail_lines: int = Field(100, description="Nombre de lignes de logs à récupérer (1-5000)", ge=1, le=5000)
+    previous: bool = Field(False, description="Récupérer les logs du container précédent (après crash)")
+    label_selector: Optional[str] = Field(None, description="Filtrer par labels (ex: 'app=nginx', 'env=prod')")
+    field_selector: Optional[str] = Field(None, description="Filtrer par champs (ex: 'status.phase=Running')")
+    kubeconfig: Optional[str] = Field(None, description="Chemin kubeconfig (utilise ~/.kube/config par défaut)")
+    context: Optional[str] = Field(None, description="Contexte K8s à utiliser (optionnel)")
     
     @field_validator('command')
     @classmethod
