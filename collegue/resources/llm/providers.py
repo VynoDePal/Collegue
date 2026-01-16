@@ -276,36 +276,18 @@ def get_available_models() -> List[str]:
 def register_providers(app, app_state):
     """Enregistre les ressources des fournisseurs LLM."""
     
-    @app.get("/resources/llm/models")
-    async def list_available_models():
+    @app.resource("collegue://llm/models/index")
+    def get_llm_models_index() -> str:
         """Liste tous les modèles LLM disponibles."""
-        return {"models": get_available_models()}
+        return json.dumps(get_available_models())
     
-    @app.get("/resources/llm/models/{model_name}")
-    async def get_model_config(model_name: str):
+    @app.resource("collegue://llm/models/{model_name}")
+    def get_model_config_resource(model_name: str) -> str:
         """Récupère la configuration d'un modèle spécifique."""
         config = get_default_model_config(model_name)
         if config:
-            return config.model_dump()
-        return {"error": f"Modèle {model_name} non trouvé"}
+            return config.model_dump_json()
+        return json.dumps({"error": f"Modèle {model_name} non trouvé"})
     
-    @app.post("/resources/llm/generate")
-    async def generate_llm_text(config: LLMConfig, prompt: str, system_prompt: Optional[str] = None):
-        """Génère du texte avec un LLM selon la configuration fournie."""
-        response = await generate_text(config, prompt, system_prompt)
-        return response.model_dump()
-    
-    # Enregistrement dans le gestionnaire de ressources
-    if "resource_manager" in app_state:
-        app_state["resource_manager"].register_resource(
-            "llm_providers",
-            {
-                "description": "Fournisseurs de modèles de langage",
-                "models": get_available_models(),
-                "get_model_config": get_default_model_config,
-                "generate_text": generate_text
-            }
-        )
-    
-    # Enregistrement dans le contexte global
+    # Enregistrement dans le contexte global pour usage interne par les outils
     app_state["llm_generate"] = generate_text
