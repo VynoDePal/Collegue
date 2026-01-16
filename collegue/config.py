@@ -3,7 +3,7 @@ Configuration - Paramètres de configuration pour le MCP Collègue
 """
 from pydantic_settings import BaseSettings
 from pydantic import field_validator
-from typing import Dict, Any, Optional, List, Union
+from typing import Optional, List, Union
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,16 +21,12 @@ class Settings(BaseSettings):
     PORT: int = 4121
     DEBUG: bool = True
     
-    # Configuration des LLMs (usage unique imposé : MoonshotAI via OpenRouter)
-    LLM_PROVIDER: str = "openrouter"  # Provider unique imposé
+    # Configuration des LLMs
+    LLM_PROVIDER: str = "openrouter"
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
-    # La clé API est désormais chargée depuis le fichier .env ou les variables d'environnement
+    # La clé API est chargée depuis le fichier .env ou les variables d'environnement
     LLM_API_KEY: Optional[str] = None
     LLM_MODEL: str = "x-ai/grok-code-fast-1"
-    
-    # Paramètres MCP surchargés (priorité sur les variables d'environnement)
-    _mcp_llm_model: Optional[str] = None
-    _mcp_llm_api_key: Optional[str] = None
 
     # Limites et performances
     MAX_TOKENS: int = 8192
@@ -43,7 +39,6 @@ class Settings(BaseSettings):
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript"]
     
     # Configuration de l'authentification OAuth
-    # Activer l'authentification OAuth (True/False)
     OAUTH_ENABLED: bool = False
     # URL du serveur d'identité OAuth/JWKS
     OAUTH_JWKS_URI: Optional[str] = None
@@ -84,45 +79,15 @@ class Settings(BaseSettings):
         "extra": "ignore"  # Ignorer les champs supplémentaires dans .env
     }
     
-    def update_from_mcp(self, mcp_params: Dict[str, Any]) -> None:
-        """
-        Met à jour la configuration avec les paramètres MCP.
-        Priorité: MCP > variables d'environnement > valeurs par défaut
-        
-        Args:
-            mcp_params: Dictionnaire des paramètres MCP (LLM_MODEL, LLM_API_KEY, etc.)
-        """
-        if not mcp_params:
-            return
-            
-        # Mise à jour du modèle LLM si fourni
-        if "LLM_MODEL" in mcp_params:
-            self._mcp_llm_model = mcp_params["LLM_MODEL"]
-            logger.info(f"Configuration MCP: Modèle LLM défini sur {self._mcp_llm_model}")
-        
-        # Mise à jour de la clé API si fournie
-        if "LLM_API_KEY" in mcp_params:
-            self._mcp_llm_api_key = mcp_params["LLM_API_KEY"]
-            logger.info("Configuration MCP: Clé API LLM mise à jour (masquée pour sécurité)")
     
     @property
     def llm_model(self) -> str:
-        """
-        Retourne le modèle LLM avec la bonne priorité.
-        Priorité: MCP > variable d'environnement > valeur par défaut
-        """
-        if self._mcp_llm_model:
-            return self._mcp_llm_model
+        """Retourne le modèle LLM."""
         return self.LLM_MODEL
     
     @property
     def llm_api_key(self) -> Optional[str]:
-        """
-        Retourne la clé API LLM avec la bonne priorité.
-        Priorité: MCP > variable d'environnement > valeur par défaut
-        """
-        if self._mcp_llm_api_key:
-            return self._mcp_llm_api_key
+        """Retourne la clé API LLM."""
         return self.LLM_API_KEY
         
 # Instance globale des paramètres
