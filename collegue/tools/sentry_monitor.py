@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
 
 try:
+    from fastmcp.server.dependencies import get_http_headers
+except Exception:
+    get_http_headers = None
+
+try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
@@ -168,19 +173,38 @@ class SentryMonitorTool(BaseTool):
     
     def get_supported_languages(self) -> List[str]:
         return []
+
+    def _get_token_from_http_headers(self) -> Optional[str]:
+        if get_http_headers is None:
+            return None
+        headers = get_http_headers() or {}
+        return headers.get("x-sentry-token") or headers.get("x-collegue-sentry-token")
+
+    def _get_org_from_http_headers(self) -> Optional[str]:
+        if get_http_headers is None:
+            return None
+        headers = get_http_headers() or {}
+        return headers.get("x-sentry-org") or headers.get("x-collegue-sentry-org")
+
+    def _get_url_from_http_headers(self) -> Optional[str]:
+        if get_http_headers is None:
+            return None
+        headers = get_http_headers() or {}
+        return headers.get("x-sentry-url") or headers.get("x-collegue-sentry-url")
     
     def _get_base_url(self, sentry_url: Optional[str] = None) -> str:
         """Retourne l'URL de base de l'API Sentry."""
-        url = sentry_url or os.environ.get('SENTRY_URL', 'https://sentry.io')
+        url = sentry_url or os.environ.get('SENTRY_URL') or self._get_url_from_http_headers() or 'https://sentry.io'
         return f"{url.rstrip('/')}/api/0"
     
     def _get_headers(self, token: Optional[str] = None) -> Dict[str, str]:
         """Construit les headers pour l'API Sentry."""
-        sentry_token = token or os.environ.get('SENTRY_AUTH_TOKEN')
+        sentry_token = token or os.environ.get('SENTRY_AUTH_TOKEN') or self._get_token_from_http_headers()
         
         if not sentry_token:
             raise ToolExecutionError(
-                "Token Sentry requis. Fournissez token ou définissez SENTRY_AUTH_TOKEN."
+                "Token Sentry requis. Fournissez request.token, ou définissez SENTRY_AUTH_TOKEN côté serveur, "
+                "ou envoyez un header X-Sentry-Token via mcp-remote."
             )
         
         return {
@@ -416,7 +440,7 @@ class SentryMonitorTool(BaseTool):
     
     def _execute_core_logic(self, request: SentryRequest, **kwargs) -> SentryResponse:
         """Exécute la logique principale."""
-        org = request.organization or os.environ.get('SENTRY_ORG')
+        org = request.organization or os.environ.get('SENTRY_ORG') or self._get_org_from_http_headers()
         
         if not org and request.command != 'get_issue':
             raise ToolExecutionError(
