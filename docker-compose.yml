@@ -12,6 +12,9 @@ services:
       PORT: 4121
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
+      # Monitoring Sentry
+      SENTRY_DSN: ${SENTRY_DSN}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
     env_file:
       - .env
     deploy:
