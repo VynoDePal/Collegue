@@ -10,6 +10,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from fastmcp import FastMCP
 from collegue.config import settings
 
+# Intégration Sentry (Monitoring)
+try:
+    import sentry_sdk
+    if settings.SENTRY_DSN:
+        sentry_sdk.init(
+            dsn=settings.SENTRY_DSN,
+            environment=settings.SENTRY_ENVIRONMENT,
+            send_default_pii=True,
+            traces_sample_rate=1.0,
+            profiles_sample_rate=1.0,
+        )
+        logging.getLogger(__name__).info(f"Sentry initialisé pour l'environnement: {settings.SENTRY_ENVIRONMENT}")
+except ImportError:
+    logging.getLogger(__name__).warning("sentry-sdk non installé, monitoring désactivé")
+
 try:
     from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
     SAMPLING_HANDLER_AVAILABLE = True

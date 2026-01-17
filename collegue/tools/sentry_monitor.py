@@ -32,10 +32,11 @@ class SentryRequest(BaseModel):
     - issue_tags: issue_id
     - project_stats: organization + project
     - list_releases: organization (+ project optionnel)
+    - parse_config: content (contenu du fichier .sentryclirc ou sentry.properties)
     """
     command: str = Field(
         ...,
-        description="Commande Sentry. list_issues nécessite organization. get_issue/issue_events nécessitent issue_id. Commandes: list_projects, list_issues, get_issue, issue_events, project_stats, list_releases, issue_tags"
+        description="Commande Sentry. list_issues nécessite organization. get_issue/issue_events nécessitent issue_id. Commandes: list_projects, list_issues, get_issue, issue_events, project_stats, list_releases, issue_tags, parse_config"
     )
     organization: Optional[str] = Field(
         None, 
@@ -55,14 +56,26 @@ class SentryRequest(BaseModel):
     token: Optional[str] = Field(None, description="Token Sentry (utilise automatiquement SENTRY_AUTH_TOKEN de l'environnement si non fourni)")
     sentry_url: Optional[str] = Field(None, description="URL Sentry self-hosted (défaut: https://sentry.io)")
     
+    # Paramètres pour parse_config
+    content: Optional[str] = Field(None, description="Contenu du fichier de configuration pour parse_config")
+    format: Optional[str] = Field("ini", description="Format du fichier: 'ini' (.sentryclirc) ou 'properties' (sentry.properties)")
+
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
         valid = ['list_projects', 'list_issues', 'get_issue', 'issue_events', 
-                 'project_stats', 'list_releases', 'issue_tags']
+                 'project_stats', 'list_releases', 'issue_tags', 'parse_config']
         if v not in valid:
             raise ValueError(f"Commande invalide. Valides: {valid}")
         return v
+
+
+class ConfigInfo(BaseModel):
+    """Information de configuration extraite."""
+    token: Optional[str] = None
+    organization: Optional[str] = None
+    project: Optional[str] = None
+    sentry_url: Optional[str] = None
 
 
 class ProjectInfo(BaseModel):
@@ -145,6 +158,7 @@ class SentryResponse(BaseModel):
     releases: Optional[List[ReleaseInfo]] = None
     stats: Optional[ProjectStats] = None
     tags: Optional[List[TagDistribution]] = None
+    config: Optional[ConfigInfo] = None
 
 
 class SentryMonitorTool(BaseTool):
@@ -157,6 +171,7 @@ class SentryMonitorTool(BaseTool):
     - Voir les statistiques de projet
     - Lister les releases
     - Analyser les tags (browser, OS, etc.)
+    - Parser les fichiers de configuration locaux (.sentryclirc, sentry.properties)
     """
     
     def get_name(self) -> str:
@@ -173,6 +188,54 @@ class SentryMonitorTool(BaseTool):
     
     def get_supported_languages(self) -> List[str]:
         return []
+
+    def _parse_sentryclirc(self, content: str) -> ConfigInfo:
+        """Parse un contenu style INI (.sentryclirc)."""
+        import configparser
+        import io
+        
+        config = configparser.ConfigParser()
+        try:
+            config.read_string(content)
+        except configparser.Error as e:
+            raise ToolExecutionError(f"Erreur de parsing .sentryclirc: {e}")
+            
+        info = ConfigInfo()
+        
+        if 'auth' in config:
+            info.token = config['auth'].get('token')
+            
+        if 'defaults' in config:
+            info.organization = config['defaults'].get('org')
+            info.project = config['defaults'].get('project')
+            info.sentry_url = config['defaults'].get('url')
+            
+        return info
+
+    def _parse_sentry_properties(self, content: str) -> ConfigInfo:
+        """Parse un contenu style Java Properties (sentry.properties)."""
+        info = ConfigInfo()
+        
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('!'):
+                continue
+                
+            if '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                
+                if key == 'auth.token':
+                    info.token = value
+                elif key == 'defaults.org':
+                    info.organization = value
+                elif key == 'defaults.project':
+                    info.project = value
+                elif key == 'defaults.url':
+                    info.sentry_url = value
+                    
+        return info
 
     def _get_token_from_http_headers(self) -> Optional[str]:
         if get_http_headers is None:
@@ -442,11 +505,27 @@ class SentryMonitorTool(BaseTool):
         """Exécute la logique principale."""
         org = request.organization or os.environ.get('SENTRY_ORG') or self._get_org_from_http_headers()
         
-        if not org and request.command != 'get_issue':
+        if not org and request.command not in ['get_issue', 'parse_config']:
             raise ToolExecutionError(
                 "Organisation Sentry requise. Fournissez organization ou définissez SENTRY_ORG."
             )
         
+        if request.command == 'parse_config':
+            if not request.content:
+                raise ToolExecutionError("content requis pour parse_config")
+            
+            if request.format == 'properties':
+                info = self._parse_sentry_properties(request.content)
+            else:
+                info = self._parse_sentryclirc(request.content)
+                
+            return SentryResponse(
+                success=True,
+                command=request.command,
+                message="✅ Configuration Sentry parsée avec succès",
+                config=info
+            )
+
         if request.command == 'list_projects':
             projects = self._list_projects(org, request.token, request.sentry_url)
             return SentryResponse(

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # Clé publique pour la vérification des tokens (alternative à JWKS)
     OAUTH_PUBLIC_KEY: Optional[str] = None
     
+    # Configuration Sentry (Monitoring)
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_ENVIRONMENT: str = "production"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
