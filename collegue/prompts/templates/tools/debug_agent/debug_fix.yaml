@@ -24,11 +24,15 @@ template: |
   Follow these steps strictly. Do not skip verification steps.
   
   ### PHASE 1: DIAGNOSIS (Read-Only)
+  0. **Check Configuration** (Optional):
+     - If organization or project is not provided, look for `.sentryclirc` or `sentry.properties` in the repository root.
+     - Use `sentry_monitor.parse_config` to extract defaults (org, project).
   1. **Fetch Error Details**: Use `sentry_monitor.get_issue` and `sentry_monitor.issue_events` to get the stacktrace and exception details.
   2. **Analyze Stacktrace**: Identify the file, line number, and the specific variables involved.
   3. **Verify Data State**:
      - If the error involves database inconsistencies (e.g., missing column, null constraint, bad data), use `postgres_db.describe_table` and `postgres_db.query` to inspect the actual schema and data.
      - NEVER modify the database. logical analysis only.
+     - **FALLBACK**: If database connection fails or is not configured, note it in your analysis and proceed relying solely on Sentry stacktrace and code logic. Do NOT stop the workflow.
   4. **Locate Code**: Use `github_ops.search_code` or `github_ops.get_repo` to find the relevant code in the repository.
   
   ### PHASE 2: SOLUTION DESIGN
