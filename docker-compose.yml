@@ -35,30 +35,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  collegue-watchdog:
-    build:
-      context: .
-      dockerfile: collegue/autonomous/Dockerfile
-    image: collegue-watchdog:latest
-    restart: always
-    networks:
-      - collegue-net
-    environment:
-      PYTHONUNBUFFERED: 1
-      SENTRY_ORG: ${SENTRY_ORG}
-      # GITHUB_TOKEN et SENTRY_AUTH_TOKEN doivent être dans .env
-    env_file:
-      - .env
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: any
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   keycloak:
     image: quay.io/keycloak/keycloak:26.3.2
     command: start-dev

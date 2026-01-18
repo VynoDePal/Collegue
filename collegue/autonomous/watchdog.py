@@ -1,12 +1,16 @@
 """
 Watchdog Autonome - Self-Healing Sentry -> GitHub
 Ce script surveille Sentry et tente de corriger automatiquement les erreurs simples.
+
+Peut être exécuté:
+1. En standalone: python -m collegue.autonomous.watchdog
+2. Intégré dans l'app principale via start_background_watchdog()
 """
 import asyncio
 import logging
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -15,8 +19,43 @@ from collegue.core.tool_llm_manager import ToolLLMManager
 from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
 from collegue.tools.github_ops import GitHubOpsTool, GitHubRequest
 
+try:
+    from fastmcp.server.dependencies import get_http_headers
+except Exception:
+    get_http_headers = None
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("watchdog")
+
+# Variable globale pour stocker la tâche de fond
+_watchdog_task: Optional[asyncio.Task] = None
+
+
+def _get_config_value(key: str, header_names: List[str] = None) -> Optional[str]:
+    """
+    Récupère une valeur de configuration avec fallback:
+    1. Variables d'environnement (passées par l'IDE via mcp.json)
+    2. Headers HTTP MCP (si disponibles)
+    
+    Args:
+        key: Nom de la variable d'environnement (ex: SENTRY_ORG)
+        header_names: Noms des headers HTTP à vérifier (ex: ['x-sentry-org'])
+    """
+    value = os.environ.get(key)
+    if value:
+        return value
+    
+    if get_http_headers is not None and header_names:
+        try:
+            headers = get_http_headers() or {}
+            for header in header_names:
+                if headers.get(header):
+                    return headers.get(header)
+        except Exception:
+            pass
+    
+    return None
+
 
 class AutoFixer:
     def __init__(self):
@@ -24,13 +63,27 @@ class AutoFixer:
         self.github = GitHubOpsTool()
         self.llm = ToolLLMManager()
         
+    def _get_sentry_org(self) -> Optional[str]:
+        """Récupère l'organisation Sentry depuis env ou headers."""
+        return _get_config_value(
+            "SENTRY_ORG", 
+            ["x-sentry-org", "x-collegue-sentry-org"]
+        )
+    
+    def _get_github_owner(self) -> Optional[str]:
+        """Récupère le propriétaire GitHub depuis env ou headers."""
+        return _get_config_value(
+            "GITHUB_OWNER",
+            ["x-github-owner", "x-collegue-github-owner"]
+        )
+        
     async def run_once(self):
         """Exécute une passe de vérification et correction sur TOUS les projets."""
         logger.info("🔍 Démarrage du cycle de Self-Healing Multi-Projets...")
         
-        org = os.environ.get("SENTRY_ORG")
+        org = self._get_sentry_org()
         if not org:
-            logger.error("SENTRY_ORG non défini. Impossible de scanner l'organisation.")
+            logger.error("SENTRY_ORG non défini (ni env, ni headers MCP). Impossible de scanner.")
             return
 
         try:
@@ -105,11 +158,12 @@ class AutoFixer:
         """Tente de corriger une issue spécifique."""
         issue_id = issue.id
         
-        if os.environ.get("GITHUB_OWNER"):
-            repo_owner = os.environ.get("GITHUB_OWNER")
+        override_owner = self._get_github_owner()
+        if override_owner:
+            repo_owner = override_owner
             
         if not repo_owner:
-             logger.warning("Impossible de déterminer le GitHub Owner.")
+             logger.warning("Impossible de déterminer le GitHub Owner (ni env, ni headers MCP).")
              return
 
         try:
@@ -215,12 +269,68 @@ class AutoFixer:
         except Exception as e:
             logger.error(f"Echec de l'opération GitHub: {e}")
 
-async def main():
+async def _watchdog_loop(interval_seconds: int = 300):
+    """Boucle principale du watchdog."""
     fixer = AutoFixer()
     while True:
-        await fixer.run_once()
-        logger.info("💤 Pause de 5 minutes...")
-        await asyncio.sleep(300)
+        try:
+            await fixer.run_once()
+        except Exception as e:
+            logger.error(f"Erreur dans le cycle watchdog: {e}")
+        logger.info(f"💤 Pause de {interval_seconds // 60} minutes...")
+        await asyncio.sleep(interval_seconds)
+
+
+def start_background_watchdog(interval_seconds: int = 300) -> Optional[asyncio.Task]:
+    """
+    Démarre le watchdog en tâche de fond.
+    
+    Cette fonction permet d'intégrer le watchdog dans l'app principale
+    pour qu'il hérite des variables d'environnement passées par l'IDE via mcp.json.
+    
+    Args:
+        interval_seconds: Intervalle entre les cycles (défaut: 5 minutes)
+        
+    Returns:
+        La tâche asyncio créée, ou None si déjà en cours
+        
+    Usage dans app.py:
+        from collegue.autonomous.watchdog import start_background_watchdog
+        
+        @app.on_event("startup")
+        async def startup():
+            start_background_watchdog()
+    """
+    global _watchdog_task
+    
+    if _watchdog_task is not None and not _watchdog_task.done():
+        logger.warning("Watchdog déjà en cours d'exécution")
+        return None
+    
+    try:
+        loop = asyncio.get_running_loop()
+        _watchdog_task = loop.create_task(_watchdog_loop(interval_seconds))
+        logger.info(f"🚀 Watchdog démarré en tâche de fond (intervalle: {interval_seconds}s)")
+        return _watchdog_task
+    except RuntimeError:
+        logger.error("Pas de boucle asyncio active. Utilisez asyncio.run(main()) pour le mode standalone.")
+        return None
+
+
+def stop_background_watchdog():
+    """Arrête le watchdog en cours d'exécution."""
+    global _watchdog_task
+    
+    if _watchdog_task is not None and not _watchdog_task.done():
+        _watchdog_task.cancel()
+        logger.info("🛑 Watchdog arrêté")
+        _watchdog_task = None
+
+
+async def main():
+    """Point d'entrée pour le mode standalone."""
+    await _watchdog_loop(interval_seconds=300)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

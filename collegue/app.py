@@ -196,6 +196,23 @@ if "prompt_engine" in app_state and "_template_endpoint" not in app_state:
 async def health_endpoint():
     return "OK"
 
+# Intégration du watchdog autonome en tâche de fond
+# Il hérite ainsi des variables d'environnement passées par l'IDE via mcp.json
+@app.on_event("startup")
+async def start_watchdog_on_startup():
+    """Démarre le watchdog autonome au démarrage de l'application."""
+    watchdog_enabled = os.environ.get("WATCHDOG_ENABLED", "true").lower() == "true"
+    if watchdog_enabled:
+        try:
+            from collegue.autonomous.watchdog import start_background_watchdog
+            interval = int(os.environ.get("WATCHDOG_INTERVAL", "300"))
+            start_background_watchdog(interval_seconds=interval)
+            logger.info(f"Watchdog autonome démarré (intervalle: {interval}s)")
+        except Exception as e:
+            logger.warning(f"Impossible de démarrer le watchdog: {e}")
+    else:
+        logger.info("Watchdog autonome désactivé (WATCHDOG_ENABLED != true)")
+
 @app.get("/.well-known/oauth-authorization-server")
 def get_oauth_metadata():
     """Expose les métadonnées du serveur d'autorisation OAuth."""
