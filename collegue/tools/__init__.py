@@ -5,7 +5,14 @@ import os
 import importlib
 import inspect
 from typing import Dict, List, Type, Any, Optional
-from fastmcp import FastMCP, Context
+
+# Rendre FastMCP optionnel pour permettre l'exécution en mode "watchdog" léger
+try:
+    from fastmcp import FastMCP, Context
+except ImportError:
+    FastMCP = Any
+    Context = Any
+
 from pydantic import BaseModel
 from .base import BaseTool
 
