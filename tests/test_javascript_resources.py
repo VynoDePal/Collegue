@@ -29,12 +29,10 @@ class TestJavaScriptStandardLibrary(unittest.TestCase):
     
     def test_get_api_reference(self):
         """Teste la récupération d'une référence d'API."""
-        # Test avec une API existante
         api = get_api_reference("array")
         self.assertIsInstance(api, JavaScriptAPIReference)
         self.assertEqual(api.name, "Array")
         
-        # Test avec une API inexistante
         api = get_api_reference("nonexistent_api")
         self.assertIsNone(api)
     
@@ -51,12 +49,10 @@ class TestJavaScriptFrameworks(unittest.TestCase):
     
     def test_get_framework_reference(self):
         """Teste la récupération d'une référence de framework."""
-        # Test avec un framework existant
         framework = get_framework_reference("react")
         self.assertIsInstance(framework, JavaScriptFrameworkReference)
         self.assertEqual(framework.name, "React")
         
-        # Test avec un framework inexistant
         framework = get_framework_reference("nonexistent_framework")
         self.assertIsNone(framework)
     
@@ -73,12 +69,10 @@ class TestJavaScriptBestPractices(unittest.TestCase):
     
     def test_get_best_practice(self):
         """Teste la récupération d'une bonne pratique."""
-        # Test avec une bonne pratique existante
         practice = get_best_practice("use_strict")
         self.assertIsInstance(practice, JavaScriptBestPractice)
         self.assertEqual(practice.title, "Utiliser 'use strict'")
         
-        # Test avec une bonne pratique inexistante
         practice = get_best_practice("nonexistent_practice")
         self.assertIsNone(practice)
     

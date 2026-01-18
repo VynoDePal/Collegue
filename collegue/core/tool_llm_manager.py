@@ -13,7 +13,6 @@ class ToolLLMManager:
         # (priorité MCP via settings.update_from_mcp)
         self.settings = settings or global_settings
         
-        # Utilise les propriétés avec priorité MCP > env > default
         if not self.settings.llm_api_key:
             raise ValueError(
                 "La clé API LLM n'est pas configurée. "
@@ -23,11 +22,11 @@ class ToolLLMManager:
         # Configuration avec les propriétés qui gèrent la priorité MCP
         self.llm_config = LLMConfig(
             provider=LLMProvider.OPENAI,  # OpenRouter compatible avec OpenAI API
-            model_name=self.settings.llm_model,  # Utilise la propriété avec priorité
-            api_key=self.settings.llm_api_key,    # Utilise la propriété avec priorité
+            model_name=self.settings.llm_model,
+            api_key=self.settings.llm_api_key,
             api_base=self.settings.LLM_BASE_URL,
             max_tokens=self.settings.MAX_TOKENS,
-            temperature=0.7,  # Valeur par défaut raisonnable
+            temperature=0.7,
             additional_params={
                 "http_client": {
                     "headers": {
@@ -74,7 +73,6 @@ class ToolLLMManager:
                 t.join()
                 return result_container["value"]
         except RuntimeError:
-            # Si aucune boucle n'est en cours, on utilise run
             pass
             
         return asyncio.run(self.async_generate(prompt, system_prompt))

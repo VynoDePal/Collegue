@@ -91,24 +91,19 @@ class LanguageOptimizer:
             logger.warning(f"Pas de règles d'optimisation pour {language}")
             return base_prompt
         
-        # Construire le prompt optimisé
         optimized_parts = [base_prompt]
         
-        # Ajouter le contexte du langage
         if rules.get("context_hints"):
             optimized_parts.append(f"\nContext: {rules['context_hints']}")
         
-        # Ajouter les conventions
         if rules.get("conventions"):
             conventions = ", ".join(rules["conventions"])
             optimized_parts.append(f"\nFollow these conventions: {conventions}")
         
-        # Ajouter les best practices
         if rules.get("best_practices"):
             practices = "\n- ".join(rules["best_practices"])
             optimized_parts.append(f"\nBest practices to follow:\n- {practices}")
         
-        # Ajouter le contexte spécifique si fourni
         if context:
             if context.get("framework"):
                 framework = context["framework"]
@@ -145,7 +140,6 @@ class LanguageOptimizer:
         base_rules = self.LANGUAGE_RULES.get(language_lower, {})
         custom_rules = self.custom_rules.get(language_lower, {})
         
-        # Fusionner les règles
         context = base_rules.copy()
         context.update(custom_rules)
         
@@ -169,17 +163,14 @@ class LanguageOptimizer:
         if not rules:
             return ["Consider adding language-specific optimizations"]
         
-        # Vérifier si les conventions sont mentionnées
         conventions = rules.get("conventions", [])
         for convention in conventions:
             if convention.lower() not in prompt.lower():
                 suggestions.append(f"Consider mentioning {convention} convention")
         
-        # Vérifier si les frameworks sont mentionnés si pertinent
         if "framework" not in prompt.lower() and rules.get("frameworks"):
             suggestions.append("Consider specifying the target framework if applicable")
         
-        # Vérifier la présence de best practices
         if "best practice" not in prompt.lower() and "practice" not in prompt.lower():
             suggestions.append("Consider emphasizing best practices for the language")
         

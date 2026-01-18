@@ -17,8 +17,6 @@ class TestOAuthManager(unittest.TestCase):
     """Tests pour le gestionnaire d'authentification OAuth."""
     
     def setUp(self):
-        """Configuration avant chaque test."""
-        # Réinitialiser les paramètres OAuth
         settings.OAUTH_ENABLED = False
         settings.OAUTH_JWKS_URI = None
         settings.OAUTH_PUBLIC_KEY = None
@@ -32,24 +30,20 @@ class TestOAuthManager(unittest.TestCase):
     @patch('collegue.core.auth.BearerAuthProvider')
     def test_oauth_with_jwks(self, mock_provider):
         """Test quand l'authentification OAuth est configurée avec JWKS."""
-        # Configurer les paramètres OAuth
         settings.OAUTH_ENABLED = True
         settings.OAUTH_JWKS_URI = "https://example.com/.well-known/jwks.json"
         settings.OAUTH_ISSUER = "https://example.com/"
         settings.OAUTH_AUDIENCE = "test-app"
         settings.OAUTH_REQUIRED_SCOPES = ["read", "write"]
         
-        # Configurer le mock
         mock_instance = MagicMock()
         mock_provider.return_value = mock_instance
         
         oauth_manager = OAuthManager()
         
-        # Vérifier que le fournisseur d'authentification est créé
         self.assertTrue(oauth_manager.is_enabled())
         self.assertIsNotNone(oauth_manager.get_auth_provider())
         
-        # Vérifier que BearerAuthProvider a été appelé avec les bons paramètres
         mock_provider.assert_called_once_with(
             jwks_uri="https://example.com/.well-known/jwks.json",
             issuer="https://example.com/",
@@ -61,24 +55,20 @@ class TestOAuthManager(unittest.TestCase):
     @patch('collegue.core.auth.BearerAuthProvider')
     def test_oauth_with_public_key(self, mock_provider):
         """Test quand l'authentification OAuth est configurée avec une clé publique."""
-        # Configurer les paramètres OAuth
         settings.OAUTH_ENABLED = True
         settings.OAUTH_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
         settings.OAUTH_ISSUER = "https://example.com/"
         settings.OAUTH_AUDIENCE = "test-app"
         settings.OAUTH_REQUIRED_SCOPES = ["read"]
         
-        # Configurer le mock
         mock_instance = MagicMock()
         mock_provider.return_value = mock_instance
         
         oauth_manager = OAuthManager()
         
-        # Vérifier que le fournisseur d'authentification est créé
         self.assertTrue(oauth_manager.is_enabled())
         self.assertIsNotNone(oauth_manager.get_auth_provider())
         
-        # Vérifier que BearerAuthProvider a été appelé avec les bons paramètres
         mock_provider.assert_called_once_with(
             public_key="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
             issuer="https://example.com/",

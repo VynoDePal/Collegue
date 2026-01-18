@@ -16,7 +16,6 @@ SLEEP_BETWEEN_CHECKS="${SLEEP_BETWEEN_CHECKS:-5}"
 
 log "Target realm=$KC_REALM url=$KC_URL clientId=$PROVISION_CLIENT_ID scope=$REQUIRED_SCOPE"
 
-# Ensure curl and jq are available before any use (Alpine base image)
 ensure_tools () {
     NEEDS=false
     command -v curl >/dev/null 2>&1 || NEEDS=true
@@ -30,7 +29,6 @@ ensure_tools () {
 }
 ensure_tools
 
-# Wait for Keycloak readiness endpoint (fallback to root if not available)
 until (
     code=$(curl -s -o /dev/null -w "%{http_code}" "$KC_URL/health/ready" || true) && echo "$code" | grep -Eq '^(2|3)[0-9]{2}$'
 ) || (
@@ -41,7 +39,6 @@ until (
 done
 log "Keycloak is ready."
 
-# Ensure tools again (no-op if already installed)
 ensure_tools
 
 get_admin_token () {
@@ -68,7 +65,6 @@ if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
 fi
 AUTH_HEADER="Authorization: Bearer $TOKEN"
 
-# Ensure a client scope exists; create it if missing
 ensure_client_scope () {
     SCOPE_NAME="$1"
     TMP=$(mktemp)
@@ -93,14 +89,11 @@ ensure_client_scope () {
     fi
 }
 
-# Create required MCP scopes up-front (DCR will request them)
 ensure_client_scope "mcp.read"
 ensure_client_scope "mcp.write"
 
-# Ensure a scope is set as realm Default Client Scope
 ensure_realm_default_scope () {
     SCOPE_NAME="$1"
-    # Resolve scope ID
     SCOPE_ID=$(curl -s -H "$AUTH_HEADER" "$KC_URL/admin/realms/$KC_REALM/client-scopes?search=$SCOPE_NAME" | \
         jq -r --arg n "$SCOPE_NAME" '.[] | select(.name==$n) | .id' | head -n1)
     if [ -z "$SCOPE_ID" ]; then
@@ -119,7 +112,6 @@ ensure_realm_default_scope () {
         log "Client scope '$SCOPE_NAME' is already set as realm Default"
         return 0
     fi
-    # Try to attach using PUT, fallback to POST depending on KC version
     ADD_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT -H "$AUTH_HEADER" \
         "$KC_URL/admin/realms/$KC_REALM/default-default-client-scopes/$SCOPE_ID" || true)
     if echo "$ADD_CODE" | grep -Eq '^(200|201|204)$'; then
@@ -135,11 +127,9 @@ ensure_realm_default_scope () {
     fi
 }
 
-# Mark MCP scopes as Default at realm level so tokens les embarquent automatiquement
 ensure_realm_default_scope "mcp.read"
 ensure_realm_default_scope "mcp.write"
 
-# Wait for the DCR-created client to appear if not present yet
 find_client_id () {
     # 1) Try exact clientId
     TMP=$(mktemp)
@@ -175,7 +165,6 @@ find_client_id () {
     fi
     rm -f "$TMP"
     if [ -z "$CID" ]; then
-        # Avoid noisy logs: only log every ~30s
         if [ $((ELAPSED % 30)) -eq 0 ]; then
             log_err "clients query failed or not found (HTTP $CODE). Showing top matches:"
             TMP=$(mktemp)
@@ -205,11 +194,9 @@ if [ -z "$CID" ]; then
 fi
 log "Found clientId='$PROVISION_CLIENT_ID' id='$CID'"
 
-# Fetch full client representation and enable service accounts
 CLIENT_REP="$(curl -s -H "$AUTH_HEADER" "$KC_URL/admin/realms/$KC_REALM/clients/$CID")"
 NEW_REP="$(echo "$CLIENT_REP" | jq '.serviceAccountsEnabled = true | .publicClient = false | .fullScopeAllowed = false | .clientAuthenticatorType = "client-secret"')"
 
-# Only PUT if a change is needed
 if [ "$(echo "$CLIENT_REP" | jq -r '.serviceAccountsEnabled')" != "true" ] || \
    [ "$(echo "$CLIENT_REP" | jq -r '.publicClient')" = "true" ] || \
    [ "$(echo "$CLIENT_REP" | jq -r '.fullScopeAllowed')" = "true" ] || \
@@ -221,7 +208,6 @@ else
     log "Client already has desired base settings"
 fi
 
-# Ensure client has a secret (with 401 refresh and HTTP checks)
 TMP=$(mktemp)
 HTTP_CODE=$(curl -s -H "$AUTH_HEADER" -o "$TMP" -w "%{http_code}" "$KC_URL/admin/realms/$KC_REALM/clients/$CID/client-secret" || true)
 if [ "$HTTP_CODE" = "401" ]; then
@@ -244,7 +230,6 @@ if [ -z "$SECRET_VALUE" ]; then
     fi
     if echo "$HTTP_CODE" | grep -Eq '^(2|3)[0-9]{2}$'; then
         SECRET_VALUE="$(jq -r '.value // empty' < "$TMP")"
-        # Some KC versions may return 204 with empty body on rotate; try GET to read it
         if [ -z "$SECRET_VALUE" ]; then
             rm -f "$TMP"
             TMP=$(mktemp)
@@ -270,7 +255,6 @@ else
     log "Client already has a secret"
 fi
 
-# Helper to attach a default client scope to the client (idempotent, with 401 handling)
 attach_client_default_scope () {
     SCOPE_NAME="$1"
     TMP=$(mktemp)
@@ -314,7 +298,6 @@ attach_client_default_scope () {
     fi
 }
 
-# Attach both MCP scopes at client level (in addition to realm Default)
 attach_client_default_scope "mcp.read"
 attach_client_default_scope "mcp.write"
 

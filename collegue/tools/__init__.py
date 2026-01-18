@@ -93,7 +93,6 @@ class ToolRegistry:
             self._instances[tool_class.__name__] = tool_class(config)
 
     def get_tool_class(self, name: str) -> Type[BaseTool]:
-        """Récupère une classe d'outil par son nom."""
         return self._tools.get(name)
 
     def get_tool_instance(self, name: str, config: Dict[str, Any] = None) -> BaseTool:
@@ -121,11 +120,9 @@ class ToolRegistry:
         return instance
 
     def list_tools(self) -> List[str]:
-        """Retourne la liste des outils disponibles."""
         return list(self._tools.keys())
 
     def get_tools_info(self) -> Dict[str, Dict[str, Any]]:
-        """Retourne les informations de tous les outils."""
         info = {}
         for name, tool_class in self._tools.items():
             try:
@@ -144,7 +141,6 @@ _registry = ToolRegistry()
 
 
 def get_registry() -> ToolRegistry:
-    """Retourne l'instance globale du registry."""
     return _registry
 
 

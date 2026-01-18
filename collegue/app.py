@@ -10,7 +10,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from fastmcp import FastMCP
 from collegue.config import settings
 
-# Intégration Sentry (Monitoring)
 try:
     import sentry_sdk
     if settings.SENTRY_DSN:
@@ -231,6 +230,5 @@ def get_oauth_protected_resource():
         }
     return {}
 
-# Point d'entrée pour le serveur
 if __name__ == "__main__":
     app.run()

@@ -8,10 +8,8 @@ from pydantic import BaseModel
 
 from ..engine import PromptEngine, PromptTemplate, PromptCategory, PromptVariable, PromptVariableType
 
-# Configurer le logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 class PromptVariableCreate(BaseModel):
     """Modèle pour la création d'une variable de prompt."""
@@ -22,7 +20,6 @@ class PromptVariableCreate(BaseModel):
     default: Optional[Any] = None
     options: Optional[List[Any]] = None
     example: Optional[Any] = None
-
 
 class PromptTemplateCreate(BaseModel):
     """Modèle pour la création d'un template de prompt."""
@@ -36,7 +33,6 @@ class PromptTemplateCreate(BaseModel):
     examples: List[Dict[str, Any]] = []
     is_public: bool = False
 
-
 class PromptTemplateUpdate(BaseModel):
     """Modèle pour la mise à jour d'un template de prompt."""
     name: Optional[str] = None
@@ -49,7 +45,6 @@ class PromptTemplateUpdate(BaseModel):
     examples: Optional[List[Dict[str, Any]]] = None
     is_public: Optional[bool] = None
 
-
 class PromptCategoryCreate(BaseModel):
     """Modèle pour la création d'une catégorie de prompt."""
     id: str
@@ -58,7 +53,6 @@ class PromptCategoryCreate(BaseModel):
     parent_id: Optional[str] = None
     icon: Optional[str] = None
 
-
 class PromptCategoryUpdate(BaseModel):
     """Modèle pour la mise à jour d'une catégorie de prompt."""
     name: Optional[str] = None
@@ -66,27 +60,20 @@ class PromptCategoryUpdate(BaseModel):
     parent_id: Optional[str] = None
     icon: Optional[str] = None
 
-
 class FormatPromptRequest(BaseModel):
     """Modèle pour la requête de formatage d'un prompt."""
     variables: Dict[str, Any]
     provider: Optional[str] = None
 
-
 def get_prompt_engine():
     """Récupère l'instance du moteur de prompts."""
-    # Dans un contexte réel, cette fonction pourrait être configurée pour
-    # récupérer l'instance depuis un état d'application partagé
     return PromptEngine()
-
 
 def register_prompt_interface(app, app_state):
     """Enregistre les endpoints de l'interface de personnalisation des prompts."""
     
-    # Créer un router pour les endpoints de prompts personnalisés
     router = APIRouter(prefix="/prompts", tags=["prompts"])
     
-    # Initialiser le moteur de prompts et le stocker dans l'état de l'application
     prompt_engine = PromptEngine()
     app_state["prompt_engine"] = prompt_engine
     
@@ -128,10 +115,7 @@ def register_prompt_interface(app, app_state):
     ):
         """Crée un nouveau template de prompt."""
         try:
-            # Convertir le modèle Pydantic en dictionnaire
             data = template_data.model_dump()
-            
-            # Créer le template
             template = engine.create_template(data)
             
             return {
@@ -150,15 +134,11 @@ def register_prompt_interface(app, app_state):
         engine: PromptEngine = Depends(get_prompt_engine)
     ):
         """Met à jour un template existant."""
-        # Vérifier que le template existe
         if not engine.get_template(template_id):
             raise HTTPException(status_code=404, detail=f"Template {template_id} non trouvé")
         
         try:
-            # Convertir le modèle Pydantic en dictionnaire
             data = template_data.model_dump(exclude_unset=True)
-            
-            # Mettre à jour le template
             updated_template = engine.update_template(template_id, data)
             
             return {
@@ -175,7 +155,6 @@ def register_prompt_interface(app, app_state):
         engine: PromptEngine = Depends(get_prompt_engine)
     ):
         """Supprime un template."""
-        # Vérifier que le template existe
         if not engine.get_template(template_id):
             raise HTTPException(status_code=404, detail=f"Template {template_id} non trouvé")
         
@@ -224,10 +203,7 @@ def register_prompt_interface(app, app_state):
     ):
         """Crée une nouvelle catégorie de prompts."""
         try:
-            # Convertir le modèle Pydantic en dictionnaire
             data = category_data.model_dump()
-            
-            # Créer la catégorie
             category = engine.create_category(data)
             
             return {
@@ -251,10 +227,8 @@ def register_prompt_interface(app, app_state):
             "history": [h.model_dump() for h in history]
         }
     
-    # Enregistrer le router dans l'application
     app.include_router(router)
     
-    # Enregistrer dans le gestionnaire de ressources
     if "resource_manager" in app_state:
         app_state["resource_manager"].register_resource(
             "prompts",

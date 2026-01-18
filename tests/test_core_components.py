@@ -40,16 +40,13 @@ async def test_components_integration():
     """Test d'intégration des trois composants principaux"""
     print("=== Test d'intégration des composants du Core Engine ===")
     
-    # Créer une session de test
     session_id = "test_session_123"
     context_manager.create_context(session_id, metadata={"user_id": "test_user", "session_name": "Test Session"})
     print(f"Session créée avec ID: {session_id}")
     
-    # Initialiser le ToolLLMManager et l'ajouter à app_state
     llm_manager = ToolLLMManager()
     orchestrator.app_state["llm_manager"] = llm_manager
     
-    # Enregistrer quelques outils de test
     def analyze_code(code, language=None, context=None):
         """Analyse le code fourni"""
         print(f"Analyse du code avec langue: {language}")
@@ -70,7 +67,6 @@ async def test_components_integration():
             session_context = context_manager.get_context(session_id)
         return orchestrator.suggest_tools(query, session_context)
     
-    # Enregistrer les outils dans l'orchestrateur
     orchestrator.register_tool(
         "analyze_code", 
         analyze_code, 
@@ -92,7 +88,6 @@ async def test_components_integration():
         category="tool_suggestion"
     )
     
-    # Créer une chaîne d'outils
     tools_chain = [
         {
             "name": "analyze_code",
@@ -109,11 +104,9 @@ async def test_components_integration():
         }
     ]
     
-    # Enregistrer la chaîne d'outils
     chain_created = orchestrator.create_tool_chain("analyze_and_get_context", tools_chain)
     print(f"Chaîne d'outils créée: {chain_created}")
     
-    # Test 1: Analyse de code
     print("\n--- Test 1: Analyse de code ---")
     code_sample = """
 def calculate_sum(a, b):
@@ -189,7 +182,6 @@ class Calculator:
             
     # Test 4: Exécution d'une chaîne d'outils
     print("\n--- Test 4: Exécution d'une chaîne d'outils ---")
-    # Maintenant que kwargs n'est plus requis, nous pouvons appeler directement la chaîne d'outils
     chain_result = await orchestrator.execute_tool_async("analyze_and_get_context", {
         "context": {"session_id": session_id}
     })
@@ -225,10 +217,8 @@ class Calculator:
         # Test 6: Refactoring (LLM)
         print("\n--- Test 8: Refactoring (LLM) ---")
         
-        # Import the refactor_code function directly
         from collegue.tools.refactoring import refactor_code, RefactoringRequest
         
-        # Create a proper refactoring request
         refactoring_request = RefactoringRequest(
             code="def add(a, b): return a + b",
             language="python",
@@ -237,7 +227,6 @@ class Calculator:
             parameters={}
         )
         
-        # Create a mock LLM service for refactoring
         class MockRefactorLLMService:
             def __init__(self):
                 self.llm_config = MagicMock()
@@ -248,19 +237,15 @@ class Calculator:
                     return a + b
                 """)
         
-        # Call the function with our mock LLM service and parser
         mock_llm_service = MockRefactorLLMService()
         mock_parser = MagicMock()
         response = refactor_code(refactoring_request, parser=mock_parser, llm_manager=mock_llm_service)
         
-        # Convert response to model_dump for easier assertion
         refactor_result = response.model_dump()
         print(f"Résultat brut: {refactor_result}")
         
-        # Check if the mock was called with the right arguments
         mock_llm_service.sync_generate.assert_called_once()
         
-        # Check if we got a valid response
         assert "refactored_code" in refactor_result, "Response should contain 'refactored_code' field"
         assert "changes" in refactor_result, "Response should contain 'changes' field"
         print(f"Mocked LLM call for refactor_code: OK (Output: {refactor_result.get('refactored_code','')[:50]}...)")
@@ -268,10 +253,8 @@ class Calculator:
         # Test 9: Documentation Generation (LLM)
         print("\n--- Test 9: Documentation Generation (LLM) ---")
         
-        # Import the generate_documentation function directly
         from collegue.tools.documentation import generate_documentation, DocumentationRequest
         
-        # Create a proper documentation request
         doc_request = DocumentationRequest(
             code="def add(a, b): return a + b",
             language="python",
@@ -279,7 +262,6 @@ class Calculator:
             session_id=session_id
         )
         
-        # Create a mock LLM service for documentation
         class MockDocLLMService:
             def __init__(self):
                 self.llm_config = MagicMock()
@@ -303,29 +285,23 @@ class Calculator:
                         return a + b
                     """)
         
-        # Call the function with our mock LLM service and parser
         mock_llm_service = MockDocLLMService()
         mock_parser = MagicMock()
         response = generate_documentation(doc_request, parser=mock_parser, llm_manager=mock_llm_service)
         
-        # Convert response to model_dump for easier assertion
         doc_result = response.model_dump()
         print(f"Résultat brut: {doc_result}")
         
-        # Check if the mock was called with the right arguments
         mock_llm_service.sync_generate.assert_called_once()
         
-        # Check if we got a valid response
         assert "documentation" in doc_result, "Response should contain 'documentation' field"
         print(f"Mocked LLM call for generate_documentation: OK (Output: {doc_result.get('documentation','')[:50]}...)")
 
         # Test 10: Test Generation (LLM)
         print("\n--- Test 10: Test Generation (LLM) ---")
         
-        # Import the generate_tests function directly
         from collegue.tools.test_generation import generate_tests, TestGenerationRequest
         
-        # Create a proper test generation request
         test_request = TestGenerationRequest(
             code="def add(a, b): return a + b",
             language="python",
@@ -333,7 +309,6 @@ class Calculator:
             session_id=session_id
         )
         
-        # Create a mock LLM service for test generation
         class MockTestLLMService:
             def __init__(self):
                 self.llm_config = MagicMock()
@@ -345,23 +320,18 @@ class Calculator:
                     assert add(-1, 1) == 0
                 """)
         
-        # Call the function with our mock LLM service and parser
         mock_llm_service = MockTestLLMService()
         mock_parser = MagicMock()
         response = generate_tests(test_request, parser=mock_parser, llm_manager=mock_llm_service)
         
-        # Convert response to model_dump for easier assertion
         test_result = response.model_dump()
         print(f"Résultat brut: {test_result}")
         
-        # Check if the mock was called with the right arguments
         mock_llm_service.sync_generate.assert_called_once()
         
-        # Check if we got a valid response
         assert "test_code" in test_result, "Response should contain 'test_code' field"
         print(f"Mocked LLM call for generate_tests: OK (Output: {test_result.get('test_code','')[:50]}...)")
 
-    # Nettoyage: Fermer la session
     print("\n--- Nettoyage: Fermer la session ---")
     orchestrator.execute_tool("close_session", {"session_id": session_id})
     print(f"Session {session_id} fermée.")

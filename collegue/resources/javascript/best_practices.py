@@ -14,7 +14,6 @@ class JavaScriptBestPractice(BaseModel):
     examples: Dict[str, Dict[str, str]] = {}  # "good" et "bad" exemples
     references: List[str] = []
 
-# Dictionnaire des bonnes pratiques JavaScript
 JS_BEST_PRACTICES = {
     "use_strict": {
         "title": "Utiliser 'use strict'",

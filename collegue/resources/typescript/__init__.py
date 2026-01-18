@@ -21,12 +21,10 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
-    # Importer et enregistrer les sous-modules
     from . import types
     from . import frameworks
     from . import best_practices
     
-    # Enregistrer les sous-modules
     types.register(app, app_state)
     frameworks.register(app, app_state)
     best_practices.register(app, app_state)

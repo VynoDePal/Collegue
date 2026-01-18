@@ -28,18 +28,14 @@ class TestPythonStandardLibrary(unittest.TestCase):
     """Tests pour le module standard_library des ressources Python."""
     
     def test_get_module_reference(self):
-        """Teste la récupération d'une référence de module."""
-        # Test avec un module existant
         module = get_module_reference("os")
         self.assertIsInstance(module, PythonModuleReference)
         self.assertEqual(module.name, "os")
         
-        # Test avec un module inexistant
         module = get_module_reference("nonexistent_module")
         self.assertIsNone(module)
     
     def test_get_all_modules(self):
-        """Teste la récupération de tous les modules."""
         modules = get_all_modules()
         self.assertIsInstance(modules, list)
         self.assertGreater(len(modules), 0)
@@ -50,18 +46,14 @@ class TestPythonFrameworks(unittest.TestCase):
     """Tests pour le module frameworks des ressources Python."""
     
     def test_get_framework_reference(self):
-        """Teste la récupération d'une référence de framework."""
-        # Test avec un framework existant
         framework = get_framework_reference("django")
         self.assertIsInstance(framework, PythonFrameworkReference)
         self.assertEqual(framework.name, "Django")
         
-        # Test avec un framework inexistant
         framework = get_framework_reference("nonexistent_framework")
         self.assertIsNone(framework)
     
     def test_get_all_frameworks(self):
-        """Teste la récupération de tous les frameworks."""
         frameworks = get_all_frameworks()
         self.assertIsInstance(frameworks, list)
         self.assertGreater(len(frameworks), 0)
@@ -72,18 +64,14 @@ class TestPythonBestPractices(unittest.TestCase):
     """Tests pour le module best_practices des ressources Python."""
     
     def test_get_best_practice(self):
-        """Teste la récupération d'une bonne pratique."""
-        # Test avec une bonne pratique existante
         practice = get_best_practice("pep8")
         self.assertIsInstance(practice, PythonBestPractice)
         self.assertEqual(practice.title, "Suivre PEP 8")
         
-        # Test avec une bonne pratique inexistante
         practice = get_best_practice("nonexistent_practice")
         self.assertIsNone(practice)
     
     def test_get_all_best_practices(self):
-        """Teste la récupération de toutes les bonnes pratiques."""
         practices = get_all_best_practices()
         self.assertIsInstance(practices, list)
         self.assertGreater(len(practices), 0)
@@ -110,7 +98,6 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         self.client = TestClient(self.app)
     
     def test_list_python_modules_endpoint(self):
-        """Teste l'endpoint de liste des modules Python."""
         response = self.client.get("/resources/python/stdlib/modules")
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -119,14 +106,12 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         self.assertGreater(len(data["modules"]), 0)
     
     def test_get_module_info_endpoint(self):
-        """Teste l'endpoint d'information sur un module."""
         response = self.client.get("/resources/python/stdlib/module/os")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["name"], "os")
     
     def test_list_frameworks_endpoint(self):
-        """Teste l'endpoint de liste des frameworks Python."""
         response = self.client.get("/resources/python/frameworks")
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -135,14 +120,12 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         self.assertGreater(len(data["frameworks"]), 0)
     
     def test_get_framework_info_endpoint(self):
-        """Teste l'endpoint d'information sur un framework."""
         response = self.client.get("/resources/python/frameworks/django")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["name"], "Django")
     
     def test_list_best_practices_endpoint(self):
-        """Teste l'endpoint de liste des bonnes pratiques Python."""
         response = self.client.get("/resources/python/best-practices")
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -151,7 +134,6 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         self.assertGreater(len(data["practices"]), 0)
     
     def test_get_best_practice_info_endpoint(self):
-        """Teste l'endpoint d'information sur une bonne pratique."""
         response = self.client.get("/resources/python/best-practices/pep8")
         self.assertEqual(response.status_code, 200)
         data = response.json()

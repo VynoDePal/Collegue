@@ -109,7 +109,6 @@ class CodeParser:
         elif js_score > python_score and js_score >= ts_score:  # Changé pour >= au lieu de >
             return "javascript"
         
-        # Si aucun score n'est clairement supérieur, on vérifie les extensions typiques
         if ".py" in code.lower():
             return "python"
         elif ".ts" in code.lower() or ".tsx" in code.lower():
@@ -132,7 +131,6 @@ class CodeParser:
         try:
             tree = ast.parse(code)
             
-            # Extraction des éléments du code
             imports = self._extract_python_imports_ast(tree)
             functions = self._extract_python_functions_ast(tree, code)
             classes = self._extract_python_classes_ast(tree, code)
@@ -222,7 +220,6 @@ class CodeParser:
             dict: La représentation structurée du code
         """
         try:
-            # Extraction des éléments du code
             imports = self._extract_js_imports(code)
             functions = self._extract_js_functions(code)
             classes = self._extract_js_classes(code)
@@ -238,7 +235,6 @@ class CodeParser:
                 "syntax_valid": True
             }
         except Exception as e:
-            # En cas d'erreur d'analyse
             return {
                 "language": "javascript",
                 "imports": [],
@@ -388,7 +384,6 @@ class CodeParser:
             dict: La représentation structurée du code
         """
         try:
-            # Extraction des éléments du code
             imports = self._extract_ts_imports(code)
             functions = self._extract_ts_functions(code)
             classes = self._extract_ts_classes(code)
@@ -408,7 +403,6 @@ class CodeParser:
                 "syntax_valid": True
             }
         except Exception as e:
-            # En cas d'erreur d'analyse
             return {
                 "language": "typescript",
                 "imports": [],
@@ -681,7 +675,6 @@ class CodeParser:
         
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
-                # Extraire les paramètres
                 params = []
                 defaults = [None] * (len(node.args.args) - len(node.args.defaults)) + list(node.args.defaults)
                 
@@ -692,14 +685,12 @@ class CodeParser:
                         "default": None
                     }
                     
-                    # Extraire l'annotation de type si elle existe
                     if arg.annotation:
                         if isinstance(arg.annotation, ast.Name):
                             param_info["type"] = arg.annotation.id
                         elif isinstance(arg.annotation, ast.Attribute):
                             param_info["type"] = f"{arg.annotation.value.id}.{arg.annotation.attr}"
                     
-                    # Extraire la valeur par défaut si elle existe
                     if default:
                         if isinstance(default, ast.Constant):
                             param_info["default"] = default.value
@@ -708,7 +699,6 @@ class CodeParser:
                     
                     params.append(param_info)
                 
-                # Extraire le type de retour
                 return_type = None
                 if node.returns:
                     if isinstance(node.returns, ast.Name):
@@ -716,10 +706,8 @@ class CodeParser:
                     elif isinstance(node.returns, ast.Attribute):
                         return_type = f"{node.returns.value.id}.{node.returns.attr}"
                 
-                # Extraire la docstring
                 docstring = ast.get_docstring(node)
                 
-                # Extraire le corps de la fonction
                 function_body = ""
                 if len(node.body) > 0:
                     start_line = node.body[0].lineno
@@ -754,7 +742,6 @@ class CodeParser:
         
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
-                # Extraire les bases (héritage)
                 bases = []
                 for base in node.bases:
                     if isinstance(base, ast.Name):
@@ -762,16 +749,13 @@ class CodeParser:
                     elif isinstance(base, ast.Attribute):
                         bases.append(f"{base.value.id}.{base.attr}")
                 
-                # Extraire les méthodes
                 methods = []
                 for child in node.body:
                     if isinstance(child, ast.FunctionDef):
-                        # Extraire les paramètres
                         params = []
                         defaults = [None] * (len(child.args.args) - len(child.args.defaults)) + list(child.args.defaults)
                         
                         for i, (arg, default) in enumerate(zip(child.args.args, defaults)):
-                            # Ignorer le premier paramètre 'self'
                             if i == 0 and arg.arg == 'self':
                                 continue
                                 
@@ -781,14 +765,12 @@ class CodeParser:
                                 "default": None
                             }
                             
-                            # Extraire l'annotation de type si elle existe
                             if arg.annotation:
                                 if isinstance(arg.annotation, ast.Name):
                                     param_info["type"] = arg.annotation.id
                                 elif isinstance(arg.annotation, ast.Attribute):
                                     param_info["type"] = f"{arg.annotation.value.id}.{arg.annotation.attr}"
                             
-                            # Extraire la valeur par défaut si elle existe
                             if default:
                                 if isinstance(default, ast.Constant):
                                     param_info["default"] = default.value
@@ -797,7 +779,6 @@ class CodeParser:
                             
                             params.append(param_info)
                         
-                        # Extraire le type de retour
                         return_type = None
                         if child.returns:
                             if isinstance(child.returns, ast.Name):
@@ -805,7 +786,6 @@ class CodeParser:
                             elif isinstance(child.returns, ast.Attribute):
                                 return_type = f"{child.returns.value.id}.{child.returns.attr}"
                         
-                        # Extraire la docstring
                         docstring = ast.get_docstring(child)
                         
                         methods.append({
@@ -817,7 +797,6 @@ class CodeParser:
                             "is_method": True
                         })
                 
-                # Extraire les attributs
                 attributes = []
                 for child in node.body:
                     if isinstance(child, ast.Assign):

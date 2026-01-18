@@ -78,7 +78,6 @@ class ToolOrchestrator:
         """
         tool = self.tools.get(name)
         if tool:
-            # Ajouter le nom de l'outil aux informations retournées
             tool_info = tool.copy()
             tool_info["name"] = name
             return tool_info
@@ -101,7 +100,6 @@ class ToolOrchestrator:
         else:
             tools_dict = self.tools
             
-        # Convertir le dictionnaire en liste et ajouter le nom à chaque outil
         tools_list = []
         for name, tool in tools_dict.items():
             tool_info = tool.copy()
@@ -164,7 +162,6 @@ class ToolOrchestrator:
             return {"error": validation["error"]}
         
         try:
-            # Ajouter le contexte aux arguments si fourni
             if context:
                 args["context"] = context
             
@@ -202,23 +199,19 @@ class ToolOrchestrator:
             return {"error": validation["error"]}
             
         try:
-            # Ajouter le contexte aux arguments si fourni
             if context:
                 args["context"] = context
                 
-            # Pour les fonctions asynchrones, utiliser asyncio.run
             if tool["is_async"]:
                 result = asyncio.run(tool["function"](**args))
             else:
                 result = tool["function"](**args)
             
-            # Enregistrer l'exécution dans l'historique
             self._add_to_execution_history(name, args, result)
                 
             return result
         except Exception as e:
             error_result = {"error": str(e), "exception_type": type(e).__name__}
-            # Enregistrer l'erreur dans l'historique
             self._add_to_execution_history(name, args, error_result)
             return error_result
     
@@ -236,26 +229,21 @@ class ToolOrchestrator:
         # Implémentation améliorée avec analyse de mots-clés et contexte
         suggestions = []
         
-        # Convertir la requête en minuscules et la diviser en mots
         query_lower = query.lower()
         query_words = set(query_lower.split())
         
         for name, tool in self.tools.items():
             score = 0
             
-            # Vérifier si des mots-clés de l'outil sont présents dans la requête
             description_lower = tool["description"].lower()
             description_words = set(description_lower.split())
             
-            # Calculer l'intersection des mots
             common_words = query_words.intersection(description_words)
             score += len(common_words) * 2
             
-            # Si le nom de l'outil est dans la requête, augmenter le score
             if name.lower() in query_lower:
                 score += 5
             
-            # Bonus pour les mots-clés importants dans la requête
             keywords = {
                 "générer": ["generation", "code", "créer", "nouveau"],
                 "expliquer": ["explication", "comprendre", "clarifier"],
@@ -271,20 +259,16 @@ class ToolOrchestrator:
                     if word in query_lower and tool["category"].lower() == action:
                         score += 2
             
-            # Utiliser le contexte pour améliorer les suggestions
             if context:
-                # Si un langage est spécifié dans le contexte et dans la catégorie de l'outil
                 if "language_context" in context and context["language_context"]:
                     lang = context["language_context"].get("language", "").lower()
                     if lang and lang in tool["category"].lower():
                         score += 3
                 
-                # Si le contexte contient un fichier courant et que l'outil traite des fichiers
                 if "current_file" in context and context["current_file"]:
                     if "fichier" in description_lower or "file" in description_lower:
                         score += 2
             
-            # Si le score est supérieur à 0, ajouter l'outil aux suggestions
             if score > 0:
                 suggestions.append({
                     "name": name,
@@ -294,7 +278,6 @@ class ToolOrchestrator:
                     "required_args": tool["required_args"]
                 })
                 
-        # Trier les suggestions par pertinence décroissante
         suggestions.sort(key=lambda x: x["relevance"], reverse=True)
         return suggestions
     
@@ -315,7 +298,6 @@ class ToolOrchestrator:
         dependencies = self.tool_dependencies[name].copy()
         
         if recursive:
-            # Récupérer récursivement les dépendances des dépendances
             for dep in list(dependencies):
                 dependencies.update(self.get_tool_dependencies(dep, recursive=True))
                 
@@ -330,7 +312,6 @@ class ToolOrchestrator:
             args (dict): Arguments utilisés
             result (Any): Résultat de l'exécution
         """
-        # Créer une entrée d'historique avec horodatage
         entry = {
             "timestamp": self._get_timestamp(),
             "tool_name": tool_name,
@@ -339,7 +320,6 @@ class ToolOrchestrator:
             "success": "error" not in result if isinstance(result, dict) else True
         }
         
-        # Ajouter à l'historique et limiter la taille
         self.execution_history.append(entry)
         if len(self.execution_history) > self.max_history_size:
             self.execution_history.pop(0)
@@ -357,7 +337,6 @@ class ToolOrchestrator:
         Returns:
             list: Liste des entrées d'historique correspondant aux critères
         """
-        # Filtrer l'historique selon les critères
         filtered_history = self.execution_history
         
         if tool_name:
@@ -368,7 +347,6 @@ class ToolOrchestrator:
             filtered_history = [entry for entry in filtered_history 
                               if entry["success"]]
         
-        # Limiter le nombre d'entrées si demandé
         if limit and limit > 0:
             filtered_history = filtered_history[-limit:]
             
@@ -395,30 +373,25 @@ class ToolOrchestrator:
         Returns:
             bool: True si la chaîne a été créée avec succès, False sinon
         """
-        # Vérifier que tous les outils existent
         for tool_config in tools:
             if tool_config["name"] not in self.tools:
                 return False
         
-        # Créer la fonction de chaîne d'outils
         async def tool_chain_func(context=None):
             results = []
-            current_args = {}  # Initialiser avec un dictionnaire vide
+            current_args = {}
             
             for i, tool_config in enumerate(tools):
                 tool_name = tool_config["name"]
                 
-                # Combiner les arguments fixes avec les arguments dynamiques
                 tool_args = tool_config.get("args", {}).copy()
                 tool_args.update(current_args)
                 
-                # Exécuter l'outil
                 result = await self.execute_tool_async(tool_name, tool_args, context)
                 
                 # Stocker le résultat tel quel, sans encapsulation supplémentaire
                 results.append(result)
                 
-                # Si l'outil a échoué, arrêter la chaîne
                 if isinstance(result, dict) and "error" in result:
                     return {
                         "chain_name": chain_name,
@@ -428,10 +401,8 @@ class ToolOrchestrator:
                         "error": f"Échec à l'étape {i + 1}: {result['error']}"
                     }
                 
-                # Mapper les résultats pour l'outil suivant si ce n'est pas le dernier
                 if i < len(tools) - 1 and "result_mapping" in tool_config:
                     for dest_arg, source_path in tool_config["result_mapping"].items():
-                        # Extraire la valeur du résultat selon le chemin spécifié
                         value = self._extract_result_value(result, source_path)
                         if value is not None:
                             current_args[dest_arg] = value
@@ -443,7 +414,6 @@ class ToolOrchestrator:
                 "results": results
             }
         
-        # Enregistrer la chaîne comme un outil
         description = f"Chaîne d'outils exécutant séquentiellement: {', '.join([t['name'] for t in tools])}"
         self.register_tool(
             chain_name, 
@@ -469,10 +439,8 @@ class ToolOrchestrator:
         if not path:
             return None
             
-        # Commencer par le résultat complet
         current = result
         
-        # Séparer le chemin en segments
         segments = path.split(".")
         
         try:
@@ -517,17 +485,14 @@ class ToolOrchestrator:
         try:
             sig = inspect.signature(func)
             for param_name, param in sig.parameters.items():
-                # Ignorer self pour les méthodes
                 if param_name == "self":
                     continue
                     
-                # Vérifier si le paramètre a une valeur par défaut
                 if param.default == inspect.Parameter.empty:
                     required_args.append(param_name)
                 else:
                     optional_args.append(param_name)
         except (ValueError, TypeError):
-            # En cas d'erreur, retourner des listes vides
             pass
             
         return required_args, optional_args

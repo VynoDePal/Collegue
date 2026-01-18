@@ -15,14 +15,11 @@ from typing import Optional
 
 def extract_session_id(response_text: str) -> Optional[str]:
     """Extrait l'ID de session de la réponse"""
-    # Rechercher l'ID de session dans les logs ou headers
     session_match = re.search(r'session[_\s]?ID[:\s]+([a-f0-9-]+)', response_text, re.IGNORECASE)
     if session_match:
         return session_match.group(1)
     
-    # Rechercher l'ID de session au format JSON
     try:
-        # Essayer de parser la réponse comme JSON
         for line in response_text.split('\n'):
             if line.startswith('data: '):
                 json_data = json.loads(line[6:])
@@ -36,7 +33,6 @@ def extract_session_id(response_text: str) -> Optional[str]:
 def test_mcp_connection():
     """Test la connexion au serveur MCP"""
     
-    # Test 1: Vérifier que le serveur est accessible
     try:
         response = requests.get("http://localhost:8088/mcp/", timeout=5)
         print(f"✅ Serveur accessible: {response.status_code}")
@@ -44,16 +40,13 @@ def test_mcp_connection():
         print(f"❌ Erreur de connexion: {e}")
         return False
     
-    # Test 2: Vérifier l'endpoint de santé via nginx
     try:
         response = requests.get("http://localhost:8088/_health", timeout=5)
         print(f"✅ Health check via nginx: {response.status_code}")
     except Exception as e:
         print(f"❌ Erreur health check nginx: {e}")
     
-    # Test 3: Tester l'initialisation MCP avec les bons paramètres
     try:
-        # D'abord, créer une session avec tous les paramètres requis
         init_response = requests.post(
             "http://localhost:8088/mcp/",
             json={
@@ -83,12 +76,10 @@ def test_mcp_connection():
         print(f"✅ Test MCP initialize: {init_response.status_code}")
         print(f"Response: {init_response.text[:300]}...")
         
-        # Vérifier s'il y a des cookies dans la réponse
         cookies = init_response.cookies
         if cookies:
             print(f"✅ Cookies trouvés dans la réponse: {dict(cookies)}")
         
-        # Extraire l'ID de session
         session_id = None
         if 'X-Session-ID' in init_response.headers:
             session_id = init_response.headers['X-Session-ID']
@@ -97,13 +88,11 @@ def test_mcp_connection():
             session_id = init_response.headers['MCP-Session-ID']
             print(f"✅ Session ID trouvé dans les headers: {session_id}")
         else:
-            # Essayer d'extraire l'ID de session du corps de la réponse
             session_id = extract_session_id(init_response.text)
             
         if session_id:
             print(f"✅ Session ID trouvé: {session_id}")
             
-            # Test des outils disponibles avec l'ID de session
             tools_headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
@@ -112,7 +101,6 @@ def test_mcp_connection():
                 "x-session-id": session_id  # Ajouter en minuscules pour nginx
             }
             
-            # Inclure l'ID de session dans les paramètres de la requête et dans l'URL
             url_with_session = f"http://localhost:8088/mcp/?session_id={session_id}"
             print(f"Utilisation de l'URL avec session ID: {url_with_session}")
             

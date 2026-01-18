@@ -8,7 +8,6 @@ import os
 import logging
 from enum import Enum
 
-# Configurer le logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,6 @@ class PromptTemplate(BaseModel):
     provider_specific: Dict[str, str] = {}  # Versions spécifiques par fournisseur
     examples: List[Dict[str, Any]] = []
 
-# Dictionnaire des templates de prompts
 PROMPT_TEMPLATES = {
     # Templates pour la documentation
     "code_documentation": {

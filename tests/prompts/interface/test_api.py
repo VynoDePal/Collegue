@@ -26,16 +26,12 @@ class TestPromptAPI(unittest.TestCase):
     
     def setUp(self):
         """Configuration avant chaque test."""
-        # Créer un répertoire temporaire pour les tests
         self.test_dir = tempfile.mkdtemp()
         
-        # Créer les sous-répertoires nécessaires
         os.makedirs(os.path.join(self.test_dir, "templates"), exist_ok=True)
         
-        # Initialiser le moteur avec le chemin de stockage
         self.engine = PromptEngine(storage_path=self.test_dir)
         
-        # Créer une catégorie de test
         self.test_category = PromptCategory(
             id="test_category",
             name="Catégorie de test",
@@ -43,7 +39,6 @@ class TestPromptAPI(unittest.TestCase):
         )
         self.engine.create_category(self.test_category.model_dump(exclude_unset=True))
         
-        # Créer une autre catégorie
         another_category = PromptCategory(
             id="another_category",
             name="Autre catégorie",
@@ -51,7 +46,6 @@ class TestPromptAPI(unittest.TestCase):
         )
         self.engine.create_category(another_category.model_dump(exclude_unset=True))
         
-        # Créer un template de test
         self.test_template = PromptTemplate(
             id="test_template",
             name="Template de test",
@@ -87,29 +81,22 @@ class TestPromptAPI(unittest.TestCase):
         )
         self.engine.create_template(self.test_template.model_dump(exclude_unset=True))
         
-        # Créer une application FastAPI pour les tests
         self.app = FastAPI()
         
-        # Remplacer la fonction get_prompt_engine dans le module api
-        # pour qu'elle retourne notre instance de moteur
         def mock_get_prompt_engine():
             return self.engine
             
-        # Enregistrer l'API avec notre fonction mockée
         with patch('collegue.prompts.interface.api.get_prompt_engine', mock_get_prompt_engine):
             register_prompt_interface(self.app, {"prompt_engine": self.engine})
         
-        # Créer un client de test
         self.client = TestClient(self.app)
     
     def tearDown(self):
         """Nettoyage après chaque test."""
-        # Supprimer le répertoire temporaire
         shutil.rmtree(self.test_dir)
 
     def test_list_templates(self):
         """Test de récupération de tous les templates."""
-        # Patcher get_prompt_engine pour chaque appel d'API
         with patch('collegue.prompts.interface.api.get_prompt_engine', return_value=self.engine):
             response = self.client.get("/prompts/templates")
             self.assertEqual(response.status_code, 200)
@@ -162,7 +149,6 @@ class TestPromptAPI(unittest.TestCase):
             self.assertIsNotNone(created_template)
             self.assertEqual(created_template.name, new_template.name)
             
-            # Vérifier que le template a bien été créé
             check_response = self.client.get(f"/prompts/templates/{created_template.id}")
             self.assertEqual(check_response.status_code, 200)
     
@@ -188,7 +174,6 @@ class TestPromptAPI(unittest.TestCase):
             response = self.client.delete(f"/prompts/templates/{self.test_template.id}")
             self.assertEqual(response.status_code, 200)
             
-            # Vérifier que le template a bien été supprimé
             check_response = self.client.get(f"/prompts/templates/{self.test_template.id}")
             self.assertEqual(check_response.status_code, 404)
     
@@ -204,7 +189,6 @@ class TestPromptAPI(unittest.TestCase):
     
     def test_get_category_by_id(self):
         """Test de récupération d'une catégorie par ID."""
-        # Récupérer toutes les catégories
         with patch('collegue.prompts.interface.api.get_prompt_engine', return_value=self.engine):
             response = self.client.get("/prompts/categories")
             self.assertEqual(response.status_code, 200)
@@ -212,7 +196,6 @@ class TestPromptAPI(unittest.TestCase):
             self.assertIn("categories", data)
             categories = data["categories"]
             
-            # Chercher notre catégorie de test
             found_category = None
             for category in categories:
                 if category["id"] == self.test_category.id:
@@ -237,7 +220,6 @@ class TestPromptAPI(unittest.TestCase):
             data = response.json()
             self.assertEqual(data["id"], new_category.id)
             
-            # Vérifier que la catégorie a bien été créée
             check_response = self.client.get("/prompts/categories")
             check_data = check_response.json()
             found = False
@@ -277,11 +259,9 @@ class TestPromptAPI(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             data = response.json()
             self.assertIn("formatted_prompt", data)
-            # Vérifier que le prompt formaté contient les valeurs des variables
             formatted_prompt = data["formatted_prompt"]
             self.assertIn("exemple", formatted_prompt)
             self.assertIn("valeur", formatted_prompt)
-            # Vérifier que les marqueurs de template ont été remplacés
             self.assertNotIn("{test}", formatted_prompt)
             self.assertNotIn("{variable}", formatted_prompt)
     
@@ -311,7 +291,6 @@ class TestPromptAPI(unittest.TestCase):
             data = response.json()
             self.assertIn("templates", data)
             
-            # Vérifier que notre template est bien dans la liste
             found = False
             for template in data["templates"]:
                 if template["id"] == self.test_template.id:
@@ -321,14 +300,12 @@ class TestPromptAPI(unittest.TestCase):
     
     def test_get_execution_history(self):
         """Test de récupération de l'historique des exécutions."""
-        # D'abord, créer une exécution en formatant un prompt
         variables = {
             "test": "exemple",
             "variable": "valeur"
         }
         self.engine.format_prompt(self.test_template.id, variables)
         
-        # Récupérer l'historique
         with patch('collegue.prompts.interface.api.get_prompt_engine', return_value=self.engine):
             response = self.client.get("/prompts/history")
             self.assertEqual(response.status_code, 200)

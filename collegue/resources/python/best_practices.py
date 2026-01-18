@@ -13,7 +13,6 @@ class PythonBestPractice(BaseModel):
     examples: Dict[str, Dict[str, str]] = {}  # "good" et "bad" exemples
     references: List[str] = []
 
-# Dictionnaire des bonnes pratiques Python
 PYTHON_BEST_PRACTICES = {
     "pep8": {
         "title": "Suivre PEP 8",

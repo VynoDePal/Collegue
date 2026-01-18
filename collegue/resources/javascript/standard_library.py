@@ -18,7 +18,6 @@ class JavaScriptAPIReference(BaseModel):
     browser_compatibility: Dict[str, bool] = {}
     mdn_url: Optional[str] = None
 
-# Dictionnaire des API JavaScript standard
 JS_STANDARD_APIS = {
     # Objets globaux
     "array": {

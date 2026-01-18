@@ -30,12 +30,10 @@ def test_config_priority():
     print("TEST DE PRIORITÉ DE CONFIGURATION")
     print("="*60)
     
-    # Sauvegarder les valeurs actuelles
     original_env_model = os.environ.get("LLM_MODEL")
     original_env_key = os.environ.get("LLM_API_KEY")
     
     try:
-        # Test 1: Valeurs par défaut uniquement
         print("\n1. Test avec valeurs par défaut:")
         if "LLM_MODEL" in os.environ:
             del os.environ["LLM_MODEL"]
@@ -46,7 +44,6 @@ def test_config_priority():
         print(f"   - Modèle: {settings.llm_model}")
         print(f"   - API Key présente: {bool(settings.llm_api_key)}")
         
-        # Test 2: Variables d'environnement
         print("\n2. Test avec variables d'environnement:")
         os.environ["LLM_MODEL"] = "openai/gpt-3.5-turbo"
         os.environ["LLM_API_KEY"] = "sk-env-test-key"
@@ -55,7 +52,6 @@ def test_config_priority():
         print(f"   - Modèle depuis ENV: {settings.llm_model}")
         print(f"   - API Key depuis ENV: {settings.llm_api_key[:20]}...")
         
-        # Test 3: Paramètres MCP (priorité maximale)
         print("\n3. Test avec paramètres MCP (priorité max):")
         mcp_params = {
             "LLM_MODEL": "google/gemini-2.0-flash-exp:free",
@@ -66,14 +62,12 @@ def test_config_priority():
         print(f"   - Modèle depuis MCP: {settings.llm_model}")
         print(f"   - API Key depuis MCP: {settings.llm_api_key[:20]}...")
         
-        # Vérifier que MCP a priorité sur ENV
         assert settings.llm_model == "google/gemini-2.0-flash-exp:free", "MCP devrait avoir priorité sur ENV"
         assert settings.llm_api_key == "sk-mcp-test-key", "MCP API key devrait avoir priorité"
         
         print("\n✅ Test de priorité réussi: MCP > ENV > DEFAULT")
         
     finally:
-        # Restaurer les valeurs originales
         if original_env_model:
             os.environ["LLM_MODEL"] = original_env_model
         elif "LLM_MODEL" in os.environ:
@@ -90,7 +84,6 @@ def test_different_models():
     print("TEST DE DIFFÉRENTS MODÈLES")
     print("="*60)
     
-    # Modèles à tester
     models_to_test = [
         {
             "name": "OpenAI GPT-4o Mini",
@@ -189,7 +182,6 @@ def simulate_windsurf_config():
         print(f"\n📋 {config_info['name']}:")
         print(f"   Config JSON: {json.dumps(config_info['config'], indent=6)}")
         
-        # Extraire les paramètres MCP
         collegue_config = config_info['config'].get('collegue', {})
         mcp_params = {}
         
@@ -198,7 +190,6 @@ def simulate_windsurf_config():
         if 'LLM_API_KEY' in collegue_config:
             mcp_params['LLM_API_KEY'] = collegue_config['LLM_API_KEY']
         
-        # Appliquer la configuration
         settings = Settings()
         settings.update_from_mcp(mcp_params)
         
@@ -216,7 +207,6 @@ def test_error_handling():
     print("TEST DE GESTION D'ERREURS")
     print("="*60)
     
-    # Test 1: Pas de clé API
     print("\n1. Test sans clé API:")
     settings = Settings()
     settings._mcp_llm_api_key = None
@@ -228,7 +218,6 @@ def test_error_handling():
     except ValueError as e:
         print(f"   ✅ Erreur correctement levée: {str(e)}")
     
-    # Test 2: Modèle invalide (sera accepté par la config mais pourrait échouer à l'exécution)
     print("\n2. Test avec modèle invalide:")
     settings = Settings()
     mcp_params = {
@@ -251,7 +240,6 @@ def main():
     print("🚀"*30)
     
     try:
-        # Exécuter tous les tests
         test_config_priority()
         test_different_models()
         simulate_windsurf_config()

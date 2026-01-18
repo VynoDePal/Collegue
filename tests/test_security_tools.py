@@ -25,14 +25,12 @@ class TestSecretScanTool(unittest.TestCase):
         self.tool = SecretScanTool()
     
     def test_tool_metadata(self):
-        """Vérifie les métadonnées de l'outil."""
         self.assertEqual(self.tool.get_name(), "secret_scan")
         self.assertIn("python", self.tool.get_supported_languages())
         self.assertFalse(self.tool.is_long_running())
         print("✅ Métadonnées secret_scan correctes")
     
     def test_detect_aws_key(self):
-        """Teste la détection de clés AWS."""
         code = '''
 config = {
     "aws_access_key": "AKIAIOSFODNN7EXAMPLE",
@@ -45,7 +43,6 @@ config = {
         print("✅ Détection clé AWS")
     
     def test_detect_openai_key(self):
-        """Teste la détection de clés OpenAI."""
         code = 'api_key = "sk-1234567890abcdef1234567890abcdef1234567890abcdef"'
         findings = self.tool._scan_content(code)
         self.assertGreater(len(findings), 0)
@@ -53,7 +50,6 @@ config = {
         print("✅ Détection clé OpenAI")
     
     def test_detect_github_token(self):
-        """Teste la détection de tokens GitHub."""
         code = 'GITHUB_TOKEN = "ghp_1234567890abcdef1234567890abcdef1234"'
         findings = self.tool._scan_content(code)
         self.assertGreater(len(findings), 0)
@@ -61,7 +57,6 @@ config = {
         print("✅ Détection token GitHub")
     
     def test_detect_private_key(self):
-        """Teste la détection de clés privées."""
         code = '''
 -----BEGIN RSA PRIVATE KEY-----
 MIIEowIBAAKCAQEA2Z3qX2BTLS4e0...
@@ -74,14 +69,12 @@ MIIEowIBAAKCAQEA2Z3qX2BTLS4e0...
         print("✅ Détection clé privée RSA")
     
     def test_detect_password_in_url(self):
-        """Teste la détection de mots de passe dans les URLs."""
         code = 'db_url = "postgres://user:supersecret123@localhost/db"'
         findings = self.tool._scan_content(code)
         self.assertGreater(len(findings), 0)
         print("✅ Détection password dans URL")
     
     def test_clean_code(self):
-        """Teste qu'un code propre ne génère pas de faux positifs."""
         code = '''
 import os
 
@@ -93,13 +86,11 @@ class Config:
     DATABASE_URL = os.getenv("DATABASE_URL")
 '''
         findings = self.tool._scan_content(code)
-        # Ne devrait pas trouver de secrets (valeurs viennent de l'env)
         critical = [f for f in findings if f.severity == 'critical']
         self.assertEqual(len(critical), 0)
         print("✅ Code propre sans faux positifs critiques")
     
     def test_mask_secret(self):
-        """Teste le masquage des secrets."""
         secret = "sk-1234567890abcdef"
         masked = self.tool._mask_secret(secret)
         self.assertIn("****", masked)
@@ -108,7 +99,6 @@ class Config:
         print("✅ Masquage des secrets")
     
     def test_scan_file(self):
-        """Teste le scan d'un fichier."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write('API_KEY = "sk-1234567890abcdef1234567890abcdef1234567890abcdef"\n')
             f.flush()
@@ -122,7 +112,6 @@ class Config:
         print("✅ Scan de fichier")
     
     def test_full_scan_content(self):
-        """Teste un scan complet via execute."""
         request = SecretScanRequest(
             target='api_key = "AKIAIOSFODNN7EXAMPLE"',
             scan_type='content'
@@ -142,14 +131,12 @@ class TestDependencyGuardTool(unittest.TestCase):
         self.tool = DependencyGuardTool()
     
     def test_tool_metadata(self):
-        """Vérifie les métadonnées de l'outil."""
         self.assertEqual(self.tool.get_name(), "dependency_guard")
         self.assertIn("python", self.tool.get_supported_languages())
         self.assertTrue(self.tool.is_long_running())
         print("✅ Métadonnées dependency_guard correctes")
     
     def test_parse_requirements_txt(self):
-        """Teste le parsing de requirements.txt."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             f.write('''
 # Dépendances principales
@@ -171,7 +158,6 @@ numpy
                 self.assertIn('flask', dep_names)
                 self.assertIn('numpy', dep_names)
                 
-                # Vérifier les versions
                 django_dep = next(d for d in deps if d['name'] == 'django')
                 self.assertEqual(django_dep['version'], '==4.2.0')
             finally:
@@ -180,7 +166,6 @@ numpy
         print("✅ Parsing requirements.txt")
     
     def test_parse_package_json(self):
-        """Teste le parsing de package.json."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
             f.write('''{
     "name": "test-project",
@@ -207,7 +192,6 @@ numpy
         print("✅ Parsing package.json")
     
     def test_detect_deprecated_packages(self):
-        """Teste la détection de packages dépréciés."""
         request = DependencyGuardRequest(
             content='pycrypto==2.6.1\nnose==1.3.7',
             language='python',
@@ -217,7 +201,6 @@ numpy
         
         response = self.tool._execute_core_logic(request)
         
-        # Devrait trouver pycrypto et nose comme dépréciés
         deprecated_issues = [i for i in response.issues if i.issue_type == 'deprecated']
         deprecated_packages = [i.package for i in deprecated_issues]
         
@@ -227,7 +210,6 @@ numpy
         print("✅ Détection packages dépréciés")
     
     def test_blocklist_check(self):
-        """Teste la vérification de la blocklist."""
         request = DependencyGuardRequest(
             content='django==4.0\nflask==2.0',
             language='python',
@@ -245,7 +227,6 @@ numpy
         print("✅ Vérification blocklist")
     
     def test_allowlist_check(self):
-        """Teste la vérification de l'allowlist."""
         request = DependencyGuardRequest(
             content='django==4.0\nflask==2.0\nrequests==2.28',
             language='python',
@@ -263,7 +244,6 @@ numpy
         print("✅ Vérification allowlist")
     
     def test_malicious_package_detection(self):
-        """Teste la détection de packages malveillants connus."""
         # 'request' est un typosquat connu de 'requests'
         request = DependencyGuardRequest(
             content='request==1.0',
@@ -285,20 +265,17 @@ class TestToolsIntegration(unittest.TestCase):
     """Tests d'intégration des outils de sécurité."""
     
     def test_all_tools_registered(self):
-        """Vérifie que tous les outils sont découvrables."""
         from collegue.tools import get_registry
         
         registry = get_registry()
         tool_names = registry.list_tools()
         
-        # Les outils de sécurité doivent être dans le registry
         self.assertIn('SecretScanTool', tool_names)
         self.assertIn('DependencyGuardTool', tool_names)
         
         print("✅ Tous les outils de sécurité sont enregistrés")
     
     def test_tools_inherit_base_tool(self):
-        """Vérifie que les outils héritent de BaseTool."""
         from collegue.tools.base import BaseTool
         
         self.assertIsInstance(SecretScanTool(), BaseTool)
@@ -311,10 +288,8 @@ class TestTestGenerationValidation(unittest.TestCase):
     """Tests pour l'intégration test_generation + run_tests."""
     
     def test_validation_request_fields(self):
-        """Vérifie que les nouveaux champs existent dans TestGenerationRequest."""
         from collegue.tools.test_generation import TestGenerationRequest, TestValidationResult
         
-        # Créer une requête avec validate_tests
         request = TestGenerationRequest(
             code="def add(a, b): return a + b",
             language="python",
@@ -327,7 +302,6 @@ class TestTestGenerationValidation(unittest.TestCase):
         print("✅ Champs validate_tests et working_dir présents")
     
     def test_validation_result_model(self):
-        """Vérifie le modèle TestValidationResult."""
         from collegue.tools.test_generation import TestValidationResult
         
         result = TestValidationResult(
@@ -346,7 +320,6 @@ class TestTestGenerationValidation(unittest.TestCase):
         print("✅ Modèle TestValidationResult valide")
     
     def test_response_includes_validation(self):
-        """Vérifie que TestGenerationResponse inclut validation_result."""
         from collegue.tools.test_generation import TestGenerationResponse, TestValidationResult
         
         validation = TestValidationResult(

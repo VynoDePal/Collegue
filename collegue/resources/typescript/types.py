@@ -7,7 +7,6 @@ from fastmcp import FastMCP
 from typing import Dict, Any, List
 import json
 
-# Types primitifs TypeScript
 PRIMITIVE_TYPES = {
     "string": {
         "description": "Représente des séquences de caractères",
@@ -56,7 +55,6 @@ PRIMITIVE_TYPES = {
     }
 }
 
-# Types complexes TypeScript
 COMPLEX_TYPES = {
     "array": {
         "description": "Collection ordonnée d'éléments du même type",
@@ -108,7 +106,6 @@ COMPLEX_TYPES = {
     }
 }
 
-# Interfaces TypeScript
 INTERFACES = {
     "basic": {
         "description": "Définit la structure d'un objet",
@@ -154,7 +151,6 @@ INTERFACES = {
     }
 }
 
-# Génériques TypeScript
 GENERICS = {
     "basic": {
         "description": "Types paramétrés qui permettent la réutilisation",
@@ -188,7 +184,6 @@ GENERICS = {
     }
 }
 
-# Utilitaires de types TypeScript
 TYPE_UTILITIES = {
     "Partial<T>": {
         "description": "Rend toutes les propriétés de T optionnelles",

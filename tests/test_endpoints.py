@@ -77,7 +77,6 @@ async def test_analyze_code(client):
     """Teste l'endpoint d'analyse de code."""
     print("\n=== Test de l'endpoint analyze_code ===")
     
-    # Code Python simple à analyser
     python_code = """
 def hello_world():
     print("Hello, world!")
@@ -91,7 +90,6 @@ class TestClass:
 """
     
     try:
-        # Appeler l'outil analyze_code avec un objet request
         result = await client.call_tool("analyze_code", {
             "request": {
                 "code": python_code,
@@ -112,12 +110,10 @@ async def test_create_session(client):
     print("\n=== Test de l'endpoint create_session ===")
     
     try:
-        # Appeler l'outil create_session
         result = await client.call_tool("create_session", {})
         print(f"✅ Succès! Session créée:")
         safe_json_print(result)
         
-        # Extraire l'ID de session du résultat
         session_id = extract_session_id(result)
         if session_id:
             print(f"✅ ID de session extrait: {session_id}")
@@ -135,7 +131,6 @@ async def test_get_session_context(client, session_id: str):
     print("\n=== Test de l'endpoint get_session_context ===")
     
     try:
-        # Appeler l'outil get_session_context avec un objet request
         result = await client.call_tool("get_session_context", {
             "request": {
                 "session_id": session_id
@@ -153,7 +148,6 @@ async def test_suggest_tools(client, session_id: str):
     print("\n=== Test de l'endpoint suggest_tools_for_query ===")
     
     try:
-        # Appeler l'outil suggest_tools_for_query avec les paramètres directement
         result = await client.call_tool("suggest_tools_for_query", {
             "query": "Comment refactorer cette fonction?",
             "session_id": session_id
@@ -169,10 +163,8 @@ async def run_tests():
     """Exécute tous les tests d'endpoints."""
     print("🚀 Démarrage des tests des endpoints API de Collègue MCP...")
     
-    # Chemin vers le script app.py
     script_path = os.path.abspath(os.path.join(parent_dir, "collegue", "app.py"))
     
-    # Configuration MCP standard
     config = {
         "mcpServers": {
             "collegue": {
@@ -183,29 +175,23 @@ async def run_tests():
     }
     
     try:
-        # Création du client avec la configuration MCP
         async with Client(config) as client:
-            # Récupérer la liste des outils disponibles
             tools = await client.list_tools()
             tool_names = [t.name if hasattr(t, 'name') else t for t in tools]
             
-            # Tester la création de session
             session_id = await test_create_session(client)
             if not session_id:
                 print("❌ Impossible de continuer les tests sans session valide")
                 return
             
-            # Tester la récupération du contexte de session
             if "get_session_context" in tool_names or "collegue_get_session_context" in tool_names:
                 context_tool = "collegue_get_session_context" if "collegue_get_session_context" in tool_names else "get_session_context"
                 await test_get_session_context(client, session_id)
             
-            # Tester l'analyse de code
             if "analyze_code" in tool_names or "collegue_analyze_code" in tool_names:
                 analyze_tool = "collegue_analyze_code" if "collegue_analyze_code" in tool_names else "analyze_code"
                 await test_analyze_code(client)
             
-            # Tester la suggestion d'outils
             if "suggest_tools_for_query" in tool_names or "collegue_suggest_tools_for_query" in tool_names:
                 suggest_tool = "collegue_suggest_tools_for_query" if "collegue_suggest_tools_for_query" in tool_names else "suggest_tools_for_query"
                 await test_suggest_tools(client, session_id)
