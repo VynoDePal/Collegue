@@ -4,6 +4,7 @@ Collègue MCP - Un assistant de développement intelligent inspiré par Junie
 import sys
 import os
 import logging
+from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -81,12 +82,40 @@ if SAMPLING_HANDLER_AVAILABLE and settings.llm_api_key:
         logger.warning(f"Impossible de configurer le sampling handler: {e}")
         sampling_handler = None
 
+
+@asynccontextmanager
+async def app_lifespan(app_instance):
+    """Lifespan context manager pour démarrer/arrêter le watchdog."""
+    watchdog_enabled = os.environ.get("WATCHDOG_ENABLED", "true").lower() == "true"
+    if watchdog_enabled:
+        try:
+            from collegue.autonomous.watchdog import start_background_watchdog
+            interval = int(os.environ.get("WATCHDOG_INTERVAL", "300"))
+            start_background_watchdog(interval_seconds=interval)
+            logger.info(f"Watchdog autonome démarré (intervalle: {interval}s)")
+        except Exception as e:
+            logger.warning(f"Impossible de démarrer le watchdog: {e}")
+    else:
+        logger.info("Watchdog autonome désactivé (WATCHDOG_ENABLED != true)")
+    
+    yield  # L'application tourne ici
+    
+    # Shutdown
+    if watchdog_enabled:
+        try:
+            from collegue.autonomous.watchdog import stop_background_watchdog
+            stop_background_watchdog()
+        except Exception:
+            pass
+
+
 app = FastMCP(
     host=settings.HOST,
     port=settings.PORT,
-    auth=auth_provider,  # Intégration native de l'authentification
-    sampling_handler=sampling_handler,  # Fallback pour ctx.sample() si client ne supporte pas
-    sampling_handler_behavior="fallback"  # Utilise le handler seulement si client ne supporte pas
+    auth=auth_provider,
+    sampling_handler=sampling_handler,
+    sampling_handler_behavior="fallback",
+    lifespan=app_lifespan
 )
 
 
@@ -195,23 +224,6 @@ if "prompt_engine" in app_state and "_template_endpoint" not in app_state:
 )
 async def health_endpoint():
     return "OK"
-
-# Intégration du watchdog autonome en tâche de fond
-# Il hérite ainsi des variables d'environnement passées par l'IDE via mcp.json
-@app.on_event("startup")
-async def start_watchdog_on_startup():
-    """Démarre le watchdog autonome au démarrage de l'application."""
-    watchdog_enabled = os.environ.get("WATCHDOG_ENABLED", "true").lower() == "true"
-    if watchdog_enabled:
-        try:
-            from collegue.autonomous.watchdog import start_background_watchdog
-            interval = int(os.environ.get("WATCHDOG_INTERVAL", "300"))
-            start_background_watchdog(interval_seconds=interval)
-            logger.info(f"Watchdog autonome démarré (intervalle: {interval}s)")
-        except Exception as e:
-            logger.warning(f"Impossible de démarrer le watchdog: {e}")
-    else:
-        logger.info("Watchdog autonome désactivé (WATCHDOG_ENABLED != true)")
 
 @app.get("/.well-known/oauth-authorization-server")
 def get_oauth_metadata():
