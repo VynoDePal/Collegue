@@ -18,7 +18,6 @@ class JavaScriptFrameworkReference(BaseModel):
     features: List[str] = []
     examples: List[Dict[str, str]] = []
 
-# Dictionnaire des frameworks JavaScript populaires
 JS_FRAMEWORKS = {
     # Frontend Frameworks
     "react": {

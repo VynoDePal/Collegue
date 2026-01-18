@@ -41,7 +41,6 @@ class LLMResponse(BaseModel):
     finish_reason: Optional[str] = None
     additional_info: Dict[str, Any] = {}
 
-# Dictionnaire des configurations de modèles par défaut
 DEFAULT_MODEL_CONFIGS = {
     "gpt-4": {
         "provider": LLMProvider.OPENAI,
@@ -69,7 +68,6 @@ DEFAULT_MODEL_CONFIGS = {
     }
 }
 
-# Dictionnaire des clients LLM par fournisseur
 llm_clients = {}
 
 def initialize_llm_client(config: LLMConfig):
@@ -110,7 +108,6 @@ def initialize_llm_client(config: LLMConfig):
             import anthropic
             client = anthropic.Anthropic(api_key=config.api_key)
             
-            # Tester la connexion
             logger.info(f"Anthropic client initialized successfully.")
             
             return client
@@ -137,7 +134,6 @@ def initialize_llm_client(config: LLMConfig):
             return None
     
     elif provider == LLMProvider.LOCAL:
-        # Implémentation pour les modèles locaux
         logger.info("Local LLM provider not fully implemented yet.")
         return None
     
@@ -162,7 +158,6 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
         )
     
     try:
-        # Générer du texte en fonction du fournisseur
         if provider == LLMProvider.OPENAI:
             messages = []
             if system_prompt:
@@ -201,7 +196,7 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
                     temperature=config.temperature,
                     top_p=config.top_p if config.top_p else 1.0,
                     stop=config.stop_sequences if config.stop_sequences else None,
-                    **config.additional_params  # ancienne API accepte plus d’options
+                    **config.additional_params
                 )
                 
                 return LLMResponse(
@@ -289,5 +284,4 @@ def register_providers(app, app_state):
             return config.model_dump_json()
         return json.dumps({"error": f"Modèle {model_name} non trouvé"})
     
-    # Enregistrement dans le contexte global pour usage interne par les outils
     app_state["llm_generate"] = generate_text

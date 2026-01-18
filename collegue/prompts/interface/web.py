@@ -13,40 +13,31 @@ from fastapi.staticfiles import StaticFiles
 from ..engine import PromptEngine
 from ..engine.models import PromptVariable, PromptVariableType
 
-# Configurer le logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Chemin vers les templates et fichiers statiques
 current_dir = os.path.dirname(os.path.abspath(__file__))
 templates_dir = os.path.join(current_dir, "templates")
 static_dir = os.path.join(current_dir, "static")
 
-# Créer les répertoires s'ils n'existent pas
 os.makedirs(templates_dir, exist_ok=True)
 os.makedirs(static_dir, exist_ok=True)
 
-# Initialiser le moteur de templates Jinja2
 templates = Jinja2Templates(directory=templates_dir)
 
 
 def get_prompt_engine():
     """Récupère l'instance du moteur de prompts."""
-    # Dans un contexte réel, cette fonction pourrait être configurée pour
-    # récupérer l'instance depuis un état d'application partagé
     return PromptEngine()
 
 
 def register_web_interface(app, app_state):
     """Enregistre l'interface web pour la personnalisation des prompts."""
     
-    # Créer un router pour les endpoints web
     router = APIRouter(prefix="/prompts/ui", tags=["prompts_ui"])
     
-    # Monter les fichiers statiques
     app.mount("/prompts/static", StaticFiles(directory=static_dir), name="prompts_static")
     
-    # Récupérer le moteur de prompts depuis l'état de l'application
     prompt_engine = app_state.get("prompt_engine")
     if not prompt_engine:
         prompt_engine = PromptEngine()
@@ -87,7 +78,6 @@ def register_web_interface(app, app_state):
             }
         )
     
-    # ---- Route création nouveau template placée avant la route paramétrique pour éviter les collisions
     @router.get("/templates/new", response_class=HTMLResponse)
     async def create_template_page(
         request: Request,
@@ -137,7 +127,6 @@ def register_web_interface(app, app_state):
     ):
         """Traitement du formulaire de création de template."""
         try:
-            # Convertir les variables JSON en liste d'objets PromptVariable
             variables_data = json.loads(variables)
             prompt_variables = []
             for var in variables_data:
@@ -153,10 +142,8 @@ def register_web_interface(app, app_state):
                     )
                 )
             
-            # Convertir les tags en liste
             tags_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
             
-            # Créer le template
             template_data = {
                 "name": name,
                 "description": description,
@@ -170,7 +157,6 @@ def register_web_interface(app, app_state):
             new_template = engine.create_template(template_data)
             logger.info(f"Template créé avec succès: {new_template.id}")
             
-            # Rediriger vers la page de visualisation du template
             redirect_url = f"/prompts/ui/templates/{new_template.id}"
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         
@@ -222,12 +208,10 @@ def register_web_interface(app, app_state):
     ):
         """Traitement du formulaire de mise à jour de template."""
         try:
-            # Vérifier que le template existe
             existing_template = engine.get_template(template_id)
             if not existing_template:
                 raise HTTPException(status_code=404, detail=f"Template {template_id} non trouvé")
             
-            # Convertir les variables JSON en liste d'objets PromptVariable
             variables_data = json.loads(variables)
             prompt_variables = []
             for var in variables_data:
@@ -243,10 +227,8 @@ def register_web_interface(app, app_state):
                     )
                 )
             
-            # Convertir les tags en liste
             tags_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
             
-            # Mettre à jour le template
             template_data = {
                 "id": template_id,
                 "name": name,
@@ -261,7 +243,6 @@ def register_web_interface(app, app_state):
             updated_template = engine.update_template(template_id, template_data)
             logger.info(f"Template mis à jour avec succès: {updated_template.id}")
             
-            # Rediriger vers la page de visualisation du template
             redirect_url = f"/prompts/ui/templates/{updated_template.id}"
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         
@@ -313,7 +294,6 @@ def register_web_interface(app, app_state):
     ):
         """Traitement du formulaire de création de catégorie."""
         try:
-            # Créer la catégorie
             category_data = {
                 "id": id,
                 "name": name,
@@ -325,7 +305,6 @@ def register_web_interface(app, app_state):
             new_category = engine.create_category(category_data)
             logger.info(f"Catégorie créée avec succès: {new_category.id}")
             
-            # Rediriger vers la liste des catégories
             redirect_url = "/prompts/ui/categories"
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         
@@ -357,11 +336,9 @@ def register_web_interface(app, app_state):
         engine: PromptEngine = Depends(get_prompt_engine)
     ):
         """Page du playground pour tester les templates."""
-        # Récupérer la liste des templates pour le formulaire
         templates_list = engine.get_all_templates()
         providers = ["openai", "anthropic", "local", "huggingface", "azure"]
         
-        # Si un template_id est fourni, récupérer le template
         selected_template = None
         if template_id:
             selected_template = engine.get_template(template_id)
@@ -386,11 +363,9 @@ def register_web_interface(app, app_state):
         engine: PromptEngine = Depends(get_prompt_engine)
     ):
         """Traitement du formulaire du playground pour exécuter un template."""
-        # Récupérer la liste des templates pour le formulaire (nécessaire dans tous les cas)
         templates_list = engine.get_all_templates()
         providers = ["openai", "anthropic", "local", "huggingface", "azure"]
         
-        # Convertir les variables JSON en dictionnaire
         variables_dict = {}
         try:
             variables_dict = json.loads(variables)
@@ -398,10 +373,8 @@ def register_web_interface(app, app_state):
             variables_dict = {}
         
         try:
-            # Récupérer le template
             template = engine.get_template(template_id)
             if not template:
-                # Si le template n'est pas trouvé, renvoyer une page avec un message d'erreur
                 return templates.TemplateResponse(
                     "playground.html",
                     {
@@ -417,10 +390,8 @@ def register_web_interface(app, app_state):
                     status_code=200
                 )
             
-            # Formater le prompt
             formatted_prompt = engine.format_prompt(template_id, variables_dict, provider)
             
-            # Renvoyer la page avec le résultat
             return templates.TemplateResponse(
                 "playground.html",
                 {
@@ -437,7 +408,6 @@ def register_web_interface(app, app_state):
         
         except Exception as e:
             logger.error(f"Erreur lors de l'exécution du template: {str(e)}")
-            # En cas d'erreur, renvoyer une page avec un message d'erreur
             return templates.TemplateResponse(
                 "playground.html",
                 {
@@ -460,7 +430,6 @@ def register_web_interface(app, app_state):
         engine: PromptEngine = Depends(get_prompt_engine)
     ):
         """Page d'édition d'une catégorie existante."""
-        # Récupérer la catégorie
         category = engine.get_category(category_id)
         if not category:
             raise HTTPException(status_code=404, detail=f"Catégorie {category_id} non trouvée")
@@ -486,12 +455,10 @@ def register_web_interface(app, app_state):
     ):
         """Traitement du formulaire de mise à jour de catégorie."""
         try:
-            # Vérifier que la catégorie existe
             existing_category = engine.get_category(category_id)
             if not existing_category:
                 raise HTTPException(status_code=404, detail=f"Catégorie {category_id} non trouvée")
             
-            # Mettre à jour la catégorie
             category_data = {
                 "id": category_id,
                 "name": name,
@@ -501,7 +468,6 @@ def register_web_interface(app, app_state):
             updated_category = engine.update_category(category_id, category_data)
             logger.info(f"Catégorie mise à jour avec succès: {updated_category.id}")
             
-            # Rediriger vers la page de liste des catégories
             redirect_url = "/prompts/ui/categories"
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         
@@ -512,5 +478,4 @@ def register_web_interface(app, app_state):
                 detail=f"Erreur lors de la mise à jour de la catégorie: {str(e)}"
             )
     
-    # Enregistrer le router dans l'application
     app.include_router(router)

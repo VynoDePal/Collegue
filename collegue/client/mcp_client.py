@@ -8,11 +8,9 @@ import asyncio
 from typing import Dict, List, Any, Optional, Union
 import logging
 
-# Configurer le logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Importer le client FastMCP
 try:
     from fastmcp import Client
 except ImportError:
@@ -34,7 +32,6 @@ class CollegueClient:
         self.client = None
         self.session_id = None
         
-        # Si le chemin du serveur est fourni, configurer pour lancer le serveur
         if server_path:
             if not os.path.exists(server_path):
                 raise FileNotFoundError(f"Le chemin du serveur {server_path} n'existe pas")
@@ -47,7 +44,6 @@ class CollegueClient:
                     }
                 }
             }
-        # Sinon, configurer pour se connecter à un serveur existant
         elif host and port:
             self.config = {
                 "mcpServers": {
@@ -57,7 +53,6 @@ class CollegueClient:
                 }
             }
         else:
-            # Essayer de trouver le chemin du serveur automatiquement
             current_dir = os.path.dirname(os.path.abspath(__file__))
             parent_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
             server_path = os.path.join(parent_dir, "collegue", "app.py")

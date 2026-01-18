@@ -22,19 +22,15 @@ class TestLLMProviders(unittest.TestCase):
     """Tests pour le module providers des ressources LLM."""
     
     def test_get_default_model_config(self):
-        """Teste la récupération de la configuration par défaut d'un modèle."""
-        # Test avec un modèle existant
         config = get_default_model_config("gpt-4")
         self.assertIsInstance(config, LLMConfig)
         self.assertEqual(config.provider, LLMProvider.OPENAI)
         self.assertEqual(config.model_name, "gpt-4")
         
-        # Test avec un modèle inexistant
         config = get_default_model_config("nonexistent_model")
         self.assertIsNone(config)
     
     def test_get_available_models(self):
-        """Teste la récupération des modèles disponibles."""
         models = get_available_models()
         self.assertIsInstance(models, list)
         self.assertGreater(len(models), 0)
@@ -43,21 +39,17 @@ class TestLLMProviders(unittest.TestCase):
     
     @patch('builtins.__import__')
     def test_initialize_openai_client(self, mock_import):
-        """Teste l'initialisation d'un client OpenAI."""
-        # Configuration pour OpenAI
         config = LLMConfig(
             provider=LLMProvider.OPENAI,
             model_name="gpt-4",
             api_key="test_key"
         )
         
-        # Mock pour le module OpenAI
         mock_openai = MagicMock()
         mock_model = MagicMock()
         mock_model.list.return_value = MagicMock(data=[])
         mock_openai.Model = mock_model
         
-        # Configurer le mock d'import pour retourner notre mock OpenAI
         def side_effect(name, *args, **kwargs):
             if name == 'openai':
                 return mock_openai
@@ -65,30 +57,24 @@ class TestLLMProviders(unittest.TestCase):
         
         mock_import.side_effect = side_effect
         
-        # Initialisation du client
         with patch.dict('sys.modules', {'openai': mock_openai}):
             client = initialize_llm_client(config)
         
-        # Vérifications
         self.assertEqual(mock_openai.api_key, "test_key")
         self.assertEqual(client, mock_openai)
     
     @patch('builtins.__import__')
     def test_initialize_anthropic_client(self, mock_import):
-        """Teste l'initialisation d'un client Anthropic."""
-        # Configuration pour Anthropic
         config = LLMConfig(
             provider=LLMProvider.ANTHROPIC,
             model_name="claude-3-opus-20240229",
             api_key="test_key"
         )
         
-        # Mock pour le module Anthropic
         mock_anthropic = MagicMock()
         mock_client = MagicMock()
         mock_anthropic.Anthropic.return_value = mock_client
         
-        # Configurer le mock d'import pour retourner notre mock Anthropic
         def side_effect(name, *args, **kwargs):
             if name == 'anthropic':
                 return mock_anthropic
@@ -173,18 +159,15 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI des fournisseurs LLM."""
     
     def setUp(self):
-        """Configuration avant chaque test."""
         self.app = FastAPI()
         self.app_state = {"resource_manager": MagicMock()}
         
-        # Enregistrement des endpoints
         from collegue.resources.llm.providers import register_providers
         register_providers(self.app, self.app_state)
         
         self.client = TestClient(self.app)
     
     def test_list_models_endpoint(self):
-        """Teste l'endpoint de liste des modèles LLM."""
         response = self.client.get("/resources/llm/models")
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -195,7 +178,6 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
         self.assertIn("claude-3-opus", data["models"])
     
     def test_get_model_config_endpoint(self):
-        """Teste l'endpoint de récupération de configuration d'un modèle."""
         response = self.client.get("/resources/llm/models/gpt-4")
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -204,8 +186,6 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
     
     @patch('collegue.resources.llm.providers.generate_text')
     def test_generate_text_endpoint(self, mock_generate):
-        """Teste l'endpoint de génération de texte."""
-        # Mock pour la génération de texte
         mock_response = LLMResponse(
             text="Test response",
             model="gpt-4",
@@ -214,12 +194,8 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
             finish_reason="stop"
         )
         
-        # Configurer le mock pour qu'il retourne directement la réponse
-        # au lieu d'un Future, car FastAPI va attendre la coroutine automatiquement
         mock_generate.return_value = mock_response
         
-        # Requête à l'endpoint avec les paramètres séparés
-        # L'endpoint attend config comme un objet et prompt/system_prompt comme des paramètres de requête
         config = {
             "provider": "openai",
             "model_name": "gpt-4",
@@ -233,7 +209,6 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
             json=config
         )
         
-        # Vérifications
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["text"], "Test response")

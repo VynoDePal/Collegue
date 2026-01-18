@@ -52,37 +52,29 @@ class RefactoringTool(BaseTool):
     """Outil de refactoring et d'amélioration de code."""
 
     def get_name(self) -> str:
-        """Retourne le nom unique de l'outil."""
         return "code_refactoring"
 
     def get_description(self) -> str:
-        """Retourne la description de l'outil."""
         return "Refactorise et améliore le code selon différents types de transformations"
 
     def get_request_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les requêtes."""
         return RefactoringRequest
 
     def get_response_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les réponses."""
         return RefactoringResponse
 
     def get_supported_languages(self) -> List[str]:
-        """Retourne la liste des langages supportés."""
         return ["python", "javascript", "typescript", "java", "c#"]
 
     def get_supported_refactoring_types(self) -> List[str]:
-        """Retourne les types de refactoring supportés."""
         return ["rename", "extract", "simplify", "optimize", "clean", "modernize"]
 
     def get_usage_description(self) -> str:
-        """Description détaillée de l'utilisation de l'outil de refactorisation."""
         return ("Outil de refactorisation qui améliore la qualité du code en appliquant différents types de "
                 "transformations : renommage, extraction, simplification, optimisation, nettoyage et modernisation. "
                 "Il fournit des métriques d'amélioration et des explications détaillées des changements.")
 
     def get_examples(self) -> List[Dict[str, Any]]:
-        """Exemples d'utilisation spécifiques à l'outil de refactorisation."""
         return [
             {
                 "title": "Renommage de variables Python",
@@ -153,7 +145,6 @@ class RefactoringTool(BaseTool):
         ]
 
     def get_capabilities(self) -> List[str]:
-        """Capacités spécifiques de l'outil de refactorisation."""
         return [
             "Refactorisation dans 5+ langages de programmation",
             "6 types de refactoring : rename, extract, simplify, optimize, clean, modernize",
@@ -170,7 +161,6 @@ class RefactoringTool(BaseTool):
         ]
 
     def get_refactoring_type_descriptions(self) -> Dict[str, str]:
-        """Descriptions détaillées des types de refactoring."""
         return {
             "rename": "Renomme variables, fonctions et classes avec des noms plus descriptifs et clairs",
             "extract": "Extrait le code dupliqué en fonctions/méthodes réutilisables pour réduire la duplication",

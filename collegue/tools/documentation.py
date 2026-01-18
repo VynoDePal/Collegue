@@ -33,23 +33,18 @@ class DocumentationTool(BaseTool):
     """Outil de génération automatique de documentation."""
 
     def get_name(self) -> str:
-        """Retourne le nom unique de l'outil."""
         return "code_documentation"
 
     def get_description(self) -> str:
-        """Retourne la description de l'outil."""
         return "Génère automatiquement de la documentation pour le code dans différents formats"
 
     def get_request_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les requêtes."""
         return DocumentationRequest
 
     def get_response_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les réponses."""
         return DocumentationResponse
 
     def get_supported_languages(self) -> List[str]:
-        """Retourne la liste des langages supportés."""
         return ["python", "javascript", "typescript", "java", "c#", "go", "rust", "php"]
 
     def is_long_running(self) -> bool:
@@ -57,22 +52,18 @@ class DocumentationTool(BaseTool):
         return True
 
     def get_supported_formats(self) -> List[str]:
-        """Retourne les formats de documentation supportés."""
         return ["markdown", "rst", "html", "docstring", "json"]
 
     def get_supported_styles(self) -> List[str]:
-        """Retourne les styles de documentation supportés."""
         return ["standard", "detailed", "minimal", "api", "tutorial"]
 
     def get_usage_description(self) -> str:
-        """Description détaillée de l'utilisation de l'outil de documentation."""
         return ("Outil de génération automatique de documentation qui analyse le code et génère une documentation "
                 "complète dans différents formats (Markdown, RST, HTML, docstring, JSON) et styles. Il peut "
                 "documenter des fonctions, classes, modules avec des exemples d'utilisation et calcule la "
                 "couverture documentaire.")
 
     def get_examples(self) -> List[Dict[str, Any]]:
-        """Exemples d'utilisation spécifiques à l'outil de documentation."""
         return [
             {
                 "title": "Documentation Python standard",
@@ -149,7 +140,6 @@ class DocumentationTool(BaseTool):
         ]
 
     def get_capabilities(self) -> List[str]:
-        """Capacités spécifiques de l'outil de documentation."""
         return [
             "Génération de documentation dans 8+ langages de programmation",
             "5 formats de sortie : Markdown, RST, HTML, docstring, JSON",
@@ -170,7 +160,6 @@ class DocumentationTool(BaseTool):
         ]
 
     def get_documentation_style_descriptions(self) -> Dict[str, str]:
-        """Descriptions détaillées des styles de documentation."""
         return {
             "standard": "Documentation complète avec descriptions, paramètres, retours et exemples basiques",
             "detailed": "Documentation très détaillée avec explications approfondies, cas d'usage et exemples avancés",

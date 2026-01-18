@@ -111,12 +111,10 @@ class PromptVersionManager:
         if not versions:
             return None
         
-        # Filtrer les versions avec au moins 10 utilisations
         experienced = [v for v in versions if v.usage_count >= 10]
         if experienced:
             return max(experienced, key=lambda v: v.performance_score)
         
-        # Sinon retourner la version active
         for v in versions:
             if v.is_active:
                 return v
@@ -145,15 +143,11 @@ class PromptVersionManager:
         """
         versions = self.versions_cache.get(template_id, [])
         
-        # Recherche exacte par numéro de version
         for v in versions:
             if v.version == version:
                 return v
         
-        # Si pas trouvé, essayer de créer une version virtuelle pour les noms de version YAML
-        # (default, v2, experimental, etc.)
         if version in ['default', 'v2', 'experimental', 'python']:
-            # Créer une version virtuelle basée sur le nom
             return self._create_virtual_version(template_id, version)
         
         return None
@@ -204,7 +198,6 @@ class PromptVersionManager:
         
         for v in versions:
             if v.version == version:
-                # Mettre à jour les métriques
                 if 'success_rate' in metrics:
                     v.success_rate = metrics['success_rate']
                 if 'avg_execution_time' in metrics:
@@ -216,7 +209,6 @@ class PromptVersionManager:
                 if 'performance_score' in metrics:
                     v.performance_score = metrics['performance_score']
                 
-                # Calculer automatiquement le score de performance si non fourni
                 if 'performance_score' not in metrics:
                     v.performance_score = self._calculate_performance_score(v)
                 
@@ -224,9 +216,7 @@ class PromptVersionManager:
                 self._save_versions()
                 return
         
-        # Si la version n'existe pas, la créer
         if version in ['default', 'v2', 'experimental', 'python']:
-            # Créer une entrée pour cette version
             prompt_version = self._create_virtual_version(template_id, version)
             self.update_metrics_for_version(prompt_version, metrics)
             
@@ -271,13 +261,11 @@ class PromptVersionManager:
         score += version.success_rate * 0.4
         
         # Facteur de vitesse (30% du score)
-        # Plus c'est rapide, meilleur est le score
         if version.average_generation_time > 0:
             speed_score = max(0, 1.0 - (version.average_generation_time / 5.0))  # 5s comme référence
             score += speed_score * 0.3
         
         # Facteur d'efficacité en tokens (30% du score)
-        # Moins de tokens = meilleur score
         if version.average_tokens > 0:
             token_efficiency = max(0, 1.0 - (version.average_tokens / 2000))  # 2000 tokens comme référence
             score += token_efficiency * 0.3
@@ -301,36 +289,28 @@ class PromptVersionManager:
         
         for v in versions:
             if v.version == version:
-                # Incrémenter le compteur d'utilisation
                 v.usage_count += 1
                 
-                # Mettre à jour le taux de succès (moyenne mobile)
                 success_value = 1.0 if success else 0.0
                 v.success_rate = ((v.success_rate * (v.usage_count - 1)) + success_value) / v.usage_count
                 
-                # Mettre à jour le temps moyen de génération
                 v.average_generation_time = ((v.average_generation_time * (v.usage_count - 1)) + execution_time) / v.usage_count
                 
-                # Mettre à jour la moyenne de tokens
                 v.average_tokens = int(((v.average_tokens * (v.usage_count - 1)) + tokens_used) / v.usage_count)
                 
-                # Recalculer le score de performance
                 v.performance_score = self._calculate_performance_score(v)
                 
-                # Ajouter la satisfaction utilisateur si fournie
                 if user_satisfaction is not None and v.metadata is not None:
                     if 'user_satisfaction_scores' not in v.metadata:
                         v.metadata['user_satisfaction_scores'] = []
                     v.metadata['user_satisfaction_scores'].append(user_satisfaction)
                     
-                    # Calculer la moyenne de satisfaction
                     v.metadata['avg_user_satisfaction'] = sum(v.metadata['user_satisfaction_scores']) / len(v.metadata['user_satisfaction_scores'])
                 
                 v.updated_at = datetime.now().isoformat()
                 self._save_versions()
                 return
         
-        # Si la version n'existe pas encore, la créer
         logger.warning(f"Version {version} non trouvée pour {template_id}, création automatique")
         prompt_version = self._create_virtual_version(template_id, version)
         prompt_version.usage_count = 1

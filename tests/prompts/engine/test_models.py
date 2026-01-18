@@ -52,7 +52,6 @@ class TestPromptVariable(unittest.TestCase):
     
     def test_variable_validation(self):
         """Test de validation des types de variables."""
-        # Variable de type string
         var_string = PromptVariable(
             name="name",
             description="Nom",
@@ -60,7 +59,6 @@ class TestPromptVariable(unittest.TestCase):
             required=True
         )
         
-        # Variable de type integer
         var_int = PromptVariable(
             name="age",
             description="Âge",
@@ -68,7 +66,6 @@ class TestPromptVariable(unittest.TestCase):
             required=True
         )
         
-        # Variable de type boolean
         var_bool = PromptVariable(
             name="active",
             description="Actif",
@@ -76,7 +73,6 @@ class TestPromptVariable(unittest.TestCase):
             required=True
         )
         
-        # Vérifier les types
         self.assertEqual(var_string.type, PromptVariableType.STRING)
         self.assertEqual(var_int.type, PromptVariableType.INTEGER)
         self.assertEqual(var_bool.type, PromptVariableType.BOOLEAN)

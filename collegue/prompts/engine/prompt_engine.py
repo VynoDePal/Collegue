@@ -28,22 +28,18 @@ class PromptEngine:
         self.library = PromptLibrary()
         
         if storage_path is None:
-            # Utiliser le dossier par défaut dans le package
             current_dir = os.path.dirname(os.path.abspath(__file__))
             parent_dir = os.path.dirname(current_dir)
             self.storage_path = os.path.join(parent_dir, "templates")
         else:
             self.storage_path = storage_path
             
-        # Créer le dossier de stockage s'il n'existe pas
         os.makedirs(self.storage_path, exist_ok=True)
         
-        # Charger les templates et catégories existants
         self._load_library()
-    
+
     def _load_library(self):
         """Charge la bibliothèque de prompts depuis le stockage."""
-        # Charger les catégories
         categories_path = os.path.join(self.storage_path, "categories.json")
         if os.path.exists(categories_path):
             try:
@@ -54,7 +50,6 @@ class PromptEngine:
             except Exception as e:
                 logger.error(f"Erreur lors du chargement des catégories: {str(e)}")
         
-        # Charger les templates
         templates_dir = os.path.join(self.storage_path, "templates")
         os.makedirs(templates_dir, exist_ok=True)
         
@@ -63,7 +58,6 @@ class PromptEngine:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     template_data = json.load(f)
                     
-                    # Convertir les variables en objets PromptVariable
                     if "variables" in template_data:
                         template_data["variables"] = [
                             PromptVariable(**var) if isinstance(var, dict) else var 
@@ -74,10 +68,9 @@ class PromptEngine:
                     self.library.templates[template.id] = template
             except Exception as e:
                 logger.error(f"Erreur lors du chargement du template {file_path}: {str(e)}")
-    
+
     def _save_library(self):
         """Sauvegarde la bibliothèque de prompts dans le stockage."""
-        # Sauvegarder les catégories
         categories_path = os.path.join(self.storage_path, "categories.json")
         try:
             categories_data = {cat_id: cat.model_dump() for cat_id, cat in self.library.categories.items()}
@@ -86,7 +79,6 @@ class PromptEngine:
         except Exception as e:
             logger.error(f"Erreur lors de la sauvegarde des catégories: {str(e)}")
         
-        # Sauvegarder les templates
         templates_dir = os.path.join(self.storage_path, "templates")
         os.makedirs(templates_dir, exist_ok=True)
         
@@ -94,7 +86,6 @@ class PromptEngine:
             try:
                 file_path = os.path.join(templates_dir, f"{template_id}.json")
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    # Convertir en dictionnaire pour la sérialisation
                     template_dict = template.model_dump()
                     json.dump(template_dict, f, ensure_ascii=False, indent=2, 
                              default=lambda o: o.isoformat() if isinstance(o, datetime.datetime) else None)
@@ -120,7 +111,6 @@ class PromptEngine:
     
     def create_template(self, template_data: Dict[str, Any]) -> PromptTemplate:
         """Crée un nouveau template de prompt."""
-        # Convertir les variables en objets PromptVariable si nécessaire
         if "variables" in template_data:
             template_data["variables"] = [
                 PromptVariable(**var) if isinstance(var, dict) else var 
@@ -137,17 +127,13 @@ class PromptEngine:
         if template_id not in self.library.templates:
             return None
         
-        # Récupérer le template existant
         existing = self.library.templates[template_id]
         
-        # Mettre à jour les champs
         for key, value in template_data.items():
             if key == "variables" and value:
-                # Convertir les variables en objets PromptVariable
                 value = [PromptVariable(**var) if isinstance(var, dict) else var for var in value]
             setattr(existing, key, value)
         
-        # Mettre à jour la date de modification
         existing.updated_at = datetime.datetime.now()
         
         self._save_library()
@@ -160,7 +146,6 @@ class PromptEngine:
         
         del self.library.templates[template_id]
         
-        # Supprimer également le fichier
         file_path = os.path.join(self.storage_path, "templates", f"{template_id}.json")
         if os.path.exists(file_path):
             try:
@@ -193,12 +178,10 @@ class PromptEngine:
         if not template:
             return None
         
-        # Sélectionner le template spécifique au fournisseur si disponible
         prompt_text = template.template
         if provider and provider in template.provider_specific:
             prompt_text = template.provider_specific[provider]
         
-        # Valider les variables requises
         required_vars = [v.name for v in template.variables if v.required]
         missing_vars = [v for v in required_vars if v not in variables]
         
@@ -206,16 +189,13 @@ class PromptEngine:
             logger.error(f"Variables requises manquantes: {', '.join(missing_vars)}")
             return None
         
-        # Appliquer les valeurs par défaut pour les variables manquantes non requises
         for var in template.variables:
             if var.name not in variables and not var.required and var.default is not None:
                 variables[var.name] = var.default
         
-        # Formater le template avec les variables
         try:
             formatted = prompt_text.format(**variables)
             
-            # Enregistrer l'exécution dans l'historique
             execution = PromptExecution(
                 template_id=template_id,
                 variables=variables,

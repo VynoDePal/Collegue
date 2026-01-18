@@ -22,12 +22,10 @@ class TestLLMOptimization(unittest.TestCase):
     
     def test_get_optimization(self):
         """Teste la récupération d'une stratégie d'optimisation."""
-        # Test avec une stratégie existante
         strategy = get_optimization("chain_of_thought")
         self.assertIsInstance(strategy, PromptOptimization)
         self.assertEqual(strategy.name, "Chain of Thought")
         
-        # Test avec une stratégie inexistante
         strategy = get_optimization("nonexistent_strategy")
         self.assertIsNone(strategy)
     
@@ -42,64 +40,48 @@ class TestLLMOptimization(unittest.TestCase):
     
     def test_optimize_prompt_chain_of_thought(self):
         """Teste l'application de la stratégie Chain of Thought."""
-        # Prompt de base
         base_prompt = "Résoudre ce problème mathématique: 5 + 7 * 2"
         
-        # Application de la stratégie
         optimized_prompt = optimize_prompt(base_prompt, "chain_of_thought")
         
-        # Vérification que le prompt a été modifié
         self.assertNotEqual(optimized_prompt, base_prompt)
         self.assertIn("étape par étape", optimized_prompt)
     
     def test_optimize_prompt_few_shot(self):
         """Teste l'application de la stratégie Few-Shot."""
-        # Prompt de base
         base_prompt = "Classifie ce texte: 'J'ai adoré ce film!'"
         
-        # Application de la stratégie
         optimized_prompt = optimize_prompt(base_prompt, "few_shot")
         
-        # Vérification que le prompt a été modifié
         self.assertNotEqual(optimized_prompt, base_prompt)
         self.assertIn("exemples", optimized_prompt.lower())
     
     def test_optimize_prompt_with_provider(self):
         """Teste l'application d'une stratégie avec un fournisseur spécifique."""
-        # Prompt de base
         base_prompt = "Résoudre ce problème mathématique: 5 + 7 * 2"
         
-        # Application de la stratégie avec un fournisseur spécifique
         optimized_prompt_openai = optimize_prompt(base_prompt, "chain_of_thought", provider="openai")
         optimized_prompt_anthropic = optimize_prompt(base_prompt, "chain_of_thought", provider="anthropic")
         
-        # Vérification que les prompts ont été modifiés différemment
         self.assertNotEqual(optimized_prompt_openai, optimized_prompt_anthropic)
     
     def test_optimize_prompt_with_examples(self):
         """Teste l'application d'une stratégie avec des exemples personnalisés."""
-        # Prompt de base
         base_prompt = "Classifie ce texte: 'J'ai adoré ce film!'"
         
-        # Exemples personnalisés - sous forme de chaîne formatée
         examples = "Exemple 1: Ce film était terrible -> Négatif\nExemple 2: J'ai beaucoup aimé cette série -> Positif"
         
-        # Application de la stratégie avec des exemples
         optimized_prompt = optimize_prompt(base_prompt, "few_shot", examples=examples)
         
-        # Vérification que le prompt contient les exemples
         self.assertIn("Ce film était terrible", optimized_prompt)
         self.assertIn("J'ai beaucoup aimé cette série", optimized_prompt)
     
     def test_optimize_prompt_nonexistent_strategy(self):
         """Teste l'application d'une stratégie inexistante."""
-        # Prompt de base
         base_prompt = "Résoudre ce problème mathématique: 5 + 7 * 2"
         
-        # Application d'une stratégie inexistante
         optimized_prompt = optimize_prompt(base_prompt, "nonexistent_strategy")
         
-        # Vérification que le prompt est None pour une stratégie inexistante
         self.assertIsNone(optimized_prompt)
 
 class TestLLMOptimizationEndpoints(unittest.TestCase):

@@ -44,7 +44,6 @@ class TestPromptVersionManager(unittest.TestCase):
     
     def test_get_best_version(self):
         """Test de récupération de la meilleure version."""
-        # Créer plusieurs versions
         v1 = self.manager.create_version(
             template_id="test_tool",
             content="Test prompt v1",
@@ -61,7 +60,6 @@ class TestPromptVersionManager(unittest.TestCase):
         )
         v2.success_rate = 0.9
         
-        # La meilleure version devrait être v2
         best = self.manager.get_best_version("test_tool")
         self.assertIsNotNone(best)
         self.assertEqual(best.version, "2.0.0")
@@ -95,9 +93,7 @@ class TestEnhancedPromptEngine(unittest.TestCase):
     
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
-        # EnhancedPromptEngine hérite de PromptEngine qui n'attend qu'un seul argument optionnel
         self.engine = EnhancedPromptEngine()
-        # Remplacer le storage_dir après l'initialisation
         self.engine.version_manager.storage_path = self.test_dir
     
     def tearDown(self):
@@ -118,11 +114,9 @@ class TestEnhancedPromptEngine(unittest.TestCase):
         
         context = {"language": "python", "description": "sort a list"}
         
-        # Exécuter la méthode asynchrone
         async def run_test():
             return await self.engine.get_optimized_prompt("test_tool", context, "python")
         
-        # Utiliser asyncio.run pour exécuter le test asynchrone
         prompt, used_version = asyncio.run(run_test())
         
         self.assertIsNotNone(prompt)

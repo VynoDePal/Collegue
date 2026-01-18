@@ -8,7 +8,6 @@ import os
 import logging
 from enum import Enum
 
-# Configurer le logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,6 @@ class PromptOptimization(BaseModel):
     provider_specific: Dict[str, Dict[str, str]] = {}
     examples: List[Dict[str, Any]] = []
 
-# Dictionnaire des optimisations de prompts
 PROMPT_OPTIMIZATIONS = {
     "chain_of_thought": {
         "name": "Chain of Thought",

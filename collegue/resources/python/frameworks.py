@@ -18,7 +18,6 @@ class PythonFrameworkReference(BaseModel):
     features: List[str] = []
     examples: List[Dict[str, str]] = []
 
-# Dictionnaire des frameworks Python populaires
 PYTHON_FRAMEWORKS = {
     # Web Frameworks
     "django": {

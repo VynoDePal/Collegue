@@ -17,7 +17,6 @@ class PythonModuleReference(BaseModel):
     examples: List[Dict[str, str]] = []
     url: Optional[str] = None
 
-# Dictionnaire des modules de la bibliothèque standard Python
 STDLIB_MODULES = {
     # Modules de base
     "os": {

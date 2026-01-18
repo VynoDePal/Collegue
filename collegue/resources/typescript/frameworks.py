@@ -7,7 +7,6 @@ from fastmcp import FastMCP
 from typing import Dict, Any, List
 import json
 
-# Frameworks frontend TypeScript
 FRONTEND_FRAMEWORKS = {
     "Angular": {
         "description": "Framework complet pour applications web développé par Google",
@@ -123,7 +122,6 @@ export default defineComponent({
     }
 }
 
-# Frameworks backend TypeScript
 BACKEND_FRAMEWORKS = {
     "NestJS": {
         "description": "Framework Node.js progressif pour construire des applications backend",
@@ -214,7 +212,6 @@ serve(handler, { port: 8000 });
     }
 }
 
-# Bibliothèques d'état et de gestion de données
 STATE_MANAGEMENT = {
     "Redux Toolkit": {
         "description": "Boîte à outils officielle pour Redux avec TypeScript",
@@ -318,7 +315,6 @@ const useBearStore = create<BearState>((set) => ({
     }
 }
 
-# Bibliothèques de test TypeScript
 TESTING_LIBRARIES = {
     "Jest": {
         "description": "Framework de test JavaScript avec support TypeScript",

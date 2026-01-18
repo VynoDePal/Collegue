@@ -12,7 +12,6 @@ services:
       PORT: 4121
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
-      # Monitoring Sentry
       SENTRY_DSN: ${SENTRY_DSN}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
     env_file:
@@ -41,13 +40,11 @@ services:
       context: .
       dockerfile: collegue/autonomous/Dockerfile
     image: collegue-watchdog:latest
-    # command: python -m collegue.autonomous.watchdog  <-- Déjà dans le CMD du Dockerfile
     restart: always
     networks:
       - collegue-net
     environment:
       PYTHONUNBUFFERED: 1
-      # Variables spécifiques au Watchdog
       SENTRY_ORG: ${SENTRY_ORG}
       # GITHUB_TOKEN et SENTRY_AUTH_TOKEN doivent être dans .env
     env_file:

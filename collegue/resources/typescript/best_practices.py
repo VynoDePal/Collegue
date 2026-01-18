@@ -7,7 +7,6 @@ from fastmcp import FastMCP
 from typing import Dict, Any, List
 import json
 
-# Bonnes pratiques générales TypeScript
 GENERAL_BEST_PRACTICES = {
     "strict_null_checks": {
         "title": "Activer strictNullChecks",
@@ -108,7 +107,6 @@ function processUser(user: User) {
     }
 }
 
-# Bonnes pratiques pour les fonctions
 FUNCTION_BEST_PRACTICES = {
     "function_return_types": {
         "title": "Spécifier les types de retour des fonctions",
@@ -171,7 +169,6 @@ function greetWithDefault(name: string, greeting: string = 'Hello'): string {
     }
 }
 
-# Bonnes pratiques pour les classes
 CLASS_BEST_PRACTICES = {
     "access_modifiers": {
         "title": "Utiliser les modificateurs d'accès",
@@ -258,7 +255,6 @@ class UserService implements IUserService {
     }
 }
 
-# Bonnes pratiques pour les génériques
 GENERICS_BEST_PRACTICES = {
     "use_generics": {
         "title": "Utiliser des génériques pour les fonctions et classes réutilisables",
@@ -299,7 +295,6 @@ const name = getProperty(user, 'name'); // Type: string
     }
 }
 
-# Configuration et outils TypeScript
 TOOLING_BEST_PRACTICES = {
     "strict_mode": {
         "title": "Activer le mode strict",

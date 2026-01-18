@@ -32,15 +32,12 @@ def main():
     # Analyser le code TypeScript
     result = parser.parse(ts_code, language="typescript")
     
-    # Afficher les résultats
     print("\n=== RÉSULTATS DE L'ANALYSE TYPESCRIPT ===\n")
     
-    # Vérifier si l'analyse a réussi
     if "error" in result:
         print(f"Erreur d'analyse: {result['error']}")
         return
     
-    # Afficher les statistiques
     print(f"Langage détecté: {result['language']}")
     print(f"Imports: {len(result['imports'])}")
     print(f"Fonctions: {len(result['functions'])}")
@@ -49,7 +46,6 @@ def main():
     print(f"Types: {len(result['types'])}")
     print(f"Variables: {len(result['variables'])}")
     
-    # Afficher les détails
     print("\n--- IMPORTS ---")
     for imp in result['imports']:
         print(f"  {imp['type']}: {imp['statement']} (ligne {imp['line']})")
@@ -82,7 +78,6 @@ def main():
         type_info = f": {var['type']}" if 'type' in var else ""
         print(f"  {var['declaration_type']} {var['name']}{type_info} = {var['value']} (ligne {var['line']})")
     
-    # Sauvegarder les résultats complets dans un fichier JSON
     result_file = Path(__file__).parent / "typescript_parser_result.json"
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)

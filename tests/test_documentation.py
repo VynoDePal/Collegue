@@ -135,7 +135,6 @@ class DataProcessor:
 
     def test_generate_documentation_python_markdown(self):
         """Test de génération de documentation Python au format Markdown."""
-        # Préparation
         request = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -144,10 +143,8 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
@@ -160,7 +157,6 @@ class DataProcessor:
 
     def test_generate_documentation_python_rst(self):
         """Test de génération de documentation Python au format RST."""
-        # Préparation
         request = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -169,22 +165,18 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "rst")
-        # Rechercher les caractères RST au lieu du texte exact
-        self.assertIn("=", response.documentation)  # RST utilise des égales pour les titres
+        self.assertIn("=", response.documentation)
         self.assertIn("add", response.documentation)
         self.assertIn("Calculator", response.documentation)
         self.assertTrue(len(response.documented_elements) > 0)
     
     def test_generate_documentation_python_html(self):
         """Test de génération de documentation Python au format HTML."""
-        # Préparation
         request = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -193,14 +185,11 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "html")
-        # Rechercher des balises HTML au lieu d'un DOCTYPE complet
         self.assertIn("<div", response.documentation)
         self.assertIn("</div>", response.documentation)
         self.assertIn("add", response.documentation)
@@ -209,7 +198,6 @@ class DataProcessor:
     
     def test_generate_documentation_javascript(self):
         """Test de génération de documentation JavaScript."""
-        # Préparation
         request = DocumentationRequest(
             code=self.javascript_code,
             language="javascript",
@@ -218,10 +206,8 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "javascript")
         self.assertEqual(response.format, "markdown")
@@ -229,7 +215,6 @@ class DataProcessor:
     
     def test_generate_documentation_detailed(self):
         """Test de génération de documentation détaillée."""
-        # Préparation
         request = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -238,20 +223,16 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
-        # Le style détaillé génère du contenu de base - vérifier la présence d'éléments
         self.assertIn("Documentation", response.documentation)
         self.assertTrue(len(response.documented_elements) > 0)
 
     def test_generate_documentation_minimal(self):
         """Test de génération de documentation minimale."""
-        # Préparation
         request = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -260,19 +241,15 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
-        # Vérifier la présence d'informations de ligne (avec majuscule)
         self.assertIn("Ligne", response.documentation)
 
     def test_generate_documentation_with_examples(self):
         """Test de génération de documentation avec exemples."""
-        # Préparation
         request = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -282,14 +259,11 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution
         response = generate_documentation(request)
         
-        # Vérification
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
-        # La documentation de base est générée même sans LLM
         self.assertIn("Documentation", response.documentation)
         self.assertTrue(len(response.documented_elements) > 0)
 
@@ -297,7 +271,6 @@ class DataProcessor:
         """Test de génération de documentation pour un langage non supporté."""
         from collegue.tools.base import ToolValidationError
 
-        # Préparation
         request = DocumentationRequest(
             code="puts 'Hello, world!'",
             language="ruby",
@@ -306,7 +279,6 @@ class DataProcessor:
             session_id="test-session"
         )
         
-        # Exécution - doit lever une exception
         with self.assertRaises(ToolValidationError):
             generate_documentation(request)
 
@@ -314,14 +286,12 @@ class DataProcessor:
         """Test d'analyse des éléments de code."""
         elements = self.tool._analyze_code_elements(self.python_code, "python")
 
-        # Vérification qu'on trouve les fonctions et classes
         function_names = [e["name"] for e in elements if e["type"] == "function"]
         class_names = [e["name"] for e in elements if e["type"] == "class"]
 
         self.assertIn("add", function_names)
         self.assertIn("Calculator", class_names)
 
-        # Vérification des métadonnées
         for element in elements:
             self.assertIn("type", element)
             self.assertIn("name", element)
@@ -331,7 +301,6 @@ class DataProcessor:
         """Test d'analyse de structure JavaScript."""
         elements = self.tool._analyze_code_elements(self.javascript_code, "javascript")
 
-        # Vérification qu'on trouve les fonctions et classes
         function_names = [e["name"] for e in elements if e["type"] == "function"]
         class_names = [e["name"] for e in elements if e["type"] == "class"]
 
@@ -340,21 +309,17 @@ class DataProcessor:
 
     def test_language_doc_instructions(self):
         """Test des instructions de documentation par langage."""
-        # Test Python
         python_instructions = self.tool._get_language_doc_instructions("python")
         self.assertIn("PEP 257", python_instructions)
         self.assertIn("docstrings", python_instructions)
 
-        # Test JavaScript
         js_instructions = self.tool._get_language_doc_instructions("javascript")
         self.assertIn("JSDoc", js_instructions)
         self.assertIn("@param", js_instructions)
 
-        # Test TypeScript
         ts_instructions = self.tool._get_language_doc_instructions("typescript")
         self.assertIn("types", ts_instructions)
 
-        # Test langage non spécifié
         unknown_instructions = self.tool._get_language_doc_instructions("unknown")
         self.assertEqual(unknown_instructions, "")
 
@@ -373,9 +338,8 @@ class DataProcessor:
         elements = self.tool._analyze_code_elements(request.code, request.language)
         prompt = self.tool._build_documentation_prompt(request, elements)
 
-        # Vérifications du prompt
         self.assertIn("python", prompt.lower())
-        self.assertIn("très détaillée", prompt.lower())  # Chercher le texte exact généré
+        self.assertIn("très détaillée", prompt.lower())
         self.assertIn("markdown", prompt.lower())
         self.assertIn("DataProcessor", prompt)
         self.assertIn("functions", prompt)
@@ -389,19 +353,15 @@ class DataProcessor:
             {"name": "Class1", "type": "class"}
         ]
 
-        # Documentation qui mentionne 2 des 3 éléments
         documentation = "Voici function1 et Class1 dans la documentation"
         coverage = self.tool._calculate_coverage(elements, documentation)
 
-        # Devrait être environ 66.7% (2/3)
         self.assertAlmostEqual(coverage, 66.67, places=1)
 
-        # Test avec documentation vide
         empty_documentation = ""
         coverage_empty = self.tool._calculate_coverage(elements, empty_documentation)
         self.assertEqual(coverage_empty, 0.0)
 
-        # Test avec tous les éléments
         full_documentation = "function1, function2, et Class1 sont documentés"
         coverage_full = self.tool._calculate_coverage(elements, full_documentation)
         self.assertEqual(coverage_full, 100.0)
@@ -426,7 +386,6 @@ class DataProcessor:
         self.assertIsInstance(suggestions, list)
         self.assertTrue(len(suggestions) > 0)
 
-        # Vérifier qu'on a des suggestions pertinentes
         suggestion_text = " ".join(suggestions).lower()
         self.assertTrue(any(keyword in suggestion_text for keyword in
                           ["couverture", "documentation", "exemple", "api"]))
@@ -435,23 +394,19 @@ class DataProcessor:
         """Test des conversions de format."""
         base_doc = "# Titre\n\nDescription du code\n\n## Section\n\nContenu"
 
-        # Test conversion docstring Python
         docstring_python = self.tool._convert_to_docstring_format(base_doc, "python")
         self.assertIn('"""', docstring_python)
         self.assertIn("Titre", docstring_python)
 
-        # Test conversion docstring JavaScript
         docstring_js = self.tool._convert_to_docstring_format(base_doc, "javascript")
         self.assertIn("/**", docstring_js)
         self.assertIn(" * ", docstring_js)
         self.assertIn(" */", docstring_js)
 
-        # Test conversion HTML
         html_doc = self.tool._convert_to_html_format(base_doc)
         self.assertIn("<div", html_doc)
         self.assertIn("</div>", html_doc)
 
-        # Test conversion RST
         rst_doc = self.tool._convert_to_rst_format(base_doc)
         self.assertIn("=", rst_doc)
 
@@ -459,7 +414,6 @@ class DataProcessor:
         """Test de validation des formats et styles."""
         from collegue.tools.base import ToolError
 
-        # Test format invalide
         with self.assertRaises(ToolError):
             request = DocumentationRequest(
                 code="def test(): pass",
@@ -468,7 +422,6 @@ class DataProcessor:
             )
             self.tool.validate_request(request)
 
-        # Test style invalide
         with self.assertRaises(ToolError):
             request = DocumentationRequest(
                 code="def test(): pass",
@@ -477,7 +430,6 @@ class DataProcessor:
             )
             self.tool.validate_request(request)
 
-        # Test format et style valides
         try:
             request = DocumentationRequest(
                 code="def test(): pass",
@@ -535,7 +487,6 @@ Calculatrice simple pour opérations arithmétiques.
 
         response = self.tool.execute(request, llm_manager=mock_llm)
 
-        # Doit utiliser le fallback en cas d'erreur
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertTrue(len(response.documentation) > 0)
@@ -576,7 +527,6 @@ Calculatrice simple pour opérations arithmétiques.
 
     def test_different_focus_options(self):
         """Test des différentes options de focus."""
-        # Test focus sur fonctions
         request_functions = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -586,7 +536,6 @@ Calculatrice simple pour opérations arithmétiques.
         response_functions = self.tool.execute(request_functions)
         self.assertIsInstance(response_functions, DocumentationResponse)
 
-        # Test focus sur classes
         request_classes = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -596,7 +545,6 @@ Calculatrice simple pour opérations arithmétiques.
         response_classes = self.tool.execute(request_classes)
         self.assertIsInstance(response_classes, DocumentationResponse)
 
-        # Test focus sur tout
         request_all = DocumentationRequest(
             code=self.python_code,
             language="python",
@@ -613,11 +561,9 @@ Calculatrice simple pour opérations arithmétiques.
             language="python"
         )
 
-        # Test sans LLM
         response = generate_documentation(request)
         self.assertIsInstance(response, DocumentationResponse)
 
-        # Test avec LLM mocké
         mock_llm = MagicMock()
         mock_llm.sync_generate.return_value = "# Documentation générée"
         response = generate_documentation(request, llm_manager=mock_llm)
@@ -625,22 +571,18 @@ Calculatrice simple pour opérations arithmétiques.
 
     def test_estimate_complexity(self):
         """Test d'estimation de complexité."""
-        # Élément simple
         simple_element = {"params": ["a", "b"]}
         complexity = self.tool._estimate_complexity(simple_element)
         self.assertEqual(complexity, "low")
 
-        # Élément moyen
         medium_element = {"params": ["a", "b", "c", "d"]}
         complexity = self.tool._estimate_complexity(medium_element)
         self.assertEqual(complexity, "medium")
 
-        # Élément complexe
         complex_element = {"params": ["a", "b", "c", "d", "e", "f"]}
         complexity = self.tool._estimate_complexity(complex_element)
         self.assertEqual(complexity, "high")
 
-        # Élément sans paramètres
         no_params_element = {}
         complexity = self.tool._estimate_complexity(no_params_element)
         self.assertEqual(complexity, "low")

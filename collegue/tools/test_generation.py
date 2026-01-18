@@ -98,23 +98,18 @@ class TestGenerationTool(BaseTool):
     """Outil de génération automatique de tests unitaires."""
 
     def get_name(self) -> str:
-        """Retourne le nom unique de l'outil."""
         return "test_generation"
 
     def get_description(self) -> str:
-        """Retourne la description de l'outil."""
         return "Génère automatiquement des tests unitaires pour du code source"
 
     def get_request_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les requêtes."""
         return TestGenerationRequest
 
     def get_response_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les réponses."""
         return TestGenerationResponse
 
     def get_supported_languages(self) -> List[str]:
-        """Retourne la liste des langages supportés."""
         return ["python", "javascript", "typescript", "java", "c#"]
 
     def is_long_running(self) -> bool:
@@ -122,7 +117,6 @@ class TestGenerationTool(BaseTool):
         return True
 
     def get_supported_test_frameworks(self) -> Dict[str, List[str]]:
-        """Retourne les frameworks de test supportés par langage."""
         return {
             "python": ["unittest", "pytest", "nose2"],
             "javascript": ["jest", "mocha", "jasmine", "vitest"],
@@ -132,13 +126,11 @@ class TestGenerationTool(BaseTool):
         }
 
     def get_usage_description(self) -> str:
-        """Description détaillée de l'utilisation de l'outil de génération de tests."""
         return ("Outil de génération automatique de tests unitaires qui analyse le code source et génère des tests "
                 "complets avec différents frameworks. Il peut inclure des mocks, viser une couverture spécifique, "
                 "et génère des tests pour fonctions, classes et modules avec estimation de couverture.")
 
     def get_examples(self) -> List[Dict[str, Any]]:
-        """Exemples d'utilisation spécifiques à l'outil de génération de tests."""
         return [
             {
                 "title": "Tests Python avec pytest",
