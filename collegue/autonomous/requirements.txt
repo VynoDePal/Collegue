@@ -1,0 +1,5 @@
+python-dotenv
+pydantic>=2.12.5
+pydantic-settings
+requests
+openai
