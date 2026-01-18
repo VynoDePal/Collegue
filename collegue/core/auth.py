@@ -1,15 +1,18 @@
 """
 Authentication - Gestion de l'authentification OAuth pour le MCP Collègue
 """
-from fastmcp import FastMCP
+from typing import Optional, Any
+import logging
+
+# Rendre FastMCP optionnel pour permettre l'exécution en mode "watchdog" léger
 try:
+    from fastmcp import FastMCP
     from fastmcp.server.auth.providers.jwt import JWTVerifier
 except ImportError:
-    # Fallback pour anciennes versions de FastMCP
+    FastMCP = Any
     JWTVerifier = None
+
 from collegue.config import settings
-from typing import Optional
-import logging
 
 logger = logging.getLogger(__name__)
 
