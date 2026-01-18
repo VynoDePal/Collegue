@@ -64,7 +64,8 @@ class SentryRequest(BaseModel):
     @classmethod
     def validate_command(cls, v: str) -> str:
         valid = ['list_projects', 'list_issues', 'get_issue', 'issue_events', 
-                 'project_stats', 'list_releases', 'issue_tags', 'parse_config']
+                 'project_stats', 'list_releases', 'issue_tags', 'parse_config', 
+                 'get_project', 'list_repos']
         if v not in valid:
             raise ValueError(f"Commande invalide. Valides: {valid}")
         return v
@@ -78,6 +79,15 @@ class ConfigInfo(BaseModel):
     sentry_url: Optional[str] = None
 
 
+class RepoInfo(BaseModel):
+    """Information sur un repository Sentry (intégration)."""
+    id: str
+    name: str
+    provider: Optional[str] = None
+    url: Optional[str] = None
+    status: str = "active"
+
+
 class ProjectInfo(BaseModel):
     """Information sur un projet Sentry."""
     id: str
@@ -85,7 +95,8 @@ class ProjectInfo(BaseModel):
     name: str
     platform: Optional[str] = None
     status: str = "active"
-
+    options: Optional[Dict[str, Any]] = None
+    organization: Optional[Dict[str, Any]] = None
 
 class IssueInfo(BaseModel):
     """Information sur une issue Sentry."""
@@ -156,6 +167,7 @@ class SentryResponse(BaseModel):
     issue: Optional[IssueInfo] = None
     events: Optional[List[EventInfo]] = None
     releases: Optional[List[ReleaseInfo]] = None
+    repos: Optional[List[RepoInfo]] = None
     stats: Optional[ProjectStats] = None
     tags: Optional[List[TagDistribution]] = None
     config: Optional[ConfigInfo] = None
@@ -301,6 +313,20 @@ class SentryMonitorTool(BaseTool):
         except requests.RequestException as e:
             raise ToolExecutionError(f"Erreur réseau Sentry: {e}")
     
+    def _get_project(self, org: str, project_slug: str, token: Optional[str], sentry_url: Optional[str]) -> ProjectInfo:
+        """Récupère les détails d'un projet."""
+        data = self._api_get(f"/projects/{org}/{project_slug}/", token, sentry_url)
+        
+        return ProjectInfo(
+            id=data['id'],
+            slug=data['slug'],
+            name=data['name'],
+            platform=data.get('platform'),
+            status=data.get('status', 'active'),
+            options=data.get('options', {}),
+            organization=data.get('organization', {})
+        )
+
     def _list_projects(self, org: str, token: Optional[str], sentry_url: Optional[str]) -> List[ProjectInfo]:
         """Liste les projets d'une organisation."""
         data = self._api_get(f"/organizations/{org}/projects/", token, sentry_url)
@@ -310,7 +336,8 @@ class SentryMonitorTool(BaseTool):
             slug=p['slug'],
             name=p['name'],
             platform=p.get('platform'),
-            status=p.get('status', 'active')
+            status=p.get('status', 'active'),
+            organization=p.get('organization', {})
         ) for p in data]
     
     def _list_issues(self, org: str, project: Optional[str], query: Optional[str],
@@ -501,6 +528,18 @@ class SentryMonitorTool(BaseTool):
             url=r.get('url')
         ) for r in data[:limit]]
     
+    def _list_repos(self, org: str, token: Optional[str], sentry_url: Optional[str]) -> List[RepoInfo]:
+        """Liste les dépôts liés à l'organisation."""
+        data = self._api_get(f"/organizations/{org}/repos/", token, sentry_url)
+        
+        return [RepoInfo(
+            id=r['id'],
+            name=r['name'],
+            provider=r.get('provider', {}).get('id') if isinstance(r.get('provider'), dict) else r.get('provider'),
+            url=r.get('url'),
+            status=r.get('status', 'active')
+        ) for r in data]
+
     def _execute_core_logic(self, request: SentryRequest, **kwargs) -> SentryResponse:
         """Exécute la logique principale."""
         org = request.organization or os.environ.get('SENTRY_ORG') or self._get_org_from_http_headers()
@@ -533,6 +572,26 @@ class SentryMonitorTool(BaseTool):
                 command=request.command,
                 message=f"✅ {len(projects)} projet(s) dans '{org}'",
                 projects=projects
+            )
+            
+        elif request.command == 'list_repos':
+            repos = self._list_repos(org, request.token, request.sentry_url)
+            return SentryResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ {len(repos)} dépôt(s) liés à '{org}'",
+                repos=repos
+            )
+            
+        elif request.command == 'get_project':
+            if not request.project:
+                raise ToolExecutionError("project requis pour get_project")
+            project_info = self._get_project(org, request.project, request.token, request.sentry_url)
+            return SentryResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Projet {project_info.slug}",
+                projects=[project_info]
             )
         
         elif request.command == 'list_issues':
