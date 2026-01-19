@@ -50,21 +50,34 @@ class UserConfigRegistry:
                     cls._instance._config_lock = Lock()
         return cls._instance
     
+    # Valeurs placeholder à ignorer
+    PLACEHOLDER_ORGS = {
+        "your-org", "my-organization", "your-organization", 
+        "my-org", "example-org", "test-org", "placeholder"
+    }
+    
     def register(
         self,
         sentry_org: str,
         sentry_token: Optional[str] = None,
         github_token: Optional[str] = None,
         github_owner: Optional[str] = None
-    ) -> str:
+    ) -> Optional[str]:
         """
         Enregistre ou met à jour une configuration utilisateur.
         
         Returns:
-            L'ID de la configuration
+            L'ID de la configuration, ou None si l'org est invalide
         """
+        # Ignorer les valeurs placeholder
+        if sentry_org.lower() in self.PLACEHOLDER_ORGS:
+            return None
+        
+        # Normaliser l'org en minuscules pour éviter les doublons (VynoDePal vs vynodepal)
+        normalized_org = sentry_org.lower()
+            
         config = UserConfig(
-            sentry_org=sentry_org,
+            sentry_org=normalized_org,
             sentry_token=sentry_token,
             github_token=github_token,
             github_owner=github_owner
@@ -134,6 +147,25 @@ class UserConfigRegistry:
         """Retourne le nombre de configurations enregistrées."""
         with self._config_lock:
             return len(self._configs)
+    
+    def clear_all(self) -> int:
+        """Supprime toutes les configurations. Utile pour le redémarrage."""
+        with self._config_lock:
+            count = len(self._configs)
+            self._configs.clear()
+            return count
+    
+    def remove_by_org(self, sentry_org: str) -> bool:
+        """Supprime une configuration par son org Sentry."""
+        org_lower = sentry_org.lower()
+        with self._config_lock:
+            to_remove = [
+                cid for cid, config in self._configs.items()
+                if config.sentry_org.lower() == org_lower
+            ]
+            for cid in to_remove:
+                del self._configs[cid]
+            return len(to_remove) > 0
 
 
 def get_config_registry() -> UserConfigRegistry:
