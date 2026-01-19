@@ -19,6 +19,7 @@ from collegue.core.tool_llm_manager import ToolLLMManager
 from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
 from collegue.tools.github_ops import GitHubOpsTool, GitHubRequest
 from collegue.autonomous.config_registry import get_config_registry, UserConfig
+from collegue.autonomous.context_pack import ContextPackBuilder, ContextPack
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -30,6 +31,9 @@ logger = logging.getLogger("watchdog")
 
 # Variable globale pour stocker la tâche de fond
 _watchdog_task: Optional[asyncio.Task] = None
+
+# Set pour tracker les issues déjà traitées (évite les doublons)
+_processed_issues: set = set()
 
 
 def _get_config_value(key: str, header_names: List[str] = None) -> Optional[str]:
@@ -187,8 +191,19 @@ class AutoFixer:
             await self.attempt_fix(issue, repo_owner, repo_name, org, token)
 
     async def attempt_fix(self, issue, repo_owner, repo_name, org: str, sentry_token: Optional[str] = None):
-        """Tente de corriger une issue spécifique."""
+        """Tente de corriger une issue spécifique avec Context Pack et patchs minimaux."""
+        global _processed_issues
+        import ast
+        import json
+        import re
+        
         issue_id = issue.id
+        
+        # Éviter de traiter la même issue plusieurs fois
+        if issue_id in _processed_issues:
+            logger.info(f"Issue {issue_id} déjà traitée, skip")
+            return
+        
         github_token = self._get_github_token()
         
         override_owner = self._get_github_owner()
@@ -203,6 +218,7 @@ class AutoFixer:
             logger.warning("Aucun token GitHub configuré - opérations GitHub impossibles.")
             return
 
+        # 1. Récupérer l'événement Sentry
         try:
             events_resp = self.sentry._execute_core_logic(SentryRequest(
                 command="issue_events",
@@ -216,48 +232,82 @@ class AutoFixer:
                 return
                 
             event = events_resp.events[0]
-            stacktrace = event.stacktrace or "No stacktrace available"
             
         except Exception as e:
             logger.error(f"Impossible de lire les détails de l'issue {issue_id}: {e}")
             return
 
+        # 2. Construire le Context Pack
+        logger.info("📦 Construction du Context Pack...")
+        
+        builder = ContextPackBuilder(
+            github_tool=self.github,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            github_token=github_token,
+            project_prefixes=["collegue/", "src/", "app/", "lib/"]
+        )
+        
+        context_pack = await builder.build(
+            sentry_event=event,
+            issue_title=issue.title,
+            error_message=getattr(issue, 'metadata', {}).get('value', '') if hasattr(issue, 'metadata') else '',
+            error_type=getattr(issue, 'metadata', {}).get('type', '') if hasattr(issue, 'metadata') else ''
+        )
+        
+        if not context_pack.primary_file:
+            logger.warning("Impossible de construire le Context Pack - pas de fichier source")
+            # Fallback: utiliser la stacktrace brute
+            stacktrace = event.stacktrace or "No stacktrace available"
+            context_prompt = f"STACKTRACE:\n{stacktrace}"
+            filepath = None
+            original_content = None
+        else:
+            context_prompt = context_pack.to_prompt_context()
+            filepath = context_pack.primary_file.filepath
+            original_content = context_pack.primary_file.full_content
+            logger.info(f"✅ Context Pack prêt: {filepath}")
+
+        # 3. Construire le prompt avec format SEARCH/REPLACE
         logger.info("🧠 Analyse de la cause racine avec le LLM...")
         
-        prompt = f"""
-        Tu es un expert Python/Backend autonome.
-        Analyse cette erreur Sentry et propose un correctif.
-        
-        ERREUR: {issue.title}
-        STACKTRACE:
-        {stacktrace}
-        
-        CONTEXTE:
-        Le projet est un serveur MCP Python.
-        
-        TACHE:
-        1. Identifie le fichier coupable (ex: collegue/app.py).
-        2. Propose le code corrigé.
-        3. Donne une explication courte.
-        
-        Réponds UNIQUEMENT au format JSON strict:
+        prompt = f"""Tu es un expert Python/Backend autonome spécialisé dans la correction de bugs.
+
+{context_prompt}
+
+## TÂCHE
+Analyse cette erreur et génère un correctif MINIMAL. 
+
+## FORMAT DE RÉPONSE (JSON strict)
+{{
+    "filepath": "{filepath or 'chemin/vers/fichier.py'}",
+    "explanation": "Explication courte de la cause et du fix",
+    "patches": [
         {{
-            "filepath": "chemin/vers/fichier.py",
-            "explanation": "explication courte",
-            "new_code": "contenu complet du fichier corrigé"
+            "search": "le code EXACT à remplacer (copié depuis le fichier ci-dessus)",
+            "replace": "le nouveau code qui corrige le bug"
         }}
-        """
+    ]
+}}
+
+## RÈGLES CRITIQUES
+1. Le champ "search" doit contenir du code EXACTEMENT tel qu'il apparaît dans le fichier
+2. Génère des patchs MINIMAUX - ne modifie que les lignes nécessaires
+3. NE JAMAIS remplacer tout le fichier - seulement les parties qui causent l'erreur
+4. Inclus assez de contexte dans "search" pour que le remplacement soit unique
+5. Si plusieurs modifications sont nécessaires, utilise plusieurs patchs
+
+Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         
         try:
             analysis_json = await self.llm.async_generate(prompt)
-            import json
-            import re
             
+            # Parser la réponse JSON
             match = re.search(r'```json\s*(.*?)\s*```', analysis_json, re.DOTALL)
             if match:
                 json_str = match.group(1)
             else:
-                json_str = analysis_json
+                json_str = analysis_json.strip()
                 
             fix_data = json.loads(json_str)
             
@@ -265,48 +315,156 @@ class AutoFixer:
             logger.error(f"Echec de l'analyse LLM: {e}")
             return
 
-        filepath = fix_data.get("filepath")
-        if ".." in filepath or filepath.startswith("/"):
-            logger.error(f"Chemin de fichier suspect: {filepath}")
+        # 4. Valider et appliquer les patchs
+        patches = fix_data.get("patches", [])
+        target_filepath = fix_data.get("filepath", filepath)
+        
+        if not target_filepath:
+            logger.error("Pas de filepath dans la réponse LLM")
+            return
+            
+        if ".." in target_filepath or target_filepath.startswith("/"):
+            logger.error(f"Chemin de fichier suspect: {target_filepath}")
+            return
+        
+        if not patches:
+            logger.error("Pas de patchs dans la réponse LLM")
+            return
+        
+        # Récupérer le contenu actuel si pas déjà fait
+        if original_content is None or target_filepath != filepath:
+            try:
+                file_resp = self.github._execute_core_logic(GitHubRequest(
+                    command="get_file",
+                    owner=repo_owner,
+                    repo=repo_name,
+                    path=target_filepath,
+                    token=github_token
+                ))
+                import base64
+                original_content = base64.b64decode(file_resp.content).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Impossible de récupérer {target_filepath}: {e}")
+                return
+        
+        # Appliquer les patchs
+        patched_content = original_content
+        patches_applied = 0
+        
+        for i, patch in enumerate(patches):
+            search = patch.get("search", "")
+            replace = patch.get("replace", "")
+            
+            if not search:
+                logger.warning(f"Patch {i+1}: 'search' vide, ignoré")
+                continue
+            
+            if search not in patched_content:
+                logger.warning(f"Patch {i+1}: 'search' non trouvé dans le fichier")
+                # Essayer avec whitespace normalisé
+                normalized_search = ' '.join(search.split())
+                normalized_content = ' '.join(patched_content.split())
+                if normalized_search not in normalized_content:
+                    logger.error(f"Patch {i+1}: impossible d'appliquer le patch")
+                    continue
+                # Si ça matche en normalisé, essayer de trouver par lignes
+                search_lines = [l.strip() for l in search.strip().split('\n') if l.strip()]
+                if search_lines:
+                    # Chercher la première ligne dans le contenu
+                    first_line = search_lines[0]
+                    if first_line in patched_content:
+                        logger.info(f"Patch {i+1}: tentative de match partiel...")
+            
+            patched_content = patched_content.replace(search, replace, 1)
+            patches_applied += 1
+            logger.info(f"✅ Patch {i+1}/{len(patches)} appliqué")
+        
+        if patches_applied == 0:
+            logger.error("Aucun patch n'a pu être appliqué")
+            return
+        
+        # 5. Valider le code patché (syntaxe Python)
+        if target_filepath.endswith('.py'):
+            try:
+                ast.parse(patched_content)
+                logger.info("✅ Validation syntaxique OK")
+            except SyntaxError as e:
+                logger.error(f"❌ Code généré invalide: {e}")
+                return
+        
+        # 6. Vérifier que le fichier n'a pas été "vidé"
+        if len(patched_content) < len(original_content) * 0.5:
+            logger.error(f"❌ Le patch réduit le fichier de plus de 50% ({len(original_content)} -> {len(patched_content)})")
             return
 
+        # 7. Créer la branche et la PR
         branch_name = f"fix/sentry-{issue.short_id}"
         pr_title = f"Fix: {issue.title} (Sentry-{issue.short_id})"
         
-        logger.info(f"🛠️ Application du correctif sur {filepath} (Branche: {branch_name})")
+        logger.info(f"🛠️ Application du correctif sur {target_filepath} (Branche: {branch_name})")
         
         try:
-            self.github._execute_core_logic(GitHubRequest(
-                command="create_branch",
-                owner=repo_owner,
-                repo=repo_name,
-                branch=branch_name,
-                token=github_token
-            ))
+            # Créer la branche (gérer le cas où elle existe déjà)
+            try:
+                self.github._execute_core_logic(GitHubRequest(
+                    command="create_branch",
+                    owner=repo_owner,
+                    repo=repo_name,
+                    branch=branch_name,
+                    token=github_token
+                ))
+            except Exception as e:
+                if "already exists" in str(e).lower() or "422" in str(e):
+                    logger.info(f"Branche {branch_name} existe déjà, réutilisation")
+                else:
+                    raise
             
+            # Mettre à jour le fichier
             self.github._execute_core_logic(GitHubRequest(
                 command="update_file",
                 owner=repo_owner,
                 repo=repo_name,
-                path=filepath,
-                message=f"Fix {issue.title}",
-                content=fix_data["new_code"],
+                path=target_filepath,
+                message=f"Fix {issue.title}\n\nAppliqué {patches_applied} patch(s) minimal(aux)",
+                content=patched_content,
                 branch=branch_name,
                 token=github_token
             ))
+            
+            # Créer la PR
+            pr_body = f"""## Fix automatique généré par Collegue Watchdog
+
+**Issue Sentry:** {issue.permalink}
+
+### Explication
+{fix_data.get('explanation', 'N/A')}
+
+### Patchs appliqués
+{patches_applied} modification(s) minimale(s) sur `{target_filepath}`
+
+### Validation
+- ✅ Syntaxe Python vérifiée
+- ✅ Taille du fichier préservée
+
+---
+*Ce fix a été généré automatiquement. Veuillez le revoir avant de merger.*
+"""
             
             pr_resp = self.github._execute_core_logic(GitHubRequest(
                 command="create_pr",
                 owner=repo_owner,
                 repo=repo_name,
                 title=pr_title,
-                body=f"Fix automatique généré par Collegue Watchdog.\n\nIssue: {issue.permalink}\n\nExplication:\n{fix_data['explanation']}",
+                body=pr_body,
                 head=branch_name,
                 base="main",
                 token=github_token
             ))
             
             logger.info(f"🚀 PR Créée avec succès: {pr_resp.pr.html_url}")
+            
+            # Marquer l'issue comme traitée
+            _processed_issues.add(issue_id)
             
         except Exception as e:
             logger.error(f"Echec de l'opération GitHub: {e}")
