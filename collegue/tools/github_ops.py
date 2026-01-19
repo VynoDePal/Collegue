@@ -83,7 +83,7 @@ class GitHubRequest(BaseModel):
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
-        valid = ['list_repos', 'get_repo', 'list_prs', 'get_pr', 'create_pr',
+        valid = ['list_repos', 'get_repo', 'get_file', 'list_prs', 'get_pr', 'create_pr',
                  'list_issues', 'get_issue', 'create_issue', 'pr_files', 'pr_comments', 
                  'repo_branches', 'create_branch', 'update_file',
                  'repo_commits', 'search_code', 'list_workflows', 'workflow_runs']
