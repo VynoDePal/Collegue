@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "openrouter"
     LLM_BASE_URL: str = "https://openrouter.ai/api/v1"
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "x-ai/grok-code-fast-1"
+    LLM_MODEL: str = "google/gemini-3-flash-preview"
 
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
