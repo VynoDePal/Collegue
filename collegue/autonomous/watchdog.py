@@ -10,6 +10,7 @@ import asyncio
 import difflib
 import logging
 import os
+import re
 import sys
 from typing import List, Optional, Tuple
 
@@ -344,6 +345,15 @@ class AutoFixer:
         # 3. Recherche web pour enrichir le contexte (optionnel)
         error_type = getattr(issue, 'metadata', {}).get('type', '') if hasattr(issue, 'metadata') else ''
         error_message = getattr(issue, 'metadata', {}).get('value', '') if hasattr(issue, 'metadata') else ''
+        
+        # Fallback: extraire l'erreur du titre si metadata vide
+        if not error_type and not error_message and issue.title:
+            title_match = re.match(r'^(\w+Error|\w+Exception):\s*(.+)$', issue.title)
+            if title_match:
+                error_type = title_match.group(1)
+                error_message = title_match.group(2)
+            else:
+                error_message = issue.title  # Utiliser le titre complet
         
         web_context = ""
         web_citations = []
