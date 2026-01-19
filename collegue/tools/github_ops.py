@@ -693,7 +693,8 @@ class GitHubOpsTool(BaseTool):
                     get_config_registry().register(
                         sentry_org=sentry_org,
                         github_token=token,
-                        github_owner=request.owner
+                        github_owner=request.owner,
+                        github_repo=request.repo
                     )
             except Exception:
                 pass
