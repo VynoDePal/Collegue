@@ -18,6 +18,7 @@ from collegue.config import settings
 from collegue.core.tool_llm_manager import ToolLLMManager
 from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
 from collegue.tools.github_ops import GitHubOpsTool, GitHubRequest
+from collegue.autonomous.config_registry import get_config_registry, UserConfig
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -58,20 +59,37 @@ def _get_config_value(key: str, header_names: List[str] = None) -> Optional[str]
 
 
 class AutoFixer:
-    def __init__(self):
+    def __init__(self, user_config: Optional[UserConfig] = None):
         self.sentry = SentryMonitorTool()
         self.github = GitHubOpsTool()
         self.llm = ToolLLMManager()
+        self.user_config = user_config
         
     def _get_sentry_org(self) -> Optional[str]:
-        """Récupère l'organisation Sentry depuis env ou headers."""
+        """Récupère l'organisation Sentry depuis config, env ou headers."""
+        if self.user_config:
+            return self.user_config.sentry_org
         return _get_config_value(
             "SENTRY_ORG", 
             ["x-sentry-org", "x-collegue-sentry-org"]
         )
     
+    def _get_sentry_token(self) -> Optional[str]:
+        """Récupère le token Sentry depuis config ou env."""
+        if self.user_config and self.user_config.sentry_token:
+            return self.user_config.sentry_token
+        return os.environ.get("SENTRY_AUTH_TOKEN")
+    
+    def _get_github_token(self) -> Optional[str]:
+        """Récupère le token GitHub depuis config ou env."""
+        if self.user_config and self.user_config.github_token:
+            return self.user_config.github_token
+        return os.environ.get("GITHUB_TOKEN")
+    
     def _get_github_owner(self) -> Optional[str]:
-        """Récupère le propriétaire GitHub depuis env ou headers."""
+        """Récupère le propriétaire GitHub depuis config, env ou headers."""
+        if self.user_config and self.user_config.github_owner:
+            return self.user_config.github_owner
         return _get_config_value(
             "GITHUB_OWNER",
             ["x-github-owner", "x-collegue-github-owner"]
@@ -79,31 +97,33 @@ class AutoFixer:
         
     async def run_once(self):
         """Exécute une passe de vérification et correction sur TOUS les projets."""
-        logger.info("🔍 Démarrage du cycle de Self-Healing Multi-Projets...")
-        
         org = self._get_sentry_org()
+        token = self._get_sentry_token()
+        
         if not org:
-            logger.error("SENTRY_ORG non défini (ni env, ni headers MCP). Impossible de scanner.")
+            logger.warning("Configuration sans SENTRY_ORG, ignorée.")
             return
+            
+        logger.info(f"🔍 Scan de l'organisation: {org}")
 
         try:
-            logger.info(f"📡 Récupération des données pour l'org: {org}")
-            
             projects_resp = self.sentry._execute_core_logic(SentryRequest(
                 command="list_projects",
-                organization=org
+                organization=org,
+                token=token
             ))
             projects = projects_resp.projects or []
             
             repos_resp = self.sentry._execute_core_logic(SentryRequest(
                 command="list_repos",
-                organization=org
+                organization=org,
+                token=token
             ))
             repos = repos_resp.repos or []
             
             self.repo_map = {}
             for r in repos:
-                self.repo_map[r.name] = r # ex: owner/repo
+                self.repo_map[r.name] = r
                 if "/" in r.name:
                     short_name = r.name.split("/")[-1]
                     self.repo_map[short_name] = r
@@ -115,9 +135,9 @@ class AutoFixer:
             return
 
         for project in projects:
-            await self.scan_project(org, project)
+            await self.scan_project(org, project, token)
 
-    async def scan_project(self, org, project):
+    async def scan_project(self, org, project, token: Optional[str] = None):
         """Scanne un projet spécifique."""
         logger.info(f"📂 Scan du projet: {project.slug}")
         
@@ -127,7 +147,8 @@ class AutoFixer:
                 organization=org,
                 project=project.slug,
                 query="is:unresolved level:error",
-                limit=3  # On limite à 3 par projet pour ne pas spammer
+                limit=3,
+                token=token
             ))
         except Exception as e:
             logger.error(f"Erreur lecture issues projet {project.slug}: {e}")
@@ -270,13 +291,42 @@ class AutoFixer:
             logger.error(f"Echec de l'opération GitHub: {e}")
 
 async def _watchdog_loop(interval_seconds: int = 300):
-    """Boucle principale du watchdog."""
-    fixer = AutoFixer()
+    """Boucle principale du watchdog - multi-utilisateur."""
+    registry = get_config_registry()
+    
     while True:
-        try:
-            await fixer.run_once()
-        except Exception as e:
-            logger.error(f"Erreur dans le cycle watchdog: {e}")
+        logger.info("🔍 Démarrage du cycle de Self-Healing Multi-Utilisateurs...")
+        
+        # Récupère toutes les configurations actives (dernières 24h)
+        configs = registry.get_all_active(max_age_hours=24.0)
+        
+        if not configs:
+            # Fallback: essayer avec les variables d'environnement
+            env_org = os.environ.get("SENTRY_ORG")
+            if env_org:
+                logger.info(f"Mode mono-utilisateur (env): {env_org}")
+                fixer = AutoFixer()
+                try:
+                    await fixer.run_once()
+                except Exception as e:
+                    logger.error(f"Erreur dans le cycle watchdog: {e}")
+            else:
+                logger.warning("Aucune configuration utilisateur enregistrée. "
+                             "Effectuez une requête Sentry pour enregistrer vos credentials.")
+        else:
+            logger.info(f"👥 {len(configs)} configuration(s) utilisateur active(s)")
+            for config in configs:
+                try:
+                    fixer = AutoFixer(user_config=config)
+                    await fixer.run_once()
+                except Exception as e:
+                    logger.error(f"Erreur pour org {config.sentry_org}: {e}")
+        
+        # Nettoyage des configs inactives
+        removed = registry.cleanup_stale(max_age_hours=48.0)
+        if removed > 0:
+            logger.info(f"🧹 {removed} configuration(s) inactive(s) supprimée(s)")
+        
         logger.info(f"💤 Pause de {interval_seconds // 60} minutes...")
         await asyncio.sleep(interval_seconds)
 
