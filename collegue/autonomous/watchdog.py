@@ -174,9 +174,9 @@ class AutoFixer:
             if not repo_owner:
                 repo_owner = org
                 
-            await self.attempt_fix(issue, repo_owner, repo_name)
+            await self.attempt_fix(issue, repo_owner, repo_name, org, token)
 
-    async def attempt_fix(self, issue, repo_owner, repo_name):
+    async def attempt_fix(self, issue, repo_owner, repo_name, org: str, token: Optional[str] = None):
         """Tente de corriger une issue spécifique."""
         issue_id = issue.id
         
@@ -192,6 +192,8 @@ class AutoFixer:
             events_resp = self.sentry._execute_core_logic(SentryRequest(
                 command="issue_events",
                 issue_id=issue_id,
+                organization=org,
+                token=token,
                 limit=1
             ))
             if not events_resp.events:

@@ -376,9 +376,15 @@ class SentryMonitorTool(BaseTool):
             type=i.get('type', 'error')
         ) for i in data[:limit]]
     
-    def _get_issue(self, issue_id: str, token: Optional[str], sentry_url: Optional[str]) -> IssueInfo:
+    def _get_issue(self, issue_id: str, token: Optional[str], sentry_url: Optional[str], 
+                    org: Optional[str] = None) -> IssueInfo:
         """Récupère les détails d'une issue."""
-        data = self._api_get(f"/issues/{issue_id}/", token, sentry_url)
+        # L'API Sentry requiert l'organisation dans le path
+        if org:
+            endpoint = f"/organizations/{org}/issues/{issue_id}/"
+        else:
+            endpoint = f"/issues/{issue_id}/"
+        data = self._api_get(endpoint, token, sentry_url)
         
         return IssueInfo(
             id=data['id'],
@@ -397,9 +403,15 @@ class SentryMonitorTool(BaseTool):
         )
     
     def _get_issue_events(self, issue_id: str, token: Optional[str], 
-                          sentry_url: Optional[str], limit: int) -> List[EventInfo]:
+                          sentry_url: Optional[str], limit: int,
+                          org: Optional[str] = None) -> List[EventInfo]:
         """Récupère les événements/stacktraces d'une issue."""
-        data = self._api_get(f"/issues/{issue_id}/events/", token, sentry_url, {"limit": limit})
+        # L'API Sentry requiert l'organisation dans le path + full=true pour la stacktrace
+        if org:
+            endpoint = f"/organizations/{org}/issues/{issue_id}/events/"
+        else:
+            endpoint = f"/issues/{issue_id}/events/"
+        data = self._api_get(endpoint, token, sentry_url, {"limit": limit, "full": "true"})
         
         events = []
         for e in data[:limit]:
@@ -471,9 +483,14 @@ class SentryMonitorTool(BaseTool):
         
         return events
     
-    def _get_issue_tags(self, issue_id: str, token: Optional[str], sentry_url: Optional[str]) -> List[TagDistribution]:
+    def _get_issue_tags(self, issue_id: str, token: Optional[str], sentry_url: Optional[str],
+                         org: Optional[str] = None) -> List[TagDistribution]:
         """Récupère la distribution des tags d'une issue."""
-        data = self._api_get(f"/issues/{issue_id}/tags/", token, sentry_url)
+        if org:
+            endpoint = f"/organizations/{org}/issues/{issue_id}/tags/"
+        else:
+            endpoint = f"/issues/{issue_id}/tags/"
+        data = self._api_get(endpoint, token, sentry_url)
         
         return [TagDistribution(
             key=t['key'],
@@ -631,7 +648,7 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'get_issue':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour get_issue")
-            issue = self._get_issue(request.issue_id, request.token, request.sentry_url)
+            issue = self._get_issue(request.issue_id, token, request.sentry_url, org)
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -643,7 +660,7 @@ class SentryMonitorTool(BaseTool):
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_events")
             events = self._get_issue_events(
-                request.issue_id, request.token, request.sentry_url, request.limit
+                request.issue_id, token, request.sentry_url, request.limit, org
             )
             return SentryResponse(
                 success=True,
@@ -655,7 +672,7 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'issue_tags':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_tags")
-            tags = self._get_issue_tags(request.issue_id, request.token, request.sentry_url)
+            tags = self._get_issue_tags(request.issue_id, token, request.sentry_url, org)
             return SentryResponse(
                 success=True,
                 command=request.command,
