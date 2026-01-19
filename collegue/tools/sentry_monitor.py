@@ -304,14 +304,14 @@ class SentryMonitorTool(BaseTool):
         headers = self._get_headers(token)
 
         # Sentry API requires project IDs to be numbers, not strings
-        if params and "project" in params:
-            p = params["project"]
-            if isinstance(p, list):
-                params["project"] = [int(x) if str(x).isdigit() else x for x in p]
-            elif isinstance(p, str) and p.isdigit():
-                params["project"] = int(p)
+        if params and "project" in params and isinstance(params["project"], (str, list)):
+            if isinstance(params["project"], list):
+                params["project"] = [int(p) if str(p).isdigit() else p for p in params["project"]]
+            elif str(params["project"]).isdigit():
+                params["project"] = int(params["project"])
         
         try:
+            # Use a copy of params to avoid side effects
             response = requests.get(url, headers=headers, params=params, timeout=30)
             
             if response.status_code == 404:
