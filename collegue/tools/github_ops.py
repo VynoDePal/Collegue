@@ -21,6 +21,12 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+try:
+    from collegue.autonomous.config_registry import get_config_registry
+    HAS_CONFIG_REGISTRY = True
+except ImportError:
+    HAS_CONFIG_REGISTRY = False
+
 
 class GitHubRequest(BaseModel):
     """Modèle de requête pour les opérations GitHub.
@@ -672,6 +678,25 @@ class GitHubOpsTool(BaseTool):
 
     def _execute_core_logic(self, request: GitHubRequest, **kwargs) -> GitHubResponse:
         """Exécute la logique principale."""
+        token = request.token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
+        
+        # Enregistrer le token GitHub pour le watchdog multi-utilisateur
+        if token and request.owner and HAS_CONFIG_REGISTRY:
+            try:
+                # On ne peut enregistrer que si on a une org Sentry associée
+                # Sinon on met à jour une config existante si possible
+                sentry_org = os.environ.get('SENTRY_ORG')
+                if get_http_headers:
+                    headers = get_http_headers() or {}
+                    sentry_org = sentry_org or headers.get('x-sentry-org')
+                if sentry_org:
+                    get_config_registry().register(
+                        sentry_org=sentry_org,
+                        github_token=token,
+                        github_owner=request.owner
+                    )
+            except Exception:
+                pass
         
         if request.command == 'list_repos':
             repos = self._list_repos(request.owner, request.token, request.limit)

@@ -20,6 +20,12 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+try:
+    from collegue.autonomous.config_registry import get_config_registry
+    HAS_CONFIG_REGISTRY = True
+except ImportError:
+    HAS_CONFIG_REGISTRY = False
+
 
 class SentryRequest(BaseModel):
     """Modèle de requête pour les opérations Sentry.
@@ -543,6 +549,22 @@ class SentryMonitorTool(BaseTool):
     def _execute_core_logic(self, request: SentryRequest, **kwargs) -> SentryResponse:
         """Exécute la logique principale."""
         org = request.organization or os.environ.get('SENTRY_ORG') or self._get_org_from_http_headers()
+        token = request.token or os.environ.get('SENTRY_AUTH_TOKEN') or self._get_token_from_http_headers()
+        
+        # Enregistrer la configuration pour le watchdog multi-utilisateur
+        if org and HAS_CONFIG_REGISTRY:
+            try:
+                github_token = os.environ.get('GITHUB_TOKEN')
+                if get_http_headers:
+                    headers = get_http_headers() or {}
+                    github_token = github_token or headers.get('x-github-token')
+                get_config_registry().register(
+                    sentry_org=org,
+                    sentry_token=token,
+                    github_token=github_token
+                )
+            except Exception:
+                pass  # Silently ignore registry errors
         
         if not org and request.command not in ['get_issue', 'parse_config']:
             raise ToolExecutionError(
