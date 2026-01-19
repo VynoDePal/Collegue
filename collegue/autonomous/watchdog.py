@@ -325,12 +325,22 @@ class AutoFixer:
         # 3. Construire le prompt avec format SEARCH/REPLACE
         logger.info("🧠 Analyse de la cause racine avec le LLM...")
         
+        # Extraire le code brut (sans numéros de ligne) pour référence
+        raw_code = ""
+        if context_pack.primary_file:
+            raw_code = context_pack.primary_file.relevant_chunk
+        
         prompt = f"""Tu es un expert Python/Backend autonome spécialisé dans la correction de bugs.
 
 {context_prompt}
 
+## CODE BRUT (sans numéros de ligne - utilise ceci pour le champ "search")
+```python
+{raw_code}
+```
+
 ## TÂCHE
-Analyse cette erreur et génère un correctif MINIMAL. 
+Analyse cette erreur et génère un correctif MINIMAL.
 
 ## FORMAT DE RÉPONSE (JSON strict)
 {{
@@ -338,20 +348,20 @@ Analyse cette erreur et génère un correctif MINIMAL.
     "explanation": "Explication courte de la cause et du fix",
     "patches": [
         {{
-            "search": "le code EXACT à remplacer (copié depuis le fichier ci-dessus)",
-            "replace": "le nouveau code qui corrige le bug"
+            "search": "copie EXACTE du code à remplacer depuis CODE BRUT ci-dessus",
+            "replace": "le nouveau code corrigé"
         }}
     ]
 }}
 
 ## RÈGLES CRITIQUES
-1. Le champ "search" doit contenir du code EXACTEMENT tel qu'il apparaît dans le fichier
-2. Génère des patchs MINIMAUX - ne modifie que les lignes nécessaires
-3. NE JAMAIS remplacer tout le fichier - seulement les parties qui causent l'erreur
-4. Inclus assez de contexte dans "search" pour que le remplacement soit unique
-5. Si plusieurs modifications sont nécessaires, utilise plusieurs patchs
+1. COPIE le code EXACTEMENT depuis la section "CODE BRUT" (pas depuis le code avec numéros de ligne)
+2. Génère UN SEUL patch si possible - préfère un patch plus large que plusieurs petits
+3. Inclus 2-3 lignes de contexte avant et après la modification pour un match unique
+4. Préserve l'indentation EXACTE (espaces, pas de tabs)
+5. NE JAMAIS inclure les numéros de ligne dans le champ "search"
 
-Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
         
         try:
             analysis_json = await self.llm.async_generate(prompt)
@@ -402,8 +412,8 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 return
         
         # Appliquer les patchs avec fuzzy matching (stratégie Aider/RooCode)
-        patched_content = original_content
-        patches_applied = 0
+        # PHASE 1: Vérifier que TOUS les patchs peuvent être appliqués (atomique)
+        patch_operations = []  # Liste de (search_found, replace) pour application
         
         for i, patch in enumerate(patches):
             search = patch.get("search", "")
@@ -414,27 +424,37 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 continue
             
             # 1. Essayer match exact d'abord
-            if search in patched_content:
-                patched_content = patched_content.replace(search, replace, 1)
-                patches_applied += 1
-                logger.info(f"✅ Patch {i+1}/{len(patches)} appliqué (exact match)")
+            if search in original_content:
+                patch_operations.append((search, replace, "exact"))
+                logger.info(f"Patch {i+1}: match exact trouvé")
                 continue
             
             # 2. Essayer fuzzy matching avec difflib
             logger.info(f"Patch {i+1}: tentative fuzzy matching...")
-            fuzzy_match, score = _fuzzy_find_match(search, patched_content, threshold=0.7)
+            fuzzy_match, score = _fuzzy_find_match(search, original_content, threshold=0.6)
             
             if fuzzy_match:
                 logger.info(f"Patch {i+1}: fuzzy match trouvé (score: {score:.2f})")
-                patched_content = patched_content.replace(fuzzy_match, replace, 1)
-                patches_applied += 1
-                logger.info(f"✅ Patch {i+1}/{len(patches)} appliqué (fuzzy match)")
+                patch_operations.append((fuzzy_match, replace, f"fuzzy:{score:.2f}"))
                 continue
             
-            # 3. Log détaillé pour debug
+            # 3. Échec - on abandonne TOUS les patchs (atomique)
             logger.warning(f"Patch {i+1}: 'search' non trouvé (meilleur score: {score:.2f})")
-            logger.debug(f"Search attendu (premières 100 chars): {search[:100]}...")
-            logger.error(f"Patch {i+1}: impossible d'appliquer le patch")
+            logger.debug(f"Search attendu: {search[:200]}...")
+            logger.error(f"Patch {i+1}: impossible de trouver - abandon de tous les patchs")
+            return
+        
+        if not patch_operations:
+            logger.error("Aucun patch valide à appliquer")
+            return
+        
+        # PHASE 2: Appliquer tous les patchs
+        patched_content = original_content
+        for search_found, replace, match_type in patch_operations:
+            patched_content = patched_content.replace(search_found, replace, 1)
+        
+        patches_applied = len(patch_operations)
+        logger.info(f"✅ {patches_applied} patch(s) appliqué(s) avec succès")
         
         if patches_applied == 0:
             logger.error("Aucun patch n'a pu être appliqué")
