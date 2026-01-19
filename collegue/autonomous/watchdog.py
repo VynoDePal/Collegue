@@ -7,10 +7,11 @@ Peut être exécuté:
 2. Intégré dans l'app principale via start_background_watchdog()
 """
 import asyncio
+import difflib
 import logging
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
@@ -34,6 +35,59 @@ _watchdog_task: Optional[asyncio.Task] = None
 
 # Set pour tracker les issues déjà traitées (évite les doublons)
 _processed_issues: set = set()
+
+
+def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tuple[Optional[str], float]:
+    """
+    Trouve le meilleur match fuzzy pour 'search' dans 'content'.
+    Utilise difflib.SequenceMatcher (stratégie Aider/RooCode).
+    
+    Returns:
+        (best_match, score) où best_match est le texte exact trouvé dans content,
+        ou (None, 0) si aucun match au-dessus du threshold.
+    """
+    search_lines = search.strip().split('\n')
+    content_lines = content.split('\n')
+    search_len = len(search_lines)
+    
+    if search_len == 0 or len(content_lines) == 0:
+        return None, 0.0
+    
+    best_match = None
+    best_score = 0.0
+    best_start = -1
+    
+    # Sliding window sur le contenu
+    for i in range(len(content_lines) - search_len + 1):
+        window = content_lines[i:i + search_len]
+        window_text = '\n'.join(window)
+        
+        # Score avec SequenceMatcher
+        ratio = difflib.SequenceMatcher(None, search.strip(), window_text.strip()).ratio()
+        
+        if ratio > best_score:
+            best_score = ratio
+            best_start = i
+            best_match = window_text
+    
+    # Essayer aussi avec whitespace normalisé si le score est faible
+    if best_score < threshold:
+        normalized_search = ' '.join(search.split())
+        for i in range(len(content_lines) - search_len + 1):
+            window = content_lines[i:i + search_len]
+            window_text = '\n'.join(window)
+            normalized_window = ' '.join(window_text.split())
+            
+            ratio = difflib.SequenceMatcher(None, normalized_search, normalized_window).ratio()
+            if ratio > best_score:
+                best_score = ratio
+                best_start = i
+                best_match = window_text
+    
+    if best_score >= threshold:
+        return best_match, best_score
+    
+    return None, best_score
 
 
 def _get_config_value(key: str, header_names: List[str] = None) -> Optional[str]:
@@ -347,7 +401,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 logger.error(f"Impossible de récupérer {target_filepath}: {e}")
                 return
         
-        # Appliquer les patchs
+        # Appliquer les patchs avec fuzzy matching (stratégie Aider/RooCode)
         patched_content = original_content
         patches_applied = 0
         
@@ -359,25 +413,28 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 logger.warning(f"Patch {i+1}: 'search' vide, ignoré")
                 continue
             
-            if search not in patched_content:
-                logger.warning(f"Patch {i+1}: 'search' non trouvé dans le fichier")
-                # Essayer avec whitespace normalisé
-                normalized_search = ' '.join(search.split())
-                normalized_content = ' '.join(patched_content.split())
-                if normalized_search not in normalized_content:
-                    logger.error(f"Patch {i+1}: impossible d'appliquer le patch")
-                    continue
-                # Si ça matche en normalisé, essayer de trouver par lignes
-                search_lines = [l.strip() for l in search.strip().split('\n') if l.strip()]
-                if search_lines:
-                    # Chercher la première ligne dans le contenu
-                    first_line = search_lines[0]
-                    if first_line in patched_content:
-                        logger.info(f"Patch {i+1}: tentative de match partiel...")
+            # 1. Essayer match exact d'abord
+            if search in patched_content:
+                patched_content = patched_content.replace(search, replace, 1)
+                patches_applied += 1
+                logger.info(f"✅ Patch {i+1}/{len(patches)} appliqué (exact match)")
+                continue
             
-            patched_content = patched_content.replace(search, replace, 1)
-            patches_applied += 1
-            logger.info(f"✅ Patch {i+1}/{len(patches)} appliqué")
+            # 2. Essayer fuzzy matching avec difflib
+            logger.info(f"Patch {i+1}: tentative fuzzy matching...")
+            fuzzy_match, score = _fuzzy_find_match(search, patched_content, threshold=0.7)
+            
+            if fuzzy_match:
+                logger.info(f"Patch {i+1}: fuzzy match trouvé (score: {score:.2f})")
+                patched_content = patched_content.replace(fuzzy_match, replace, 1)
+                patches_applied += 1
+                logger.info(f"✅ Patch {i+1}/{len(patches)} appliqué (fuzzy match)")
+                continue
+            
+            # 3. Log détaillé pour debug
+            logger.warning(f"Patch {i+1}: 'search' non trouvé (meilleur score: {score:.2f})")
+            logger.debug(f"Search attendu (premières 100 chars): {search[:100]}...")
+            logger.error(f"Patch {i+1}: impossible d'appliquer le patch")
         
         if patches_applied == 0:
             logger.error("Aucun patch n'a pu être appliqué")
