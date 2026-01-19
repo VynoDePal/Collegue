@@ -304,7 +304,13 @@ class SentryMonitorTool(BaseTool):
         headers = self._get_headers(token)
         
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
+            # Nettoyage des params pour éviter d'envoyer des slugs là où des IDs numériques sont attendus
+            clean_params = params.copy() if params else {}
+            if "project" in clean_params and isinstance(clean_params["project"], list):
+                # S'assurer que les IDs de projet sont des chaînes numériques si passés en liste
+                clean_params["project"] = [str(p) for p in clean_params["project"] if str(p).isdigit()]
+
+            response = requests.get(url, headers=headers, params=clean_params, timeout=30)
             
             if response.status_code == 404:
                 raise ToolExecutionError(f"Ressource introuvable: {endpoint}")
