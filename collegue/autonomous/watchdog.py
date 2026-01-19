@@ -176,9 +176,10 @@ class AutoFixer:
                 
             await self.attempt_fix(issue, repo_owner, repo_name, org, token)
 
-    async def attempt_fix(self, issue, repo_owner, repo_name, org: str, token: Optional[str] = None):
+    async def attempt_fix(self, issue, repo_owner, repo_name, org: str, sentry_token: Optional[str] = None):
         """Tente de corriger une issue spécifique."""
         issue_id = issue.id
+        github_token = self._get_github_token()
         
         override_owner = self._get_github_owner()
         if override_owner:
@@ -187,13 +188,17 @@ class AutoFixer:
         if not repo_owner:
              logger.warning("Impossible de déterminer le GitHub Owner (ni env, ni headers MCP).")
              return
+        
+        if not github_token:
+            logger.warning("Aucun token GitHub configuré - opérations GitHub impossibles.")
+            return
 
         try:
             events_resp = self.sentry._execute_core_logic(SentryRequest(
                 command="issue_events",
                 issue_id=issue_id,
                 organization=org,
-                token=token,
+                token=sentry_token,
                 limit=1
             ))
             if not events_resp.events:
@@ -265,7 +270,8 @@ class AutoFixer:
                 command="create_branch",
                 owner=repo_owner,
                 repo=repo_name,
-                branch=branch_name
+                branch=branch_name,
+                token=github_token
             ))
             
             self.github._execute_core_logic(GitHubRequest(
@@ -275,7 +281,8 @@ class AutoFixer:
                 path=filepath,
                 message=f"Fix {issue.title}",
                 content=fix_data["new_code"],
-                branch=branch_name
+                branch=branch_name,
+                token=github_token
             ))
             
             pr_resp = self.github._execute_core_logic(GitHubRequest(
@@ -285,7 +292,8 @@ class AutoFixer:
                 title=pr_title,
                 body=f"Fix automatique généré par Collegue Watchdog.\n\nIssue: {issue.permalink}\n\nExplication:\n{fix_data['explanation']}",
                 head=branch_name,
-                base="main"
+                base="main",
+                token=github_token
             ))
             
             logger.info(f"🚀 PR Créée avec succès: {pr_resp.pr.html_url}")
