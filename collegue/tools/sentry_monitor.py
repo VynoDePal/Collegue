@@ -303,6 +303,11 @@ class SentryMonitorTool(BaseTool):
         url = f"{base_url}{endpoint}"
         headers = self._get_headers(token)
         
+        # Sentry API often expects project IDs as numbers in query params
+        if params and "project" in params and hasattr(params["project"], "id"):
+            params = params.copy()
+            params["project"] = params["project"].id
+
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
             
