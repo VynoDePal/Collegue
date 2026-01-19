@@ -51,7 +51,7 @@ class GitHubRequest(BaseModel):
     """
     command: str = Field(
         ...,
-        description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, create_pr, list_prs, get_pr, create_issue, list_issues, get_issue, pr_files, pr_comments, create_branch, update_file, repo_branches, repo_commits, search_code, list_workflows"
+        description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, get_file, create_pr, list_prs, get_pr, create_issue, list_issues, get_issue, pr_files, pr_comments, create_branch, update_file, repo_branches, repo_commits, search_code, list_workflows"
     )
     owner: Optional[str] = Field(
         None, 
@@ -212,6 +212,8 @@ class GitHubResponse(BaseModel):
     commits: Optional[List[CommitInfo]] = None
     workflows: Optional[List[WorkflowRun]] = None
     search_results: Optional[List[SearchResult]] = None
+    content: Optional[str] = None  # Contenu du fichier (base64)
+    sha: Optional[str] = None  # SHA du fichier
 
 
 class GitHubOpsTool(BaseTool):
@@ -676,6 +678,27 @@ class GitHubOpsTool(BaseTool):
             "commit": resp['commit']
         }
 
+    def _get_file_content(self, owner: str, repo: str, path: str, branch: Optional[str], token: Optional[str]) -> Dict:
+        """Récupère le contenu d'un fichier depuis GitHub.
+        
+        Returns:
+            Dict avec 'content' (base64) et 'sha'
+        """
+        url = f"/repos/{owner}/{repo}/contents/{path}"
+        if branch:
+            url += f"?ref={branch}"
+        
+        data = self._api_get(url, token)
+        
+        return {
+            "content": data.get('content', ''),
+            "sha": data.get('sha', ''),
+            "name": data.get('name', ''),
+            "path": data.get('path', ''),
+            "size": data.get('size', 0),
+            "encoding": data.get('encoding', 'base64')
+        }
+
     def _execute_core_logic(self, request: GitHubRequest, **kwargs) -> GitHubResponse:
         """Exécute la logique principale."""
         token = request.token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
@@ -883,6 +906,18 @@ class GitHubOpsTool(BaseTool):
                 command=request.command,
                 message=f"✅ Fichier '{request.path}' mis à jour",
                 files=[FileChange(filename=request.path, status="updated", additions=0, deletions=0)]
+            )
+
+        elif request.command == 'get_file':
+            if not request.owner or not request.repo or not request.path:
+                raise ToolExecutionError("owner, repo et path requis pour get_file")
+            file_data = self._get_file_content(request.owner, request.repo, request.path, request.branch, request.token)
+            return GitHubResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Fichier '{request.path}' récupéré",
+                content=file_data.get('content'),
+                sha=file_data.get('sha')
             )
 
         else:
