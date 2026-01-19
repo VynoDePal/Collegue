@@ -19,6 +19,7 @@ class UserConfig:
     sentry_token: Optional[str] = None
     github_token: Optional[str] = None
     github_owner: Optional[str] = None
+    github_repo: Optional[str] = None  # Nom du repo GitHub (ex: "Collegue")
     last_seen: float = field(default_factory=time.time)
     
     def update_last_seen(self):
@@ -61,7 +62,8 @@ class UserConfigRegistry:
         sentry_org: str,
         sentry_token: Optional[str] = None,
         github_token: Optional[str] = None,
-        github_owner: Optional[str] = None
+        github_owner: Optional[str] = None,
+        github_repo: Optional[str] = None
     ) -> Optional[str]:
         """
         Enregistre ou met à jour une configuration utilisateur.
@@ -80,7 +82,8 @@ class UserConfigRegistry:
             sentry_org=normalized_org,
             sentry_token=sentry_token,
             github_token=github_token,
-            github_owner=github_owner
+            github_owner=github_owner,
+            github_repo=github_repo
         )
         
         with self._config_lock:
@@ -93,6 +96,8 @@ class UserConfigRegistry:
                     existing.github_token = github_token
                 if github_owner:
                     existing.github_owner = github_owner
+                if github_repo:
+                    existing.github_repo = github_repo
                 existing.update_last_seen()
             else:
                 self._configs[config.config_id] = config

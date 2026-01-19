@@ -94,6 +94,12 @@ class AutoFixer:
             "GITHUB_OWNER",
             ["x-github-owner", "x-collegue-github-owner"]
         )
+    
+    def _get_github_repo(self) -> Optional[str]:
+        """Récupère le nom du repo GitHub depuis config ou env."""
+        if self.user_config and self.user_config.github_repo:
+            return self.user_config.github_repo
+        return os.environ.get("GITHUB_REPO")
         
     async def run_once(self):
         """Exécute une passe de vérification et correction sur TOUS les projets."""
@@ -161,19 +167,23 @@ class AutoFixer:
         for issue in sentry_response.issues:
             logger.info(f"🚨 [Projet: {project.slug}] Analyse issue: {issue.title} ({issue.short_id})")
             
-            mapped_repo = self.repo_map.get(project.slug)
+            # Priorité: 1) Config GITHUB_REPO, 2) Mapping Sentry, 3) Slug du projet
+            repo_owner = self._get_github_owner()
+            repo_name = self._get_github_repo()
             
-            repo_owner = None
-            repo_name = project.slug
-            
-            if mapped_repo:
-                if "/" in mapped_repo.name:
+            # Si pas de repo configuré, essayer le mapping Sentry
+            if not repo_name:
+                mapped_repo = self.repo_map.get(project.slug)
+                if mapped_repo and "/" in mapped_repo.name:
                     repo_owner, repo_name = mapped_repo.name.split("/", 1)
                     logger.info(f"🔗 Lien détecté via Sentry: Projet {project.slug} -> GitHub {repo_owner}/{repo_name}")
+                else:
+                    repo_name = project.slug
             
             if not repo_owner:
                 repo_owner = org
-                
+            
+            logger.info(f"📍 Repo cible: {repo_owner}/{repo_name}")
             await self.attempt_fix(issue, repo_owner, repo_name, org, token)
 
     async def attempt_fix(self, issue, repo_owner, repo_name, org: str, sentry_token: Optional[str] = None):
