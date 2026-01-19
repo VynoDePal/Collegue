@@ -189,8 +189,27 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
                     
                     # Extraire les annotations (citations web) si présentes
                     annotations = []
-                    if hasattr(response.choices[0].message, 'annotations'):
-                        annotations = response.choices[0].message.annotations or []
+                    if hasattr(response.choices[0].message, 'annotations') and response.choices[0].message.annotations:
+                        raw_annotations = response.choices[0].message.annotations
+                        for ann in raw_annotations:
+                            # Convertir l'objet Annotation en dict
+                            if hasattr(ann, 'model_dump'):
+                                annotations.append(ann.model_dump())
+                            elif hasattr(ann, '__dict__'):
+                                annotations.append(dict(ann.__dict__))
+                            elif isinstance(ann, dict):
+                                annotations.append(ann)
+                            else:
+                                # Fallback: extraire manuellement les champs connus
+                                ann_dict = {'type': getattr(ann, 'type', 'unknown')}
+                                if hasattr(ann, 'url_citation'):
+                                    citation = ann.url_citation
+                                    ann_dict['url_citation'] = {
+                                        'url': getattr(citation, 'url', ''),
+                                        'title': getattr(citation, 'title', ''),
+                                        'content': getattr(citation, 'content', '')
+                                    }
+                                annotations.append(ann_dict)
                     
                     return LLMResponse(
                         text=response.choices[0].message.content,
