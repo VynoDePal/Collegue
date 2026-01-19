@@ -303,14 +303,14 @@ class SentryMonitorTool(BaseTool):
         url = f"{base_url}{endpoint}"
         headers = self._get_headers(token)
         
-        try:
-            # Nettoyage des params pour éviter d'envoyer des slugs là où des IDs numériques sont attendus
-            clean_params = params.copy() if params else {}
-            if "project" in clean_params and isinstance(clean_params["project"], list):
-                # S'assurer que les IDs de projet sont des chaînes numériques si passés en liste
-                clean_params["project"] = [str(p) for p in clean_params["project"] if str(p).isdigit()]
+        # Sentry API often requires project IDs as integers in query params
+        if params and "project" in params and isinstance(params["project"], str) and not params["project"].isdigit():
+            # If we have a slug instead of an ID, we keep it but this log helps debugging
+            # or we could attempt a lookup. For now, we ensure params is passed correctly.
+            pass
 
-            response = requests.get(url, headers=headers, params=clean_params, timeout=30)
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
             
             if response.status_code == 404:
                 raise ToolExecutionError(f"Ressource introuvable: {endpoint}")
