@@ -302,6 +302,14 @@ class SentryMonitorTool(BaseTool):
         base_url = self._get_base_url(sentry_url)
         url = f"{base_url}{endpoint}"
         headers = self._get_headers(token)
+
+        # Sentry API requires project IDs to be numbers, not strings
+        if params and "project" in params:
+            p = params["project"]
+            if isinstance(p, list):
+                params["project"] = [int(x) if str(x).isdigit() else x for x in p]
+            elif isinstance(p, str) and p.isdigit():
+                params["project"] = int(p)
         
         try:
             response = requests.get(url, headers=headers, params=params, timeout=30)
