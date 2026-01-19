@@ -86,7 +86,7 @@ if SAMPLING_HANDLER_AVAILABLE and settings.llm_api_key:
 @asynccontextmanager
 async def app_lifespan(app_instance):
     """Lifespan context manager pour démarrer/arrêter le watchdog."""
-    watchdog_enabled = os.environ.get("WATCHDOG_ENABLED", "true").lower() == "true"
+    watchdog_enabled = os.environ.get("WATCHDOG_ENABLED", "false").lower() == "true"
     if watchdog_enabled:
         try:
             from collegue.autonomous.watchdog import start_background_watchdog
