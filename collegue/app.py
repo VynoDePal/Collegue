@@ -90,7 +90,7 @@ async def app_lifespan(app_instance):
     if watchdog_enabled:
         try:
             from collegue.autonomous.watchdog import start_background_watchdog
-            interval = int(os.environ.get("WATCHDOG_INTERVAL", "10800"))
+            interval = int(os.environ.get("WATCHDOG_INTERVAL", "300"))
             start_background_watchdog(interval_seconds=interval)
             logger.info(f"Watchdog autonome démarré (intervalle: {interval}s)")
         except Exception as e:
