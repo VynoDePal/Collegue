@@ -139,13 +139,14 @@ class AutoFixer:
 
     async def scan_project(self, org, project, token: Optional[str] = None):
         """Scanne un projet spécifique."""
-        logger.info(f"📂 Scan du projet: {project.slug}")
+        logger.info(f"📂 Scan du projet: {project.slug} (id: {project.id})")
         
         try:
+            # Utiliser project.id car l'API Sentry attend un ID numérique pour list_issues
             sentry_response = self.sentry._execute_core_logic(SentryRequest(
                 command="list_issues",
                 organization=org,
-                project=project.slug,
+                project=project.id,
                 query="is:unresolved level:error",
                 limit=3,
                 token=token
