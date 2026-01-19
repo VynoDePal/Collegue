@@ -37,6 +37,25 @@ _watchdog_task: Optional[asyncio.Task] = None
 _processed_issues: set = set()
 
 
+def _build_web_search_query(error_type: str, error_message: str, filepath: Optional[str] = None) -> str:
+    """
+    Construit une requête de recherche web optimisée pour trouver des solutions.
+    """
+    # Nettoyer le message d'erreur (garder l'essentiel)
+    clean_message = error_message[:100] if error_message else ""
+    clean_message = clean_message.replace('\n', ' ').strip()
+    
+    # Construire la requête
+    parts = ["Python"]
+    if error_type:
+        parts.append(error_type)
+    if clean_message:
+        parts.append(clean_message)
+    parts.append("fix solution")
+    
+    return " ".join(parts)
+
+
 def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tuple[Optional[str], float]:
     """
     Trouve le meilleur match fuzzy pour 'search' dans 'content'.
@@ -322,7 +341,40 @@ class AutoFixer:
             original_content = context_pack.primary_file.full_content
             logger.info(f"✅ Context Pack prêt: {filepath}")
 
-        # 3. Construire le prompt avec format SEARCH/REPLACE
+        # 3. Recherche web pour enrichir le contexte (optionnel)
+        error_type = getattr(issue, 'metadata', {}).get('type', '') if hasattr(issue, 'metadata') else ''
+        error_message = getattr(issue, 'metadata', {}).get('value', '') if hasattr(issue, 'metadata') else ''
+        
+        web_context = ""
+        web_citations = []
+        
+        if error_type or error_message:
+            search_query = _build_web_search_query(error_type, error_message, filepath)
+            logger.info(f"🌐 Recherche web: {search_query[:80]}...")
+            
+            try:
+                web_response, web_citations = await self.llm.async_generate_with_web_search(
+                    prompt=f"Trouve des solutions pour cette erreur Python:\n{error_type}: {error_message}",
+                    max_results=5
+                )
+                
+                if web_citations:
+                    web_context = "\n\n## SOLUTIONS WEB (contexte additionnel)\n"
+                    for i, citation in enumerate(web_citations[:3], 1):
+                        web_context += f"\n### Source {i}: {citation.get('title', 'N/A')}\n"
+                        web_context += f"URL: {citation.get('url', '')}\n"
+                        content = citation.get('content', '')[:500]
+                        if content:
+                            web_context += f"Extrait: {content}...\n"
+                    
+                    logger.info(f"📚 {len(web_citations)} source(s) web intégrée(s)")
+                else:
+                    logger.info("Pas de résultats web pertinents")
+                    
+            except Exception as e:
+                logger.warning(f"Recherche web échouée (non bloquant): {e}")
+        
+        # 4. Construire le prompt avec format SEARCH/REPLACE
         logger.info("🧠 Analyse de la cause racine avec le LLM...")
         
         # Extraire le code brut (sans numéros de ligne) pour référence
@@ -333,6 +385,7 @@ class AutoFixer:
         prompt = f"""Tu es un expert Python/Backend autonome spécialisé dans la correction de bugs.
 
 {context_prompt}
+{web_context}
 
 ## CODE BRUT (sans numéros de ligne - utilise ceci pour le champ "search")
 ```python
@@ -508,6 +561,16 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
                 token=github_token
             ))
             
+            # Construire la section des sources web si disponible
+            web_sources_section = ""
+            if web_citations:
+                web_sources_section = "\n### Sources consultées\n"
+                for citation in web_citations[:3]:
+                    title = citation.get('title', 'Source')
+                    url = citation.get('url', '')
+                    if url:
+                        web_sources_section += f"- [{title}]({url})\n"
+            
             # Créer la PR
             pr_body = f"""## Fix automatique généré par Collegue Watchdog
 
@@ -518,7 +581,7 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
 
 ### Patchs appliqués
 {patches_applied} modification(s) minimale(s) sur `{target_filepath}`
-
+{web_sources_section}
 ### Validation
 - ✅ Syntaxe Python vérifiée
 - ✅ Taille du fichier préservée

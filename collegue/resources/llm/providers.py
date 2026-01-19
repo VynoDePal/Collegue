@@ -31,6 +31,7 @@ class LLMConfig(BaseModel):
     top_p: Optional[float] = None
     stop_sequences: List[str] = []
     additional_params: Dict[str, Any] = {}
+    plugins: List[Dict[str, Any]] = []
 
 class LLMResponse(BaseModel):
     """Réponse d'un modèle LLM."""
@@ -40,6 +41,7 @@ class LLMResponse(BaseModel):
     provider: LLMProvider
     finish_reason: Optional[str] = None
     additional_info: Dict[str, Any] = {}
+    annotations: List[Dict[str, Any]] = []
 
 DEFAULT_MODEL_CONFIGS = {
     "gpt-4": {
@@ -171,6 +173,10 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
                     _allowed_extra = {"seed", "frequency_penalty", "presence_penalty", "response_format", "stream"}
                     extra_v1 = {k: v for k, v in config.additional_params.items() if k in _allowed_extra}
                     
+                    # Support des plugins OpenRouter (web search, etc.)
+                    if config.plugins:
+                        extra_v1["extra_body"] = {"plugins": config.plugins}
+                    
                     response = client.chat.completions.create(
                         model=config.model_name,
                         messages=messages,
@@ -181,12 +187,18 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
                         **extra_v1
                     )
                     
+                    # Extraire les annotations (citations web) si présentes
+                    annotations = []
+                    if hasattr(response.choices[0].message, 'annotations'):
+                        annotations = response.choices[0].message.annotations or []
+                    
                     return LLMResponse(
                         text=response.choices[0].message.content,
                         usage={"prompt_tokens": response.usage.prompt_tokens, "completion_tokens": response.usage.completion_tokens},
                         model=response.model,
                         provider=config.provider,
-                        finish_reason=response.choices[0].finish_reason
+                        finish_reason=response.choices[0].finish_reason,
+                        annotations=annotations
                     )
                 # Ancienne interface (openai.ChatCompletion.create)
                 response = client.ChatCompletion.create(
