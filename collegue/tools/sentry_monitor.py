@@ -323,6 +323,10 @@ class SentryMonitorTool(BaseTool):
         """Récupère les détails d'un projet."""
         data = self._api_get(f"/projects/{org}/{project_slug}/", token, sentry_url)
         
+        # S'assurer que l'ID est passé si l'API attend un nombre pour le paramètre 'project'
+        if isinstance(data, dict) and "id" in data:
+            data["project_id"] = data["id"]
+
         return ProjectInfo(
             id=data['id'],
             slug=data['slug'],
