@@ -117,3 +117,40 @@ Les outils d'intégration se configurent via le bloc `env` de la configuration M
 | `SENTRY_ORG` | Slug de l'organisation Sentry | sentry_monitor |
 | `SENTRY_URL` | URL Sentry self-hosted (optionnel) | sentry_monitor |
 | `KUBECONFIG` | Chemin vers kubeconfig (optionnel) | kubernetes_ops |
+
+---
+
+## 🤖 Agent Autonome Watchdog (Self-Healing)
+
+Le **Watchdog** est un agent autonome de **Self-Healing** qui surveille automatiquement vos erreurs Sentry et génère des correctifs via Pull Requests GitHub.
+
+### ⚡ Fonctionnement
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Sentry    │ ──► │  Watchdog   │ ──► │     LLM     │ ──► │   GitHub    │
+│  (erreurs)  │     │  (analyse)  │     │   (fix)     │     │    (PR)     │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+```
+
+1.  **Surveillance** : Scan périodique des erreurs non résolues dans Sentry
+2.  **Context Pack** : Extraction intelligente du code source via GitHub (AST-based)
+3.  **Analyse LLM** : Génération de patchs minimaux avec recherche web
+4.  **Fuzzy Matching** : Application robuste des correctifs (stratégie Aider/RooCode)
+5.  **Pull Request** : Création automatique d'une PR avec explication détaillée
+
+### 🛡️ Sécurités intégrées
+
+*   **Validation syntaxique** : Le code Python est vérifié via `ast.parse()` avant commit
+*   **Protection anti-destruction** : Les patchs réduisant le fichier de >50% sont rejetés
+*   **Fuzzy matching** : Tolérance aux variations d'indentation (score minimum: 0.6)
+*   **Atomicité** : Tous les patchs d'un fix doivent réussir ou aucun n'est appliqué
+*   **Déduplication** : Chaque issue n'est traitée qu'une seule fois par cycle
+
+### 👥 Mode Multi-Utilisateurs
+
+Le Watchdog supporte automatiquement plusieurs utilisateurs via le **Config Registry** :
+
+*   Les configurations sont enregistrées lors de chaque requête MCP
+*   Le watchdog itère sur toutes les configurations actives (< 24h)
+*   Les configurations inactives (> 48h) sont automatiquement nettoyées
