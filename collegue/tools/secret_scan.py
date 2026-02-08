@@ -154,7 +154,7 @@ class SecretScanTool(BaseTool):
         # OpenAI / LLM
         ("openai_api_key", r"sk-[A-Za-z0-9]{48}", "critical", "Clé API OpenAI"),
         ("anthropic_api_key", r"sk-ant-[A-Za-z0-9\-]{93}", "critical", "Clé API Anthropic"),
-        ("openrouter_api_key", r"sk-or-v1-[A-Za-z0-9]{64}", "critical", "Clé API OpenRouter"),
+        ("gemini_api_key", r"AIzaSy[A-Za-z0-9_-]{33}", "critical", "Clé API Google Gemini"),
         
         # GitHub / GitLab
         ("github_token", r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}", "critical", "Token GitHub"),
@@ -324,7 +324,7 @@ class SecretScanTool(BaseTool):
             "azure": "Utilisez Azure Key Vault. Régénérez cette clé dans le portail Azure.",
             "openai": "Stockez la clé dans une variable d'environnement. Régénérez la clé sur platform.openai.com.",
             "anthropic": "Utilisez une variable d'environnement. Régénérez la clé sur console.anthropic.com.",
-            "openrouter": "Stockez la clé dans .env. Régénérez sur openrouter.ai/keys.",
+            "gemini": "Stockez la clé dans .env. Régénérez sur aistudio.google.com/apikey.",
             "github": "Révoquez ce token sur github.com/settings/tokens. Utilisez GITHUB_TOKEN dans CI/CD.",
             "gitlab": "Révoquez ce token. Utilisez des variables CI/CD GitLab.",
             "postgres": "Utilisez des variables d'environnement pour les credentials de BDD.",

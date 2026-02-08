@@ -45,8 +45,8 @@ def test_config_priority():
         print(f"   - API Key présente: {bool(settings.llm_api_key)}")
         
         print("\n2. Test avec variables d'environnement:")
-        os.environ["LLM_MODEL"] = "openai/gpt-3.5-turbo"
-        os.environ["LLM_API_KEY"] = "sk-env-test-key"
+        os.environ["LLM_MODEL"] = "gemini-2.5-flash"
+        os.environ["LLM_API_KEY"] = "AIzaSy-env-test-key"
         
         settings = Settings()
         print(f"   - Modèle depuis ENV: {settings.llm_model}")
@@ -54,16 +54,16 @@ def test_config_priority():
         
         print("\n3. Test avec paramètres MCP (priorité max):")
         mcp_params = {
-            "LLM_MODEL": "google/gemini-2.0-flash-exp:free",
-            "LLM_API_KEY": "sk-mcp-test-key"
+            "LLM_MODEL": "gemini-3-flash-preview",
+            "LLM_API_KEY": "AIzaSy-mcp-test-key"
         }
         
         settings.update_from_mcp(mcp_params)
         print(f"   - Modèle depuis MCP: {settings.llm_model}")
         print(f"   - API Key depuis MCP: {settings.llm_api_key[:20]}...")
         
-        assert settings.llm_model == "google/gemini-2.0-flash-exp:free", "MCP devrait avoir priorité sur ENV"
-        assert settings.llm_api_key == "sk-mcp-test-key", "MCP API key devrait avoir priorité"
+        assert settings.llm_model == "gemini-3-flash-preview", "MCP devrait avoir priorité sur ENV"
+        assert settings.llm_api_key == "AIzaSy-mcp-test-key", "MCP API key devrait avoir priorité"
         
         print("\n✅ Test de priorité réussi: MCP > ENV > DEFAULT")
         
@@ -79,36 +79,36 @@ def test_config_priority():
             del os.environ["LLM_API_KEY"]
 
 def test_different_models():
-    """Test avec différents modèles OpenRouter."""
+    """Test avec différents modèles Google Gemini."""
     print("\n" + "="*60)
     print("TEST DE DIFFÉRENTS MODÈLES")
     print("="*60)
     
     models_to_test = [
         {
-            "name": "OpenAI GPT-4o Mini",
-            "model": "openai/gpt-4o-mini",
-            "description": "Modèle économique recommandé"
+            "name": "Google Gemini 3 Flash Preview",
+            "model": "gemini-3-flash-preview",
+            "description": "Dernier modèle Gemini 3, rapide et économique"
         },
         {
-            "name": "Google Gemini Flash (Gratuit)",
-            "model": "google/gemini-2.0-flash-exp:free",
-            "description": "Modèle gratuit pour tests"
+            "name": "Google Gemini 2.5 Flash",
+            "model": "gemini-2.5-flash",
+            "description": "Modèle performant pour la plupart des tâches"
         },
         {
-            "name": "Claude 3.5 Haiku",
-            "model": "anthropic/claude-3.5-haiku",
-            "description": "Modèle Anthropic rapide"
+            "name": "Google Gemini 2.5 Flash Lite",
+            "model": "gemini-2.5-flash-lite",
+            "description": "Version légère pour les tâches simples"
         },
         {
-            "name": "DeepSeek Chat",
-            "model": "deepseek/deepseek-chat",
-            "description": "Bon rapport qualité/prix"
+            "name": "Google Gemini 2.5 Pro",
+            "model": "gemini-2.5-pro",
+            "description": "Modèle premium pour les tâches complexes"
         }
     ]
     
     # Clé API de test (remplacer par une vraie pour tester réellement)
-    test_api_key = os.environ.get("LLM_API_KEY", "sk-or-v1-test-key-12345")
+    test_api_key = os.environ.get("LLM_API_KEY", "AIzaSy-test-key-12345")
     
     for model_info in models_to_test:
         print(f"\n🔧 Test avec {model_info['name']}:")
@@ -128,7 +128,7 @@ def test_different_models():
             print(f"   ✅ Configuration acceptée: {settings.llm_model}")
             
             # Essayer d'initialiser le ToolLLMManager
-            if test_api_key and test_api_key.startswith("sk-or-v1-"):
+            if test_api_key and test_api_key.startswith("AIzaSy-"):
                 try:
                     manager = ToolLLMManager(settings)
                     print(f"   ✅ ToolLLMManager initialisé avec succès")
@@ -161,8 +161,8 @@ def simulate_windsurf_config():
             "config": {
                 "collegue": {
                     "serverUrl": "http://localhost:8088/mcp/",
-                    "LLM_MODEL": "google/gemini-2.0-flash-exp:free",
-                    "LLM_API_KEY": "sk-or-v1-dev-key"
+                    "LLM_MODEL": "gemini-3-flash-preview",
+                    "LLM_API_KEY": "AIzaSy-dev-key"
                 }
             }
         },
@@ -171,8 +171,8 @@ def simulate_windsurf_config():
             "config": {
                 "collegue": {
                     "serverUrl": "https://collegue.example.com/mcp/",
-                    "LLM_MODEL": "openai/gpt-4o",
-                    "LLM_API_KEY": "sk-or-v1-prod-key"
+                    "LLM_MODEL": "gemini-2.5-pro",
+                    "LLM_API_KEY": "AIzaSy-prod-key"
                 }
             }
         }
@@ -221,8 +221,8 @@ def test_error_handling():
     print("\n2. Test avec modèle invalide:")
     settings = Settings()
     mcp_params = {
-        "LLM_MODEL": "invalid/model-name",
-        "LLM_API_KEY": "sk-or-v1-test"
+        "LLM_MODEL": "gemini-3-flash-preview",
+        "LLM_API_KEY": "AIzaSy-test"
     }
     settings.update_from_mcp(mcp_params)
     
@@ -249,7 +249,7 @@ def main():
         print("✅ TOUS LES TESTS SONT PASSÉS AVEC SUCCÈS!")
         print("="*60)
         print("\n📌 Prochaines étapes:")
-        print("1. Configurer une vraie clé API OpenRouter dans .env")
+        print("1. Configurer une vraie clé API Google Gemini dans .env")
         print("2. Tester avec Windsurf en utilisant mcp_config.json")
         print("3. Surveiller les logs avec: docker-compose logs collegue-app")
         print("4. Utiliser le client Python pour tester les outils")
