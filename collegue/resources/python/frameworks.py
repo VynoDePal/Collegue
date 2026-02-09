@@ -19,7 +19,7 @@ class PythonFrameworkReference(BaseModel):
     examples: List[Dict[str, str]] = []
 
 PYTHON_FRAMEWORKS = {
-    # Web Frameworks
+
     "django": {
         "name": "Django",
         "description": "Framework web complet pour le développement rapide et propre",
@@ -62,8 +62,8 @@ PYTHON_FRAMEWORKS = {
             {"title": "Modèle Pydantic", "code": "from fastapi import FastAPI\nfrom pydantic import BaseModel\n\nclass Item(BaseModel):\n    name: str\n    price: float\n\napp = FastAPI()\n\n@app.post('/items/')\ndef create_item(item: Item):\n    return item"}
         ]
     },
-    
-    # Data Science
+
+
     "pandas": {
         "name": "Pandas",
         "description": "Bibliothèque d'analyse et de manipulation de données",
@@ -92,8 +92,8 @@ PYTHON_FRAMEWORKS = {
             {"title": "Opérations matricielles", "code": "import numpy as np\n\na = np.array([[1, 2], [3, 4]])\nb = np.array([[5, 6], [7, 8]])\nc = np.dot(a, b)"}
         ]
     },
-    
-    # Testing
+
+
     "pytest": {
         "name": "pytest",
         "description": "Framework de test simple et puissant",
@@ -122,22 +122,22 @@ def get_all_frameworks() -> List[str]:
 
 def get_frameworks_by_category(category: str) -> List[str]:
     """Récupère la liste des frameworks d'une catégorie spécifique."""
-    return [name for name, data in PYTHON_FRAMEWORKS.items() 
+    return [name for name, data in PYTHON_FRAMEWORKS.items()
             if category in data.get("categories", [])]
 
 def register_frameworks(app, app_state):
     """Enregistre les ressources des frameworks Python."""
-    
+
     @app.resource("collegue://python/frameworks/index")
     def get_frameworks_index() -> str:
         """Liste tous les frameworks Python disponibles."""
         return json.dumps(get_all_frameworks())
-    
+
     @app.resource("collegue://python/frameworks/category/{category}")
     def get_frameworks_by_category_resource(category: str) -> str:
         """Liste les frameworks d'une catégorie spécifique."""
         return json.dumps(get_frameworks_by_category(category))
-    
+
     @app.resource("collegue://python/frameworks/{framework_name}")
     def get_framework_resource(framework_name: str) -> str:
         """Récupère les informations d'un framework spécifique."""

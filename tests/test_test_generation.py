@@ -7,7 +7,7 @@ import sys
 import os
 from pathlib import Path
 
-# Ajouter le répertoire parent au path pour pouvoir importer les modules
+
 parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
@@ -25,7 +25,7 @@ class TestTestGeneration(unittest.TestCase):
         """Initialisation des tests."""
         self.tool = TestGenerationTool()
 
-        # Exemple de code Python pour les tests
+
         self.python_code = """
 def add(a, b):
     \"\"\"Additionne deux nombres.\"\"\"
@@ -33,18 +33,18 @@ def add(a, b):
 
 class Calculator:
     \"\"\"Une calculatrice simple.\"\"\"
-    
+
     def __init__(self):
         \"\"\"Initialise la calculatrice.\"\"\"
         self.result = 0
-    
+
     def add(self, a, b):
         \"\"\"Additionne deux nombres.\"\"\"
         self.result = a + b
         return self.result
 """
 
-        # Exemple de code JavaScript pour les tests
+
         self.javascript_code = """
 function add(a, b) {
     // Additionne deux nombres
@@ -56,7 +56,7 @@ class Calculator {
         // Initialise la calculatrice
         this.result = 0;
     }
-    
+
     add(a, b) {
         // Additionne deux nombres
         this.result = a + b;
@@ -65,7 +65,7 @@ class Calculator {
 }
 """
 
-        # Exemple de code TypeScript pour les tests
+
         self.typescript_code = """
 interface MathOperation {
     execute(a: number, b: number): number;
@@ -77,7 +77,7 @@ function add(a: number, b: number): number {
 
 class Calculator implements MathOperation {
     private result: number = 0;
-    
+
     execute(a: number, b: number): number {
         this.result = a + b;
         return this.result;
@@ -107,7 +107,7 @@ class Calculator implements MathOperation {
             test_framework="unittest",
             include_mocks=False
         )
-        
+
         response = generate_tests(request)
 
         self.assertIsInstance(response, TestGenerationResponse)
@@ -127,7 +127,7 @@ class Calculator implements MathOperation {
             test_framework="pytest",
             include_mocks=True
         )
-        
+
         response = generate_tests(request)
 
         self.assertIsInstance(response, TestGenerationResponse)
@@ -146,7 +146,7 @@ class Calculator implements MathOperation {
             test_framework="jest",
             include_mocks=False
         )
-        
+
         response = generate_tests(request)
 
         self.assertIsInstance(response, TestGenerationResponse)
@@ -183,7 +183,7 @@ class Calculator implements MathOperation {
             language="ruby",
             test_framework="rspec"
         )
-        
+
         with self.assertRaises(ToolValidationError):
             generate_tests(request)
 
@@ -195,7 +195,7 @@ class Calculator implements MathOperation {
             file_path="/path/to/calculator.py",
             output_dir="/path/to/tests"
         )
-        
+
         response = generate_tests(request)
 
         self.assertIsInstance(response, TestGenerationResponse)
@@ -301,7 +301,7 @@ class Calculator implements MathOperation {
             {"name": "add", "type": "function"},
             {"name": "Calculator", "type": "class"}
         ]
-        
+
         coverage = self.tool._estimate_coverage(tested_elements, self.python_code, 0.8)
 
         self.assertGreaterEqual(coverage, 0.0)
@@ -332,7 +332,7 @@ class TestAdd(unittest.TestCase):
     def test_add_positive_numbers(self):
         result = add(2, 3)
         self.assertEqual(result, 5)
-        
+
     def test_add_negative_numbers(self):
         result = add(-1, -2)
         self.assertEqual(result, -3)
@@ -406,7 +406,7 @@ class TestAdd(unittest.TestCase):
             TestGenerationRequest(
                 code="def test(): pass",
                 language="python",
-                coverage_target=1.5  # Invalide
+                coverage_target=1.5
             )
 
     def test_validation_language_field(self):
@@ -415,15 +415,15 @@ class TestAdd(unittest.TestCase):
         with self.assertRaises(ValidationError):
             TestGenerationRequest(
                 code="def test(): pass",
-                language=""  # Vide
+                language=""
             )
 
         try:
             request = TestGenerationRequest(
                 code="def test(): pass",
-                language="  PYTHON  "  # Avec espaces
+                language="  PYTHON  "
             )
-            self.assertEqual(request.language, "python")  # Normalisé
+            self.assertEqual(request.language, "python")
         except ValidationError:
             self.fail("Language 'PYTHON' should be valid")
 
@@ -466,7 +466,7 @@ class DataProcessor:
     def __init__(self, batch_size: int = 100):
         self.batch_size = batch_size
         self.cache: Dict[str, any] = {}
-        
+
     async def process_data(self, data: List[str]) -> List[str]:
         results = []
         for item in data:
@@ -474,7 +474,7 @@ class DataProcessor:
                 processed = await self._process_item(item)
                 results.append(processed)
         return results
-    
+
     async def _process_item(self, item: str) -> str:
         await asyncio.sleep(0.01)
         return item.upper()

@@ -18,11 +18,11 @@ class PromptTemplate(BaseModel):
     template: str
     variables: List[str] = []
     category: str
-    provider_specific: Dict[str, str] = {}  # Versions spécifiques par fournisseur
+    provider_specific: Dict[str, str] = {}
     examples: List[Dict[str, Any]] = []
 
 PROMPT_TEMPLATES = {
-    # Templates pour la documentation
+
     "code_documentation": {
         "name": "Documentation de code",
         "description": "Template pour générer de la documentation pour un extrait de code.",
@@ -52,8 +52,8 @@ La documentation doit inclure:
             }
         ]
     },
-    
-    # Templates pour la génération de tests
+
+
     "test_generation": {
         "name": "Génération de tests",
         "description": "Template pour générer des tests pour un extrait de code.",
@@ -96,7 +96,7 @@ def get_all_templates() -> List[str]:
 
 def get_templates_by_category(category: str) -> List[str]:
     """Récupère la liste des templates d'une catégorie spécifique."""
-    return [id for id, data in PROMPT_TEMPLATES.items() 
+    return [id for id, data in PROMPT_TEMPLATES.items()
             if data.get("category") == category]
 
 def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optional[str] = None) -> Optional[str]:
@@ -104,13 +104,13 @@ def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optiona
     template = get_prompt_template(template_id)
     if not template:
         return None
-    
-    # Sélectionner le template spécifique au fournisseur si disponible
+
+
     prompt_text = template.template
     if provider and provider in template.provider_specific:
         prompt_text = template.provider_specific[provider]
-    
-    # Formater le template avec les variables
+
+
     try:
         return prompt_text.format(**variables)
     except KeyError as e:
@@ -122,17 +122,17 @@ def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optiona
 
 def register_prompts(app, app_state):
     """Enregistre les ressources des prompts LLM."""
-    
+
     @app.resource("collegue://llm/prompts/index")
     def get_prompt_templates_index() -> str:
         """Liste tous les templates de prompts disponibles."""
         return json.dumps(get_all_templates())
-    
+
     @app.resource("collegue://llm/prompts/category/{category}")
     def get_templates_by_category_resource(category: str) -> str:
         """Liste les templates d'une catégorie spécifique."""
         return json.dumps(get_templates_by_category(category))
-    
+
     @app.resource("collegue://llm/prompts/{template_id}")
     def get_template_resource(template_id: str) -> str:
         """Récupère les informations d'un template spécifique."""

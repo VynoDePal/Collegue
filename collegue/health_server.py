@@ -1,4 +1,4 @@
-# collegue/health_server.py
+
 from fastapi import FastAPI
 import uvicorn
 
@@ -17,7 +17,7 @@ health_app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 async def root():
     return {"status": "ok"}
 
-# Endpoint de découverte OAuth Protected Resource (MCP)
+
 @health_app.get('/.well-known/oauth-protected-resource')
 async def oauth_protected_resource():
     if settings.OAUTH_ENABLED and settings.OAUTH_ISSUER:

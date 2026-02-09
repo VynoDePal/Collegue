@@ -23,7 +23,7 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 class RunTestsRequest(BaseModel):
     """Modèle de requête pour l'exécution de tests."""
     target: Optional[str] = Field(
-        None, 
+        None,
         description="Cible des tests: fichier, dossier, pattern ou 'all' pour tous les tests"
     )
     test_content: Optional[str] = Field(
@@ -35,32 +35,32 @@ class RunTestsRequest(BaseModel):
         description="Contenu du code source à tester (utilisé avec test_content)"
     )
     language: str = Field(
-        ..., 
+        ...,
         description="Langage: python ou typescript"
     )
     framework: Optional[str] = Field(
-        None, 
+        None,
         description="Framework de test: pytest, unittest, jest, mocha (auto-détecté si non spécifié)"
     )
     working_dir: Optional[str] = Field(
-        None, 
+        None,
         description="Répertoire de travail pour l'exécution des tests"
     )
     timeout: Optional[int] = Field(
-        300, 
+        300,
         description="Timeout en secondes (max 600)",
         ge=1,
         le=600
     )
     verbose: Optional[bool] = Field(
-        False, 
+        False,
         description="Afficher les logs détaillés"
     )
     pattern: Optional[str] = Field(
-        None, 
+        None,
         description="Pattern pour filtrer les tests (ex: 'test_auth*')"
     )
-    
+
     @field_validator('language')
     def validate_language(cls, v):
         """Valide le langage."""
@@ -68,7 +68,7 @@ class RunTestsRequest(BaseModel):
         if v not in ['python', 'typescript', 'javascript']:
             raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript")
         return v
-    
+
     @field_validator('framework')
     def validate_framework(cls, v):
         """Valide le framework si spécifié."""
@@ -79,7 +79,7 @@ class RunTestsRequest(BaseModel):
         if v not in valid_frameworks:
             raise ValueError(f"Framework '{v}' non supporté. Utilisez: {', '.join(valid_frameworks)}")
         return v
-    
+
     def model_post_init(self, __context):
         """Valide que target ou test_content est fourni."""
         if not self.target and not self.test_content:
@@ -107,7 +107,7 @@ class RunTestsResponse(BaseModel):
     duration: float = Field(..., description="Durée totale en secondes")
     framework: str = Field(..., description="Framework utilisé")
     results: List[TestResult] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="Résultats détaillés (limités aux 50 premiers échecs)"
     )
     stdout: Optional[str] = Field(None, description="Sortie standard (tronquée)")
@@ -118,11 +118,11 @@ class RunTestsResponse(BaseModel):
 class RunTestsTool(BaseTool):
     """
     Outil d'exécution de tests unitaires.
-    
+
     Supporte:
     - Python: pytest, unittest
     - TypeScript/JavaScript: jest, mocha, vitest
-    
+
     Fonctionnalités:
     - Exécution avec timeout
     - Résultats structurés (JSON)
@@ -130,7 +130,7 @@ class RunTestsTool(BaseTool):
     - Détection automatique du framework
     """
 
-    # Commandes par framework
+
     FRAMEWORK_COMMANDS = {
         'pytest': ['pytest', '--tb=short', '-v', '--json-report', '--json-report-file=-'],
         'unittest': ['python', '-m', 'unittest', 'discover', '-v'],
@@ -138,8 +138,8 @@ class RunTestsTool(BaseTool):
         'mocha': ['npx', 'mocha', '--reporter', 'json'],
         'vitest': ['npx', 'vitest', 'run', '--reporter=json']
     }
-    
-    # Mapping langage -> frameworks possibles
+
+
     LANGUAGE_FRAMEWORKS = {
         'python': ['pytest', 'unittest'],
         'typescript': ['jest', 'mocha', 'vitest'],
@@ -224,27 +224,27 @@ class RunTestsTool(BaseTool):
     def _detect_framework(self, language: str, working_dir: str) -> str:
         """Détecte automatiquement le framework de test."""
         if language == 'python':
-            # Vérifier si pytest est installé
+
             pyproject = os.path.join(working_dir, 'pyproject.toml')
             setup_cfg = os.path.join(working_dir, 'setup.cfg')
-            
+
             if os.path.exists(pyproject):
                 with open(pyproject, 'r') as f:
                     if 'pytest' in f.read():
                         return 'pytest'
-            
-            # Par défaut pytest pour Python
+
+
             return 'pytest'
-        
-        else:  # typescript/javascript
+
+        else:
             package_json = os.path.join(working_dir, 'package.json')
-            
+
             if os.path.exists(package_json):
                 with open(package_json, 'r') as f:
                     try:
                         pkg = json.load(f)
                         deps = {**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})}
-                        
+
                         if 'vitest' in deps:
                             return 'vitest'
                         elif 'jest' in deps:
@@ -253,18 +253,18 @@ class RunTestsTool(BaseTool):
                             return 'mocha'
                     except json.JSONDecodeError:
                         pass
-            
-            # Par défaut jest
+
+
             return 'jest'
 
     def _build_command(self, request: RunTestsRequest, framework: str) -> List[str]:
         """Construit la commande à exécuter."""
         base_cmd = self.FRAMEWORK_COMMANDS.get(framework, []).copy()
-        
+
         if not base_cmd:
             raise ToolExecutionError(f"Framework '{framework}' non configuré")
-        
-        # Ajouter la cible
+
+
         if request.target and request.target != 'all':
             if framework == 'pytest':
                 base_cmd.append(request.target)
@@ -285,7 +285,7 @@ class RunTestsTool(BaseTool):
                 base_cmd.append(request.target)
                 if request.pattern:
                     base_cmd.extend(['--grep', request.pattern])
-        
+
         return base_cmd
 
     def _parse_pytest_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
@@ -294,10 +294,10 @@ class RunTestsTool(BaseTool):
             'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
             'duration': 0.0, 'results': []
         }
-        
-        # Essayer de parser le JSON report
+
+
         try:
-            # Chercher le JSON dans la sortie
+
             json_match = re.search(r'\{.*"summary".*\}', stdout, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
@@ -308,8 +308,8 @@ class RunTestsTool(BaseTool):
                 results['skipped'] = summary.get('skipped', 0)
                 results['errors'] = summary.get('error', 0)
                 results['duration'] = data.get('duration', 0.0)
-                
-                # Parser les tests individuels
+
+
                 for test in data.get('tests', [])[:50]:
                     results['results'].append(TestResult(
                         name=test.get('nodeid', 'unknown'),
@@ -320,9 +320,8 @@ class RunTestsTool(BaseTool):
                 return results
         except (json.JSONDecodeError, KeyError):
             pass
-        
-        # Fallback: parser la sortie texte
-        # Chercher la ligne de résumé: "X passed, Y failed, Z skipped"
+
+
         summary_match = re.search(
             r'(\d+) passed(?:, (\d+) failed)?(?:, (\d+) skipped)?(?:, (\d+) error)?',
             stdout + stderr
@@ -333,12 +332,12 @@ class RunTestsTool(BaseTool):
             results['skipped'] = int(summary_match.group(3) or 0)
             results['errors'] = int(summary_match.group(4) or 0)
             results['total'] = results['passed'] + results['failed'] + results['skipped'] + results['errors']
-        
-        # Chercher la durée
+
+
         duration_match = re.search(r'in ([\d.]+)s', stdout + stderr)
         if duration_match:
             results['duration'] = float(duration_match.group(1))
-        
+
         return results
 
     def _parse_jest_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
@@ -347,22 +346,22 @@ class RunTestsTool(BaseTool):
             'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
             'duration': 0.0, 'results': []
         }
-        
+
         try:
-            # Jest output JSON directement
+
             data = json.loads(stdout)
             results['total'] = data.get('numTotalTests', 0)
             results['passed'] = data.get('numPassedTests', 0)
             results['failed'] = data.get('numFailedTests', 0)
             results['skipped'] = data.get('numPendingTests', 0)
-            
-            # Calculer la durée
+
+
             start = data.get('startTime', 0)
             for result in data.get('testResults', []):
                 end = result.get('endTime', start)
                 results['duration'] = max(results['duration'], (end - start) / 1000)
-                
-                # Parser les tests individuels
+
+
                 for test in result.get('assertionResults', [])[:50]:
                     results['results'].append(TestResult(
                         name=test.get('fullName', test.get('title', 'unknown')),
@@ -372,9 +371,9 @@ class RunTestsTool(BaseTool):
                         file=result.get('name')
                     ))
         except json.JSONDecodeError:
-            # Fallback parsing
+
             pass
-        
+
         return results
 
     def _parse_unittest_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
@@ -383,29 +382,29 @@ class RunTestsTool(BaseTool):
             'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
             'duration': 0.0, 'results': []
         }
-        
+
         combined = stdout + stderr
-        
-        # Chercher "Ran X tests in Y.YYYs"
+
+
         ran_match = re.search(r'Ran (\d+) tests? in ([\d.]+)s', combined)
         if ran_match:
             results['total'] = int(ran_match.group(1))
             results['duration'] = float(ran_match.group(2))
-        
-        # Chercher "OK" ou "FAILED (failures=X, errors=Y)"
+
+
         if 'OK' in combined and 'FAILED' not in combined:
             results['passed'] = results['total']
         else:
             failed_match = re.search(r'failures=(\d+)', combined)
             errors_match = re.search(r'errors=(\d+)', combined)
             skipped_match = re.search(r'skipped=(\d+)', combined)
-            
+
             results['failed'] = int(failed_match.group(1)) if failed_match else 0
             results['errors'] = int(errors_match.group(1)) if errors_match else 0
             results['skipped'] = int(skipped_match.group(1)) if skipped_match else 0
             results['passed'] = results['total'] - results['failed'] - results['errors'] - results['skipped']
-        
-        # Parser les tests individuels depuis la sortie verbose
+
+
         test_pattern = re.compile(r'^(test\w+)\s+\(([^)]+)\)\s+\.\.\.\s+(ok|FAIL|ERROR|skipped)', re.MULTILINE)
         for match in test_pattern.finditer(combined):
             status_map = {'ok': 'passed', 'FAIL': 'failed', 'ERROR': 'error', 'skipped': 'skipped'}
@@ -413,67 +412,67 @@ class RunTestsTool(BaseTool):
                 name=f"{match.group(2)}.{match.group(1)}",
                 status=status_map.get(match.group(3), 'unknown')
             ))
-        
+
         return results
 
     def _execute_core_logic(self, request: RunTestsRequest, **kwargs) -> RunTestsResponse:
         """Exécute les tests et retourne les résultats structurés."""
         temp_dir = None
-        
+
         try:
-            # Mode 1: Contenu fourni directement (pour MCP et environnements isolés)
+
             if request.test_content:
                 temp_dir = tempfile.mkdtemp(prefix="collegue_run_tests_")
                 working_dir = temp_dir
-                
-                # Déterminer les noms de fichiers selon le langage
+
+
                 if request.language == 'python':
                     test_filename = "test_module.py"
                     source_filename = "module_under_test.py"
-                else:  # typescript/javascript
+                else:
                     ext = ".ts" if request.language == "typescript" else ".js"
                     test_filename = f"module.test{ext}"
                     source_filename = f"module_under_test{ext}"
-                
-                # Écrire le fichier source si fourni
+
+
                 if request.source_content:
                     source_path = os.path.join(temp_dir, source_filename)
                     with open(source_path, 'w', encoding='utf-8') as f:
                         f.write(request.source_content)
                     self.logger.info(f"Code source écrit dans: {source_path}")
-                
-                # Adapter les imports dans le test pour Python
+
+
                 test_code = request.test_content
                 if request.language == 'python':
                     test_code = f"import sys\nsys.path.insert(0, '{temp_dir}')\n" + test_code
-                
-                # Écrire le fichier de test
+
+
                 test_path = os.path.join(temp_dir, test_filename)
                 with open(test_path, 'w', encoding='utf-8') as f:
                     f.write(test_code)
                 self.logger.info(f"Tests écrits dans: {test_path}")
-                
-                # Mettre à jour la cible
+
+
                 request_target = test_filename
             else:
                 working_dir = request.working_dir or os.getcwd()
                 request_target = request.target
-                
+
                 if not os.path.isdir(working_dir):
                     raise ToolValidationError(f"Répertoire '{working_dir}' inexistant. Utilisez 'test_content' pour passer le code directement.")
-            
-            # Détecter ou utiliser le framework spécifié
+
+
             framework = request.framework or self._detect_framework(request.language, working_dir)
-            
-            # Vérifier que le framework est compatible avec le langage
+
+
             valid_frameworks = self.LANGUAGE_FRAMEWORKS.get(request.language, [])
             if framework not in valid_frameworks:
                 raise ToolValidationError(
                     f"Framework '{framework}' incompatible avec {request.language}. "
                     f"Utilisez: {', '.join(valid_frameworks)}"
                 )
-            
-            # Construire la commande - créer une requête modifiée pour le target
+
+
             modified_request = RunTestsRequest(
                 target=request_target,
                 language=request.language,
@@ -485,10 +484,10 @@ class RunTestsTool(BaseTool):
             )
             cmd = self._build_command(modified_request, framework)
             cmd_str = ' '.join(cmd)
-            
+
             self.logger.info(f"Exécution: {cmd_str} dans {working_dir}")
-            
-            # Exécuter la commande
+
+
             result = subprocess.run(
                 cmd,
                 cwd=working_dir,
@@ -497,11 +496,11 @@ class RunTestsTool(BaseTool):
                 timeout=request.timeout,
                 env={**os.environ, 'CI': 'true', 'FORCE_COLOR': '0'}
             )
-            
+
             stdout = result.stdout
             stderr = result.stderr
-            
-            # Parser selon le framework
+
+
             if framework == 'pytest':
                 parsed = self._parse_pytest_output(stdout, stderr)
             elif framework in ['jest', 'vitest']:
@@ -510,12 +509,12 @@ class RunTestsTool(BaseTool):
                 parsed = self._parse_unittest_output(stdout, stderr)
             else:
                 parsed = {'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0, 'duration': 0.0, 'results': []}
-            
-            # Tronquer les sorties
+
+
             max_output = 5000
             truncated_stdout = stdout[:max_output] + '...[tronqué]' if len(stdout) > max_output else stdout
             truncated_stderr = stderr[:max_output] + '...[tronqué]' if len(stderr) > max_output else stderr
-            
+
             return RunTestsResponse(
                 success=parsed['failed'] == 0 and parsed['errors'] == 0,
                 total=parsed['total'],
@@ -530,7 +529,7 @@ class RunTestsTool(BaseTool):
                 stderr=truncated_stderr if truncated_stderr.strip() else None,
                 command=cmd_str
             )
-            
+
         except subprocess.TimeoutExpired:
             raise ToolExecutionError(f"Timeout après {request.timeout}s")
         except FileNotFoundError as e:
@@ -540,7 +539,7 @@ class RunTestsTool(BaseTool):
         except Exception as e:
             raise ToolExecutionError(f"Erreur d'exécution: {str(e)}")
         finally:
-            # Nettoyer le répertoire temporaire
+
             if temp_dir and os.path.exists(temp_dir):
                 try:
                     shutil.rmtree(temp_dir)

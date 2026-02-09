@@ -60,11 +60,11 @@ class BaseTool(ABC):
         self.app_state = app_state or {}
         self.logger = logging.getLogger(f"tools.{self.__class__.__name__}")
         self.metrics: List[ToolMetrics] = []
-        
+
         self.prompt_engine = self.app_state.get('prompt_engine')
         self.llm_manager = self.app_state.get('llm_manager')
         self.context_manager = self.app_state.get('context_manager')
-        
+
         self._setup_logging()
         self._validate_config()
 
@@ -126,28 +126,28 @@ class BaseTool(ABC):
             Liste des langages supportés
         """
         return ["python", "javascript", "typescript"]
-    
+
     def is_long_running(self) -> bool:
         """
         Indique si l'outil est susceptible de prendre du temps (> 10s).
         Les outils longs seront exécutés comme tâches de fond avec FastMCP task=True.
-        
+
         Returns:
             True si l'outil est long-running, False sinon
         """
         return False
-    
+
     async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
         """
         Prépare un prompt optimisé en utilisant le système de prompts amélioré.
-        
+
         Args:
             request: Requête contenant les variables pour le prompt
             template_name: Nom du template à utiliser (par défaut: nom de l'outil)
-            
+
         Returns:
             Prompt formaté et optimisé
-            
+
         Raises:
             ToolExecutionError: Si le prompt engine n'est pas disponible
         """
@@ -156,15 +156,15 @@ class BaseTool(ABC):
                 self.logger.warning("Prompt engine non disponible, utilisation du fallback")
                 return self._build_prompt(request)
             raise ToolExecutionError("Prompt engine non configuré et pas de méthode fallback")
-        
+
         from ..prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
-        
+
         if isinstance(self.prompt_engine, EnhancedPromptEngine):
             tool_name = template_name or self.get_name().lower().replace(' ', '_')
             language = getattr(request, 'language', None)
-            
+
             context = request.model_dump() if hasattr(request, 'model_dump') else {}
-            
+
             try:
                 if asyncio.iscoroutinefunction(self.prompt_engine.get_optimized_prompt):
                     prompt, version = await self.prompt_engine.get_optimized_prompt(
@@ -178,30 +178,30 @@ class BaseTool(ABC):
                         context=context,
                         language=language
                     )
-                
+
                 self.logger.info(f"Prompt préparé avec version {version} pour {tool_name}")
                 return prompt
-                
+
             except Exception as e:
                 self.logger.warning(f"Erreur lors de la préparation du prompt optimisé: {e}")
                 if hasattr(self, '_build_prompt'):
                     return self._build_prompt(request)
                 raise
-        
+
         else:
             tool_name = self.get_name().lower().replace(' ', '_')
             templates = self.prompt_engine.get_templates_by_category(f"tool/{tool_name}")
-            
+
             if templates:
                 template = templates[0]
                 context = request.model_dump() if hasattr(request, 'model_dump') else {}
                 prompt = self.prompt_engine.format_prompt(template.id, context)
                 return prompt
-            
+
             if hasattr(self, '_build_prompt'):
                 self.logger.warning(f"Pas de template trouvé pour {tool_name}, utilisation du fallback")
                 return self._build_prompt(request)
-            
+
             raise ToolExecutionError(f"Aucun template trouvé pour l'outil {tool_name}")
 
     def validate_language(self, language: str) -> bool:
@@ -343,18 +343,18 @@ class BaseTool(ABC):
     async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
         """
         Exécute l'outil de manière asynchrone avec support Context (FastMCP 2.14+).
-        
+
         Cette méthode est utilisée pour les outils long-running avec task=True.
         Elle supporte:
         - ctx.report_progress(): Reporting de progression via Context
         - ctx.sample(): Appels LLM avec structured output
-        
+
         Args:
             request: Requête à traiter
             **kwargs: Arguments supplémentaires incluant:
                 - ctx: Context FastMCP pour ctx.sample() et ctx.report_progress()
                 - parser, llm_manager, context_manager: Services standard
-        
+
         Returns:
             Réponse de l'outil
         """
@@ -362,7 +362,7 @@ class BaseTool(ABC):
         tool_name = self.get_name()
         ctx = kwargs.get('ctx')
         total_steps = 4
-        
+
         try:
             self.logger.info(f"Début d'exécution async de {tool_name}")
             if ctx:
@@ -370,14 +370,14 @@ class BaseTool(ABC):
             self.validate_request(request)
             if ctx:
                 await ctx.report_progress(progress=1, total=total_steps)
-            
-            # Appeler _execute_core_logic_async si disponible, sinon _execute_core_logic
+
+
             if hasattr(self, '_execute_core_logic_async'):
                 result = await self._execute_core_logic_async(request, **kwargs)
             else:
-                # Fallback vers la version sync dans un thread
+
                 result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
-            
+
             if ctx:
                 await ctx.report_progress(progress=3, total=total_steps)
             expected_response = self.get_response_model()
@@ -385,7 +385,7 @@ class BaseTool(ABC):
                 raise ToolExecutionError(
                     f"Type de réponse invalide. Attendu: {expected_response.__name__}"
                 )
-            
+
             execution_time = (datetime.now() - start_time).total_seconds()
             metrics = ToolMetrics(
                 tool_name=tool_name,
@@ -396,17 +396,17 @@ class BaseTool(ABC):
                 output_size=len(str(result)) if hasattr(result, '__str__') else None
             )
             self.metrics.append(metrics)
-            
+
             if ctx:
                 await ctx.report_progress(progress=total_steps, total=total_steps)
-            
+
             self.logger.info(f"Exécution async de {tool_name} réussie en {execution_time:.2f}s")
             return result
-            
+
         except (ToolError, ValidationError) as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             error_msg = str(e)
-            
+
             metrics = ToolMetrics(
                 tool_name=tool_name,
                 execution_time=execution_time,
@@ -415,14 +415,14 @@ class BaseTool(ABC):
                 error_message=error_msg
             )
             self.metrics.append(metrics)
-            
+
             self.logger.error(f"Erreur dans {tool_name}: {error_msg}")
             raise
-            
+
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             error_msg = f"Erreur inattendue: {str(e)}"
-            
+
             metrics = ToolMetrics(
                 tool_name=tool_name,
                 execution_time=execution_time,
@@ -431,7 +431,7 @@ class BaseTool(ABC):
                 error_message=error_msg
             )
             self.metrics.append(metrics)
-            
+
             self.logger.error(f"Erreur inattendue dans {tool_name}: {str(e)}")
             raise ToolExecutionError(error_msg)
 
@@ -446,11 +446,11 @@ class BaseTool(ABC):
     ) -> Any:
         """
         Appelle le LLM via ctx.sample() (FastMCP 2.14+) ou fallback vers ToolLLMManager.
-        
+
         Cette méthode permet d'utiliser le nouveau ctx.sample() de FastMCP tout en
         conservant la compatibilité avec ToolLLMManager pour les environnements
         qui ne supportent pas le sampling MCP.
-        
+
         Args:
             prompt: Le prompt à envoyer au LLM
             ctx: Context FastMCP (si disponible, utilise ctx.sample())
@@ -458,49 +458,48 @@ class BaseTool(ABC):
             system_prompt: Message système optionnel
             result_type: Type Pydantic pour structured output (FastMCP 2.14.1+)
             temperature: Température pour la génération
-            
+
         Returns:
             - Si result_type: Instance validée du modèle Pydantic
             - Sinon: Texte brut de la réponse LLM
         """
-        # Priorité 1: Utiliser ctx.sample() si Context disponible
+
         if ctx is not None:
             try:
                 self.logger.debug(f"Utilisation de ctx.sample() pour {self.get_name()}")
-                
-                # Construire les messages
+
+
                 messages = prompt
                 if system_prompt:
                     messages = [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ]
-                
-                # Appel avec ou sans structured output
+
+
                 if result_type:
                     result = await ctx.sample(
                         messages=messages,
                         result_type=result_type,
                         temperature=temperature
                     )
-                    return result.result  # Objet Pydantic validé
+                    return result.result
                 else:
                     result = await ctx.sample(
                         messages=messages,
                         temperature=temperature
                     )
                     return result.text or ""
-                    
+
             except Exception as e:
                 self.logger.warning(f"ctx.sample() a échoué, fallback vers llm_manager: {e}")
-                # Fallback vers ToolLLMManager
-        
-        # Priorité 2: Fallback vers ToolLLMManager
+
+
         if llm_manager is not None:
             self.logger.debug(f"Utilisation de ToolLLMManager pour {self.get_name()}")
             text = await llm_manager.async_generate(prompt, system_prompt)
-            
-            # Si result_type demandé, parser la réponse JSON
+
+
             if result_type:
                 import json
                 try:
@@ -510,7 +509,7 @@ class BaseTool(ABC):
                     self.logger.warning(f"Impossible de parser en {result_type.__name__}: {e}")
                     return text
             return text
-        
+
         raise ToolExecutionError(
             "Aucun backend LLM disponible. Fournissez ctx (FastMCP) ou llm_manager."
         )
@@ -544,7 +543,7 @@ class BaseTool(ABC):
             "required_config": self.get_required_config_keys(),
             "metrics_count": len(self.metrics),
             "success_rate": self._calculate_success_rate(),
-            # Nouvelles informations détaillées
+
             "usage_description": self.get_usage_description(),
             "parameters": self.get_parameters_info(),
             "examples": self.get_examples(),
@@ -660,18 +659,18 @@ def tool_method(func):
         if not isinstance(self, BaseTool):
             raise TypeError("tool_method ne peut être utilisé que sur des classes BaseTool")
 
-        # Récupération des arguments
+
         sig = inspect.signature(func)
         bound = sig.bind(self, *args, **kwargs)
         bound.apply_defaults()
 
-        # Extraction de la requête (premier argument après self)
-        args_list = list(bound.arguments.values())[1:]  # Exclure self
+
+        args_list = list(bound.arguments.values())[1:]
         if args_list:
             request = args_list[0]
             remaining_kwargs = dict(bound.arguments)
-            del remaining_kwargs[list(bound.arguments.keys())[0]]  # Supprimer self
-            del remaining_kwargs[list(bound.arguments.keys())[1]]  # Supprimer request
+            del remaining_kwargs[list(bound.arguments.keys())[0]]
+            del remaining_kwargs[list(bound.arguments.keys())[1]]
 
             return self.execute(request, **remaining_kwargs)
         else:

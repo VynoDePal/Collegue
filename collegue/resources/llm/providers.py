@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Any
 import json
 import logging
 
-# Configurer le logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -89,7 +88,6 @@ def initialize_llm_client(api_key: Optional[str] = None):
 		return None
 
 
-# Client global (singleton)
 _llm_client = None
 
 
@@ -113,7 +111,6 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
 		)
 	
 	try:
-		# Configuration de génération
 		gen_config = types.GenerateContentConfig(
 			system_instruction=system_prompt,
 			max_output_tokens=config.max_tokens,
@@ -122,25 +119,20 @@ async def generate_text(config: LLMConfig, prompt: str, system_prompt: Optional[
 			stop_sequences=config.stop_sequences if config.stop_sequences else None,
 		)
 		
-		# Activer Google Search Grounding si demandé
 		if config.use_search_grounding:
 			gen_config.tools = [types.Tool(google_search=types.GoogleSearch())]
 			logger.info("🔍 Google Search Grounding activé")
 		
-		# Génération avec le client async natif
 		response = await client.aio.models.generate_content(
 			model=config.model_name,
 			contents=prompt,
 			config=gen_config
 		)
 		
-		# Extraire les citations
 		annotations = _extract_google_citations(response)
 		
-		# Extraire l'usage
 		usage = _extract_usage(response)
 		
-		# Déterminer le finish_reason
 		finish_reason = None
 		if response.candidates and len(response.candidates) > 0:
 			candidate = response.candidates[0]

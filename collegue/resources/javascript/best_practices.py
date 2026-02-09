@@ -11,7 +11,7 @@ class JavaScriptBestPractice(BaseModel):
     title: str
     description: str
     category: str
-    examples: Dict[str, Dict[str, str]] = {}  # "good" et "bad" exemples
+    examples: Dict[str, Dict[str, str]] = {}
     references: List[str] = []
 
 JS_BEST_PRACTICES = {
@@ -125,22 +125,22 @@ def get_all_best_practices() -> List[str]:
 
 def get_best_practices_by_category(category: str) -> List[str]:
     """Récupère la liste des bonnes pratiques d'une catégorie spécifique."""
-    return [id for id, data in JS_BEST_PRACTICES.items() 
+    return [id for id, data in JS_BEST_PRACTICES.items()
             if data.get("category") == category]
 
 def register_best_practices(app, app_state):
     """Enregistre les ressources des bonnes pratiques JavaScript."""
-    
+
     @app.resource("collegue://javascript/best-practices/index")
     def get_js_best_practices_index() -> str:
         """Liste toutes les bonnes pratiques JavaScript disponibles."""
         return json.dumps(get_all_best_practices())
-    
+
     @app.resource("collegue://javascript/best-practices/category/{category}")
     def get_js_best_practices_by_category_resource(category: str) -> str:
         """Liste les bonnes pratiques d'une catégorie spécifique."""
         return json.dumps(get_best_practices_by_category(category))
-    
+
     @app.resource("collegue://javascript/best-practices/{practice_id}")
     def get_js_best_practice_resource(practice_id: str) -> str:
         """Récupère les informations d'une bonne pratique spécifique."""

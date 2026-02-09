@@ -6,7 +6,7 @@ import sys
 import os
 from pathlib import Path
 
-# Ajouter le répertoire parent au chemin pour pouvoir importer collegue
+
 parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
@@ -21,7 +21,7 @@ from collegue.tools.refactoring import (
 
 class TestRefactoring(unittest.TestCase):
     """Tests pour les fonctionnalités de refactoring de code."""
-    
+
     def setUp(self):
         """Initialisation des tests."""
         self.tool = RefactoringTool()
@@ -61,13 +61,11 @@ def process_data(data):
 
 def   badly_formatted( x,y ):
     result=x+y
-    return result   
+    return result
 
 
-    
 def another_function():
     pass
-
 
 
 """
@@ -100,9 +98,9 @@ def another_function():
             refactoring_type="clean",
             session_id="test-session"
         )
-        
+
         response = refactor_code(request)
-        
+
         self.assertIsInstance(response, RefactoringResponse)
         self.assertEqual(response.language, "python")
         self.assertNotEqual(response.refactored_code, self.messy_code)
@@ -149,7 +147,7 @@ result = add(1, 2)
             },
             session_id="test-session"
         )
-        
+
         response = self.tool.execute(request, llm_manager=mock_llm)
 
         self.assertIsInstance(response, RefactoringResponse)
@@ -189,7 +187,7 @@ def calculate():
             },
             session_id="test-session"
         )
-        
+
         response = self.tool.execute(request, llm_manager=mock_llm)
 
         self.assertIsInstance(response, RefactoringResponse)
@@ -216,7 +214,7 @@ function greet(name) {
             refactoring_type="optimize",
             session_id="test-session"
         )
-        
+
         response = self.tool.execute(request, llm_manager=mock_llm)
 
         self.assertIsInstance(response, RefactoringResponse)
@@ -234,7 +232,7 @@ function greet(name) {
             refactoring_type="unknown_type",
             session_id="test-session"
         )
-        
+
         with self.assertRaises(ToolError):
             refactor_code(request)
 
