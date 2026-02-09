@@ -8,32 +8,26 @@ logger = logging.getLogger(__name__)
 
 
 def _get_skills_dir() -> Path:
+	candidates = []
+
 	env_path = os.environ.get('COLLEGUE_SKILLS_DIR')
 	if env_path:
-		path = Path(env_path)
+		candidates.append(("env", Path(env_path)))
+
+	candidates.append(("__file__", Path(__file__).resolve().parent.parent.parent / "skills"))
+	candidates.append(("cwd", Path.cwd() / "skills"))
+	candidates.append(("workdir", Path("/app/skills")))
+
+	for label, path in candidates:
 		if path.is_dir():
-			logger.info("SKILLS_DIR depuis env var: %s", path)
+			logger.info("SKILLS_DIR résolu via %s: %s", label, path)
 			return path
-		logger.warning("COLLEGUE_SKILLS_DIR pointe vers un dossier invalide: %s", env_path)
-	
-	file_path = Path(__file__).resolve().parent.parent.parent / "skills"
-	if file_path.is_dir():
-		logger.info("SKILLS_DIR depuis __file__: %s", file_path)
-		return file_path
-	
-	cwd_path = Path.cwd() / "skills"
-	if cwd_path.is_dir():
-		logger.info("SKILLS_DIR depuis cwd: %s", cwd_path)
-		return cwd_path
-	
-	abs_path = Path("/home/kevyn-odjo/Documents/Collegue/skills")
-	if abs_path.is_dir():
-		logger.info("SKILLS_DIR depuis chemin absolu: %s", abs_path)
-		return abs_path
-	
-	logger.error("Impossible de trouver le dossier skills! Tried: env=%s, file=%s, cwd=%s, abs=%s",
-				env_path, file_path, cwd_path, abs_path)
-	return file_path
+
+	logger.error(
+		"Dossier skills/ introuvable! Chemins testés: %s",
+		", ".join(f"{label}={path}" for label, path in candidates),
+	)
+	return candidates[1][1]
 
 
 SKILLS_DIR = _get_skills_dir()

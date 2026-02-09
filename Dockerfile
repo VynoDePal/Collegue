@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY ./collegue ./collegue
+COPY ./skills ./skills
 
 # Port de l'application principale
 EXPOSE ${PORT}
