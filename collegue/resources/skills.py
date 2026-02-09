@@ -87,7 +87,14 @@ def _read_skill_file(skill_name: str, file_path: str) -> Optional[str]:
 		return None
 def _register_annex(app: Any, skill_name: str, file_name: str) -> None:
 	uri = f"collegue://skills/{skill_name}/{file_name}"
-	@app.resource(uri)
+	resource_name = f"skill_{skill_name}_{file_name.replace('/', '_').replace('.', '_')}"
+	resource_desc = f"Fichier annexe '{file_name}' du skill '{skill_name}'."
+
+	@app.resource(
+		uri,
+		name=resource_name,
+		description=resource_desc,
+	)
 	def _read_annex() -> str:
 		content = _read_skill_file(skill_name, file_name)
 		if content is None:
@@ -96,17 +103,17 @@ def _register_annex(app: Any, skill_name: str, file_name: str) -> None:
 				ensure_ascii=False,
 			)
 		return content
-	_read_annex.__name__ = f"skill_{skill_name}_{file_name.replace('/', '_').replace('.', '_')}"
-	_read_annex.__doc__ = (
-		f"Fichier annexe '{file_name}' du skill '{skill_name}'."
-	)
 def register_skills(app: Any, app_state: Any) -> None:
 	skills_index = _discover_skills()
 	logger.info(
 		"Skills découverts: %s",
 		list(skills_index.keys()),
 	)
-	@app.resource("collegue://skills")
+	@app.resource(
+		"collegue://skills",
+		name="get_skills_index",
+		description="Liste tous les skills Collègue disponibles (code-review, security-audit, refactoring, CI/CD, toolkit).",
+	)
 	def get_skills_index() -> str:
 		refreshed = _discover_skills()
 		return json.dumps(
@@ -122,7 +129,11 @@ def register_skills(app: Any, app_state: Any) -> None:
 			ensure_ascii=False,
 			indent=2,
 		)
-	@app.resource("collegue://skills/{skill_name}")
+	@app.resource(
+		"collegue://skills/{skill_name}",
+		name="get_skill_content",
+		description="Récupère le contenu complet d'un skill par son nom (ex: code-review, security-audit, collegue-toolkit).",
+	)
 	def get_skill_main(skill_name: str) -> str:
 		content = _read_skill_file(skill_name, "SKILL.md")
 		if content is None:
