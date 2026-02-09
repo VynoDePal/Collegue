@@ -5,10 +5,10 @@ import asyncio
 from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
+from .shared import run_async_from_sync
 
 
 class DocumentationRequest(BaseModel):
-    """Modèle de requête pour la génération de documentation."""
     code: str = Field(..., description="Code à documenter")
     language: str = Field(..., description="Langage de programmation du code")
     session_id: Optional[str] = Field(None, description="Identifiant de session")
@@ -18,9 +18,7 @@ class DocumentationRequest(BaseModel):
     file_path: Optional[str] = Field(None, description="Chemin du fichier contenant le code")
     focus_on: Optional[str] = Field(None, description="Éléments à documenter (functions, classes, modules, all)")
 
-
 class DocumentationResponse(BaseModel):
-    """Modèle de réponse pour la génération de documentation."""
     documentation: str = Field(..., description="Documentation générée")
     language: str = Field(..., description="Langage du code documenté")
     format: str = Field(..., description="Format de la documentation")
@@ -28,28 +26,13 @@ class DocumentationResponse(BaseModel):
     coverage: float = Field(..., description="Pourcentage du code couvert par la documentation")
     suggestions: Optional[List[str]] = Field(None, description="Suggestions d'amélioration de la documentation")
 
-
 class DocumentationTool(BaseTool):
-    """Outil de génération automatique de documentation."""
-
-    def get_name(self) -> str:
-        return "code_documentation"
-
-    def get_description(self) -> str:
-        return "Génère automatiquement de la documentation pour le code dans différents formats"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return DocumentationRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return DocumentationResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["python", "javascript", "typescript", "java", "c#", "go", "rust", "php"]
-
-    def is_long_running(self) -> bool:
-        """Cet outil génère de la documentation complète via LLM et peut prendre du temps."""
-        return True
+    tool_name = "code_documentation"
+    tool_description = "Génère automatiquement de la documentation pour le code dans différents formats"
+    request_model = DocumentationRequest
+    response_model = DocumentationResponse
+    supported_languages = ["python", "javascript", "typescript", "java", "c#", "go", "rust", "php"]
+    long_running = True
 
     def get_supported_formats(self) -> List[str]:
         return ["markdown", "rst", "html", "docstring", "json"]
@@ -169,7 +152,6 @@ class DocumentationTool(BaseTool):
         }
 
     def get_format_descriptions(self) -> Dict[str, str]:
-        """Descriptions des formats de documentation supportés."""
         return {
             "markdown": "Format Markdown (.md) idéal pour GitHub, wikis et documentation web",
             "rst": "reStructuredText (.rst) utilisé par Sphinx et la documentation Python",
@@ -179,10 +161,7 @@ class DocumentationTool(BaseTool):
         }
 
     def validate_request(self, request: BaseModel) -> bool:
-        """Validation étendue pour les requêtes de documentation."""
-
         super().validate_request(request)
-
 
         if hasattr(request, 'doc_format') and request.doc_format:
             supported_formats = self.get_supported_formats()
@@ -191,7 +170,6 @@ class DocumentationTool(BaseTool):
                     f"Format '{request.doc_format}' non supporté. "
                     f"Formats supportés: {supported_formats}"
                 )
-
 
         if hasattr(request, 'doc_style') and request.doc_style:
             supported_styles = self.get_supported_styles()
@@ -204,16 +182,6 @@ class DocumentationTool(BaseTool):
         return True
 
     def _execute_core_logic(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
-        """
-        Exécute la logique principale de génération de documentation.
-
-        Args:
-            request: Requête de documentation validée
-            **kwargs: Services additionnels (llm_manager, parser, etc.)
-
-        Returns:
-            DocumentationResponse: La documentation générée
-        """
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
 
@@ -234,14 +202,7 @@ class DocumentationTool(BaseTool):
 
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
-                                prompt = future.result()
-                        else:
-                            prompt = loop.run_until_complete(self.prepare_prompt(request, context=context))
+                        prompt = run_async_from_sync(self.prepare_prompt(request, context=context))
                     else:
                         prompt = self.prepare_prompt(request, context=context)
                 except Exception as e:
@@ -249,7 +210,6 @@ class DocumentationTool(BaseTool):
                     prompt = self._build_documentation_prompt(request, code_elements)
 
                 generated_docs = llm_manager.sync_generate(prompt)
-
 
                 formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
 
@@ -272,18 +232,6 @@ class DocumentationTool(BaseTool):
             return self._generate_fallback_documentation(request, code_elements, parser)
 
     async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
-        """
-        Version async de la logique de génération de documentation (FastMCP 2.14+).
-
-        Utilise ctx.sample() pour les appels LLM avec fallback vers ToolLLMManager.
-
-        Args:
-            request: Requête de documentation validée
-            **kwargs: Services additionnels incluant ctx, llm_manager, parser
-
-        Returns:
-            DocumentationResponse: La documentation générée
-        """
         ctx = kwargs.get('ctx')
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
@@ -291,9 +239,7 @@ class DocumentationTool(BaseTool):
         if ctx:
             await ctx.info("Analyse du code...")
 
-
         code_elements = self._analyze_code_elements(request.code, request.language, parser)
-
 
         prompt = self._build_documentation_prompt(request, code_elements)
         system_prompt = f"""Tu es un expert en documentation de code {request.language}.
@@ -304,7 +250,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             await ctx.info("Génération de la documentation via LLM...")
 
         try:
-
             generated_docs = await self.sample_llm(
                 prompt=prompt,
                 ctx=ctx,
@@ -316,12 +261,9 @@ Style de documentation: {request.doc_style or 'standard'}."""
             if ctx:
                 await ctx.info("Documentation générée, formatage...")
 
-
             formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
 
-
             coverage = self._calculate_coverage(code_elements, formatted_docs)
-
 
             suggestions = self._generate_documentation_suggestions(request, code_elements, coverage)
 
@@ -339,20 +281,12 @@ Style de documentation: {request.doc_style or 'standard'}."""
             return self._generate_fallback_documentation(request, code_elements, parser)
 
     def _analyze_code_elements(self, code: str, language: str, parser=None) -> List[Dict[str, str]]:
-        """
-        Analyse le code pour identifier les éléments à documenter.
-
-        Returns:
-            Liste des éléments trouvés avec leurs métadonnées
-        """
         elements = []
-
 
         if parser and hasattr(parser, f'parse_{language.lower()}'):
             try:
                 parse_method = getattr(parser, f'parse_{language.lower()}')
                 parsed = parse_method(code)
-
 
                 if 'functions' in parsed:
                     for func in parsed['functions']:
@@ -364,7 +298,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
                             "line_number": str(func.get('line_number', 0)),
                             "complexity": self._estimate_complexity(func)
                         })
-
 
                 if 'classes' in parsed:
                     for cls in parsed['classes']:
@@ -381,11 +314,9 @@ Style de documentation: {request.doc_style or 'standard'}."""
             except Exception as e:
                 self.logger.debug(f"Erreur parsing avec parser: {e}")
 
-
         return self._basic_element_analysis(code, language)
 
     def _basic_element_analysis(self, code: str, language: str) -> List[Dict[str, str]]:
-        """Analyse basique des éléments du code."""
         elements = []
         lines = code.split('\n')
 
@@ -393,11 +324,9 @@ Style de documentation: {request.doc_style or 'standard'}."""
             for i, line in enumerate(lines):
                 line_stripped = line.strip()
 
-
                 if line_stripped.startswith("def "):
                     func_signature = line_stripped
                     func_name = func_signature.split("def ")[1].split("(")[0].strip()
-
 
                     docstring = ""
                     if i + 1 < len(lines) and '"""' in lines[i + 1]:
@@ -411,7 +340,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
                         "line_number": str(i + 1),
                         "complexity": "medium"
                     })
-
 
                 elif line_stripped.startswith("class "):
                     class_signature = line_stripped
@@ -430,7 +358,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             for i, line in enumerate(lines):
                 line_stripped = line.strip()
 
-
                 if 'function ' in line_stripped or '=>' in line_stripped:
                     func_name = "anonymous"
                     if line_stripped.startswith('function '):
@@ -447,7 +374,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
                         "complexity": "medium"
                     })
 
-
                 elif line_stripped.startswith('class '):
                     class_name = line_stripped.split('class ')[1].split(' ')[0].split('{')[0].strip()
 
@@ -463,8 +389,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return elements
 
     def _estimate_complexity(self, element: Dict[str, Any]) -> str:
-        """Estime la complexité d'un élément de code."""
-
         params_count = len(element.get('params', []))
 
         if params_count <= 2:
@@ -475,16 +399,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
             return "high"
 
     def _build_documentation_prompt(self, request: DocumentationRequest, elements: List[Dict[str, str]]) -> str:
-        """
-        Construit le prompt pour la génération de documentation.
 
-        Args:
-            request: Requête de documentation
-            elements: Éléments de code identifiés
-
-        Returns:
-            Prompt optimisé
-        """
         style_instructions = {
             "standard": "Génère une documentation claire et concise avec descriptions, paramètres et valeurs de retour",
             "detailed": "Génère une documentation très détaillée avec exemples, cas d'usage et notes techniques",
@@ -508,7 +423,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             ""
         ]
 
-
         prompt_parts.extend([
             f"```{request.language}",
             request.code,
@@ -516,21 +430,17 @@ Style de documentation: {request.doc_style or 'standard'}."""
             ""
         ])
 
-
         if elements:
             prompt_parts.append("Éléments identifiés à documenter :")
             for element in elements[:10]:
                 prompt_parts.append(f"- {element['type']}: {element['name']} (ligne {element['line_number']})")
             prompt_parts.append("")
 
-
         if request.focus_on and request.focus_on != "all":
             prompt_parts.append(f"Concentre-toi sur les {request.focus_on}")
 
-
         if request.include_examples:
             prompt_parts.append("Inclus des exemples d'utilisation pratiques pour chaque élément principal.")
-
 
         language_instructions = self._get_language_doc_instructions(request.language)
         if language_instructions:
@@ -539,7 +449,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return "\n".join(prompt_parts)
 
     def _get_language_doc_instructions(self, language: str) -> str:
-        """Instructions spécifiques par langage pour la documentation."""
         instructions = {
             "python": "Utilise les conventions PEP 257 pour les docstrings, inclus les types avec les paramètres",
             "javascript": "Utilise JSDoc format avec @param, @returns, @example",
@@ -552,7 +461,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return instructions.get(language.lower(), "")
 
     def _format_documentation(self, docs: str, format_type: str, language: str) -> str:
-        """Formate la documentation selon le type demandé."""
         if format_type == "docstring":
             return self._convert_to_docstring_format(docs, language)
         elif format_type == "html":
@@ -563,7 +471,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return docs
 
     def _convert_to_docstring_format(self, docs: str, language: str) -> str:
-        """Convertit la documentation en format docstring selon le langage."""
         if language.lower() == "python":
 
             lines = docs.split('\n')
@@ -582,8 +489,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return docs
 
     def _convert_to_html_format(self, docs: str) -> str:
-        """Conversion basique en HTML."""
-
         html_docs = docs.replace('# ', '<h1>').replace('\n# ', '</h1>\n<h1>')
         html_docs = html_docs.replace('## ', '<h2>').replace('\n## ', '</h2>\n<h2>')
         html_docs = html_docs.replace('### ', '<h3>').replace('\n### ', '</h3>\n<h3>')
@@ -591,8 +496,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return f'<div class="documentation">\n<p>{html_docs}</p>\n</div>'
 
     def _convert_to_rst_format(self, docs: str) -> str:
-        """Conversion basique en reStructuredText."""
-
         rst_docs = docs.replace('# ', '').replace('## ', '').replace('### ', '')
 
         lines = rst_docs.split('\n')
@@ -606,7 +509,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         return '\n'.join(formatted_lines)
 
     def _calculate_coverage(self, elements: List[Dict[str, str]], documentation: str) -> float:
-        """Calcule le pourcentage de couverture de la documentation."""
         if not elements:
             return 100.0
 
@@ -620,26 +522,20 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
     def _generate_documentation_suggestions(self, request: DocumentationRequest,
                                           elements: List[Dict[str, str]], coverage: float) -> List[str]:
-        """Génère des suggestions d'amélioration de la documentation."""
         suggestions = []
-
 
         if coverage < 80:
             suggestions.append(f"Couverture documentation faible ({coverage:.1f}%). Documenter les éléments manquants.")
-
 
         functions_without_docs = [e for e in elements if e['type'] == 'function' and not e.get('description')]
         if functions_without_docs:
             suggestions.append(f"{len(functions_without_docs)} fonction(s) sans documentation détectée(s).")
 
-
         if request.doc_format == "docstring":
             suggestions.append("Intégrer les docstrings directement dans le code source.")
 
-
         if request.doc_style == "api":
             suggestions.append("Considérer l'ajout d'exemples de requêtes/réponses pour une API complète.")
-
 
         if not request.include_examples:
             suggestions.append("Ajouter des exemples d'utilisation pour améliorer la compréhension.")
@@ -648,8 +544,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
     def _generate_fallback_documentation(self, request: DocumentationRequest,
                                        elements: List[Dict[str, str]], parser=None) -> DocumentationResponse:
-        """Génère une documentation basique sans LLM."""
-
 
         doc_parts = [
             f"# Documentation - {request.language.title()}",
@@ -658,7 +552,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             f"Ce code {request.language} contient {len(elements)} élément(s) principal(aux).",
             ""
         ]
-
 
         functions = [e for e in elements if e['type'] == 'function']
         if functions:
@@ -674,7 +567,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
                     f"- **Description:** {func.get('description') or 'À documenter'}",
                     ""
                 ])
-
 
         classes = [e for e in elements if e['type'] == 'class']
         if classes:
@@ -692,12 +584,9 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
         documentation = "\n".join(doc_parts)
 
-
         formatted_docs = self._format_documentation(documentation, request.doc_format or "markdown", request.language)
 
-
         coverage = self._calculate_coverage(elements, formatted_docs)
-
 
         suggestions = [
             "Documentation générée automatiquement. Recommandation: utiliser un LLM pour une documentation plus riche.",
@@ -714,18 +603,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             suggestions=suggestions
         )
 
-
 def generate_documentation(request: DocumentationRequest, parser=None, llm_manager=None) -> DocumentationResponse:
-    """
-    Fonction de compatibilité avec l'ancien système.
-
-    Args:
-        request: Requête de documentation
-        parser: Parser pour l'analyse
-        llm_manager: Service LLM
-
-    Returns:
-        Réponse de documentation
-    """
     tool = DocumentationTool()
     return tool.execute(request, parser=parser, llm_manager=llm_manager)

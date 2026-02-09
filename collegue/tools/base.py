@@ -13,7 +13,6 @@ import asyncio
 class ToolError(Exception):
     pass
 
-
 class ToolValidationError(ToolError):
     pass
 
@@ -344,9 +343,7 @@ class BaseTool(ABC):
             "usage_description": self.get_usage_description(),
             "parameters": self.get_parameters_info(),
             "examples": self.get_examples(),
-            "capabilities": self.get_capabilities(),
-            "limitations": self.get_limitations(),
-            "best_practices": self.get_best_practices()
+            "capabilities": self.get_capabilities()
         }
 
     def _calculate_success_rate(self) -> float:
@@ -392,19 +389,3 @@ class BaseTool(ABC):
             "Collecte de métriques",
             "Gestion d'erreurs"
         ]
-
-    def get_limitations(self) -> List[str]:
-        return [
-            "Dépend de la qualité du code fourni",
-            "Performance variable selon la complexité",
-            "Nécessite une configuration appropriée"
-        ]
-
-    def get_best_practices(self) -> List[str]:
-        return [
-            "Fournir du code bien formaté",
-            "Spécifier le langage de programmation",
-            "Utiliser un identifiant de session pour le suivi",
-            "Vérifier les métriques régulièrement"
-        ]
-

@@ -208,20 +208,11 @@ class KubernetesOpsTool(BaseTool):
     - Lister les ConfigMaps et Secrets
     """
 
-    def get_name(self) -> str:
-        return "kubernetes_ops"
-
-    def get_description(self) -> str:
-        return "Inspecte les clusters Kubernetes: pods, logs, déploiements, services, événements"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return KubernetesRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return KubernetesResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["yaml"]
+    tool_name = "kubernetes_ops"
+    tool_description = "Inspecte les clusters Kubernetes: pods, logs, déploiements, services, événements"
+    request_model = KubernetesRequest
+    response_model = KubernetesResponse
+    supported_languages = ["yaml"]
 
     def _load_config(self, kubeconfig: Optional[str] = None, context: Optional[str] = None):
         """Charge la configuration Kubernetes."""

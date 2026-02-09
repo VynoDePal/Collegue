@@ -11,11 +11,12 @@ from pydantic import BaseModel, Field, validator, field_validator
 import os
 import pathlib
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
+from .shared import run_async_from_sync
 from ._run_tests import RunTestsTool, RunTestsRequest
+from . import _test_templates
 
 
 class TestGenerationRequest(BaseModel):
-    """Modèle de requête pour la génération de tests unitaires."""
     code: str = Field(..., description="Code à tester", min_length=1)
     language: str = Field(..., description="Langage de programmation du code")
     session_id: Optional[str] = Field(None, description="Identifiant de session")
@@ -29,21 +30,18 @@ class TestGenerationRequest(BaseModel):
 
     @field_validator('language')
     def validate_language_field(cls, v):
-        """Valide que le langage est fourni et non vide."""
         if not v or not v.strip():
             raise ValueError("Le langage ne peut pas être vide")
         return v.strip().lower()
 
     @field_validator('coverage_target')
     def validate_coverage_target(cls, v):
-        """Valide que la cible de couverture est dans la plage valide."""
         if v is not None and (v < 0.0 or v > 1.0):
             raise ValueError("La cible de couverture doit être entre 0.0 et 1.0")
         return v
 
 
 class TestValidationResult(BaseModel):
-    """Résultat de la validation des tests générés."""
     validated: bool = Field(..., description="True si les tests ont été validés")
     success: bool = Field(..., description="True si tous les tests passent")
     total: int = Field(0, description="Nombre total de tests")
@@ -55,7 +53,6 @@ class TestValidationResult(BaseModel):
 
 
 class TestGenerationResponse(BaseModel):
-    """Modèle de réponse pour la génération de tests unitaires."""
     test_code: str = Field(..., description="Code de test généré")
     language: str = Field(..., description="Langage du code de test")
     framework: str = Field(..., description="Framework de test utilisé")
@@ -66,12 +63,6 @@ class TestGenerationResponse(BaseModel):
 
 
 class LLMTestGenerationResult(BaseModel):
-    """
-    Modèle de sortie structurée pour ctx.sample() avec result_type (FastMCP 2.14.1+).
-    
-    Ce modèle force le LLM à produire une réponse JSON validée par Pydantic,
-    garantissant que tous les champs requis sont présents et correctement typés.
-    """
     test_code: str = Field(..., description="Code de test complet et exécutable")
     test_count: int = Field(..., description="Nombre de tests générés")
     coverage_estimate: float = Field(
@@ -93,28 +84,13 @@ class LLMTestGenerationResult(BaseModel):
         description="Imports nécessaires pour les tests"
     )
 
-
 class TestGenerationTool(BaseTool):
-    """Outil de génération automatique de tests unitaires."""
-
-    def get_name(self) -> str:
-        return "test_generation"
-
-    def get_description(self) -> str:
-        return "Génère automatiquement des tests unitaires pour du code source"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return TestGenerationRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return TestGenerationResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["python", "javascript", "typescript", "java", "c#"]
-
-    def is_long_running(self) -> bool:
-        """Cet outil génère des tests complets via LLM et peut prendre du temps."""
-        return True
+    tool_name = "test_generation"
+    tool_description = "Génère automatiquement des tests unitaires pour du code source"
+    request_model = TestGenerationRequest
+    response_model = TestGenerationResponse
+    supported_languages = ["python", "javascript", "typescript", "java", "c#"]
+    long_running = True
 
     def get_supported_test_frameworks(self) -> Dict[str, List[str]]:
         return {
@@ -207,7 +183,6 @@ class TestGenerationTool(BaseTool):
         ]
 
     def get_capabilities(self) -> List[str]:
-        """Capacités spécifiques de l'outil de génération de tests."""
         return [
             "Génération de tests dans 5+ langages de programmation",
             "Support de 15+ frameworks de test populaires",
@@ -228,7 +203,6 @@ class TestGenerationTool(BaseTool):
         ]
 
     def get_framework_descriptions(self) -> Dict[str, Dict[str, str]]:
-        """Descriptions des frameworks de test par langage."""
         return {
             "python": {
                 "unittest": "Framework de test standard Python, intégré à la bibliothèque standard",
@@ -260,7 +234,6 @@ class TestGenerationTool(BaseTool):
         }
 
     def get_required_config_keys(self) -> List[str]:
-        """Retourne les clés de configuration requises."""
         return []
 
     def _validate_generated_tests(
@@ -271,19 +244,6 @@ class TestGenerationTool(BaseTool):
         source_code: str,
         working_dir: Optional[str] = None
     ) -> TestValidationResult:
-        """
-        Valide les tests générés en les exécutant avec run_tests.
-        
-        Args:
-            test_code: Code des tests générés
-            language: Langage de programmation
-            framework: Framework de test
-            source_code: Code source original à tester
-            working_dir: Répertoire de travail (optionnel)
-        
-        Returns:
-            TestValidationResult: Résultat de la validation
-        """
         temp_dir = None
         try:
             temp_dir = tempfile.mkdtemp(prefix="collegue_test_validation_")
@@ -362,16 +322,6 @@ class TestGenerationTool(BaseTool):
                     self.logger.warning(f"Impossible de supprimer le répertoire temporaire: {e}")
 
     def _execute_core_logic(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
-        """
-        Exécute la logique principale de génération de tests.
-
-        Args:
-            request: Requête de génération de tests validée
-            **kwargs: Services additionnels (llm_manager, parser, etc.)
-
-        Returns:
-            TestGenerationResponse: Les tests générés
-        """
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
 
@@ -391,14 +341,7 @@ class TestGenerationTool(BaseTool):
                 
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            import concurrent.futures
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(asyncio.run, self.prepare_prompt(request, context=context))
-                                prompt = future.result()
-                        else:
-                            prompt = loop.run_until_complete(self.prepare_prompt(request, context=context))
+                        prompt = run_async_from_sync(self.prepare_prompt(request, context=context))
                     else:
                         prompt = self.prepare_prompt(request, context=context)
                 except Exception as e:
@@ -443,19 +386,6 @@ class TestGenerationTool(BaseTool):
             return self._generate_fallback_tests(request, parser)
 
     async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
-        """
-        Version async de la logique de génération de tests (FastMCP 2.14+).
-        
-        Utilise ctx.sample() pour les appels LLM avec support structured output (result_type),
-        avec fallback vers ToolLLMManager si ctx non disponible.
-        
-        Args:
-            request: Requête de génération de tests validée
-            **kwargs: Services additionnels incluant ctx, llm_manager, parser
-        
-        Returns:
-            TestGenerationResponse: Les tests générés
-        """
         ctx = kwargs.get('ctx')
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
@@ -574,15 +504,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
             return self._generate_fallback_tests(request, parser)
 
     def _build_test_generation_prompt(self, request: TestGenerationRequest) -> str:
-        """
-        Construit le prompt optimisé pour le LLM.
-
-        Args:
-            request: Requête de génération de tests
-
-        Returns:
-            Prompt optimisé pour le LLM
-        """
         framework = request.test_framework or self._get_default_test_framework(request.language)
 
         prompt_parts = [
@@ -613,7 +534,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
         return "\n\n".join(prompt_parts)
 
     def _get_default_test_framework(self, language: str) -> str:
-        """Retourne le framework de test par défaut pour un langage donné."""
         framework_map = {
             "python": "pytest",
             "javascript": "jest",
@@ -624,7 +544,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
         return framework_map.get(language.lower(), "generic")
 
     def _get_available_test_frameworks(self, language: str) -> List[str]:
-        """Retourne la liste des frameworks de test disponibles pour un langage donné."""
         frameworks_map = {
             "python": ["unittest", "pytest"],
             "javascript": ["jest", "mocha", "jasmine"],
@@ -635,16 +554,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
         return frameworks_map.get(language.lower(), ["generic"])
 
     def _get_test_framework_instructions(self, language: str, framework: str) -> str:
-        """
-        Retourne les instructions spécifiques pour un framework de test.
-
-        Args:
-            language: Langage de programmation
-            framework: Framework de test
-
-        Returns:
-            Instructions spécifiques au framework
-        """
         instructions_map = {
             ("python", "pytest"): "Utilise les fixtures pytest et assert statements. Préfixe les fonctions de test par 'test_'.",
             ("python", "unittest"): "Hérite de unittest.TestCase. Utilise les méthodes assert* de la classe.",
@@ -656,18 +565,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
         return instructions_map.get((language.lower(), framework.lower()), "")
 
     def _generate_python_tests(self, code: str, test_framework: str, parsed_elements: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """
-        Génère des tests unitaires pour du code Python.
-
-        Args:
-            code: Le code Python à tester
-            test_framework: Le framework de test à utiliser
-            parsed_elements: Les éléments parsés du code
-            include_mocks: Indique si des mocks doivent être inclus
-
-        Returns:
-            str: Le code de test généré
-        """
         functions = []
         classes = []
 
@@ -704,195 +601,13 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
         else:
             return self._generate_unittest_tests(code, functions, classes, include_mocks)
 
-    def _generate_unittest_tests(self, code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """Génère des tests unitaires avec le framework unittest."""
-        module_name = "module_test"
+    def _generate_unittest_tests(self, code, functions, classes, include_mocks):
+        return _test_templates.generate_unittest_tests(code, functions, classes, include_mocks)
 
-        test_code = """\"\"\"
-Tests unitaires générés automatiquement avec unittest
-\"\"\"
-import unittest
-from unittest.mock import MagicMock, patch
-"""
-
-        test_code += f"from {module_name} import "
-
-        elements_to_import = []
-        for func in functions:
-            elements_to_import.append(func["name"])
-        for cls in classes:
-            elements_to_import.append(cls["name"])
-
-        if elements_to_import:
-            test_code += f", {', '.join(elements_to_import)}\n\n"
-        else:
-            test_code += "*\n\n"
-
-        if functions:
-            test_code += "class TestFunctions(unittest.TestCase):\n"
-            test_code += "    \"\"\"Tests pour les fonctions.\"\"\"\n\n"
-
-            for func in functions:
-                func_name = func["name"]
-                params = func.get("params", "")
-
-                test_code += f"    def test_{func_name}(self):\n"
-                test_code += f"        \"\"\"Test pour la fonction {func_name}.\"\"\"\n"
-
-                test_values = []
-                for param in params.split(","):
-                    param = param.strip()
-                    if not param:
-                        continue
-
-                    if "str" in param or "name" in param or "text" in param:
-                        test_values.append('"test"')
-                    elif "int" in param or "num" in param or "count" in param:
-                        test_values.append("42")
-                    elif "float" in param or "price" in param or "amount" in param:
-                        test_values.append("3.14")
-                    elif "bool" in param or "flag" in param or "is_" in param:
-                        test_values.append("True")
-                    elif "list" in param or "array" in param:
-                        test_values.append("[1, 2, 3]")
-                    elif "dict" in param or "map" in param:
-                        test_values.append('{"key": "value"}')
-                    else:
-                        test_values.append("None")
-
-                if include_mocks and params:
-                    test_code += "        # Créer des mocks pour les dépendances\n"
-                    test_code += "        mock_dependency = MagicMock()\n\n"
-
-                test_code += "        # Exécuter la fonction à tester\n"
-                test_code += f"        result = {func_name}({', '.join(test_values)})\n\n"
-
-                test_code += "        # Vérifier les résultats\n"
-                test_code += "        self.assertIsNotNone(result)\n\n"
-
-            test_code += "\n"
-
-        for cls in classes:
-            class_name = cls["name"]
-
-            test_code += f"class Test{class_name}(unittest.TestCase):\n"
-            test_code += f"    \"\"\"Tests pour la classe {class_name}.\"\"\"\n\n"
-
-            test_code += "    def setUp(self):\n"
-            test_code += "        \"\"\"Initialisation des tests.\"\"\"\n"
-            test_code += f"        self.instance = {class_name}()\n\n"
-
-            test_code += "    def test_initialization(self):\n"
-            test_code += f"        \"\"\"Test de l'initialisation de {class_name}.\"\"\"\n"
-            test_code += f"        self.assertIsInstance(self.instance, {class_name})\n\n"
-
-            test_code += "    def test_methods(self):\n"
-            test_code += f"        \"\"\"Test des méthodes de {class_name}.\"\"\"\n"
-            test_code += "        # Ajouter des tests pour les méthodes spécifiques\n"
-            test_code += "        pass\n\n"
-
-        test_code += "if __name__ == '__main__':\n"
-        test_code += "    unittest.main()"
-
-        return test_code
-
-    def _generate_pytest_tests(self, code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """Génère des tests unitaires avec le framework pytest."""
-        module_name = "module_test"
-
-        test_code = """\"\"\"
-Tests unitaires générés automatiquement avec pytest
-\"\"\"
-import pytest
-from unittest.mock import MagicMock, patch
-"""
-
-        test_code += f"from {module_name} import "
-
-        elements_to_import = []
-        for func in functions:
-            elements_to_import.append(func["name"])
-        for cls in classes:
-            elements_to_import.append(cls["name"])
-
-        if elements_to_import:
-            test_code += f", {', '.join(elements_to_import)}\n\n"
-        else:
-            test_code += "*\n\n"
-
-        if classes:
-            test_code += "@pytest.fixture\n"
-            for cls in classes:
-                class_name = cls["name"]
-                test_code += f"def {class_name.lower()}_instance():\n"
-                test_code += f"    \"\"\"Fixture pour créer une instance de {class_name}.\"\"\"\n"
-                test_code += f"    return {class_name}()\n\n"
-
-        for func in functions:
-            func_name = func["name"]
-            params = func.get("params", "")
-
-            test_code += f"def test_{func_name}():\n"
-            test_code += f"    \"\"\"Test pour la fonction {func_name}.\"\"\"\n"
-
-            test_values = []
-            for param in params.split(","):
-                param = param.strip()
-                if not param:
-                    continue
-
-                if "str" in param or "name" in param or "text" in param:
-                    test_values.append('"test"')
-                elif "int" in param or "num" in param or "count" in param:
-                    test_values.append("42")
-                elif "float" in param or "price" in param or "amount" in param:
-                    test_values.append("3.14")
-                elif "bool" in param or "flag" in param or "is_" in param:
-                    test_values.append("True")
-                elif "list" in param or "array" in param:
-                    test_values.append("[1, 2, 3]")
-                elif "dict" in param or "map" in param:
-                    test_values.append('{"key": "value"}')
-                else:
-                    test_values.append("None")
-
-            if include_mocks and params:
-                test_code += "    # Créer des mocks pour les dépendances\n"
-                test_code += "    mock_dependency = MagicMock()\n\n"
-
-            test_code += "    # Exécuter la fonction à tester\n"
-            test_code += f"    result = {func_name}({', '.join(test_values)})\n\n"
-
-            test_code += "    # Vérifier les résultats\n"
-            test_code += "    assert result is not None\n\n"
-
-        for cls in classes:
-            class_name = cls["name"]
-
-            test_code += f"def test_{class_name.lower()}_initialization({class_name.lower()}_instance):\n"
-            test_code += f"    \"\"\"Test de l'initialisation de {class_name}.\"\"\"\n"
-            test_code += f"    assert isinstance({class_name.lower()}_instance, {class_name})\n\n"
-
-            test_code += f"def test_{class_name.lower()}_methods({class_name.lower()}_instance):\n"
-            test_code += f"    \"\"\"Test des méthodes de {class_name}.\"\"\"\n"
-            test_code += "    # Ajouter des tests pour les méthodes spécifiques\n"
-            test_code += "    pass\n\n"
-
-        return test_code
+    def _generate_pytest_tests(self, code, functions, classes, include_mocks):
+        return _test_templates.generate_pytest_tests(code, functions, classes, include_mocks)
 
     def _generate_javascript_tests(self, code: str, test_framework: str, parsed_elements: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """
-        Génère des tests unitaires pour du code JavaScript.
-
-        Args:
-            code: Le code JavaScript à tester
-            test_framework: Le framework de test à utiliser
-            parsed_elements: Les éléments parsés du code
-            include_mocks: Indique si des mocks doivent être inclus
-
-        Returns:
-            str: Le code de test généré
-        """
         functions = []
         classes = []
 
@@ -931,18 +646,6 @@ from unittest.mock import MagicMock, patch
             return self._generate_jest_tests(code, functions, classes, include_mocks)
 
     def _generate_typescript_tests(self, code: str, test_framework: str, parsed_elements: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """
-        Génère des tests unitaires pour du code TypeScript.
-
-        Args:
-            code: Le code TypeScript à tester
-            test_framework: Le framework de test à utiliser
-            parsed_elements: Les éléments parsés du code
-            include_mocks: Indique si des mocks doivent être inclus
-
-        Returns:
-            str: Le code de test généré
-        """
         functions = []
         classes = []
         interfaces = []
@@ -1011,16 +714,6 @@ from unittest.mock import MagicMock, patch
             return self._generate_typescript_jest_tests(code, functions, classes, interfaces, types, include_mocks)
 
     def _generate_fallback_tests(self, request: TestGenerationRequest, parser=None) -> TestGenerationResponse:
-        """
-        Génère des tests en fallback local sans LLM.
-
-        Args:
-            request: Requête de génération de tests
-            parser: Parser optionnel
-
-        Returns:
-            TestGenerationResponse: Tests générés en mode fallback
-        """
         framework = request.test_framework or self._get_default_test_framework(request.language)
 
         tested_elements = self._extract_tested_elements(request.code, request.language, parser)
@@ -1058,17 +751,6 @@ from unittest.mock import MagicMock, patch
         )
 
     def _extract_tested_elements(self, code: str, language: str, parser=None) -> List[Dict[str, str]]:
-        """
-        Extrait les éléments testables du code.
-
-        Args:
-            code: Code source à analyser
-            language: Langage du code
-            parser: Parser optionnel
-
-        Returns:
-            Liste des éléments testables
-        """
         elements = []
 
         if parser and hasattr(parser, 'parse'):
@@ -1105,17 +787,6 @@ from unittest.mock import MagicMock, patch
         return elements
 
     def _estimate_coverage(self, tested_elements: List[Dict[str, str]], code: str, target_coverage: float) -> float:
-        """
-        Estime la couverture de code basée sur les éléments testés.
-
-        Args:
-            tested_elements: Éléments qui seront testés
-            code: Code source
-            target_coverage: Couverture cible
-
-        Returns:
-            Estimation de la couverture (0.0-1.0)
-        """
         if not tested_elements:
             return 0.0
 
@@ -1132,17 +803,6 @@ from unittest.mock import MagicMock, patch
         return round(estimated_coverage, 2)
 
     def _generate_test_file_path(self, file_path: str, output_dir: str, framework: str) -> str:
-        """
-        Génère le chemin du fichier de test.
-
-        Args:
-            file_path: Chemin du fichier source
-            output_dir: Répertoire de sortie
-            framework: Framework de test
-
-        Returns:
-            Chemin du fichier de test
-        """
         import os
 
         filename = os.path.basename(file_path)
@@ -1156,447 +816,23 @@ from unittest.mock import MagicMock, patch
 
         return os.path.join(output_dir, test_filename)
 
-    def _generate_generic_tests(self, code: str, language: str, framework: str) -> str:
-        """
-        Génère des tests génériques pour les langages non spécifiquement supportés.
+    def _generate_generic_tests(self, code, language, framework):
+        return _test_templates.generate_generic_tests(code, language, framework)
 
-        Args:
-            code: Code source
-            language: Langage
-            framework: Framework de test
+    def _generate_jest_tests(self, code, functions, classes, include_mocks):
+        return _test_templates.generate_jest_tests(code, functions, classes, include_mocks)
 
-        Returns:
-            Code de test générique
-        """
-        return f"""
-// Tests générés automatiquement pour {language}
-// Framework: {framework}
+    def _generate_mocha_tests(self, code, functions, classes, include_mocks):
+        return _test_templates.generate_mocha_tests(code, functions, classes, include_mocks)
 
-// TODO: Implémenter les tests spécifiques pour {language}
-// Code source à tester:
-/*
-{code}
-*/
+    def _generate_typescript_jest_tests(self, code, functions, classes, interfaces, types, include_mocks):
+        return _test_templates.generate_typescript_jest_tests(code, functions, classes, interfaces, types, include_mocks)
 
-// Exemple de structure de test:
-function testExample() {{
-    // Ajouter les tests appropriés ici
-    console.log("Tests à implémenter pour {language}");
-}}
-"""
-
-    def _generate_jest_tests(self, code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """Génère des tests Jest pour JavaScript."""
-        test_code = "// Tests générés automatiquement avec Jest\n\n"
-
-        if include_mocks:
-            test_code += "// Mocks\njest.mock('./module');\n\n"
-
-        if functions:
-            test_code += "// Tests des fonctions\n"
-            test_code += "describe('Functions', () => {\n"
-            for func in functions:
-                func_name = func["name"]
-                test_code += f"  test('{func_name} should work correctly', () => {{\n"
-                test_code += f"    // TODO: Implémenter le test pour {func_name}\n"
-                test_code += f"    expect({func_name}).toBeDefined();\n"
-                test_code += "  });\n\n"
-            test_code += "});\n\n"
-
-        if classes:
-            test_code += "// Tests des classes\n"
-            for cls in classes:
-                class_name = cls["name"]
-                test_code += f"describe('{class_name}', () => {{\n"
-                test_code += f"  test('should instantiate correctly', () => {{\n"
-                test_code += f"    const instance = new {class_name}();\n"
-                test_code += f"    expect(instance).toBeInstanceOf({class_name});\n"
-                test_code += "  });\n"
-                test_code += "});\n\n"
-
-        return test_code
-
-    def _generate_mocha_tests(self, code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """Génère des tests Mocha pour JavaScript."""
-        test_code = "// Tests générés automatiquement avec Mocha\n"
-        test_code += "const { expect } = require('chai');\n\n"
-
-        if include_mocks:
-            test_code += "// Configuration des mocks\nconst sinon = require('sinon');\n\n"
-
-        if functions:
-            test_code += "describe('Functions', function() {\n"
-            for func in functions:
-                func_name = func["name"]
-                test_code += f"  describe('{func_name}', function() {{\n"
-                test_code += f"    it('should work correctly', function() {{\n"
-                test_code += f"      // TODO: Implémenter le test pour {func_name}\n"
-                test_code += f"      expect({func_name}).to.exist;\n"
-                test_code += "    });\n"
-                test_code += "  });\n"
-            test_code += "});\n\n"
-
-        if classes:
-            for cls in classes:
-                class_name = cls["name"]
-                test_code += f"describe('{class_name}', function() {{\n"
-                test_code += f"  it('should instantiate correctly', function() {{\n"
-                test_code += f"    const instance = new {class_name}();\n"
-                test_code += f"    expect(instance).to.be.instanceOf({class_name});\n"
-                test_code += "  });\n"
-                test_code += "});\n\n"
-
-        return test_code
-
-    def _generate_typescript_jest_tests(self, code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], interfaces: List[Dict[str, Any]], types: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """Génère des tests unitaires avec le framework Jest pour TypeScript."""
-        module_name = "module"
-
-        test_code = "/**\n * Tests unitaires générés automatiquement avec Jest pour TypeScript\n */\n"
-
-        test_code += "import { expect } from '@jest/globals';\n"
-
-        if functions or classes or interfaces or types:
-            test_code += "// Import du module à tester\n"
-
-            elements_to_import = []
-            for func in functions:
-                elements_to_import.append(func["name"])
-            for cls in classes:
-                elements_to_import.append(cls["name"])
-            for interface in interfaces:
-                elements_to_import.append(interface["name"])
-            for type in types:
-                elements_to_import.append(type["name"])
-
-            if elements_to_import:
-                test_code += f"import {{ {', '.join(elements_to_import)} }} from './{module_name}';\n\n"
-
-        if include_mocks:
-            test_code += "// Configuration des mocks\n"
-            test_code += "jest.mock('./module');\n\n"
-
-        for func in functions:
-            func_name = func["name"]
-
-            test_code += f"// Tests pour la fonction {func_name}\n"
-            test_code += f"describe('{func_name}', () => {{\n"
-
-            test_code += "  it('should be defined', () => {\n"
-            test_code += f"    expect({func_name}).toBeDefined();\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should return expected result', () => {\n"
-
-            params = func.get("params", "")
-            return_type = func.get("return_type", "void")
-
-            param_values = []
-            if params:
-                param_parts = params.split(",")
-                for param in param_parts:
-                    param = param.strip()
-                    if ":" in param:
-                        param_name, param_type = param.split(":", 1)
-                        param_name = param_name.strip()
-                        param_type = param_type.strip()
-
-                        if "string" in param_type:
-                            param_values.append(f"'test{param_name}'")
-                        elif "number" in param_type:
-                            param_values.append("42")
-                        elif "boolean" in param_type:
-                            param_values.append("true")
-                        elif "[]" in param_type or "Array" in param_type:
-                            param_values.append("[]")
-                        elif "object" in param_type or "{" in param_type:
-                            param_values.append("{}")
-                        else:
-                            param_values.append("undefined")
-                    else:
-                        param_values.append("undefined")
-
-            func_call = f"{func_name}({', '.join(param_values)})"
-
-            if return_type and return_type != "void":
-                if "string" in return_type:
-                    test_code += f"    expect(typeof {func_call}).toBe('string');\n"
-                elif "number" in return_type:
-                    test_code += f"    expect(typeof {func_call}).toBe('number');\n"
-                elif "boolean" in return_type:
-                    test_code += f"    expect(typeof {func_call}).toBe('boolean');\n"
-                elif "[]" in return_type or "Array" in return_type:
-                    test_code += f"    expect(Array.isArray({func_call})).toBe(true);\n"
-                elif "Promise" in return_type:
-                    test_code += f"    return {func_call}.then(result => {{\n"
-                    test_code += "      expect(result).toBeDefined();\n"
-                    test_code += "    });\n"
-                else:
-                    test_code += f"    expect({func_call}).toBeDefined();\n"
-            else:
-                test_code += f"    {func_call};\n"
-                test_code += "    expect(true).toBe(true); // Vérifier que la fonction s'exécute sans erreur\n"
-
-            test_code += "  });\n"
-
-            test_code += "\n  it('should handle error cases', () => {\n"
-            test_code += "    // Ajouter des tests pour les cas d'erreur\n"
-            test_code += "  });\n"
-
-            test_code += "});\n\n"
-
-        for cls in classes:
-            class_name = cls["name"]
-
-            test_code += f"// Tests pour la classe {class_name}\n"
-            test_code += f"describe('{class_name}', () => {{\n"
-            test_code += f"  let instance: {class_name};\n\n"
-
-            test_code += "  beforeEach(() => {\n"
-            test_code += f"    instance = new {class_name}();\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should initialize correctly', () => {\n"
-            test_code += f"    expect(instance).toBeInstanceOf({class_name});\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should have expected methods', () => {\n"
-            test_code += "    // Ajouter des tests pour les méthodes spécifiques\n"
-            test_code += "  });\n"
-            test_code += "});\n\n"
-
-        for interface in interfaces:
-            interface_name = interface["name"]
-
-            test_code += f"// Tests pour l'interface {interface_name}\n"
-            test_code += f"describe('{interface_name}', () => {{\n"
-            test_code += f"  let mockImplementation: {interface_name};\n\n"
-
-            test_code += "  beforeEach(() => {\n"
-            test_code += f"    mockImplementation = {{\n"
-            test_code += "      // Implémenter les propriétés requises par l'interface\n"
-            test_code += "    }} as " + interface_name + ";\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should be able to create an implementation', () => {\n"
-            test_code += f"    expect(mockImplementation).toBeDefined();\n"
-            test_code += "  });\n\n"
-
-            if interface.get("extends"):
-                parent_interface = interface.get("extends")
-                test_code += f"\n  it('should extend {parent_interface}', () => {{\n"
-                test_code += "    // Vérifier que l'implémentation contient les propriétés de l'interface parente\n"
-                test_code += f"    const parentProps: Array<keyof {parent_interface}> = [];\n"
-                test_code += "    parentProps.forEach(prop => {\n"
-                test_code += "      expect(mockImplementation[prop]).toBeDefined();\n"
-                test_code += "    });\n"
-                test_code += "  });\n"
-
-            test_code += "});\n\n"
-
-        for type in types:
-            type_name = type["name"]
-
-            test_code += f"// Tests pour le type {type_name}\n"
-            test_code += f"describe('{type_name}', () => {{\n"
-            test_code += f"  let instance: {type_name};\n\n"
-
-            test_code += "  beforeEach(() => {\n"
-            test_code += f"    instance = {{\n"
-            test_code += "      // Initialiser avec des valeurs valides pour ce type\n"
-            test_code += "    }} as " + type_name + ";\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should be a valid type', () => {\n"
-            test_code += f"    const typeCheck = (value: {type_name}): boolean => true;\n"
-            test_code += "    expect(typeCheck(instance)).toBe(true);\n"
-            test_code += "  });\n"
-
-            test_code += "});\n\n"
-
-        return test_code
-
-    def _generate_typescript_mocha_tests(self, code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], interfaces: List[Dict[str, Any]], types: List[Dict[str, Any]], include_mocks: bool) -> str:
-        """Génère des tests unitaires avec le framework Mocha pour TypeScript."""
-        module_name = "module"
-
-        test_code = "/**\n * Tests unitaires générés automatiquement avec Mocha pour TypeScript\n */\n"
-
-        test_code += "import { expect } from 'chai';\n"
-
-        if functions or classes or interfaces or types:
-            test_code += "// Import du module à tester\n"
-
-            elements_to_import = []
-            for func in functions:
-                elements_to_import.append(func["name"])
-            for cls in classes:
-                elements_to_import.append(cls["name"])
-            for interface in interfaces:
-                elements_to_import.append(interface["name"])
-            for type in types:
-                elements_to_import.append(type["name"])
-
-            if elements_to_import:
-                test_code += f"import {{ {', '.join(elements_to_import)} }} from './{module_name}';\n\n"
-
-        if include_mocks:
-            test_code += "// Configuration des mocks\n"
-            test_code += "import * as sinon from 'sinon';\n\n"
-
-        for func in functions:
-            func_name = func["name"]
-
-            test_code += f"// Tests pour la fonction {func_name}\n"
-            test_code += f"describe('{func_name}', () => {{\n"
-
-            test_code += "  it('should be defined', () => {\n"
-            test_code += f"    expect({func_name}).to.exist;\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should return expected result', () => {\n"
-
-            params = func.get("params", "")
-            return_type = func.get("return_type", "void")
-
-            param_values = []
-            if params:
-                param_parts = params.split(",")
-                for param in param_parts:
-                    param = param.strip()
-                    if ":" in param:
-                        param_name, param_type = param.split(":", 1)
-                        param_name = param_name.strip()
-                        param_type = param_type.strip()
-
-                        if "string" in param_type:
-                            param_values.append(f"'test{param_name}'")
-                        elif "number" in param_type:
-                            param_values.append("42")
-                        elif "boolean" in param_type:
-                            param_values.append("true")
-                        elif "[]" in param_type or "Array" in param_type:
-                            param_values.append("[]")
-                        elif "object" in param_type or "{" in param_type:
-                            param_values.append("{}")
-                        else:
-                            param_values.append("undefined")
-                    else:
-                        param_values.append("undefined")
-
-            func_call = f"{func_name}({', '.join(param_values)})"
-
-            if return_type and return_type != "void":
-                if "string" in return_type:
-                    test_code += f"    expect(typeof {func_call}).toBe('string');\n"
-                elif "number" in return_type:
-                    test_code += f"    expect(typeof {func_call}).toBe('number');\n"
-                elif "boolean" in return_type:
-                    test_code += f"    expect(typeof {func_call}).toBe('boolean');\n"
-                elif "[]" in return_type or "Array" in return_type:
-                    test_code += f"    expect(Array.isArray({func_call})).toBe(true);\n"
-                elif "Promise" in return_type:
-                    test_code += f"    return {func_call}.then(result => {{\n"
-                    test_code += "      expect(result).to.exist;\n"
-                    test_code += "    });\n"
-                else:
-                    test_code += f"    expect({func_call}).to.exist;\n"
-            else:
-                test_code += f"    {func_call};\n"
-                test_code += "    expect(true).toBe(true); // Vérifier que la fonction s'exécute sans erreur\n"
-
-            test_code += "  });\n"
-
-            test_code += "\n  it('should handle error cases', () => {\n"
-            test_code += "    // Ajouter des tests pour les cas d'erreur\n"
-            test_code += "  });\n"
-
-            test_code += "});\n\n"
-
-        for cls in classes:
-            class_name = cls["name"]
-
-            test_code += f"// Tests pour la classe {class_name}\n"
-            test_code += f"describe('{class_name}', () => {{\n"
-            test_code += f"  let instance: {class_name};\n\n"
-
-            test_code += "  beforeEach(() => {\n"
-            test_code += f"    instance = new {class_name}();\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should initialize correctly', () => {\n"
-            test_code += f"    expect(instance).toBeInstanceOf({class_name});\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should have expected methods', () => {\n"
-            test_code += "    // Ajouter des tests pour les méthodes spécifiques\n"
-            test_code += "  });\n"
-            test_code += "});\n\n"
-
-        for interface in interfaces:
-            interface_name = interface["name"]
-
-            test_code += f"// Tests pour l'interface {interface_name}\n"
-            test_code += f"describe('{interface_name}', () => {{\n"
-            test_code += f"  let mockImplementation: {interface_name};\n\n"
-
-            test_code += "  beforeEach(() => {\n"
-            test_code += f"    mockImplementation = {{\n"
-            test_code += "      // Implémenter les propriétés requises par l'interface\n"
-            test_code += "    }} as " + interface_name + ";\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should be able to create an implementation', () => {\n"
-            test_code += f"    expect(mockImplementation).to.exist;\n"
-            test_code += "  });\n\n"
-
-            if interface.get("extends"):
-                parent_interface = interface.get("extends")
-                test_code += f"\n  it('should extend {parent_interface}', () => {{\n"
-                test_code += "    // Vérifier que l'implémentation contient les propriétés de l'interface parente\n"
-                test_code += f"    const parentProps: Array<keyof {parent_interface}> = [];\n"
-                test_code += "    parentProps.forEach(prop => {\n"
-                test_code += "      expect(mockImplementation[prop]).to.exist;\n"
-                test_code += "    });\n"
-                test_code += "  });\n"
-
-            test_code += "});\n\n"
-
-        for type in types:
-            type_name = type["name"]
-
-            test_code += f"// Tests pour le type {type_name}\n"
-            test_code += f"describe('{type_name}', () => {{\n"
-            test_code += f"  let instance: {type_name};\n\n"
-
-            test_code += "  beforeEach(() => {\n"
-            test_code += f"    instance = {{\n"
-            test_code += "      // Initialiser avec des valeurs valides pour ce type\n"
-            test_code += "    }} as " + type_name + ";\n"
-            test_code += "  });\n\n"
-
-            test_code += "  it('should be a valid type', () => {\n"
-            test_code += f"    const typeCheck = (value: {type_name}): boolean => true;\n"
-            test_code += "    expect(typeCheck(instance)).toBe(true);\n"
-            test_code += "  });\n"
-
-            test_code += "});\n\n"
-
-        return test_code
+    def _generate_typescript_mocha_tests(self, code, functions, classes, interfaces, types, include_mocks):
+        return _test_templates.generate_typescript_mocha_tests(code, functions, classes, interfaces, types, include_mocks)
 
 
 _test_generation_tool = TestGenerationTool()
 
 def generate_tests(request: TestGenerationRequest, parser=None, llm_manager=None) -> TestGenerationResponse:
-    """
-    Fonction de compatibilité pour l'ancien système.
-
-    Args:
-        request: Requête de génération de tests
-        parser: Parser optionnel
-        llm_manager: LLM manager optionnel
-
-    Returns:
-        TestGenerationResponse: Tests générés
-    """
     return _test_generation_tool.execute(request, parser=parser, llm_manager=llm_manager)

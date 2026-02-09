@@ -146,24 +146,12 @@ class RunTestsTool(BaseTool):
         'javascript': ['jest', 'mocha', 'vitest']
     }
 
-    def get_name(self) -> str:
-        return "run_tests"
-
-    def get_description(self) -> str:
-        return "Exécute des tests unitaires (pytest, unittest, jest, mocha) et retourne des résultats structurés"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return RunTestsRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return RunTestsResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["python", "typescript", "javascript"]
-
-    def is_long_running(self) -> bool:
-        """Les tests peuvent prendre du temps."""
-        return True
+    tool_name = "run_tests"
+    tool_description = "Exécute des tests unitaires (pytest, unittest, jest, mocha) et retourne des résultats structurés"
+    request_model = RunTestsRequest
+    response_model = RunTestsResponse
+    supported_languages = ["python", "typescript", "javascript"]
+    long_running = True
 
     def get_usage_description(self) -> str:
         return (
