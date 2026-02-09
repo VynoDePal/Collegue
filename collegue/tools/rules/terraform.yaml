@@ -1,0 +1,93 @@
+baseline:
+  - id: TF-001
+    title: Security group allows all inbound traffic
+    severity: critical
+    pattern: 'cidr_blocks\s*=\s*\[\s*"0\.0\.0\.0/0"\s*\]'
+    description: "La règle autorise le trafic depuis n'importe quelle adresse IP."
+    remediation: "Restreindre cidr_blocks aux IPs nécessaires uniquement."
+    references:
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group
+
+  - id: TF-002
+    title: S3 bucket with public access
+    severity: critical
+    pattern: 'acl\s*=\s*"public-read(?:-write)?"'
+    description: "Le bucket S3 est accessible publiquement."
+    remediation: "Utiliser acl = \"private\" et configurer des policies explicites."
+    references:
+      - https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html
+
+  - id: TF-003
+    title: RDS instance publicly accessible
+    severity: critical
+    pattern: 'publicly_accessible\s*=\s*true'
+    description: "L'instance RDS est accessible depuis Internet."
+    remediation: "Définir publicly_accessible = false."
+    references:
+      - https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_SettingUp.html
+
+  - id: TF-004
+    title: SSH port open to world
+    severity: critical
+    pattern: '(?:from_port|to_port)\s*=\s*22[\s\S]*?cidr_blocks\s*=\s*\[\s*"0\.0\.0\.0/0"\s*\]'
+    description: "Le port SSH (22) est ouvert à tout Internet."
+    remediation: "Restreindre l'accès SSH aux IPs de confiance ou utiliser un bastion."
+    references:
+      - https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/authorizing-access-to-an-instance.html
+
+  - id: TF-005
+    title: Encryption at rest not enabled
+    severity: high
+    pattern: '(?:aws_db_instance|aws_ebs_volume|aws_s3_bucket)[\s\S]*?(?!encrypted\s*=\s*true)'
+    check_type: absence
+    description: "Le chiffrement au repos n'est pas activé."
+    remediation: "Ajouter encrypted = true pour les ressources de stockage."
+    references:
+      - https://docs.aws.amazon.com/whitepapers/latest/introduction-aws-security/data-encryption.html
+
+  - id: TF-006
+    title: IAM policy with wildcard actions
+    severity: high
+    pattern: '"Action"\s*:\s*(?:\[\s*)?"[\w:]*\*"'
+    description: "La policy IAM utilise des actions wildcard (*), violant le principe du moindre privilège."
+    remediation: "Spécifier les actions exactes nécessaires au lieu de wildcards."
+    references:
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html
+
+  - id: TF-007
+    title: IAM policy with wildcard resources
+    severity: high
+    pattern: '"Resource"\s*:\s*(?:\[\s*)?"\*"'
+    description: "La policy IAM s'applique à toutes les ressources (*)."
+    remediation: "Spécifier les ARN des ressources exactes."
+    references:
+      - https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html
+
+  - id: TF-008
+    title: Hardcoded secret in Terraform
+    severity: critical
+    pattern: '(?:password|secret|api_key|access_key)\s*=\s*"[^"$]{8,}"'
+    description: "Un secret semble être hardcodé dans le code Terraform."
+    remediation: "Utiliser des variables sensibles, Vault, ou AWS Secrets Manager."
+    references:
+      - https://developer.hashicorp.com/terraform/tutorials/configuration-language/sensitive-variables
+
+strict:
+  - id: TF-101
+    title: CloudTrail logging not enabled
+    severity: medium
+    pattern: aws_cloudtrail
+    check_type: absence_in_project
+    description: "CloudTrail n'est pas configuré pour l'audit."
+    remediation: "Configurer aws_cloudtrail pour auditer les actions API."
+    references:
+      - https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-create-and-update-a-trail.html
+
+  - id: TF-102
+    title: VPC flow logs not enabled
+    severity: medium
+    pattern: 'aws_vpc(?![\s\S]*?aws_flow_log)'
+    description: "Les VPC Flow Logs ne sont pas activés."
+    remediation: "Configurer aws_flow_log pour chaque VPC."
+    references:
+      - https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html
