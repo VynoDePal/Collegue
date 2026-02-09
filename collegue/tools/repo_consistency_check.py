@@ -23,13 +23,7 @@ from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from collections import defaultdict
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-
-
-class FileInput(BaseModel):
-    """Un fichier avec son chemin et contenu."""
-    path: str = Field(..., description="Chemin relatif du fichier")
-    content: str = Field(..., description="Contenu du fichier")
-    language: Optional[str] = Field(None, description="Langage (auto-détecté si absent)")
+from .shared import FileInput, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
 
 
 class ConsistencyCheckRequest(BaseModel):
@@ -45,7 +39,7 @@ class ConsistencyCheckRequest(BaseModel):
     )
     checks: Optional[List[str]] = Field(
         None,
-        description="Checks à exécuter: 'unused_imports', 'unused_vars', 'dead_code', 'duplication', 'signature_mismatch', 'unresolved_symbol'. Tous par défaut."
+        description="Checks à exécuter: 'unused_imports', 'unused_vars', 'dead_code', 'duplication', 'unresolved_symbol'. Tous par défaut."
     )
     diff: Optional[str] = Field(
         None,
@@ -78,33 +72,25 @@ class ConsistencyCheckRequest(BaseModel):
 
     @field_validator('mode')
     def validate_mode(cls, v):
-        valid = ['fast', 'deep']
-        if v not in valid:
-            raise ValueError(f"Mode '{v}' invalide. Utilisez: {', '.join(valid)}")
-        return v
+        return validate_fast_deep(v)
 
     @field_validator('analysis_depth')
     def validate_analysis_depth(cls, v):
-        valid = ['fast', 'deep']
-        if v not in valid:
-            raise ValueError(f"Depth '{v}' invalide. Utilisez: {', '.join(valid)}")
-        return v
+        return validate_fast_deep(v)
 
     @field_validator('checks')
     def validate_checks(cls, v):
         if v is None:
             return v
         valid = ['unused_imports', 'unused_vars', 'dead_code', 'duplication',
-                 'signature_mismatch', 'unresolved_symbol']
+                 'unresolved_symbol']
         for check in v:
             if check not in valid:
                 raise ValueError(f"Check '{check}' invalide. Utilisez: {', '.join(valid)}")
         return v
 
-
 class ConsistencyIssue(BaseModel):
-    """Un problème de cohérence détecté."""
-    kind: str = Field(..., description="Type: unused_import, unused_var, dead_code, duplication, signature_mismatch, unresolved_symbol")
+    kind: str = Field(..., description="Type: unused_import, unused_var, dead_code, duplication, unresolved_symbol")
     severity: str = Field(..., description="Sévérité: info, low, medium, high")
     path: str = Field(..., description="Chemin du fichier")
     line: Optional[int] = Field(None, description="Numéro de ligne")
@@ -113,18 +99,13 @@ class ConsistencyIssue(BaseModel):
     confidence: int = Field(..., description="Confiance 0-100")
     suggested_fix: Optional[str] = Field(None, description="Suggestion de correction")
     engine: str = Field("embedded-rules", description="Moteur utilisé")
-
-
 class LLMInsight(BaseModel):
-    """Un insight généré par l'IA en mode deep."""
     category: str = Field(..., description="Catégorie: pattern, architecture, debt, suggestion")
     insight: str = Field(..., description="L'insight détaillé")
     confidence: str = Field("medium", description="Confiance: low, medium, high")
     affected_files: List[str] = Field(default_factory=list, description="Fichiers concernés")
 
-
 class SuggestedAction(BaseModel):
-    """Une action suggérée (potentiellement auto-exécutable)."""
     tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
     action_type: str = Field(..., description="Type: refactor, cleanup, restructure")
     rationale: str = Field(..., description="Pourquoi cette action")
@@ -134,7 +115,6 @@ class SuggestedAction(BaseModel):
 
 
 class ConsistencyCheckResponse(BaseModel):
-    """Modèle de réponse pour la vérification de cohérence."""
     valid: bool = Field(..., description="True si aucun problème trouvé")
     summary: Dict[str, int] = Field(
         ...,
@@ -178,54 +158,24 @@ class ConsistencyCheckResponse(BaseModel):
         description="Résultat du refactoring automatique (si déclenché)"
     )
 
-
 class RepoConsistencyCheckTool(BaseTool):
-    """
-    Outil de détection d'incohérences dans le code.
-
-    Détecte les problèmes typiques générés par l'IA:
-    - Imports non utilisés (Python, JS/TS)
-    - Variables déclarées mais jamais utilisées
-    - Fonctions/classes jamais appelées (code mort)
-    - Duplication de code (similarité token)
-    - Mismatch signature/usage
-    - Symboles non résolus dans le scope fourni
-
-    Basé sur des heuristiques AST (Python) et regex (JS/TS).
-    Compatible avec l'environnement MCP isolé (analyse sur contenu).
-    """
-
+    tool_name = "repo_consistency_check"
+    tool_description = "Détecte les incohérences dans le code: imports/variables inutilisés, code mort, duplication"
+    request_model = ConsistencyCheckRequest
+    response_model = ConsistencyCheckResponse
+    supported_languages = ["python", "typescript", "javascript", "auto"]
+    long_running = False
 
     ALL_CHECKS = ['unused_imports', 'unused_vars', 'dead_code', 'duplication',
-                  'signature_mismatch', 'unresolved_symbol']
-
+                  'unresolved_symbol']
 
     SEVERITY_MAP = {
         'unused_import': 'low',
         'unused_var': 'medium',
         'dead_code': 'medium',
         'duplication': 'low',
-        'signature_mismatch': 'high',
         'unresolved_symbol': 'high',
     }
-
-    def get_name(self) -> str:
-        return "repo_consistency_check"
-
-    def get_description(self) -> str:
-        return "Détecte les incohérences dans le code: imports/variables inutilisés, code mort, duplication"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return ConsistencyCheckRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return ConsistencyCheckResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["python", "typescript", "javascript", "auto"]
-
-    def is_long_running(self) -> bool:
-        return False
 
     def get_usage_description(self) -> str:
         return (
@@ -264,18 +214,9 @@ class RepoConsistencyCheckTool(BaseTool):
         ]
 
     def _detect_language(self, filepath: str) -> str:
-        """Détecte le langage à partir de l'extension."""
-        ext_map = {
-            '.py': 'python',
-            '.ts': 'typescript', '.tsx': 'typescript',
-            '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript',
-        }
-        ext = '.' + filepath.split('.')[-1] if '.' in filepath else ''
-        return ext_map.get(ext.lower(), 'unknown')
-
+        return detect_language_from_extension(filepath)
 
     def _analyze_python_unused_imports(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        """Détecte les imports Python non utilisés."""
         issues = []
 
         try:
@@ -292,7 +233,6 @@ class RepoConsistencyCheckTool(BaseTool):
             ))
             return issues
 
-
         imports = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -304,7 +244,6 @@ class RepoConsistencyCheckTool(BaseTool):
                     name = alias.asname or alias.name
                     if name != '*':
                         imports[name] = (node.lineno, f"{node.module}.{alias.name}")
-
 
         used_names = set()
         for node in ast.walk(tree):
@@ -320,7 +259,6 @@ class RepoConsistencyCheckTool(BaseTool):
                 elif isinstance(node.func, ast.Attribute):
                     if isinstance(node.func.value, ast.Name):
                         used_names.add(node.func.value.id)
-
 
         for name, (line, full_import) in imports.items():
             if name not in used_names:
@@ -338,14 +276,12 @@ class RepoConsistencyCheckTool(BaseTool):
         return issues
 
     def _analyze_python_unused_vars(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        """Détecte les variables Python non utilisées."""
         issues = []
 
         try:
             tree = ast.parse(content)
         except SyntaxError:
             return issues
-
 
         class VariableVisitor(ast.NodeVisitor):
             def __init__(self):
@@ -356,7 +292,6 @@ class RepoConsistencyCheckTool(BaseTool):
                 self.scopes.append({})
 
                 for arg in node.args.args:
-
                     if arg.arg not in ('self', 'cls') and not arg.arg.startswith('_'):
                         self.scopes[-1][arg.arg] = (node.lineno, False)
                 self.generic_visit(node)
@@ -376,7 +311,6 @@ class RepoConsistencyCheckTool(BaseTool):
 
             def visit_Name(self, node):
                 if isinstance(node.ctx, ast.Load):
-
                     for scope in self.scopes:
                         if node.id in scope:
                             scope[node.id] = (scope[node.id][0], True)
@@ -401,14 +335,12 @@ class RepoConsistencyCheckTool(BaseTool):
         return visitor.issues
 
     def _analyze_python_dead_code(self, content: str, filepath: str, all_contents: str) -> List[ConsistencyIssue]:
-        """Détecte les fonctions/classes Python jamais appelées."""
         issues = []
 
         try:
             tree = ast.parse(content)
         except SyntaxError:
             return issues
-
 
         definitions = {}
         for node in ast.walk(tree):
@@ -419,7 +351,6 @@ class RepoConsistencyCheckTool(BaseTool):
             elif isinstance(node, ast.ClassDef):
                 if not node.name.startswith('_'):
                     definitions[node.name] = (node.lineno, 'class')
-
 
         for name, (line, kind) in definitions.items():
 
@@ -432,7 +363,6 @@ class RepoConsistencyCheckTool(BaseTool):
             for pattern in patterns:
                 matches = list(re.finditer(pattern, all_contents))
                 usage_count += len(matches)
-
 
             if usage_count <= 1:
                 issues.append(ConsistencyIssue(
@@ -448,11 +378,8 @@ class RepoConsistencyCheckTool(BaseTool):
 
         return issues
 
-
     def _analyze_js_unused_imports(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        """Détecte les imports JS/TS non utilisés."""
         issues = []
-
 
         import_patterns = [
 
@@ -487,7 +414,6 @@ class RepoConsistencyCheckTool(BaseTool):
             pattern = rf'\b{re.escape(name)}\b'
             matches = list(re.finditer(pattern, content))
 
-
             usage_count = 0
             for m in matches:
                 match_line = content[:m.start()].count('\n') + 1
@@ -509,9 +435,7 @@ class RepoConsistencyCheckTool(BaseTool):
         return issues
 
     def _analyze_js_unused_vars(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        """Détecte les variables JS/TS non utilisées."""
         issues = []
-
 
         decl_patterns = [
             r"(?:const|let|var)\s+(\w+)\s*=",
@@ -531,11 +455,9 @@ class RepoConsistencyCheckTool(BaseTool):
                         if not name.startswith('_') and name not in ('const', 'let', 'var'):
                             declarations[name] = i
 
-
         for name, line in declarations.items():
             pattern = rf'\b{re.escape(name)}\b'
             matches = list(re.finditer(pattern, content))
-
 
             usage_count = sum(1 for m in matches if content[:m.start()].count('\n') + 1 != line)
 
@@ -553,9 +475,7 @@ class RepoConsistencyCheckTool(BaseTool):
 
         return issues
 
-
     def _analyze_duplication(self, files: List[FileInput], min_lines: int = 5) -> List[ConsistencyIssue]:
-        """Détecte la duplication de code entre fichiers."""
         issues = []
 
 
@@ -579,11 +499,9 @@ class RepoConsistencyCheckTool(BaseTool):
                     blocks[block_hash] = (i + 1, '\n'.join(lines[i:i+block_size]))
             return blocks
 
-
         file_blocks = {}
         for file in files:
             file_blocks[file.path] = get_blocks(file.content, min_lines)
-
 
         seen_duplicates = set()
         for path1, blocks1 in file_blocks.items():
@@ -614,12 +532,9 @@ class RepoConsistencyCheckTool(BaseTool):
         return issues
 
     def _analyze_unresolved_symbols(self, files: List[FileInput]) -> List[ConsistencyIssue]:
-        """Détecte les symboles non résolus dans le scope fourni."""
         issues = []
 
-
         defined_symbols = set()
-
 
         python_builtins = {
             'print', 'len', 'range', 'str', 'int', 'float', 'bool', 'list', 'dict', 'set',
@@ -677,7 +592,6 @@ class RepoConsistencyCheckTool(BaseTool):
                     matches = re.findall(pattern, file.content)
                     defined_symbols.update(matches)
 
-
         for file in files:
             lang = file.language or self._detect_language(file.path)
 
@@ -704,17 +618,13 @@ class RepoConsistencyCheckTool(BaseTool):
         return issues
 
     def _calculate_refactoring_score(self, issues: List[ConsistencyIssue]) -> Tuple[float, str]:
-        """Calcule le score de refactoring basé sur les issues détectées."""
         if not issues:
             return 0.0, "none"
-
 
         weights = {'high': 0.4, 'medium': 0.25, 'low': 0.1, 'info': 0.05}
         total_weight = sum(weights.get(i.severity, 0.1) for i in issues)
 
-
         score = min(1.0, total_weight / 4.0)
-
 
         if score >= 0.8:
             priority = "critical"
@@ -733,7 +643,6 @@ class RepoConsistencyCheckTool(BaseTool):
         files: List[FileInput],
         score: float
     ) -> List[SuggestedAction]:
-        """Génère les actions suggérées basées sur les issues."""
         actions = []
 
 
@@ -765,7 +674,6 @@ class RepoConsistencyCheckTool(BaseTool):
                 score=score
             ))
 
-
         if 'dead_code' in issue_types and len(issue_types['dead_code']) >= 2:
             actions.append(SuggestedAction(
                 tool_name="code_refactoring",
@@ -794,11 +702,6 @@ class RepoConsistencyCheckTool(BaseTool):
         issues: List[ConsistencyIssue],
         llm_manager=None
     ) -> Tuple[Optional[List[LLMInsight]], float, str]:
-        """
-        Enrichit l'analyse avec le LLM (mode deep).
-
-        Retourne (insights, refactoring_score, priority) ou (None, score_heuristique, priority).
-        """
         try:
             manager = llm_manager or self.llm_manager
             if not manager:
@@ -861,24 +764,14 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 score, priority = self._calculate_refactoring_score(issues)
                 return None, score, priority
 
-
             try:
-                clean_response = response.strip()
-                if clean_response.startswith("```"):
-                    clean_response = clean_response.split("\n", 1)[1]
-                if clean_response.endswith("```"):
-                    clean_response = clean_response.rsplit("```", 1)[0]
-                clean_response = clean_response.strip()
-
-                data = json.loads(clean_response)
+                data = parse_llm_json_response(response)
 
                 llm_score = float(data.get("refactoring_score", 0.0))
                 llm_score = max(0.0, min(1.0, llm_score))
 
-
                 heuristic_score, _ = self._calculate_refactoring_score(issues)
                 final_score = (llm_score * 0.6) + (heuristic_score * 0.4)
-
 
                 if final_score >= 0.8:
                     priority = "critical"
@@ -888,7 +781,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                     priority = "suggested"
                 else:
                     priority = "none"
-
 
                 insights = []
                 for item in data.get("insights", [])[:10]:
@@ -921,11 +813,9 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         llm_manager=None,
         ctx=None
     ) -> Optional[Dict[str, Any]]:
-        """Exécute automatiquement le refactoring si le seuil est atteint."""
         try:
 
             from .refactoring import RefactoringTool, RefactoringRequest
-
 
             if not suggested_actions:
                 return None
@@ -934,7 +824,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
             if best_action.tool_name != "code_refactoring":
                 return None
-
 
             params = best_action.params
             if not params.get("code"):
@@ -957,7 +846,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 file_path=params.get("file_path"),
                 parameters={"context": "auto-triggered from repo_consistency_check"}
             )
-
 
             refactoring_tool = RefactoringTool(app_state=self.app_state)
             result = refactoring_tool.execute(
@@ -982,7 +870,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             return None
 
     def _execute_core_logic(self, request: ConsistencyCheckRequest, **kwargs) -> ConsistencyCheckResponse:
-        """Exécute la vérification de cohérence."""
         self.logger.info(f"Vérification de cohérence sur {len(request.files)} fichier(s)")
 
 
@@ -1008,16 +895,13 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 if 'unused_vars' in checks:
                     all_issues.extend(self._analyze_js_unused_vars(file.content, file.path))
 
-
         if 'duplication' in checks and len(request.files) > 1:
             all_issues.extend(self._analyze_duplication(request.files))
 
         if 'unresolved_symbol' in checks and request.mode == 'deep':
             all_issues.extend(self._analyze_unresolved_symbols(request.files))
 
-
         all_issues = [i for i in all_issues if i.confidence >= request.min_confidence]
-
 
         severity_counts = {'high': 0, 'medium': 0, 'low': 0, 'info': 0}
         for issue in all_issues:
@@ -1031,10 +915,8 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             'info': severity_counts['info'],
         }
 
-
         llm_manager = kwargs.get('llm_manager') or self.llm_manager
         ctx = kwargs.get('ctx')
-
 
         llm_insights = None
         analysis_depth_used = "fast"
@@ -1047,14 +929,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
             try:
                 coro = self._deep_analysis_with_llm(request, all_issues, llm_manager)
-                try:
-                    loop = asyncio.get_running_loop()
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, coro)
-                        llm_insights, refactoring_score, refactoring_priority = future.result(timeout=30)
-                except RuntimeError:
-                    llm_insights, refactoring_score, refactoring_priority = asyncio.run(coro)
+                llm_insights, refactoring_score, refactoring_priority = run_async_from_sync(coro, timeout=30)
             except Exception as e:
                 self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
                 refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
@@ -1062,9 +937,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
             refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
 
-
         suggested_actions = self._generate_suggested_actions(all_issues, request.files, refactoring_score)
-
 
         auto_refactoring_triggered = False
         auto_refactoring_result = None
@@ -1075,20 +948,12 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 coro = self._execute_auto_chain_refactoring(
                     request, all_issues, suggested_actions, llm_manager, ctx
                 )
-                try:
-                    loop = asyncio.get_running_loop()
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, coro)
-                        auto_refactoring_result = future.result(timeout=60)
-                except RuntimeError:
-                    auto_refactoring_result = asyncio.run(coro)
+                auto_refactoring_result = run_async_from_sync(coro, timeout=60)
 
                 if auto_refactoring_result:
                     auto_refactoring_triggered = True
             except Exception as e:
                 self.logger.warning(f"Erreur auto-chain: {e}")
-
 
         if not all_issues:
             analysis_summary = f"✅ Aucune incohérence détectée dans {len(request.files)} fichier(s)."

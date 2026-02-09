@@ -7,33 +7,22 @@ from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 from datetime import datetime
-import inspect
-import functools
 import asyncio
 
 
 class ToolError(Exception):
-    """Exception de base pour les outils."""
     pass
-
 
 class ToolValidationError(ToolError):
-    """Erreur de validation des inputs d'un outil."""
     pass
-
 
 class ToolExecutionError(ToolError):
-    """Erreur d'exécution d'un outil."""
     pass
-
 
 class ToolConfigurationError(ToolError):
-    """Erreur de configuration d'un outil."""
     pass
 
-
 class ToolMetrics(BaseModel):
-    """Métriques d'exécution d'un outil."""
     tool_name: str
     execution_time: float
     success: bool
@@ -42,18 +31,13 @@ class ToolMetrics(BaseModel):
     output_size: Optional[int] = None
     error_message: Optional[str] = None
 
-
 class BaseTool(ABC):
-    """
-    Classe de base abstraite pour tous les outils.
-
-    Fournit une interface commune et des fonctionnalités de base :
-    - Validation des inputs
-    - Gestion d'erreurs standardisée
-    - Logging unifié
-    - Collecte de métriques
-    - Configuration
-    """
+    tool_name: str = ""
+    tool_description: str = ""
+    request_model: Optional[Type[BaseModel]] = None
+    response_model: Optional[Type[BaseModel]] = None
+    supported_languages: List[str] = ["python", "javascript", "typescript"]
+    long_running: bool = False
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, app_state: Optional[Dict[str, Any]] = None):
         self.config = config or {}
@@ -69,7 +53,6 @@ class BaseTool(ABC):
         self._validate_config()
 
     def _setup_logging(self):
-        """Configure le logging pour l'outil."""
         if not self.logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter(
@@ -80,7 +63,6 @@ class BaseTool(ABC):
             self.logger.setLevel(self.config.get('log_level', logging.INFO))
 
     def _validate_config(self):
-        """Valide la configuration de l'outil."""
         required_configs = self.get_required_config_keys()
         missing_keys = [key for key in required_configs if key not in self.config]
 
@@ -89,68 +71,28 @@ class BaseTool(ABC):
                 f"Configuration manquante pour {self.__class__.__name__}: {missing_keys}"
             )
 
-    @abstractmethod
     def get_name(self) -> str:
-        """Retourne le nom unique de l'outil."""
-        pass
+        return self.tool_name
 
-    @abstractmethod
     def get_description(self) -> str:
-        """Retourne la description de l'outil."""
-        pass
+        return self.tool_description
 
-    @abstractmethod
     def get_request_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les requêtes."""
-        pass
+        return self.request_model
 
-    @abstractmethod
     def get_response_model(self) -> Type[BaseModel]:
-        """Retourne le modèle Pydantic pour les réponses."""
-        pass
+        return self.response_model
 
     def get_required_config_keys(self) -> List[str]:
-        """
-        Retourne les clés de configuration requises.
-
-        Returns:
-            Liste des clés de configuration obligatoires
-        """
         return []
 
     def get_supported_languages(self) -> List[str]:
-        """
-        Retourne la liste des langages supportés par l'outil.
-
-        Returns:
-            Liste des langages supportés
-        """
-        return ["python", "javascript", "typescript"]
+        return self.supported_languages
 
     def is_long_running(self) -> bool:
-        """
-        Indique si l'outil est susceptible de prendre du temps (> 10s).
-        Les outils longs seront exécutés comme tâches de fond avec FastMCP task=True.
-
-        Returns:
-            True si l'outil est long-running, False sinon
-        """
-        return False
+        return self.long_running
 
     async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
-        """
-        Prépare un prompt optimisé en utilisant le système de prompts amélioré.
-
-        Args:
-            request: Requête contenant les variables pour le prompt
-            template_name: Nom du template à utiliser (par défaut: nom de l'outil)
-
-        Returns:
-            Prompt formaté et optimisé
-
-        Raises:
-            ToolExecutionError: Si le prompt engine n'est pas disponible
-        """
         if not self.prompt_engine:
             if hasattr(self, '_build_prompt'):
                 self.logger.warning("Prompt engine non disponible, utilisation du fallback")
@@ -205,18 +147,6 @@ class BaseTool(ABC):
             raise ToolExecutionError(f"Aucun template trouvé pour l'outil {tool_name}")
 
     def validate_language(self, language: str) -> bool:
-        """
-        Valide qu'un langage est supporté par l'outil.
-
-        Args:
-            language: Langage à valider
-
-        Returns:
-            True si le langage est supporté
-
-        Raises:
-            ToolValidationError: Si le langage n'est pas supporté
-        """
         supported = self.get_supported_languages()
         if language.lower() not in [lang.lower() for lang in supported]:
             raise ToolValidationError(
@@ -225,18 +155,6 @@ class BaseTool(ABC):
         return True
 
     def validate_request(self, request: BaseModel) -> bool:
-        """
-        Valide une requête selon le modèle de l'outil.
-
-        Args:
-            request: Requête à valider
-
-        Returns:
-            True si la requête est valide
-
-        Raises:
-            ToolValidationError: Si la validation échoue
-        """
         try:
             expected_model = self.get_request_model()
             if not isinstance(request, expected_model):
@@ -257,32 +175,34 @@ class BaseTool(ABC):
 
     @abstractmethod
     def _execute_core_logic(self, request: BaseModel, **kwargs) -> BaseModel:
-        """
-        Exécute la logique principale de l'outil.
-
-        Args:
-            request: Requête validée
-            **kwargs: Arguments supplémentaires (parser, llm_manager, etc.)
-
-        Returns:
-            Réponse de l'outil
-        """
         pass
 
+    def _record_metrics(
+        self, start_time: datetime, success: bool,
+        request: Optional[BaseModel] = None, result: Optional[BaseModel] = None,
+        error_message: Optional[str] = None
+    ) -> float:
+        execution_time = (datetime.now() - start_time).total_seconds()
+        metrics = ToolMetrics(
+            tool_name=self.get_name(),
+            execution_time=execution_time,
+            success=success,
+            timestamp=start_time,
+            input_size=len(str(request)) if request else None,
+            output_size=len(str(result)) if result else None,
+            error_message=error_message,
+        )
+        self.metrics.append(metrics)
+        return execution_time
+
+    def _validate_result(self, result: BaseModel) -> None:
+        expected = self.get_response_model()
+        if not isinstance(result, expected):
+            raise ToolExecutionError(
+                f"Type de réponse invalide. Attendu: {expected.__name__}"
+            )
+
     def execute(self, request: BaseModel, **kwargs) -> BaseModel:
-        """
-        Exécute l'outil avec gestion complète des erreurs et métriques.
-
-        Args:
-            request: Requête à traiter
-            **kwargs: Arguments supplémentaires
-
-        Returns:
-            Réponse de l'outil
-
-        Raises:
-            ToolError: En cas d'erreur d'exécution
-        """
         start_time = datetime.now()
         tool_name = self.get_name()
 
@@ -290,74 +210,23 @@ class BaseTool(ABC):
             self.logger.info(f"Début d'exécution de {tool_name}")
             self.validate_request(request)
             result = self._execute_core_logic(request, **kwargs)
-            expected_response = self.get_response_model()
-            if not isinstance(result, expected_response):
-                raise ToolExecutionError(
-                    f"Type de réponse invalide. Attendu: {expected_response.__name__}"
-                )
-
-            execution_time = (datetime.now() - start_time).total_seconds()
-            metrics = ToolMetrics(
-                tool_name=tool_name,
-                execution_time=execution_time,
-                success=True,
-                timestamp=start_time,
-                input_size=len(str(request)) if hasattr(request, '__str__') else None,
-                output_size=len(str(result)) if hasattr(result, '__str__') else None
-            )
-            self.metrics.append(metrics)
-
+            self._validate_result(result)
+            execution_time = self._record_metrics(start_time, True, request, result)
             self.logger.info(f"Exécution de {tool_name} réussie en {execution_time:.2f}s")
             return result
 
         except (ToolError, ValidationError) as e:
-            execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = str(e)
-            metrics = ToolMetrics(
-                tool_name=tool_name,
-                execution_time=execution_time,
-                success=False,
-                timestamp=start_time,
-                error_message=error_msg
-            )
-            self.metrics.append(metrics)
-
-            self.logger.error(f"Erreur dans {tool_name}: {error_msg}")
+            self._record_metrics(start_time, False, error_message=str(e))
+            self.logger.error(f"Erreur dans {tool_name}: {e}")
             raise
 
         except Exception as e:
-            execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Erreur inattendue: {str(e)}"
-            metrics = ToolMetrics(
-                tool_name=tool_name,
-                execution_time=execution_time,
-                success=False,
-                timestamp=start_time,
-                error_message=error_msg
-            )
-            self.metrics.append(metrics)
-
-            self.logger.error(f"Erreur inattendue dans {tool_name}: {str(e)}")
+            error_msg = f"Erreur inattendue: {e}"
+            self._record_metrics(start_time, False, error_message=error_msg)
+            self.logger.error(f"Erreur inattendue dans {tool_name}: {e}")
             raise ToolExecutionError(error_msg)
 
     async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
-        """
-        Exécute l'outil de manière asynchrone avec support Context (FastMCP 2.14+).
-
-        Cette méthode est utilisée pour les outils long-running avec task=True.
-        Elle supporte:
-        - ctx.report_progress(): Reporting de progression via Context
-        - ctx.sample(): Appels LLM avec structured output
-
-        Args:
-            request: Requête à traiter
-            **kwargs: Arguments supplémentaires incluant:
-                - ctx: Context FastMCP pour ctx.sample() et ctx.report_progress()
-                - parser, llm_manager, context_manager: Services standard
-
-        Returns:
-            Réponse de l'outil
-        """
         start_time = datetime.now()
         tool_name = self.get_name()
         ctx = kwargs.get('ctx')
@@ -371,68 +240,29 @@ class BaseTool(ABC):
             if ctx:
                 await ctx.report_progress(progress=1, total=total_steps)
 
-
             if hasattr(self, '_execute_core_logic_async'):
                 result = await self._execute_core_logic_async(request, **kwargs)
             else:
-
                 result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
 
             if ctx:
                 await ctx.report_progress(progress=3, total=total_steps)
-            expected_response = self.get_response_model()
-            if not isinstance(result, expected_response):
-                raise ToolExecutionError(
-                    f"Type de réponse invalide. Attendu: {expected_response.__name__}"
-                )
-
-            execution_time = (datetime.now() - start_time).total_seconds()
-            metrics = ToolMetrics(
-                tool_name=tool_name,
-                execution_time=execution_time,
-                success=True,
-                timestamp=start_time,
-                input_size=len(str(request)) if hasattr(request, '__str__') else None,
-                output_size=len(str(result)) if hasattr(result, '__str__') else None
-            )
-            self.metrics.append(metrics)
-
+            self._validate_result(result)
+            execution_time = self._record_metrics(start_time, True, request, result)
             if ctx:
                 await ctx.report_progress(progress=total_steps, total=total_steps)
-
             self.logger.info(f"Exécution async de {tool_name} réussie en {execution_time:.2f}s")
             return result
 
         except (ToolError, ValidationError) as e:
-            execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = str(e)
-
-            metrics = ToolMetrics(
-                tool_name=tool_name,
-                execution_time=execution_time,
-                success=False,
-                timestamp=start_time,
-                error_message=error_msg
-            )
-            self.metrics.append(metrics)
-
-            self.logger.error(f"Erreur dans {tool_name}: {error_msg}")
+            self._record_metrics(start_time, False, error_message=str(e))
+            self.logger.error(f"Erreur dans {tool_name}: {e}")
             raise
 
         except Exception as e:
-            execution_time = (datetime.now() - start_time).total_seconds()
-            error_msg = f"Erreur inattendue: {str(e)}"
-
-            metrics = ToolMetrics(
-                tool_name=tool_name,
-                execution_time=execution_time,
-                success=False,
-                timestamp=start_time,
-                error_message=error_msg
-            )
-            self.metrics.append(metrics)
-
-            self.logger.error(f"Erreur inattendue dans {tool_name}: {str(e)}")
+            error_msg = f"Erreur inattendue: {e}"
+            self._record_metrics(start_time, False, error_message=error_msg)
+            self.logger.error(f"Erreur inattendue dans {tool_name}: {e}")
             raise ToolExecutionError(error_msg)
 
     async def sample_llm(
@@ -444,25 +274,6 @@ class BaseTool(ABC):
         result_type: Optional[Type[BaseModel]] = None,
         temperature: float = 0.7
     ) -> Any:
-        """
-        Appelle le LLM via ctx.sample() (FastMCP 2.14+) ou fallback vers ToolLLMManager.
-
-        Cette méthode permet d'utiliser le nouveau ctx.sample() de FastMCP tout en
-        conservant la compatibilité avec ToolLLMManager pour les environnements
-        qui ne supportent pas le sampling MCP.
-
-        Args:
-            prompt: Le prompt à envoyer au LLM
-            ctx: Context FastMCP (si disponible, utilise ctx.sample())
-            llm_manager: ToolLLMManager (fallback si ctx non disponible)
-            system_prompt: Message système optionnel
-            result_type: Type Pydantic pour structured output (FastMCP 2.14.1+)
-            temperature: Température pour la génération
-
-        Returns:
-            - Si result_type: Instance validée du modèle Pydantic
-            - Sinon: Texte brut de la réponse LLM
-        """
 
         if ctx is not None:
             try:
@@ -475,7 +286,6 @@ class BaseTool(ABC):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ]
-
 
                 if result_type:
                     result = await ctx.sample(
@@ -493,7 +303,6 @@ class BaseTool(ABC):
 
             except Exception as e:
                 self.logger.warning(f"ctx.sample() a échoué, fallback vers llm_manager: {e}")
-
 
         if llm_manager is not None:
             self.logger.debug(f"Utilisation de ToolLLMManager pour {self.get_name()}")
@@ -515,25 +324,12 @@ class BaseTool(ABC):
         )
 
     def get_metrics(self) -> List[ToolMetrics]:
-        """
-        Retourne les métriques collectées par l'outil.
-
-        Returns:
-            Liste des métriques d'exécution
-        """
         return self.metrics.copy()
 
     def clear_metrics(self):
-        """Efface les métriques collectées."""
         self.metrics.clear()
 
     def get_info(self) -> Dict[str, Any]:
-        """
-        Retourne les informations détaillées sur l'outil.
-
-        Returns:
-            Dictionnaire avec les informations complètes de l'outil
-        """
         return {
             "name": self.get_name(),
             "description": self.get_description(),
@@ -547,9 +343,7 @@ class BaseTool(ABC):
             "usage_description": self.get_usage_description(),
             "parameters": self.get_parameters_info(),
             "examples": self.get_examples(),
-            "capabilities": self.get_capabilities(),
-            "limitations": self.get_limitations(),
-            "best_practices": self.get_best_practices()
+            "capabilities": self.get_capabilities()
         }
 
     def _calculate_success_rate(self) -> float:
@@ -561,21 +355,9 @@ class BaseTool(ABC):
         return (successful / len(self.metrics)) * 100.0
 
     def get_usage_description(self) -> str:
-        """
-        Retourne une description détaillée de l'utilisation de l'outil.
-
-        Returns:
-            Description détaillée de l'utilisation
-        """
         return f"Outil {self.get_name()}: {self.get_description()}"
 
     def get_parameters_info(self) -> Dict[str, Any]:
-        """
-        Retourne les informations détaillées sur les paramètres de l'outil.
-
-        Returns:
-            Dictionnaire avec les informations sur chaque paramètre
-        """
         request_model = self.get_request_model()
         parameters = {}
 
@@ -591,12 +373,6 @@ class BaseTool(ABC):
         return parameters
 
     def get_examples(self) -> List[Dict[str, Any]]:
-        """
-        Retourne des exemples d'utilisation de l'outil.
-
-        Returns:
-            Liste d'exemples avec requête et réponse attendue
-        """
         return [
             {
                 "title": f"Exemple d'utilisation de {self.get_name()}",
@@ -607,73 +383,9 @@ class BaseTool(ABC):
         ]
 
     def get_capabilities(self) -> List[str]:
-        """
-        Retourne la liste des capacités de l'outil.
-
-        Returns:
-            Liste des capacités
-        """
         return [
             f"Traitement de code en {', '.join(self.get_supported_languages())}",
             "Validation des entrées",
             "Collecte de métriques",
             "Gestion d'erreurs"
         ]
-
-    def get_limitations(self) -> List[str]:
-        """
-        Retourne la liste des limitations de l'outil.
-
-        Returns:
-            Liste des limitations
-        """
-        return [
-            "Dépend de la qualité du code fourni",
-            "Performance variable selon la complexité",
-            "Nécessite une configuration appropriée"
-        ]
-
-    def get_best_practices(self) -> List[str]:
-        """
-        Retourne la liste des bonnes pratiques pour utiliser l'outil.
-
-        Returns:
-            Liste des bonnes pratiques
-        """
-        return [
-            "Fournir du code bien formaté",
-            "Spécifier le langage de programmation",
-            "Utiliser un identifiant de session pour le suivi",
-            "Vérifier les métriques régulièrement"
-        ]
-
-
-def tool_method(func):
-    """
-    Décorateur pour marquer une méthode comme endpoint d'outil.
-
-    Ajoute automatiquement la validation et la gestion d'erreurs.
-    """
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if not isinstance(self, BaseTool):
-            raise TypeError("tool_method ne peut être utilisé que sur des classes BaseTool")
-
-
-        sig = inspect.signature(func)
-        bound = sig.bind(self, *args, **kwargs)
-        bound.apply_defaults()
-
-
-        args_list = list(bound.arguments.values())[1:]
-        if args_list:
-            request = args_list[0]
-            remaining_kwargs = dict(bound.arguments)
-            del remaining_kwargs[list(bound.arguments.keys())[0]]
-            del remaining_kwargs[list(bound.arguments.keys())[1]]
-
-            return self.execute(request, **remaining_kwargs)
-        else:
-            return func(self, *args, **kwargs)
-
-    return wrapper

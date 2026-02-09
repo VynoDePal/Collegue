@@ -147,20 +147,11 @@ class PostgresDBTool(BaseTool):
     - Échantillonner les données
     """
 
-    def get_name(self) -> str:
-        return "postgres_db"
-
-    def get_description(self) -> str:
-        return "Inspecte et interroge les bases de données PostgreSQL (schéma, tables, requêtes lecture seule)"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return PostgresRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return PostgresResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["sql"]
+    tool_name = "postgres_db"
+    tool_description = "Inspecte et interroge les bases de données PostgreSQL (schéma, tables, requêtes lecture seule)"
+    request_model = PostgresRequest
+    response_model = PostgresResponse
+    supported_languages = ["sql"]
 
     def _get_connection(self, connection_string: Optional[str] = None):
         """Obtient une connexion PostgreSQL."""

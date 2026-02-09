@@ -1,0 +1,117 @@
+baseline:
+  - id: K8S-001
+    title: Container running as privileged
+    severity: critical
+    pattern: 'privileged:\s*true'
+    description: "Les containers privilégiés désactivent la plupart des mécanismes de sécurité."
+    remediation: "Définir privileged: false ou supprimer le champ."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-002
+    title: Host network enabled
+    severity: high
+    pattern: 'hostNetwork:\s*true'
+    description: "Partager le namespace réseau de l'hôte expose le pod aux attaques réseau."
+    remediation: "Supprimer hostNetwork ou le définir à false."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-003
+    title: Host PID namespace enabled
+    severity: high
+    pattern: 'hostPID:\s*true'
+    description: "Partager le namespace PID permet de voir/tuer les processus de l'hôte."
+    remediation: "Supprimer hostPID ou le définir à false."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-004
+    title: Host IPC namespace enabled
+    severity: high
+    pattern: 'hostIPC:\s*true'
+    description: "Partager le namespace IPC permet l'accès à la mémoire partagée de l'hôte."
+    remediation: "Supprimer hostIPC ou le définir à false."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-005
+    title: HostPath volume mount
+    severity: high
+    pattern: 'hostPath:\s*\n\s+path:'
+    description: "Les volumes hostPath exposent le filesystem de l'hôte."
+    remediation: "Utiliser des volumes persistants (PVC) au lieu de hostPath."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-006
+    title: Dangerous capabilities added
+    severity: high
+    pattern: 'capabilities:\s*\n\s+add:\s*\n\s+-\s*(SYS_ADMIN|NET_ADMIN|SYS_PTRACE|CAP_SYS_ADMIN)'
+    description: "Ces capabilities permettent des opérations privilégiées dangereuses."
+    remediation: "Supprimer les capabilities dangereuses ou utiliser des alternatives sécurisées."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-007
+    title: Container without resource limits
+    severity: medium
+    pattern: 'containers:\s*\n(?:(?!limits:).)*?name:'
+    description: "Sans limites de ressources, un container peut consommer toutes les ressources du node."
+    remediation: "Définir resources.limits.cpu et resources.limits.memory."
+    references:
+      - https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+
+  - id: K8S-008
+    title: Image tag latest or missing
+    severity: medium
+    pattern: 'image:\s*[\w\-./]+(?::latest)?(?:\s|$)'
+    description: "Utiliser latest ou pas de tag rend les déploiements non reproductibles."
+    remediation: "Spécifier un tag de version spécifique (ex: image: nginx:1.25.3)."
+    references:
+      - https://kubernetes.io/docs/concepts/containers/images/
+
+strict:
+  - id: K8S-101
+    title: Container not running as non-root
+    severity: high
+    pattern: '(?!.*runAsNonRoot:\s*true)'
+    check_type: absence
+    search_scope: securityContext
+    description: "Les containers devraient s'exécuter en tant qu'utilisateur non-root."
+    remediation: "Ajouter securityContext.runAsNonRoot: true."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-102
+    title: AllowPrivilegeEscalation not disabled
+    severity: high
+    pattern: '(?!.*allowPrivilegeEscalation:\s*false)'
+    check_type: absence
+    search_scope: securityContext
+    description: "L'escalade de privilèges devrait être explicitement désactivée."
+    remediation: "Ajouter securityContext.allowPrivilegeEscalation: false."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-103
+    title: Capabilities not dropped
+    severity: medium
+    pattern: '(?!.*capabilities:\s*\n\s+drop:\s*\n\s+-\s*ALL)'
+    check_type: absence
+    search_scope: securityContext
+    description: "Les capabilities devraient être explicitement supprimées."
+    remediation: "Ajouter securityContext.capabilities.drop: [\"ALL\"]."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+  - id: K8S-104
+    title: ReadOnlyRootFilesystem not enabled
+    severity: medium
+    pattern: '(?!.*readOnlyRootFilesystem:\s*true)'
+    check_type: absence
+    search_scope: securityContext
+    description: "Le filesystem root devrait être en lecture seule."
+    remediation: "Ajouter securityContext.readOnlyRootFilesystem: true."
+    references:
+      - https://kubernetes.io/docs/concepts/security/pod-security-standards/

@@ -16,9 +16,7 @@ except ImportError:
 from pydantic import BaseModel
 from .base import BaseTool
 
-
 class ToolInfoResponse(BaseModel):
-    """Modèle de réponse pour les informations détaillées d'un outil."""
     name: str
     description: str
     supported_languages: List[str]
@@ -35,26 +33,20 @@ class ToolInfoResponse(BaseModel):
     limitations: Optional[List[str]] = None
     best_practices: Optional[List[str]] = None
 
-
 class ToolMetricsResponse(BaseModel):
-    """Modèle de réponse pour les métriques d'un outil."""
     tool_name: str
     total_executions: int
     success_rate: float
     average_execution_time: float
     recent_metrics: List[dict]
 
-
 class ToolRegistry:
-    """Registry centralisé pour tous les outils."""
-
     def __init__(self):
         self._tools: Dict[str, Type[BaseTool]] = {}
         self._instances: Dict[str, BaseTool] = {}
         self._auto_discover_tools()
 
     def _auto_discover_tools(self):
-        """Auto-découverte des outils dans le package."""
         current_dir = os.path.dirname(__file__)
 
         for filename in os.listdir(current_dir):
@@ -77,13 +69,6 @@ class ToolRegistry:
                     print(f"Erreur lors de l'import de {module_name}: {e}")
 
     def register_tool(self, tool_class: Type[BaseTool], config: Dict[str, Any] = None):
-        """
-        Enregistre manuellement un outil.
-
-        Args:
-            tool_class: Classe de l'outil à enregistrer
-            config: Configuration pour l'outil
-        """
         if not issubclass(tool_class, BaseTool):
             raise ValueError(f"{tool_class.__name__} doit hériter de BaseTool")
 
@@ -96,16 +81,6 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def get_tool_instance(self, name: str, config: Dict[str, Any] = None) -> BaseTool:
-        """
-        Récupère ou crée une instance d'outil.
-
-        Args:
-            name: Nom de l'outil
-            config: Configuration pour l'outil
-
-        Returns:
-            Instance de l'outil
-        """
         if name in self._instances and config is None:
             return self._instances[name]
 
@@ -135,22 +110,12 @@ class ToolRegistry:
                 }
         return info
 
-
 _registry = ToolRegistry()
-
 
 def get_registry() -> ToolRegistry:
     return _registry
 
-
 def register_tools(app: FastMCP, app_state: dict):
-    """
-    Enregistre tous les outils découverts dans l'application FastMCP.
-
-    Args:
-        app: Instance FastMCP
-        app_state: État de l'application
-    """
     registry = get_registry()
 
     default_config = app_state.get('tools_config', {})
@@ -167,62 +132,31 @@ def register_tools(app: FastMCP, app_state: dict):
         except Exception as e:
             print(f"Erreur lors de l'enregistrement de '{tool_name}': {e}")
 
-
 def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
-    """
-    Enregistre les endpoints d'un outil dans FastMCP.
-
-    Les outils longs (is_long_running=True) sont enregistrés avec task=True pour
-    s'exécuter en tâche de fond avec support de progression (FastMCP v2.14+).
-
-    Args:
-        app: Instance FastMCP
-        tool: Instance de l'outil
-        app_state: État de l'application
-    """
     tool_name = tool.get_name()
     request_model = tool.get_request_model()
     response_model = tool.get_response_model()
     is_long_running = tool.is_long_running()
 
+    decorator_kwargs = {"name": tool_name, "description": tool.get_description()}
     if is_long_running:
-        @app.tool(name=tool_name, description=tool.get_description(), task=True)
-        async def tool_endpoint_async(
-            request: request_model,
-            ctx: Context
-        ) -> response_model:
-            """Endpoint async généré automatiquement pour l'outil long-running."""
-            try:
-                parser = app_state.get('parser')
-                llm_manager = app_state.get('llm_manager')
-                context_manager = app_state.get('context_manager')
-                return await tool.execute_async(
-                    request,
-                    parser=parser,
-                    llm_manager=llm_manager,
-                    context_manager=context_manager,
-                    ctx=ctx
-                )
+        decorator_kwargs["task"] = True
 
-            except Exception as e:
-                tool.logger.error(f"Erreur dans l'endpoint async {tool_name}: {e}")
-                raise
-    else:
-        @app.tool(name=tool_name, description=tool.get_description())
-        async def tool_endpoint(request: request_model, ctx: Context) -> response_model:
-            """Endpoint généré automatiquement pour l'outil."""
-            try:
-                parser = app_state.get('parser')
-                llm_manager = app_state.get('llm_manager')
-                context_manager = app_state.get('context_manager')
-                return tool.execute(
-                    request,
-                    parser=parser,
-                    llm_manager=llm_manager,
-                    context_manager=context_manager,
-                    ctx=ctx
-                )
-
-            except Exception as e:
-                tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
-                raise
+    @app.tool(**decorator_kwargs)
+    async def tool_endpoint(
+        request: request_model,
+        ctx: Context
+    ) -> response_model:
+        try:
+            kwargs = {
+                "parser": app_state.get('parser'),
+                "llm_manager": app_state.get('llm_manager'),
+                "context_manager": app_state.get('context_manager'),
+                "ctx": ctx,
+            }
+            if is_long_running:
+                return await tool.execute_async(request, **kwargs)
+            return tool.execute(request, **kwargs)
+        except Exception as e:
+            tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
+            raise

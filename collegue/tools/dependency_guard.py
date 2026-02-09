@@ -25,14 +25,6 @@ from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 
 
 class DependencyGuardRequest(BaseModel):
-    """Modèle de requête pour la validation des dépendances.
-
-    NOTE: Cet outil utilise l'API OSV de Google pour scanner les vulnérabilités.
-    Passez le contenu du fichier via 'content'. Le type est auto-détecté.
-
-    Pour JS/TS: passez le contenu de package-lock.json (contient les versions exactes).
-    Pour Python: passez le contenu de requirements.txt ou pyproject.toml.
-    """
     content: str = Field(
         ...,
         description="Contenu du fichier de dépendances (package-lock.json, requirements.txt, pyproject.toml). Le type est auto-détecté."
@@ -67,9 +59,7 @@ class DependencyGuardRequest(BaseModel):
             raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript")
         return v
 
-
 class DependencyIssue(BaseModel):
-    """Un problème détecté sur une dépendance."""
     package: str = Field(..., description="Nom du package")
     version: Optional[str] = Field(None, description="Version concernée")
     issue_type: str = Field(..., description="Type: not_found, vulnerable, deprecated, blocked, version_conflict")
@@ -78,9 +68,7 @@ class DependencyIssue(BaseModel):
     recommendation: str = Field(..., description="Recommandation pour corriger")
     cve_ids: Optional[List[str]] = Field(None, description="IDs CVE si vulnérabilité")
 
-
 class DependencyGuardResponse(BaseModel):
-    """Modèle de réponse pour la validation des dépendances."""
     valid: bool = Field(..., description="True si aucune vulnérabilité critique/haute")
     summary: str = Field(..., description="Résumé de l'analyse")
     total_dependencies: int = Field(..., description="Nombre total de dépendances analysées")
@@ -94,30 +82,11 @@ class DependencyGuardResponse(BaseModel):
         description="Liste des problèmes détectés (vulnérabilités, packages bloqués, etc.)"
     )
 
-
 class DependencyGuardTool(BaseTool):
-    """
-    Outil de validation des dépendances.
-
-    Vérifie:
-    - Existence des packages (PyPI, npm)
-    - Versions valides
-    - Vulnérabilités connues (via pip-audit, npm audit)
-    - Packages dans la blocklist
-    - Packages non autorisés (si allowlist définie)
-
-    Prévient:
-    - Hallucinations IA (packages inventés)
-    - Attaques typosquatting
-    - Vulnérabilités supply-chain
-    """
-
-
     KNOWN_MALICIOUS_PACKAGES = {
         'python': [
-            'python-dateutil',
-            'jeIlyfish',
             'python3-dateutil',
+            'jeIlyfish',
             'request',
             'beautifulsoup',
         ],
@@ -128,7 +97,6 @@ class DependencyGuardTool(BaseTool):
             'eslint-scope',
         ]
     }
-
 
     DEPRECATED_PACKAGES = {
         'python': {
@@ -146,23 +114,12 @@ class DependencyGuardTool(BaseTool):
         }
     }
 
-    def get_name(self) -> str:
-        return "dependency_guard"
-
-    def get_description(self) -> str:
-        return "Valide les dépendances d'un projet (existence, versions, vulnérabilités, supply chain)"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return DependencyGuardRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return DependencyGuardResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return ["python", "typescript", "javascript"]
-
-    def is_long_running(self) -> bool:
-        return True
+    tool_name = "dependency_guard"
+    tool_description = "Valide les dépendances d'un projet (existence, versions, vulnérabilités, supply chain)"
+    request_model = DependencyGuardRequest
+    response_model = DependencyGuardResponse
+    supported_languages = ["python", "typescript", "javascript"]
+    long_running = True
 
     def get_usage_description(self) -> str:
         return (
@@ -213,9 +170,7 @@ class DependencyGuardTool(BaseTool):
     def get_required_config_keys(self) -> List[str]:
         return []
 
-
     def _parse_package_lock_content(self, content: str) -> List[Dict[str, str]]:
-        """Extrait les dépendances directes du package-lock.json."""
         deps = []
         try:
             data = json.loads(content)
@@ -225,7 +180,6 @@ class DependencyGuardTool(BaseTool):
                 **root_pkg.get('dependencies', {}),
                 **root_pkg.get('devDependencies', {})
             }
-
 
             if not dependencies:
 
@@ -240,17 +194,14 @@ class DependencyGuardTool(BaseTool):
         return deps
 
     def _parse_requirements_txt(self, filepath: str) -> List[Dict[str, str]]:
-        """Parse un fichier requirements.txt."""
         dependencies = []
 
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
 
-
                 if not line or line.startswith('#') or line.startswith('-'):
                     continue
-
 
                 match = re.match(r'^([a-zA-Z0-9_-]+)(?:\[.*\])?\s*((?:==|>=|<=|>|<|~=|!=)[^\s;#]+)?', line)
                 if match:
@@ -261,7 +212,6 @@ class DependencyGuardTool(BaseTool):
         return dependencies
 
     def _parse_pyproject_toml(self, filepath: str) -> List[Dict[str, str]]:
-        """Parse les dépendances d'un pyproject.toml."""
         dependencies = []
 
         try:
@@ -273,7 +223,6 @@ class DependencyGuardTool(BaseTool):
 
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
-
 
                 deps_match = re.search(r'\[project\].*?dependencies\s*=\s*\[(.*?)\]', content, re.DOTALL)
                 if deps_match:
@@ -289,7 +238,6 @@ class DependencyGuardTool(BaseTool):
         with open(filepath, 'rb') as f:
             data = tomllib.load(f)
 
-
         for dep in data.get('project', {}).get('dependencies', []):
             match = re.match(r'^([a-zA-Z0-9_-]+)', dep)
             if match:
@@ -298,7 +246,6 @@ class DependencyGuardTool(BaseTool):
         return dependencies
 
     def _parse_package_json(self, filepath: str) -> List[Dict[str, str]]:
-        """Parse un fichier package.json."""
         dependencies = []
 
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -338,7 +285,6 @@ class DependencyGuardTool(BaseTool):
             return {'exists': None, 'latest_version': None, 'error': str(e)}
 
     def _check_npm_existence(self, package_name: str) -> Dict[str, Any]:
-        """Vérifie si un package existe sur npm."""
         try:
             result = subprocess.run(
                 ['npm', 'view', package_name, 'version'],
@@ -358,7 +304,6 @@ class DependencyGuardTool(BaseTool):
             return {'exists': None, 'latest_version': None, 'error': str(e)}
 
     def _check_pip_audit(self, working_dir: str) -> List[Dict[str, Any]]:
-        """Exécute pip-audit pour trouver les vulnérabilités."""
         vulnerabilities = []
 
         try:
@@ -386,19 +331,9 @@ class DependencyGuardTool(BaseTool):
         return vulnerabilities
 
     def _check_osv_vulnerabilities(self, deps: List[Dict[str, str]], ecosystem: str = "npm") -> List[Dict[str, Any]]:
-        """Vérifie les vulnérabilités via l'API batch OSV de Google (gratuite, rapide).
-
-        Args:
-            deps: Liste de dépendances [{'name': 'pkg', 'version': '1.0.0'}, ...]
-            ecosystem: 'npm' pour JS/TS, 'PyPI' pour Python
-
-        Returns:
-            Liste de vulnérabilités trouvées
-        """
         vulnerabilities = []
         OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
         OSV_VULN_URL = "https://api.osv.dev/v1/vulns/"
-
 
         queries = []
         dep_map = {}
@@ -421,7 +356,6 @@ class DependencyGuardTool(BaseTool):
         self.logger.info(f"Vérification OSV batch pour {len(queries)} packages ({ecosystem})...")
 
         try:
-
             batch_data = {"queries": queries}
             req = urllib.request.Request(
                 OSV_BATCH_URL,
@@ -431,7 +365,6 @@ class DependencyGuardTool(BaseTool):
 
             with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode('utf-8'))
-
 
             vuln_to_packages = {}
 
@@ -447,28 +380,22 @@ class DependencyGuardTool(BaseTool):
                             vuln_to_packages[vuln_id] = []
                         vuln_to_packages[vuln_id].append(pkg_info)
 
-
             self.logger.info(f"Récupération des détails pour {len(vuln_to_packages)} vulnérabilités uniques...")
 
             for vuln_id, packages in vuln_to_packages.items():
                 try:
-
                     vuln_req = urllib.request.Request(f"{OSV_VULN_URL}{vuln_id}")
                     with urllib.request.urlopen(vuln_req, timeout=10) as resp:
                         vuln_details = json.loads(resp.read().decode('utf-8'))
 
-
                     severity = self._extract_osv_severity(vuln_details)
-
 
                     description = vuln_details.get('summary', vuln_details.get('details', ''))[:200]
                     if not description:
                         description = f"Vulnérabilité {vuln_id}"
 
-
                     aliases = vuln_details.get('aliases', [])
                     cve_id = next((a for a in aliases if a.startswith('CVE-')), vuln_id)
-
 
                     fix_versions = []
                     for affected in vuln_details.get('affected', []):
@@ -476,7 +403,6 @@ class DependencyGuardTool(BaseTool):
                             for event in range_info.get('events', []):
                                 if 'fixed' in event:
                                     fix_versions.append(event['fixed'])
-
 
                     for pkg_info in packages:
                         vulnerabilities.append({
@@ -512,8 +438,6 @@ class DependencyGuardTool(BaseTool):
         return vulnerabilities
 
     def _extract_osv_severity(self, vuln_details: dict) -> str:
-        """Extrait la sévérité d'une vulnérabilité OSV."""
-
         db_specific = vuln_details.get('database_specific', {})
         if 'severity' in db_specific:
             sev = str(db_specific['severity']).upper()
@@ -525,7 +449,6 @@ class DependencyGuardTool(BaseTool):
                 return 'medium'
             elif sev == 'LOW':
                 return 'low'
-
 
         for affected in vuln_details.get('affected', []):
             eco_specific = affected.get('ecosystem_specific', {})
@@ -540,12 +463,10 @@ class DependencyGuardTool(BaseTool):
                 elif sev == 'LOW':
                     return 'low'
 
-
         for sev_info in vuln_details.get('severity', []):
             score_str = sev_info.get('score', '')
             if score_str:
                 try:
-
                     if score_str.replace('.', '').replace('-', '').isdigit():
                         score = float(score_str)
                     else:
@@ -564,24 +485,14 @@ class DependencyGuardTool(BaseTool):
         return 'medium'
 
     def _extract_version(self, version_spec: str) -> str:
-        """Extrait une version exacte d'un spécificateur de version.
-
-        Args:
-            version_spec: Spécificateur comme '==1.0.0', '^1.0.0', '>=1.0.0', '1.0.0'
-
-        Returns:
-            Version extraite ou chaîne vide
-        """
         if not version_spec or version_spec == '*':
             return ''
-
 
         version = version_spec.strip()
         for prefix in ['==', '>=', '<=', '>', '<', '~=', '!=', '^', '~']:
             if version.startswith(prefix):
                 version = version[len(prefix):]
                 break
-
 
         match = re.match(r'^(\d+(?:\.\d+)*(?:-[a-zA-Z0-9.]+)?)', version)
         if match:
@@ -590,18 +501,9 @@ class DependencyGuardTool(BaseTool):
         return version.strip()
 
     def _extract_all_packages_from_lock(self, lock_content: str) -> List[Dict[str, str]]:
-        """Extrait TOUTES les dépendances avec leurs versions exactes du package-lock.json.
-
-        Args:
-            lock_content: Contenu du package-lock.json
-
-        Returns:
-            Liste de toutes les dépendances avec versions exactes
-        """
         deps = []
         try:
             data = json.loads(lock_content)
-
 
             packages = data.get('packages', {})
             for path, info in packages.items():
@@ -614,7 +516,6 @@ class DependencyGuardTool(BaseTool):
                     version = info.get('version', '')
                     if name and version:
                         deps.append({'name': name, 'version': version})
-
 
             if not deps:
                 def extract_deps_v1(dependencies: dict, prefix: str = ''):
@@ -640,7 +541,6 @@ class DependencyGuardTool(BaseTool):
         return deps
 
     def _parse_requirements_txt_content(self, content: str) -> List[Dict[str, str]]:
-        """Parse le contenu d'un fichier requirements.txt."""
         dependencies = []
         for line in content.split('\n'):
             line = line.strip()
@@ -654,7 +554,6 @@ class DependencyGuardTool(BaseTool):
         return dependencies
 
     def _parse_package_json_content(self, content: str) -> List[Dict[str, str]]:
-        """Parse le contenu d'un fichier package.json."""
         dependencies = []
         try:
             data = json.loads(content)
@@ -669,9 +568,7 @@ class DependencyGuardTool(BaseTool):
         return dependencies
 
     def _detect_content_type(self, content: str, language: str) -> str:
-        """Auto-détecte le type de fichier à partir du contenu."""
         content_stripped = content.strip()
-
 
         if content_stripped.startswith('{'):
             try:
@@ -685,25 +582,20 @@ class DependencyGuardTool(BaseTool):
             except json.JSONDecodeError:
                 pass
 
-
         if '[project]' in content or '[tool.' in content or 'dependencies = [' in content:
             return 'pyproject.toml'
-
 
         if language == 'python':
             return 'requirements.txt'
         return 'package.json'
 
     def _execute_core_logic(self, request: DependencyGuardRequest, **kwargs) -> DependencyGuardResponse:
-        """Exécute la validation des dépendances."""
         issues = []
         deps = []
-
 
         content_type = self._detect_content_type(request.content, request.language)
         manifest_file = f"[content:{content_type}]"
         self.logger.info(f"Type de fichier détecté: {content_type}")
-
 
         if content_type == 'package-lock.json':
             deps = self._parse_package_lock_content(request.content)
@@ -729,7 +621,6 @@ class DependencyGuardTool(BaseTool):
             name = dep['name']
             version = dep['version']
 
-
             if request.blocklist and name.lower() in [b.lower() for b in request.blocklist]:
                 issues.append(DependencyIssue(
                     package=name,
@@ -740,7 +631,6 @@ class DependencyGuardTool(BaseTool):
                     recommendation=f"Supprimez ce package ou trouvez une alternative"
                 ))
 
-
             if request.allowlist and name.lower() not in [a.lower() for a in request.allowlist]:
                 issues.append(DependencyIssue(
                     package=name,
@@ -750,7 +640,6 @@ class DependencyGuardTool(BaseTool):
                     message=f"Package '{name}' n'est pas dans la liste blanche",
                     recommendation=f"Ajoutez '{name}' à l'allowlist ou supprimez-le"
                 ))
-
 
             malicious = self.KNOWN_MALICIOUS_PACKAGES.get(request.language, [])
             if name.lower() in [m.lower() for m in malicious]:
@@ -763,7 +652,6 @@ class DependencyGuardTool(BaseTool):
                     recommendation="Supprimez immédiatement ce package!"
                 ))
 
-
             deprecated = self.DEPRECATED_PACKAGES.get(request.language, {})
             if name.lower() in [d.lower() for d in deprecated.keys()]:
                 replacement = deprecated.get(name, 'une alternative')
@@ -775,7 +663,6 @@ class DependencyGuardTool(BaseTool):
                     message=f"Package '{name}' est déprécié",
                     recommendation=f"Utilisez {replacement} à la place"
                 ))
-
 
             if request.check_existence:
                 if request.language == 'python':
@@ -793,10 +680,8 @@ class DependencyGuardTool(BaseTool):
                         recommendation="Vérifiez l'orthographe. Ce package pourrait être une hallucination IA ou un typosquat."
                     ))
 
-
         if request.check_vulnerabilities:
             ecosystem = 'PyPI' if request.language == 'python' else 'npm'
-
 
             all_deps = deps.copy()
             if content_type == 'package-lock.json' and request.language != 'python':
@@ -818,7 +703,6 @@ class DependencyGuardTool(BaseTool):
                     recommendation=f"Mettez à jour vers une version corrigée: {vuln.get('fix_versions', ['dernière version'])}",
                     cve_ids=[vuln.get('vulnerability_id')] if vuln.get('vulnerability_id') else None
                 ))
-
 
         severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
         for issue in issues:

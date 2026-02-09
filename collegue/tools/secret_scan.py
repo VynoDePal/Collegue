@@ -18,12 +18,7 @@ import re
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-
-
-class FileContent(BaseModel):
-    """Un fichier avec son chemin et contenu pour le scan batch."""
-    path: str = Field(..., description="Chemin relatif du fichier")
-    content: str = Field(..., description="Contenu du fichier")
+from .shared import FileContent
 
 
 class SecretScanRequest(BaseModel):
@@ -223,37 +218,22 @@ class SecretScanTool(BaseTool):
 
     SEVERITY_LEVELS = {'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
 
-    def get_name(self) -> str:
-        return "secret_scan"
-
-    def get_description(self) -> str:
-        return "Scanne le code pour détecter les secrets exposés (clés API, tokens, mots de passe)"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return SecretScanRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return SecretScanResponse
-
-    def get_supported_languages(self) -> List[str]:
-
-
-        return [
-            "python", "typescript", "javascript", "java", "go", "rust", "ruby", "php",
-            "json", "yaml", "yml", "toml", "xml", "html", "css", "scss",
-            "markdown", "md", "txt", "text", "env", "config", "ini", "properties",
-            "dockerfile", "docker", "shell", "bash", "sh", "zsh", "powershell",
-            "sql", "graphql", "terraform", "tf", "hcl", "any"
-        ]
+    tool_name = "secret_scan"
+    tool_description = "Scanne le code pour détecter les secrets exposés (clés API, tokens, mots de passe)"
+    request_model = SecretScanRequest
+    response_model = SecretScanResponse
+    supported_languages = [
+        "python", "typescript", "javascript", "java", "go", "rust", "ruby", "php",
+        "json", "yaml", "yml", "toml", "xml", "html", "css", "scss",
+        "markdown", "md", "txt", "text", "env", "config", "ini", "properties",
+        "dockerfile", "docker", "shell", "bash", "sh", "zsh", "powershell",
+        "sql", "graphql", "terraform", "tf", "hcl", "any"
+    ]
+    long_running = False
 
     def validate_language(self, language: str) -> bool:
         """Override: accepte n'importe quel langage pour le scan de secrets."""
-
-
         return True
-
-    def is_long_running(self) -> bool:
-        return False
 
     def get_usage_description(self) -> str:
         return (

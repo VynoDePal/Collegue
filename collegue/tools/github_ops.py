@@ -29,26 +29,6 @@ except ImportError:
 
 
 class GitHubRequest(BaseModel):
-    """Modèle de requête pour les opérations GitHub.
-
-    PARAMÈTRES REQUIS PAR COMMANDE:
-    - list_repos: owner (optionnel, liste vos repos si omis)
-    - get_repo: owner + repo
-    - list_prs: owner + repo
-    - get_pr: owner + repo + pr_number
-    - create_pr: owner + repo + title + head + base
-    - pr_files: owner + repo + pr_number
-    - pr_comments: owner + repo + pr_number
-    - list_issues: owner + repo
-    - get_issue: owner + repo + issue_number
-    - create_issue: owner + repo + title + body
-    - repo_branches: owner + repo
-    - create_branch: owner + repo + branch + from_branch (ou sha)
-    - update_file: owner + repo + path + message + content + branch
-    - repo_commits: owner + repo
-    - search_code: query (owner/repo optionnels pour filtrer)
-    - list_workflows: owner + repo
-    """
     command: str = Field(
         ...,
         description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, get_file, create_pr, list_prs, get_pr, create_issue, list_issues, get_issue, pr_files, pr_comments, create_branch, update_file, repo_branches, repo_commits, search_code, list_workflows"
@@ -69,8 +49,6 @@ class GitHubRequest(BaseModel):
     query: Optional[str] = Field(None, description="Requête de recherche (requis pour search_code)")
     limit: int = Field(30, description="Nombre max de résultats (1-100)", ge=1, le=100)
     token: Optional[str] = Field(None, description="Token GitHub (utilise automatiquement GITHUB_TOKEN de l'environnement si non fourni)")
-
-
     title: Optional[str] = Field(None, description="Titre pour create_pr ou create_issue")
     body: Optional[str] = Field(None, description="Description pour create_pr ou create_issue")
     head: Optional[str] = Field(None, description="Branche source pour create_pr (ex: 'feature-branch')")
@@ -91,9 +69,7 @@ class GitHubRequest(BaseModel):
             raise ValueError(f"Commande invalide. Valides: {valid}")
         return v
 
-
 class RepoInfo(BaseModel):
-    """Information sur un repository."""
     name: str
     full_name: str
     description: Optional[str] = None
@@ -106,9 +82,7 @@ class RepoInfo(BaseModel):
     is_private: bool = False
     updated_at: str
 
-
 class PRInfo(BaseModel):
-    """Information sur une Pull Request."""
     number: int
     title: str
     state: str
@@ -125,9 +99,7 @@ class PRInfo(BaseModel):
     labels: List[str] = []
     draft: bool = False
 
-
 class IssueInfo(BaseModel):
-    """Information sur une issue."""
     number: int
     title: str
     state: str
@@ -140,43 +112,32 @@ class IssueInfo(BaseModel):
     comments: int = 0
     body: Optional[str] = None
 
-
 class FileChange(BaseModel):
-    """Fichier modifié dans une PR."""
     filename: str
     status: str
     additions: int
     deletions: int
     patch: Optional[str] = None
 
-
 class Comment(BaseModel):
-    """Commentaire sur une PR ou issue."""
     id: int
     user: str
     body: str
     created_at: str
     html_url: str
 
-
 class BranchInfo(BaseModel):
-    """Information sur une branche."""
     name: str
     sha: str
     protected: bool = False
-
-
 class CommitInfo(BaseModel):
-    """Information sur un commit."""
     sha: str
     message: str
     author: str
     date: str
     html_url: str
 
-
 class WorkflowRun(BaseModel):
-    """Information sur une exécution de workflow."""
     id: int
     name: str
     status: str
@@ -185,18 +146,14 @@ class WorkflowRun(BaseModel):
     created_at: str
     head_branch: str
 
-
 class SearchResult(BaseModel):
-    """Résultat de recherche de code."""
     name: str
     path: str
     repository: str
     html_url: str
     score: float
 
-
 class GitHubResponse(BaseModel):
-    """Modèle de réponse pour les opérations GitHub."""
     success: bool
     command: str
     message: str
@@ -217,18 +174,6 @@ class GitHubResponse(BaseModel):
 
 
 class GitHubOpsTool(BaseTool):
-    """
-    Outil d'interaction avec l'API GitHub.
-
-    Fonctionnalités:
-    - Lister et inspecter les repositories
-    - Gérer les Pull Requests (liste, détails, fichiers, commentaires)
-    - Gérer les Issues
-    - Voir les branches et commits
-    - Vérifier les workflows CI/CD
-    - Rechercher du code
-    """
-
     API_BASE = "https://api.github.com"
 
     def _get_token_from_http_headers(self) -> Optional[str]:
@@ -237,27 +182,17 @@ class GitHubOpsTool(BaseTool):
         headers = get_http_headers() or {}
         return headers.get("x-github-token") or headers.get("x-collegue-github-token")
 
-    def get_name(self) -> str:
-        return "github_ops"
-
-    def get_description(self) -> str:
-        return (
-            "Interagit avec l'API GitHub. IMPORTANT: Pour list_prs, list_issues, get_repo, "
-            "vous DEVEZ fournir 'owner' ET 'repo' (ex: owner='microsoft', repo='vscode'). "
-            "Commandes: list_repos, get_repo, list_prs, get_pr, list_issues, repo_branches, search_code"
-        )
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return GitHubRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return GitHubResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return []
+    tool_name = "github_ops"
+    tool_description = (
+        "Interagit avec l'API GitHub. IMPORTANT: Pour list_prs, list_issues, get_repo, "
+        "vous DEVEZ fournir 'owner' ET 'repo' (ex: owner='microsoft', repo='vscode'). "
+        "Commandes: list_repos, get_repo, list_prs, get_pr, list_issues, repo_branches, search_code"
+    )
+    request_model = GitHubRequest
+    response_model = GitHubResponse
+    supported_languages = []
 
     def _get_headers(self, token: Optional[str] = None) -> Dict[str, str]:
-        """Construit les headers pour l'API GitHub."""
         gh_token = token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
         headers = {
             "Accept": "application/vnd.github+json",
@@ -271,11 +206,9 @@ class GitHubOpsTool(BaseTool):
         return headers
 
     def _has_token(self, token: Optional[str] = None) -> bool:
-        """Vérifie si un token est disponible."""
         return bool(token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers())
 
     def _api_get(self, endpoint: str, token: Optional[str] = None, params: Optional[Dict] = None) -> Any:
-        """Effectue une requête GET à l'API GitHub."""
         if not HAS_REQUESTS:
             raise ToolExecutionError("requests non installé. Installez avec: pip install requests")
 
@@ -310,12 +243,9 @@ class GitHubOpsTool(BaseTool):
             raise ToolExecutionError(f"Erreur réseau GitHub: {e}")
 
     def _list_repos(self, owner: Optional[str], token: Optional[str], limit: int) -> List[RepoInfo]:
-        """Liste les repositories."""
         if owner:
-
             endpoint = f"/users/{owner}/repos"
         else:
-
             endpoint = "/user/repos"
 
         data = self._api_get(endpoint, token, {"per_page": limit, "sort": "updated"})
@@ -335,7 +265,6 @@ class GitHubOpsTool(BaseTool):
         ) for r in data[:limit]]
 
     def _get_repo(self, owner: str, repo: str, token: Optional[str]) -> RepoInfo:
-        """Récupère les détails d'un repository."""
         data = self._api_get(f"/repos/{owner}/{repo}", token)
         return RepoInfo(
             name=data['name'],
@@ -352,7 +281,6 @@ class GitHubOpsTool(BaseTool):
         )
 
     def _list_prs(self, owner: str, repo: str, state: str, token: Optional[str], limit: int) -> List[PRInfo]:
-        """Liste les Pull Requests."""
         data = self._api_get(f"/repos/{owner}/{repo}/pulls", token, {
             "state": state,
             "per_page": limit,
@@ -375,7 +303,6 @@ class GitHubOpsTool(BaseTool):
         ) for pr in data[:limit]]
 
     def _get_pr(self, owner: str, repo: str, pr_number: int, token: Optional[str]) -> PRInfo:
-        """Récupère les détails d'une PR."""
         data = self._api_get(f"/repos/{owner}/{repo}/pulls/{pr_number}", token)
         return PRInfo(
             number=data['number'],
@@ -396,7 +323,6 @@ class GitHubOpsTool(BaseTool):
         )
 
     def _get_pr_files(self, owner: str, repo: str, pr_number: int, token: Optional[str], limit: int) -> List[FileChange]:
-        """Récupère les fichiers modifiés dans une PR."""
         data = self._api_get(f"/repos/{owner}/{repo}/pulls/{pr_number}/files", token, {"per_page": limit})
 
         return [FileChange(
@@ -408,8 +334,6 @@ class GitHubOpsTool(BaseTool):
         ) for f in data[:limit]]
 
     def _get_pr_comments(self, owner: str, repo: str, pr_number: int, token: Optional[str], limit: int) -> List[Comment]:
-        """Récupère les commentaires d'une PR."""
-
         review_comments = self._api_get(f"/repos/{owner}/{repo}/pulls/{pr_number}/comments", token, {"per_page": limit})
         issue_comments = self._api_get(f"/repos/{owner}/{repo}/issues/{pr_number}/comments", token, {"per_page": limit})
 
@@ -423,19 +347,16 @@ class GitHubOpsTool(BaseTool):
                 html_url=c['html_url']
             ))
 
-
         all_comments.sort(key=lambda x: x.created_at)
         return all_comments[:limit]
 
     def _list_issues(self, owner: str, repo: str, state: str, token: Optional[str], limit: int) -> List[IssueInfo]:
-        """Liste les issues (sans les PRs)."""
         data = self._api_get(f"/repos/{owner}/{repo}/issues", token, {
             "state": state,
             "per_page": limit,
             "sort": "updated",
             "direction": "desc"
         })
-
 
         issues = [i for i in data if 'pull_request' not in i]
 
@@ -454,7 +375,6 @@ class GitHubOpsTool(BaseTool):
         ) for i in issues[:limit]]
 
     def _get_issue(self, owner: str, repo: str, issue_number: int, token: Optional[str]) -> IssueInfo:
-        """Récupère les détails d'une issue."""
         data = self._api_get(f"/repos/{owner}/{repo}/issues/{issue_number}", token)
         return IssueInfo(
             number=data['number'],
@@ -471,7 +391,6 @@ class GitHubOpsTool(BaseTool):
         )
 
     def _list_branches(self, owner: str, repo: str, token: Optional[str], limit: int) -> List[BranchInfo]:
-        """Liste les branches d'un repo."""
         data = self._api_get(f"/repos/{owner}/{repo}/branches", token, {"per_page": limit})
         return [BranchInfo(
             name=b['name'],
@@ -480,7 +399,6 @@ class GitHubOpsTool(BaseTool):
         ) for b in data[:limit]]
 
     def _list_commits(self, owner: str, repo: str, branch: Optional[str], token: Optional[str], limit: int) -> List[CommitInfo]:
-        """Liste les commits d'un repo/branche."""
         params = {"per_page": limit}
         if branch:
             params["sha"] = branch
@@ -495,7 +413,6 @@ class GitHubOpsTool(BaseTool):
         ) for c in data[:limit]]
 
     def _list_workflows(self, owner: str, repo: str, token: Optional[str], limit: int) -> List[WorkflowRun]:
-        """Liste les exécutions de workflows CI/CD."""
         data = self._api_get(f"/repos/{owner}/{repo}/actions/runs", token, {"per_page": limit})
         runs = data.get('workflow_runs', [])
 
@@ -510,7 +427,6 @@ class GitHubOpsTool(BaseTool):
         ) for r in runs[:limit]]
 
     def _search_code(self, query: str, owner: Optional[str], repo: Optional[str], token: Optional[str], limit: int) -> List[SearchResult]:
-        """Recherche du code sur GitHub."""
         q = query
         if owner and repo:
             q += f" repo:{owner}/{repo}"
@@ -529,7 +445,6 @@ class GitHubOpsTool(BaseTool):
         ) for i in items[:limit]]
 
     def _api_post(self, endpoint: str, data: Dict, token: Optional[str] = None) -> Any:
-        """Effectue une requête POST à l'API GitHub."""
         if not HAS_REQUESTS:
             raise ToolExecutionError("requests non installé. Installez avec: pip install requests")
 
@@ -553,7 +468,6 @@ class GitHubOpsTool(BaseTool):
             raise ToolExecutionError(f"Erreur réseau GitHub: {e}")
 
     def _api_put(self, endpoint: str, data: Dict, token: Optional[str] = None) -> Any:
-        """Effectue une requête PUT à l'API GitHub."""
         if not HAS_REQUESTS:
             raise ToolExecutionError("requests non installé")
 
@@ -571,7 +485,6 @@ class GitHubOpsTool(BaseTool):
             raise ToolExecutionError(f"Erreur réseau GitHub: {e}")
 
     def _create_pr(self, owner: str, repo: str, title: str, head: str, base: str, body: Optional[str], token: Optional[str]) -> PRInfo:
-        """Crée une Pull Request."""
         data = {
             "title": title,
             "head": head,
@@ -593,7 +506,6 @@ class GitHubOpsTool(BaseTool):
         )
 
     def _create_issue(self, owner: str, repo: str, title: str, body: Optional[str], token: Optional[str]) -> IssueInfo:
-        """Crée une Issue."""
         data = {
             "title": title,
             "body": body or ""
@@ -611,7 +523,6 @@ class GitHubOpsTool(BaseTool):
         )
 
     def _get_branch_sha(self, owner: str, repo: str, branch: str, token: Optional[str]) -> str:
-        """Récupère le SHA d'une branche."""
         try:
             resp = self._api_get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}", token)
             return resp['object']['sha']
@@ -619,15 +530,11 @@ class GitHubOpsTool(BaseTool):
             raise ToolExecutionError(f"Branche source '{branch}' introuvable")
 
     def _create_branch(self, owner: str, repo: str, branch: str, from_branch: Optional[str], token: Optional[str]) -> BranchInfo:
-        """Crée une nouvelle branche."""
-
         if not from_branch:
-
             repo_info = self._get_repo(owner, repo, token)
             from_branch = repo_info.default_branch
 
         sha = self._get_branch_sha(owner, repo, from_branch, token)
-
 
         data = {
             "ref": f"refs/heads/{branch}",
@@ -642,8 +549,6 @@ class GitHubOpsTool(BaseTool):
         )
 
     def _update_file(self, owner: str, repo: str, path: str, message: str, content: str, branch: Optional[str], token: Optional[str]) -> Dict:
-        """Crée ou met à jour un fichier."""
-
         sha = None
         try:
             url = f"/repos/{owner}/{repo}/contents/{path}"
@@ -656,9 +561,7 @@ class GitHubOpsTool(BaseTool):
             if "introuvable" not in str(e) and "404" not in str(e):
                 raise e
 
-
         content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
-
 
         data = {
             "message": message,
@@ -669,7 +572,6 @@ class GitHubOpsTool(BaseTool):
         if branch:
             data["branch"] = branch
 
-
         resp = self._api_put(f"/repos/{owner}/{repo}/contents/{path}", data, token)
 
         return {
@@ -678,11 +580,6 @@ class GitHubOpsTool(BaseTool):
         }
 
     def _get_file_content(self, owner: str, repo: str, path: str, branch: Optional[str], token: Optional[str]) -> Dict:
-        """Récupère le contenu d'un fichier depuis GitHub.
-
-        Returns:
-            Dict avec 'content' (base64) et 'sha'
-        """
         url = f"/repos/{owner}/{repo}/contents/{path}"
         if branch:
             url += f"?ref={branch}"
@@ -699,14 +596,10 @@ class GitHubOpsTool(BaseTool):
         }
 
     def _execute_core_logic(self, request: GitHubRequest, **kwargs) -> GitHubResponse:
-        """Exécute la logique principale."""
         token = request.token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
-
 
         if token and request.owner and HAS_CONFIG_REGISTRY:
             try:
-
-
                 sentry_org = os.environ.get('SENTRY_ORG')
                 if get_http_headers:
                     headers = get_http_headers() or {}

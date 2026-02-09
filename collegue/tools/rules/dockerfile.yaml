@@ -1,0 +1,84 @@
+baseline:
+  - id: DOCKER-001
+    title: Running as root user
+    severity: high
+    pattern: '^(?!.*USER\s+(?!root)\w+).*$'
+    check_type: absence
+    description: "Le container s'exécute en tant que root par défaut."
+    remediation: "Ajouter USER <non-root-user> après l'installation des dépendances."
+    references:
+      - https://docs.docker.com/develop/develop-images/instructions/#user
+
+  - id: DOCKER-002
+    title: Using latest tag
+    severity: medium
+    pattern: 'FROM\s+[\w\-./]+:latest'
+    description: "L'image de base utilise le tag latest, ce qui rend les builds non reproductibles."
+    remediation: "Spécifier une version spécifique (ex: FROM python:3.11-slim)."
+    references:
+      - https://docs.docker.com/develop/develop-images/instructions/#from
+
+  - id: DOCKER-003
+    title: No tag specified for base image
+    severity: medium
+    pattern: 'FROM\s+[\w\-./]+\s*$'
+    description: "L'image de base n'a pas de tag, ce qui équivaut à latest."
+    remediation: "Spécifier un tag de version explicite."
+    references:
+      - https://docs.docker.com/develop/develop-images/instructions/#from
+
+  - id: DOCKER-004
+    title: ADD used instead of COPY
+    severity: low
+    pattern: '^ADD\s+(?!https?://)'
+    description: "ADD a un comportement auto-extract qui peut être dangereux. COPY est préféré."
+    remediation: "Utiliser COPY au lieu de ADD pour les fichiers locaux."
+    references:
+      - https://docs.docker.com/develop/develop-images/instructions/#add-or-copy
+
+  - id: DOCKER-005
+    title: Hardcoded secret in Dockerfile
+    severity: critical
+    pattern: "(?:ENV|ARG)\\s+(?:\\w+_)?(?:PASSWORD|SECRET|TOKEN|API_KEY|ACCESS_KEY)\\s*=\\s*[\"']?[^\\s\"'$]+[\"']?"
+    description: "Un secret semble être hardcodé dans le Dockerfile."
+    remediation: "Utiliser des secrets Docker ou des variables d'environnement runtime."
+    references:
+      - https://docs.docker.com/engine/swarm/secrets/
+
+  - id: DOCKER-006
+    title: Curl or wget piped to shell
+    severity: high
+    pattern: '(?:curl|wget)\s+[^\|]+\|\s*(?:bash|sh)'
+    description: "Télécharger et exécuter un script est dangereux (man-in-the-middle)."
+    remediation: "Télécharger, vérifier le checksum, puis exécuter séparément."
+    references:
+      - https://blog.aquasec.com/docker-security-best-practices
+
+  - id: DOCKER-007
+    title: Apt-get without cleanup
+    severity: low
+    pattern: 'apt-get\s+install(?![\s\S]*?rm\s+-rf\s+/var/lib/apt)'
+    description: "apt-get install sans nettoyage augmente la taille de l'image."
+    remediation: "Ajouter && rm -rf /var/lib/apt/lists/* après apt-get install."
+    references:
+      - https://docs.docker.com/develop/develop-images/dockerfile_best-practices/
+
+  - id: DOCKER-008
+    title: HEALTHCHECK not defined
+    severity: low
+    pattern: HEALTHCHECK
+    check_type: absence
+    description: "Pas de HEALTHCHECK défini pour vérifier la santé du container."
+    remediation: "Ajouter une instruction HEALTHCHECK."
+    references:
+      - https://docs.docker.com/engine/reference/builder/#healthcheck
+
+strict:
+  - id: DOCKER-101
+    title: Non-specific base image digest
+    severity: medium
+    pattern: 'FROM\s+[\w\-./]+:[\w\-\.]+(?!@sha256:)'
+    description: "L'image n'utilise pas de digest SHA256 pour garantir l'intégrité."
+    remediation: "Utiliser une image avec digest (ex: python:3.11@sha256:abc...)."
+    references:
+      - https://docs.docker.com/engine/reference/builder/#from

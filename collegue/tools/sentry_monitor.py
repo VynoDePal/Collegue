@@ -192,20 +192,11 @@ class SentryMonitorTool(BaseTool):
     - Parser les fichiers de configuration locaux (.sentryclirc, sentry.properties)
     """
 
-    def get_name(self) -> str:
-        return "sentry_monitor"
-
-    def get_description(self) -> str:
-        return "Récupère les erreurs, stacktraces et statistiques depuis Sentry pour prioriser le debugging"
-
-    def get_request_model(self) -> Type[BaseModel]:
-        return SentryRequest
-
-    def get_response_model(self) -> Type[BaseModel]:
-        return SentryResponse
-
-    def get_supported_languages(self) -> List[str]:
-        return []
+    tool_name = "sentry_monitor"
+    tool_description = "Récupère les erreurs, stacktraces et statistiques depuis Sentry pour prioriser le debugging"
+    request_model = SentryRequest
+    response_model = SentryResponse
+    supported_languages = []
 
     def _parse_sentryclirc(self, content: str) -> ConfigInfo:
         """Parse un contenu style INI (.sentryclirc)."""
