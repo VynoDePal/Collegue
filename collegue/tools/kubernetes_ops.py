@@ -20,7 +20,7 @@ except ImportError:
 
 class KubernetesRequest(BaseModel):
     """Modèle de requête pour les opérations Kubernetes.
-    
+
     PARAMÈTRES REQUIS PAR COMMANDE:
     - list_namespaces, list_nodes: aucun paramètre requis
     - list_pods, list_deployments, list_services, list_events, list_configmaps, list_secrets: namespace (défaut: 'default')
@@ -33,11 +33,11 @@ class KubernetesRequest(BaseModel):
     )
     namespace: str = Field("default", description="Namespace Kubernetes (défaut: 'default')")
     name: Optional[str] = Field(
-        None, 
+        None,
         description="REQUIS pour get_pod, pod_logs, get_deployment, describe_resource. Nom de la ressource K8s"
     )
     resource_type: Optional[str] = Field(
-        None, 
+        None,
         description="REQUIS pour describe_resource. Type: 'pod', 'deployment', 'service', 'configmap', 'secret'"
     )
     container: Optional[str] = Field(None, description="Nom du container spécifique pour pod_logs (optionnel si un seul container)")
@@ -47,7 +47,7 @@ class KubernetesRequest(BaseModel):
     field_selector: Optional[str] = Field(None, description="Filtrer par champs (ex: 'status.phase=Running')")
     kubeconfig: Optional[str] = Field(None, description="Chemin kubeconfig (utilise ~/.kube/config par défaut)")
     context: Optional[str] = Field(None, description="Contexte K8s à utiliser (optionnel)")
-    
+
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
@@ -199,7 +199,7 @@ class KubernetesResponse(BaseModel):
 class KubernetesOpsTool(BaseTool):
     """
     Outil d'inspection et gestion des clusters Kubernetes.
-    
+
     Fonctionnalités:
     - Lister et inspecter les pods, déploiements, services
     - Récupérer les logs des containers
@@ -207,56 +207,56 @@ class KubernetesOpsTool(BaseTool):
     - Décrire les ressources en YAML
     - Lister les ConfigMaps et Secrets
     """
-    
+
     def get_name(self) -> str:
         return "kubernetes_ops"
-    
+
     def get_description(self) -> str:
         return "Inspecte les clusters Kubernetes: pods, logs, déploiements, services, événements"
-    
+
     def get_request_model(self) -> Type[BaseModel]:
         return KubernetesRequest
-    
+
     def get_response_model(self) -> Type[BaseModel]:
         return KubernetesResponse
-    
+
     def get_supported_languages(self) -> List[str]:
         return ["yaml"]
-    
+
     def _load_config(self, kubeconfig: Optional[str] = None, context: Optional[str] = None):
         """Charge la configuration Kubernetes."""
         if not HAS_K8S:
             raise ToolExecutionError(
                 "kubernetes non installé. Installez avec: pip install kubernetes"
             )
-        
+
         try:
             if kubeconfig:
                 config.load_kube_config(config_file=kubeconfig, context=context)
             else:
-                # Essayer in-cluster d'abord, puis kubeconfig local
+
                 try:
                     config.load_incluster_config()
                 except config.ConfigException:
                     config.load_kube_config(context=context)
         except Exception as e:
             raise ToolExecutionError(f"Erreur de configuration Kubernetes: {e}")
-    
+
     def _format_age(self, timestamp) -> str:
         """Formate un timestamp en âge relatif."""
         if not timestamp:
             return "N/A"
-        
+
         from datetime import datetime, timezone
-        
+
         if hasattr(timestamp, 'timestamp'):
             ts = timestamp
         else:
             return str(timestamp)
-        
+
         now = datetime.now(timezone.utc)
         delta = now - ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else now - ts
-        
+
         seconds = int(delta.total_seconds())
         if seconds < 60:
             return f"{seconds}s"
@@ -266,28 +266,28 @@ class KubernetesOpsTool(BaseTool):
             return f"{seconds // 3600}h"
         else:
             return f"{seconds // 86400}d"
-    
-    def _list_pods(self, namespace: str, label_selector: Optional[str], 
+
+    def _list_pods(self, namespace: str, label_selector: Optional[str],
                    field_selector: Optional[str]) -> List[PodInfo]:
         """Liste les pods d'un namespace."""
         v1 = client.CoreV1Api()
-        
+
         kwargs = {"namespace": namespace}
         if label_selector:
             kwargs["label_selector"] = label_selector
         if field_selector:
             kwargs["field_selector"] = field_selector
-        
+
         pods = v1.list_namespaced_pod(**kwargs)
-        
+
         result = []
         for pod in pods.items:
-            # Calculer le nombre de restarts
+
             restarts = 0
             containers = []
             ready_count = 0
             total_count = 0
-            
+
             if pod.status.container_statuses:
                 for cs in pod.status.container_statuses:
                     restarts += cs.restart_count
@@ -295,7 +295,7 @@ class KubernetesOpsTool(BaseTool):
                     total_count += 1
                     if cs.ready:
                         ready_count += 1
-            
+
             result.append(PodInfo(
                 name=pod.metadata.name,
                 namespace=pod.metadata.namespace,
@@ -308,28 +308,28 @@ class KubernetesOpsTool(BaseTool):
                 containers=containers,
                 labels=pod.metadata.labels or {}
             ))
-        
+
         return result
-    
+
     def _get_pod(self, name: str, namespace: str) -> PodDetail:
         """Récupère les détails d'un pod."""
         v1 = client.CoreV1Api()
-        
+
         try:
             pod = v1.read_namespaced_pod(name=name, namespace=namespace)
         except ApiException as e:
             if e.status == 404:
                 raise ToolExecutionError(f"Pod '{name}' introuvable dans '{namespace}'")
             raise ToolExecutionError(f"Erreur API Kubernetes: {e.reason}")
-        
-        # Extraire les statuts des containers
+
+
         containers = []
         if pod.status.container_statuses:
             for cs in pod.status.container_statuses:
                 state = "unknown"
                 reason = None
                 message = None
-                
+
                 if cs.state.running:
                     state = "running"
                 elif cs.state.waiting:
@@ -340,7 +340,7 @@ class KubernetesOpsTool(BaseTool):
                     state = "terminated"
                     reason = cs.state.terminated.reason
                     message = cs.state.terminated.message
-                
+
                 containers.append(ContainerStatus(
                     name=cs.name,
                     ready=cs.ready,
@@ -350,8 +350,8 @@ class KubernetesOpsTool(BaseTool):
                     message=message,
                     image=cs.image
                 ))
-        
-        # Extraire les conditions
+
+
         conditions = []
         if pod.status.conditions:
             for c in pod.status.conditions:
@@ -361,7 +361,7 @@ class KubernetesOpsTool(BaseTool):
                     "reason": c.reason,
                     "message": c.message
                 })
-        
+
         return PodDetail(
             name=pod.metadata.name,
             namespace=pod.metadata.namespace,
@@ -375,12 +375,12 @@ class KubernetesOpsTool(BaseTool):
             labels=pod.metadata.labels or {},
             annotations=dict(list((pod.metadata.annotations or {}).items())[:10])
         )
-    
+
     def _get_pod_logs(self, name: str, namespace: str, container: Optional[str],
                       tail_lines: int, previous: bool) -> str:
         """Récupère les logs d'un pod."""
         v1 = client.CoreV1Api()
-        
+
         try:
             logs = v1.read_namespaced_pod_log(
                 name=name,
@@ -394,24 +394,24 @@ class KubernetesOpsTool(BaseTool):
             if e.status == 404:
                 raise ToolExecutionError(f"Pod '{name}' introuvable dans '{namespace}'")
             raise ToolExecutionError(f"Erreur récupération logs: {e.reason}")
-    
+
     def _list_deployments(self, namespace: str, label_selector: Optional[str]) -> List[DeploymentInfo]:
         """Liste les déploiements d'un namespace."""
         apps_v1 = client.AppsV1Api()
-        
+
         kwargs = {"namespace": namespace}
         if label_selector:
             kwargs["label_selector"] = label_selector
-        
+
         deployments = apps_v1.list_namespaced_deployment(**kwargs)
-        
+
         result = []
         for dep in deployments.items:
-            # Extraire l'image du premier container
+
             image = None
             if dep.spec.template.spec.containers:
                 image = dep.spec.template.spec.containers[0].image
-            
+
             result.append(DeploymentInfo(
                 name=dep.metadata.name,
                 namespace=dep.metadata.namespace,
@@ -423,24 +423,24 @@ class KubernetesOpsTool(BaseTool):
                 strategy=dep.spec.strategy.type if dep.spec.strategy else "RollingUpdate",
                 image=image
             ))
-        
+
         return result
-    
+
     def _get_deployment(self, name: str, namespace: str) -> DeploymentInfo:
         """Récupère les détails d'un déploiement."""
         apps_v1 = client.AppsV1Api()
-        
+
         try:
             dep = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
         except ApiException as e:
             if e.status == 404:
                 raise ToolExecutionError(f"Deployment '{name}' introuvable dans '{namespace}'")
             raise ToolExecutionError(f"Erreur API Kubernetes: {e.reason}")
-        
+
         image = None
         if dep.spec.template.spec.containers:
             image = dep.spec.template.spec.containers[0].image
-        
+
         return DeploymentInfo(
             name=dep.metadata.name,
             namespace=dep.metadata.namespace,
@@ -452,17 +452,17 @@ class KubernetesOpsTool(BaseTool):
             strategy=dep.spec.strategy.type if dep.spec.strategy else "RollingUpdate",
             image=image
         )
-    
+
     def _list_services(self, namespace: str, label_selector: Optional[str]) -> List[ServiceInfo]:
         """Liste les services d'un namespace."""
         v1 = client.CoreV1Api()
-        
+
         kwargs = {"namespace": namespace}
         if label_selector:
             kwargs["label_selector"] = label_selector
-        
+
         services = v1.list_namespaced_service(**kwargs)
-        
+
         result = []
         for svc in services.items:
             ports = []
@@ -473,12 +473,12 @@ class KubernetesOpsTool(BaseTool):
                         port_str += f":{p.node_port}"
                     port_str += f"/{p.protocol}"
                     ports.append(port_str)
-            
+
             external_ip = None
             if svc.status.load_balancer and svc.status.load_balancer.ingress:
                 ingress = svc.status.load_balancer.ingress[0]
                 external_ip = ingress.ip or ingress.hostname
-            
+
             result.append(ServiceInfo(
                 name=svc.metadata.name,
                 namespace=svc.metadata.namespace,
@@ -489,38 +489,38 @@ class KubernetesOpsTool(BaseTool):
                 selector=svc.spec.selector or {},
                 age=self._format_age(svc.metadata.creation_timestamp)
             ))
-        
+
         return result
-    
+
     def _list_namespaces(self) -> List[NamespaceInfo]:
         """Liste tous les namespaces."""
         v1 = client.CoreV1Api()
         namespaces = v1.list_namespace()
-        
+
         return [NamespaceInfo(
             name=ns.metadata.name,
             status=ns.status.phase,
             age=self._format_age(ns.metadata.creation_timestamp),
             labels=ns.metadata.labels or {}
         ) for ns in namespaces.items]
-    
+
     def _list_events(self, namespace: str, field_selector: Optional[str]) -> List[EventInfo]:
         """Liste les événements d'un namespace."""
         v1 = client.CoreV1Api()
-        
+
         kwargs = {"namespace": namespace}
         if field_selector:
             kwargs["field_selector"] = field_selector
-        
+
         events = v1.list_namespaced_event(**kwargs)
-        
-        # Trier par timestamp décroissant
+
+
         sorted_events = sorted(
             events.items,
             key=lambda e: e.last_timestamp or e.first_timestamp or e.metadata.creation_timestamp,
             reverse=True
         )
-        
+
         return [EventInfo(
             name=e.metadata.name,
             namespace=e.metadata.namespace,
@@ -533,27 +533,27 @@ class KubernetesOpsTool(BaseTool):
             count=e.count or 1,
             involved_object=f"{e.involved_object.kind}/{e.involved_object.name}" if e.involved_object else ""
         ) for e in sorted_events[:50]]
-    
+
     def _list_nodes(self) -> List[NodeInfo]:
         """Liste tous les nœuds du cluster."""
         v1 = client.CoreV1Api()
         nodes = v1.list_node()
-        
+
         result = []
         for node in nodes.items:
-            # Déterminer les rôles
+
             roles = []
             for label, value in (node.metadata.labels or {}).items():
                 if label.startswith("node-role.kubernetes.io/"):
                     roles.append(label.split("/")[1])
-            
-            # Déterminer le statut
+
+
             status = "Unknown"
             for condition in (node.status.conditions or []):
                 if condition.type == "Ready":
                     status = "Ready" if condition.status == "True" else "NotReady"
                     break
-            
+
             result.append(NodeInfo(
                 name=node.metadata.name,
                 status=status,
@@ -565,26 +565,26 @@ class KubernetesOpsTool(BaseTool):
                 memory=str(node.status.capacity.get("memory", "?")) if node.status.capacity else "?",
                 pods=str(node.status.capacity.get("pods", "?")) if node.status.capacity else "?"
             ))
-        
+
         return result
-    
+
     def _list_configmaps(self, namespace: str) -> List[ConfigMapInfo]:
         """Liste les ConfigMaps d'un namespace."""
         v1 = client.CoreV1Api()
         cms = v1.list_namespaced_config_map(namespace=namespace)
-        
+
         return [ConfigMapInfo(
             name=cm.metadata.name,
             namespace=cm.metadata.namespace,
             data_keys=list((cm.data or {}).keys()),
             age=self._format_age(cm.metadata.creation_timestamp)
         ) for cm in cms.items]
-    
+
     def _list_secrets(self, namespace: str) -> List[SecretInfo]:
         """Liste les Secrets d'un namespace (sans données sensibles)."""
         v1 = client.CoreV1Api()
         secrets = v1.list_namespaced_secret(namespace=namespace)
-        
+
         return [SecretInfo(
             name=s.metadata.name,
             namespace=s.metadata.namespace,
@@ -592,14 +592,14 @@ class KubernetesOpsTool(BaseTool):
             data_keys=list((s.data or {}).keys()),
             age=self._format_age(s.metadata.creation_timestamp)
         ) for s in secrets.items]
-    
+
     def _describe_resource(self, resource_type: str, name: str, namespace: str) -> str:
         """Décrit une ressource en YAML."""
         v1 = client.CoreV1Api()
         apps_v1 = client.AppsV1Api()
-        
+
         resource_type = resource_type.lower()
-        
+
         try:
             if resource_type in ('pod', 'pods'):
                 resource = v1.read_namespaced_pod(name=name, namespace=namespace)
@@ -611,27 +611,27 @@ class KubernetesOpsTool(BaseTool):
                 resource = v1.read_namespaced_config_map(name=name, namespace=namespace)
             elif resource_type in ('secret', 'secrets'):
                 resource = v1.read_namespaced_secret(name=name, namespace=namespace)
-                # Masquer les données sensibles
+
                 if hasattr(resource, 'data') and resource.data:
                     resource.data = {k: "***REDACTED***" for k in resource.data.keys()}
             else:
                 raise ToolExecutionError(f"Type de ressource '{resource_type}' non supporté")
-            
-            # Convertir en dict et formater en YAML
+
+
             resource_dict = client.ApiClient().sanitize_for_serialization(resource)
-            
+
             import yaml
             return yaml.dump(resource_dict, default_flow_style=False, allow_unicode=True)
-            
+
         except ApiException as e:
             if e.status == 404:
                 raise ToolExecutionError(f"{resource_type} '{name}' introuvable dans '{namespace}'")
             raise ToolExecutionError(f"Erreur API Kubernetes: {e.reason}")
-    
+
     def _execute_core_logic(self, request: KubernetesRequest, **kwargs) -> KubernetesResponse:
         """Exécute la logique principale."""
         self._load_config(request.kubeconfig, request.context)
-        
+
         if request.command == 'list_pods':
             pods = self._list_pods(request.namespace, request.label_selector, request.field_selector)
             return KubernetesResponse(
@@ -640,7 +640,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(pods)} pod(s) dans '{request.namespace}'",
                 pods=pods
             )
-        
+
         elif request.command == 'get_pod':
             if not request.name:
                 raise ToolExecutionError("name requis pour get_pod")
@@ -651,7 +651,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ Pod {pod.name}: {pod.status}",
                 pod=pod
             )
-        
+
         elif request.command == 'pod_logs':
             if not request.name:
                 raise ToolExecutionError("name requis pour pod_logs")
@@ -663,9 +663,9 @@ class KubernetesOpsTool(BaseTool):
                 success=True,
                 command=request.command,
                 message=f"✅ Logs de '{request.name}' ({len(logs)} caractères)",
-                logs=logs[:50000]  # Limiter la taille
+                logs=logs[:50000]
             )
-        
+
         elif request.command == 'list_deployments':
             deployments = self._list_deployments(request.namespace, request.label_selector)
             return KubernetesResponse(
@@ -674,7 +674,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(deployments)} deployment(s) dans '{request.namespace}'",
                 deployments=deployments
             )
-        
+
         elif request.command == 'get_deployment':
             if not request.name:
                 raise ToolExecutionError("name requis pour get_deployment")
@@ -685,7 +685,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ Deployment {deployment.name}: {deployment.replicas}",
                 deployment=deployment
             )
-        
+
         elif request.command == 'list_services':
             services = self._list_services(request.namespace, request.label_selector)
             return KubernetesResponse(
@@ -694,7 +694,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(services)} service(s) dans '{request.namespace}'",
                 services=services
             )
-        
+
         elif request.command == 'list_namespaces':
             namespaces = self._list_namespaces()
             return KubernetesResponse(
@@ -703,7 +703,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(namespaces)} namespace(s)",
                 namespaces=namespaces
             )
-        
+
         elif request.command == 'list_events':
             events = self._list_events(request.namespace, request.field_selector)
             return KubernetesResponse(
@@ -712,7 +712,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(events)} événement(s) dans '{request.namespace}'",
                 events=events
             )
-        
+
         elif request.command == 'list_nodes':
             nodes = self._list_nodes()
             return KubernetesResponse(
@@ -721,7 +721,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(nodes)} nœud(s)",
                 nodes=nodes
             )
-        
+
         elif request.command == 'get_node':
             if not request.name:
                 raise ToolExecutionError("name requis pour get_node")
@@ -735,7 +735,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ Nœud {node.name}: {node.status}",
                 node=node
             )
-        
+
         elif request.command == 'list_configmaps':
             configmaps = self._list_configmaps(request.namespace)
             return KubernetesResponse(
@@ -744,7 +744,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(configmaps)} ConfigMap(s) dans '{request.namespace}'",
                 configmaps=configmaps
             )
-        
+
         elif request.command == 'list_secrets':
             secrets = self._list_secrets(request.namespace)
             return KubernetesResponse(
@@ -753,7 +753,7 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ {len(secrets)} Secret(s) dans '{request.namespace}'",
                 secrets=secrets
             )
-        
+
         elif request.command == 'describe_resource':
             if not request.name or not request.resource_type:
                 raise ToolExecutionError("name et resource_type requis pour describe_resource")
@@ -764,6 +764,6 @@ class KubernetesOpsTool(BaseTool):
                 message=f"✅ Description de {request.resource_type}/{request.name}",
                 resource_yaml=yaml_output
             )
-        
+
         else:
             raise ToolExecutionError(f"Commande inconnue: {request.command}")

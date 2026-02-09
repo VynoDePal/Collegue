@@ -77,14 +77,14 @@ class IacGuardrailsRequest(BaseModel):
         ge=0.0,
         le=1.0
     )
-    
+
     @field_validator('policy_profile')
     def validate_profile(cls, v):
         valid = ['baseline', 'strict']
         if v not in valid:
             raise ValueError(f"Profil '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
-    
+
     @field_validator('engines')
     def validate_engines(cls, v):
         valid = ['embedded-rules', 'opa-lite']
@@ -92,7 +92,7 @@ class IacGuardrailsRequest(BaseModel):
             if engine not in valid:
                 raise ValueError(f"Engine '{engine}' invalide. Utilisez: {', '.join(valid)}")
         return v
-    
+
     @field_validator('analysis_depth')
     def validate_analysis_depth(cls, v):
         valid = ['fast', 'deep']
@@ -149,13 +149,13 @@ class IacGuardrailsResponse(BaseModel):
     rules_evaluated: int = Field(..., description="Nombre de règles évaluées")
     scan_summary: str = Field(..., description="Résumé du scan")
     sarif: Optional[Dict] = Field(None, description="Sortie SARIF si demandée")
-    # Champs enrichis par IA (mode deep)
+
     analysis_depth_used: str = Field("fast", description="Profondeur d'analyse utilisée")
     llm_insights: Optional[List[LLMSecurityInsight]] = Field(
         None,
         description="Insights IA (mode deep): vulnérabilités, compliance, best practices"
     )
-    # Scoring sécurité
+
     security_score: float = Field(
         1.0,
         description="Score de sécurité global (0.0=critique, 1.0=sécurisé)",
@@ -176,7 +176,7 @@ class IacGuardrailsResponse(BaseModel):
         default_factory=list,
         description="Actions de remédiation suggérées"
     )
-    # Résultat du chaînage automatique
+
     auto_remediation_triggered: bool = Field(
         False,
         description="True si la remédiation automatique a été déclenchée"
@@ -190,21 +190,19 @@ class IacGuardrailsResponse(BaseModel):
 class IacGuardrailsScanTool(BaseTool):
     """
     Outil de scan de sécurité pour Infrastructure as Code.
-    
+
     Scanne Terraform, Kubernetes YAML, et Dockerfiles pour détecter:
     - Privilèges excessifs (least privilege violations)
     - Configurations dangereuses par défaut
     - Expositions réseau (0.0.0.0/0, ports dangereux)
     - Containers root, capabilities dangereuses
     - Secrets et credentials hardcodés
-    
+
     Basé sur les Pod Security Standards (K8s) et les best practices Terraform/Docker.
     Supporte des policies personnalisées (Option B).
     """
 
-    # ==================== KUBERNETES RULES ====================
-    # Basées sur Pod Security Standards (PSS) Baseline & Restricted
-    
+
     K8S_RULES = {
         'baseline': [
             {
@@ -328,8 +326,7 @@ class IacGuardrailsScanTool(BaseTool):
         ],
     }
 
-    # ==================== TERRAFORM RULES ====================
-    
+
     TF_RULES = {
         'baseline': [
             {
@@ -429,8 +426,7 @@ class IacGuardrailsScanTool(BaseTool):
         ],
     }
 
-    # ==================== DOCKERFILE RULES ====================
-    
+
     DOCKERFILE_RULES = {
         'baseline': [
             {
@@ -590,13 +586,13 @@ class IacGuardrailsScanTool(BaseTool):
     def _detect_file_type(self, filepath: str, content: str) -> str:
         """Détecte le type de fichier IaC."""
         lower_path = filepath.lower()
-        
+
         if lower_path.endswith('.tf') or lower_path.endswith('.tf.json'):
             return 'terraform'
         elif lower_path == 'dockerfile' or lower_path.endswith('/dockerfile') or 'dockerfile' in lower_path:
             return 'dockerfile'
         elif lower_path.endswith(('.yaml', '.yml')):
-            # Vérifier si c'est du K8s
+
             if any(kw in content for kw in ['apiVersion:', 'kind:', 'metadata:']):
                 return 'kubernetes'
             return 'yaml'
@@ -604,7 +600,7 @@ class IacGuardrailsScanTool(BaseTool):
             return 'terraform'
         elif content.strip().startswith('FROM '):
             return 'dockerfile'
-        
+
         return 'unknown'
 
     def _apply_regex_rule(self, rule: Dict, content: str, filepath: str, lines: List[str]) -> List[IacFinding]:
@@ -612,7 +608,7 @@ class IacGuardrailsScanTool(BaseTool):
         findings = []
         pattern = rule['pattern']
         check_type = rule.get('check_type', 'presence')
-        
+
         try:
             if check_type == 'presence':
                 matches = list(re.finditer(pattern, content, re.MULTILINE | re.IGNORECASE))
@@ -629,9 +625,9 @@ class IacGuardrailsScanTool(BaseTool):
                         references=rule.get('references', []),
                         engine='embedded-rules'
                     ))
-            
+
             elif check_type == 'absence':
-                # Pour les checks d'absence, on vérifie que le pattern N'EST PAS trouvé
+
                 if not re.search(pattern, content, re.MULTILINE | re.IGNORECASE):
                     findings.append(IacFinding(
                         rule_id=rule['id'],
@@ -646,27 +642,27 @@ class IacGuardrailsScanTool(BaseTool):
                     ))
         except re.error as e:
             self.logger.warning(f"Erreur regex pour {rule['id']}: {e}")
-        
+
         return findings
 
     def _scan_kubernetes(self, content: str, filepath: str, profile: str) -> List[IacFinding]:
         """Scanne un fichier Kubernetes YAML."""
         findings = []
         lines = content.split('\n')
-        
-        # Appliquer les règles baseline
+
+
         for rule in self.K8S_RULES['baseline']:
             findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
-        
-        # Appliquer les règles strict si demandé
+
+
         if profile == 'strict':
-            # Pour les règles strict, vérifier la présence de securityContext
+
             if 'securityContext' in content:
                 for rule in self.K8S_RULES['strict']:
-                    # Ces règles vérifient l'absence de bonnes pratiques
+
                     findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
             else:
-                # Pas de securityContext du tout = plusieurs violations
+
                 findings.append(IacFinding(
                     rule_id='K8S-100',
                     severity='high',
@@ -678,41 +674,41 @@ class IacGuardrailsScanTool(BaseTool):
                     references=['https://kubernetes.io/docs/concepts/security/pod-security-standards/'],
                     engine='embedded-rules'
                 ))
-        
+
         return findings
 
     def _scan_terraform(self, content: str, filepath: str, profile: str) -> List[IacFinding]:
         """Scanne un fichier Terraform."""
         findings = []
         lines = content.split('\n')
-        
-        # Appliquer les règles baseline
+
+
         for rule in self.TF_RULES['baseline']:
             findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
-        
-        # Appliquer les règles strict si demandé
+
+
         if profile == 'strict':
             for rule in self.TF_RULES['strict']:
                 findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
-        
+
         return findings
 
     def _scan_dockerfile(self, content: str, filepath: str, profile: str) -> List[IacFinding]:
         """Scanne un Dockerfile."""
         findings = []
         lines = content.split('\n')
-        
-        # Vérification spéciale pour USER non-root
+
+
         has_user_instruction = False
         last_user_is_root = True
-        
+
         for i, line in enumerate(lines, 1):
             line_stripped = line.strip()
             if line_stripped.startswith('USER '):
                 has_user_instruction = True
                 user = line_stripped[5:].strip()
                 last_user_is_root = user.lower() in ('root', '0')
-        
+
         if not has_user_instruction or last_user_is_root:
             findings.append(IacFinding(
                 rule_id='DOCKER-001',
@@ -725,25 +721,25 @@ class IacGuardrailsScanTool(BaseTool):
                 references=['https://docs.docker.com/develop/develop-images/instructions/#user'],
                 engine='embedded-rules'
             ))
-        
-        # Appliquer les autres règles baseline
+
+
         for rule in self.DOCKERFILE_RULES['baseline']:
             if rule['id'] == 'DOCKER-001':
-                continue  # Déjà traité
+                continue
             findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
-        
-        # Appliquer les règles strict si demandé
+
+
         if profile == 'strict':
             for rule in self.DOCKERFILE_RULES['strict']:
                 findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
-        
+
         return findings
 
-    def _apply_custom_policies(self, content: str, filepath: str, 
+    def _apply_custom_policies(self, content: str, filepath: str,
                                 policies: List[CustomPolicy]) -> List[IacFinding]:
         """Applique les policies personnalisées."""
         findings = []
-        
+
         for policy in policies:
             if policy.language == 'regex':
                 try:
@@ -763,9 +759,9 @@ class IacGuardrailsScanTool(BaseTool):
                         ))
                 except re.error as e:
                     self.logger.warning(f"Erreur regex dans policy {policy.id}: {e}")
-            
+
             elif policy.language == 'yaml-rules':
-                # Format simplifié: check si une clé/valeur existe
+
                 try:
                     rule_def = yaml.safe_load(policy.content)
                     if isinstance(rule_def, dict):
@@ -784,16 +780,16 @@ class IacGuardrailsScanTool(BaseTool):
                             ))
                 except yaml.YAMLError as e:
                     self.logger.warning(f"Erreur YAML dans policy {policy.id}: {e}")
-        
+
         return findings
 
     def _generate_sarif(self, findings: List[IacFinding], files_scanned: int) -> Dict:
         """Génère une sortie au format SARIF."""
         rules = {}
         results = []
-        
+
         for finding in findings:
-            # Ajouter la règle si pas encore vue
+
             if finding.rule_id not in rules:
                 rules[finding.rule_id] = {
                     'id': finding.rule_id,
@@ -804,8 +800,8 @@ class IacGuardrailsScanTool(BaseTool):
                         'level': 'error' if finding.severity in ('critical', 'high') else 'warning'
                     }
                 }
-            
-            # Ajouter le résultat
+
+
             results.append({
                 'ruleId': finding.rule_id,
                 'level': 'error' if finding.severity in ('critical', 'high') else 'warning',
@@ -817,7 +813,7 @@ class IacGuardrailsScanTool(BaseTool):
                     }
                 }]
             })
-        
+
         return {
             '$schema': 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
             'version': '2.1.0',
@@ -838,22 +834,22 @@ class IacGuardrailsScanTool(BaseTool):
         """Calcule les scores de sécurité et compliance basés sur les findings."""
         if not findings:
             return 1.0, 1.0, "low"
-        
-        # Pondération par sévérité
+
+
         severity_weights = {'critical': 0.4, 'high': 0.25, 'medium': 0.1, 'low': 0.05}
         total_weight = sum(severity_weights.get(f.severity, 0.05) for f in findings)
-        
-        # Score de sécurité (1.0 = parfait, 0.0 = critique)
+
+
         security_score = max(0.0, 1.0 - (total_weight / 2.0))
-        
-        # Score de compliance (basé sur les règles K8S/TF qui mappent aux standards)
+
+
         compliance_related = [f for f in findings if f.rule_id.startswith(('K8S-', 'TF-'))]
         compliance_score = max(0.0, 1.0 - (len(compliance_related) * 0.1))
-        
-        # Niveau de risque global
+
+
         critical_count = sum(1 for f in findings if f.severity == 'critical')
         high_count = sum(1 for f in findings if f.severity == 'high')
-        
+
         if critical_count > 0:
             risk_level = "critical"
         elif high_count >= 2:
@@ -862,7 +858,7 @@ class IacGuardrailsScanTool(BaseTool):
             risk_level = "medium"
         else:
             risk_level = "low"
-        
+
         return security_score, compliance_score, risk_level
 
     def _generate_remediation_actions(
@@ -873,24 +869,24 @@ class IacGuardrailsScanTool(BaseTool):
     ) -> List[RemediationAction]:
         """Génère les actions de remédiation suggérées."""
         actions = []
-        
-        # Grouper par fichier
+
+
         file_findings = {}
         for f in findings:
             file_findings.setdefault(f.path, []).append(f)
-        
-        # Générer une action par fichier avec des problèmes critiques/high
+
+
         for filepath, file_issues in file_findings.items():
             critical_high = [f for f in file_issues if f.severity in ('critical', 'high')]
             if not critical_high:
                 continue
-            
+
             file_content = next((f.content for f in files if f.path == filepath), "")
             file_type = self._detect_file_type(filepath, file_content)
-            
-            # Construire les remédiations à appliquer
+
+
             remediations = [f"{f.title}: {f.remediation}" for f in critical_high[:3]]
-            
+
             actions.append(RemediationAction(
                 tool_name="code_refactoring",
                 action_type="fix_config",
@@ -905,7 +901,7 @@ class IacGuardrailsScanTool(BaseTool):
                 },
                 score=1.0 - security_score
             ))
-        
+
         return actions[:5]
 
     async def _deep_analysis_with_llm(
@@ -916,7 +912,7 @@ class IacGuardrailsScanTool(BaseTool):
     ) -> Tuple[Optional[List[LLMSecurityInsight]], float, float, str]:
         """
         Enrichit l'analyse avec le LLM (mode deep).
-        
+
         Retourne (insights, security_score, compliance_score, risk_level).
         """
         try:
@@ -924,22 +920,22 @@ class IacGuardrailsScanTool(BaseTool):
             if not manager:
                 self.logger.warning("LLM manager non disponible pour analyse deep")
                 return None, *self._calculate_security_scores(findings)
-            
-            # Préparer le contexte
+
+
             files_summary = []
             for f in request.files[:3]:
                 file_type = self._detect_file_type(f.path, f.content)
                 preview = f.content[:500] + "..." if len(f.content) > 500 else f.content
                 files_summary.append(f"### {f.path} ({file_type})\n```\n{preview}\n```")
-            
+
             findings_summary = []
             for finding in findings[:10]:
                 findings_summary.append(
                     f"- [{finding.severity.upper()}] {finding.rule_id}: {finding.title} @ {finding.path}"
                 )
-            
+
             cloud = request.platform.get('cloud', 'aws') if request.platform else 'aws'
-            
+
             prompt = f"""Analyse les configurations IaC et les problèmes de sécurité détectés.
 
 ## Fichiers IaC analysés
@@ -955,20 +951,20 @@ class IacGuardrailsScanTool(BaseTool):
 ---
 
 Fournis une analyse de sécurité enrichie au format JSON strict:
-{{
+{
   "security_score": 0.0-1.0,
   "compliance_score": 0.0-1.0,
   "risk_level": "low|medium|high|critical",
   "insights": [
-    {{
+    {
       "category": "vulnerability|misconfiguration|compliance|best_practice",
       "insight": "Description détaillée du problème ou de la recommandation",
       "risk_level": "low|medium|high|critical",
       "affected_resources": ["resource1", "resource2"],
       "compliance_frameworks": ["CIS", "SOC2", "HIPAA"]
-    }}
+    }
   ]
-}}
+}
 
 Catégories d'insights:
 - **vulnerability**: Failles de sécurité exploitables
@@ -983,11 +979,11 @@ Scores:
 Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
             response = await manager.async_generate(prompt)
-            
+
             if not response:
                 return None, *self._calculate_security_scores(findings)
-            
-            # Parser la réponse
+
+
             try:
                 clean_response = response.strip()
                 if clean_response.startswith("```"):
@@ -995,19 +991,19 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 if clean_response.endswith("```"):
                     clean_response = clean_response.rsplit("```", 1)[0]
                 clean_response = clean_response.strip()
-                
+
                 data = json.loads(clean_response)
-                
+
                 llm_security = float(data.get("security_score", 0.5))
                 llm_compliance = float(data.get("compliance_score", 0.5))
                 llm_risk = data.get("risk_level", "medium")
-                
-                # Combiner avec les scores heuristiques
+
+
                 heur_security, heur_compliance, _ = self._calculate_security_scores(findings)
                 final_security = (llm_security * 0.6) + (heur_security * 0.4)
                 final_compliance = (llm_compliance * 0.6) + (heur_compliance * 0.4)
-                
-                # Niveau de risque basé sur le score final
+
+
                 if final_security < 0.3:
                     risk_level = "critical"
                 elif final_security < 0.5:
@@ -1016,8 +1012,8 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                     risk_level = "medium"
                 else:
                     risk_level = "low"
-                
-                # Parser les insights
+
+
                 insights = []
                 for item in data.get("insights", [])[:10]:
                     if isinstance(item, dict) and "insight" in item:
@@ -1028,14 +1024,14 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                             affected_resources=item.get("affected_resources", []),
                             compliance_frameworks=item.get("compliance_frameworks", [])
                         ))
-                
+
                 self.logger.info(f"Analyse deep: {len(insights)} insights, security={final_security:.2f}")
                 return insights, final_security, final_compliance, risk_level
-                
+
             except json.JSONDecodeError as e:
                 self.logger.warning(f"Erreur parsing réponse LLM: {e}")
                 return None, *self._calculate_security_scores(findings)
-                
+
         except Exception as e:
             self.logger.error(f"Erreur analyse deep: {e}")
             return None, *self._calculate_security_scores(findings)
@@ -1051,20 +1047,20 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         """Exécute automatiquement la remédiation si le seuil est atteint."""
         try:
             from .refactoring import RefactoringTool, RefactoringRequest
-            
+
             if not remediations:
                 return None
-            
-            # Prendre l'action avec le score le plus élevé
+
+
             best_action = max(remediations, key=lambda a: a.score)
-            
+
             if best_action.tool_name != "code_refactoring":
                 return None
-            
+
             params = best_action.params
             if not params.get("code"):
                 return None
-            
+
             refactoring_request = RefactoringRequest(
                 code=params.get("code", ""),
                 language=params.get("language", "yaml"),
@@ -1076,16 +1072,16 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                     "instructions": params.get("instructions", "")
                 }
             )
-            
+
             refactoring_tool = RefactoringTool(app_state=self.app_state)
             result = refactoring_tool.execute(
                 refactoring_request,
                 llm_manager=llm_manager,
                 ctx=ctx
             )
-            
+
             self.logger.info(f"Auto-remediation exécutée sur {params.get('file_path', 'fichier')}")
-            
+
             return {
                 "file_path": params.get("file_path"),
                 "issues_fixed": len([f for f in findings if f.path == params.get("file_path")]),
@@ -1094,7 +1090,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 "changes_count": len(result.changes),
                 "explanation": result.explanation
             }
-            
+
         except Exception as e:
             self.logger.error(f"Erreur auto-remediation: {e}")
             return None
@@ -1102,38 +1098,38 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
     def _execute_core_logic(self, request: IacGuardrailsRequest, **kwargs) -> IacGuardrailsResponse:
         """Exécute le scan IaC."""
         self.logger.info(f"Scan IaC de {len(request.files)} fichier(s) avec profil '{request.policy_profile}'")
-        
+
         all_findings = []
         rules_count = 0
-        
+
         for file in request.files:
             file_type = self._detect_file_type(file.path, file.content)
             self.logger.debug(f"Fichier {file.path}: type={file_type}")
-            
+
             if file_type == 'kubernetes':
                 rules_count += len(self.K8S_RULES['baseline'])
                 if request.policy_profile == 'strict':
                     rules_count += len(self.K8S_RULES['strict'])
                 all_findings.extend(self._scan_kubernetes(file.content, file.path, request.policy_profile))
-            
+
             elif file_type == 'terraform':
                 rules_count += len(self.TF_RULES['baseline'])
                 if request.policy_profile == 'strict':
                     rules_count += len(self.TF_RULES['strict'])
                 all_findings.extend(self._scan_terraform(file.content, file.path, request.policy_profile))
-            
+
             elif file_type == 'dockerfile':
                 rules_count += len(self.DOCKERFILE_RULES['baseline'])
                 if request.policy_profile == 'strict':
                     rules_count += len(self.DOCKERFILE_RULES['strict'])
                 all_findings.extend(self._scan_dockerfile(file.content, file.path, request.policy_profile))
-            
-            # Appliquer les policies personnalisées
+
+
             if request.custom_policies:
                 rules_count += len(request.custom_policies)
                 all_findings.extend(self._apply_custom_policies(file.content, file.path, request.custom_policies))
-        
-        # Dédupliquer les findings (même rule_id + même fichier + même ligne)
+
+
         seen = set()
         unique_findings = []
         for f in all_findings:
@@ -1141,15 +1137,15 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             if key not in seen:
                 seen.add(key)
                 unique_findings.append(f)
-        
-        # Compter par sévérité
+
+
         severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
         for finding in unique_findings:
             severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
-        
-        # Déterminer si passé (pas de critical/high)
+
+
         passed = severity_counts['critical'] == 0 and severity_counts['high'] == 0
-        
+
         summary = {
             'total': len(unique_findings),
             'critical': severity_counts['critical'],
@@ -1160,22 +1156,22 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             'failed': len(unique_findings),
             'skipped': 0,
         }
-        
-        # Récupérer les services depuis kwargs
+
+
         llm_manager = kwargs.get('llm_manager') or self.llm_manager
         ctx = kwargs.get('ctx')
-        
-        # Mode deep: enrichissement IA
+
+
         llm_insights = None
         analysis_depth_used = "fast"
         security_score = 1.0
         compliance_score = 1.0
         risk_level = "low"
-        
+
         if request.analysis_depth == "deep":
             self.logger.info("Mode deep: enrichissement IA sécurité en cours...")
             analysis_depth_used = "deep"
-            
+
             try:
                 coro = self._deep_analysis_with_llm(request, unique_findings, llm_manager)
                 try:
@@ -1190,16 +1186,16 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
                 security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
         else:
-            # Mode fast: scoring heuristique uniquement
+
             security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
-        
-        # Générer les actions de remédiation
+
+
         suggested_remediations = self._generate_remediation_actions(unique_findings, request.files, security_score)
-        
-        # Auto-chain: déclencher la remédiation si seuil atteint
+
+
         auto_remediation_triggered = False
         auto_remediation_result = None
-        
+
         if request.auto_chain and security_score < request.remediation_threshold and suggested_remediations:
             self.logger.info(f"Auto-remediation: security_score {security_score:.2f} < seuil {request.remediation_threshold}")
             try:
@@ -1214,13 +1210,13 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                         auto_remediation_result = future.result(timeout=60)
                 except RuntimeError:
                     auto_remediation_result = asyncio.run(coro)
-                
+
                 if auto_remediation_result:
                     auto_remediation_triggered = True
             except Exception as e:
                 self.logger.warning(f"Erreur auto-remediation: {e}")
-        
-        # Construire le résumé
+
+
         if passed and not unique_findings:
             scan_summary = f"✅ Aucun problème de sécurité détecté dans {len(request.files)} fichier(s) IaC."
         elif passed:
@@ -1234,20 +1230,20 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 f"Critique({severity_counts['critical']}), Haute({severity_counts['high']}), "
                 f"Moyenne({severity_counts['medium']}), Basse({severity_counts['low']})."
             )
-        
+
         if analysis_depth_used == "deep":
             scan_summary += f" 🔒 Score sécurité: {security_score:.0%}, Compliance: {compliance_score:.0%} (risque: {risk_level})."
             if llm_insights:
                 scan_summary += f" {len(llm_insights)} insight(s) IA."
-        
+
         if auto_remediation_triggered:
             scan_summary += " 🔧 Remédiation auto-déclenchée."
-        
-        # Générer SARIF si demandé
+
+
         sarif_output = None
         if request.output_format == 'sarif':
             sarif_output = self._generate_sarif(unique_findings, len(request.files))
-        
+
         return IacGuardrailsResponse(
             passed=passed,
             summary=summary,

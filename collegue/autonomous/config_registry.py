@@ -19,13 +19,13 @@ class UserConfig:
     sentry_token: Optional[str] = None
     github_token: Optional[str] = None
     github_owner: Optional[str] = None
-    github_repo: Optional[str] = None  # Nom du repo GitHub (ex: "Collegue")
+    github_repo: Optional[str] = None
     last_seen: float = field(default_factory=time.time)
-    
+
     def update_last_seen(self):
         """Met à jour le timestamp de dernière activité."""
         self.last_seen = time.time()
-    
+
     @property
     def config_id(self) -> str:
         """Génère un ID unique basé sur l'org Sentry."""
@@ -35,13 +35,13 @@ class UserConfig:
 class UserConfigRegistry:
     """
     Registre singleton des configurations utilisateurs.
-    
+
     Les outils MCP enregistrent les configurations lorsqu'ils reçoivent des requêtes.
     Le watchdog itère sur toutes les configurations actives.
     """
     _instance: Optional["UserConfigRegistry"] = None
     _lock = Lock()
-    
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -50,13 +50,13 @@ class UserConfigRegistry:
                     cls._instance._configs: Dict[str, UserConfig] = {}
                     cls._instance._config_lock = Lock()
         return cls._instance
-    
-    # Valeurs placeholder à ignorer
+
+
     PLACEHOLDER_ORGS = {
-        "your-org", "my-organization", "your-organization", 
+        "your-org", "my-organization", "your-organization",
         "my-org", "example-org", "test-org", "placeholder"
     }
-    
+
     def register(
         self,
         sentry_org: str,
@@ -67,17 +67,17 @@ class UserConfigRegistry:
     ) -> Optional[str]:
         """
         Enregistre ou met à jour une configuration utilisateur.
-        
+
         Returns:
             L'ID de la configuration, ou None si l'org est invalide
         """
-        # Ignorer les valeurs placeholder
+
         if sentry_org.lower() in self.PLACEHOLDER_ORGS:
             return None
-        
-        # Normaliser l'org en minuscules pour éviter les doublons (VynoDePal vs vynodepal)
+
+
         normalized_org = sentry_org.lower()
-            
+
         config = UserConfig(
             sentry_org=normalized_org,
             sentry_token=sentry_token,
@@ -85,11 +85,11 @@ class UserConfigRegistry:
             github_owner=github_owner,
             github_repo=github_repo
         )
-        
+
         with self._config_lock:
             existing = self._configs.get(config.config_id)
             if existing:
-                # Mise à jour avec les nouvelles valeurs non-nulles
+
                 if sentry_token:
                     existing.sentry_token = sentry_token
                 if github_token:
@@ -101,42 +101,42 @@ class UserConfigRegistry:
                 existing.update_last_seen()
             else:
                 self._configs[config.config_id] = config
-        
+
         return config.config_id
-    
+
     def get_all_active(self, max_age_hours: float = 24.0) -> List[UserConfig]:
         """
         Récupère toutes les configurations actives.
-        
+
         Args:
             max_age_hours: Âge maximum en heures (défaut: 24h)
-            
+
         Returns:
             Liste des configurations actives
         """
         cutoff = time.time() - (max_age_hours * 3600)
-        
+
         with self._config_lock:
             return [
                 config for config in self._configs.values()
                 if config.last_seen >= cutoff
             ]
-    
+
     def get_config(self, config_id: str) -> Optional[UserConfig]:
         """Récupère une configuration par son ID."""
         with self._config_lock:
             return self._configs.get(config_id)
-    
+
     def cleanup_stale(self, max_age_hours: float = 24.0) -> int:
         """
         Supprime les configurations inactives.
-        
+
         Returns:
             Nombre de configurations supprimées
         """
         cutoff = time.time() - (max_age_hours * 3600)
         removed = 0
-        
+
         with self._config_lock:
             stale_ids = [
                 cid for cid, config in self._configs.items()
@@ -145,21 +145,21 @@ class UserConfigRegistry:
             for cid in stale_ids:
                 del self._configs[cid]
                 removed += 1
-        
+
         return removed
-    
+
     def count(self) -> int:
         """Retourne le nombre de configurations enregistrées."""
         with self._config_lock:
             return len(self._configs)
-    
+
     def clear_all(self) -> int:
         """Supprime toutes les configurations. Utile pour le redémarrage."""
         with self._config_lock:
             count = len(self._configs)
             self._configs.clear()
             return count
-    
+
     def remove_by_org(self, sentry_org: str) -> bool:
         """Supprime une configuration par son org Sentry."""
         org_lower = sentry_org.lower()

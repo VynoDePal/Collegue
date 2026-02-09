@@ -30,7 +30,7 @@ class RefactoringResponse(BaseModel):
 class LLMRefactoringResult(BaseModel):
     """
     Modèle de sortie structurée pour ctx.sample() avec result_type (FastMCP 2.14.1+).
-    
+
     Force le LLM à produire une réponse JSON validée par Pydantic.
     """
     refactored_code: str = Field(..., description="Code refactoré complet")
@@ -172,10 +172,10 @@ class RefactoringTool(BaseTool):
 
     def validate_request(self, request: BaseModel) -> bool:
         """Validation étendue pour les requêtes de refactoring."""
-        # Validation de base
+
         super().validate_request(request)
 
-        # Validation du type de refactoring
+
         if hasattr(request, 'refactoring_type'):
             supported_types = self.get_supported_refactoring_types()
             if request.refactoring_type not in supported_types:
@@ -215,7 +215,7 @@ class RefactoringTool(BaseTool):
                     "parameters": str(request.parameters) if request.parameters else "default settings",
                     "file_path": request.file_path or "unknown"
                 }
-                
+
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
                         loop = asyncio.get_event_loop()
@@ -231,7 +231,7 @@ class RefactoringTool(BaseTool):
                 except Exception as e:
                     self.logger.debug(f"Fallback vers _build_refactoring_prompt: {e}")
                     prompt = self._build_refactoring_prompt(request)
-                
+
                 refactored_code = llm_manager.sync_generate(prompt)
                 new_metrics = self._analyze_code_metrics(refactored_code, request.language)
                 improvement_metrics = self._calculate_improvements(original_metrics, new_metrics)
@@ -257,14 +257,14 @@ class RefactoringTool(BaseTool):
     async def _execute_core_logic_async(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         """
         Version async de la logique de refactoring (FastMCP 2.14+).
-        
+
         Utilise ctx.sample() pour les appels LLM avec support structured output (result_type),
         avec fallback vers ToolLLMManager si ctx non disponible.
-        
+
         Args:
             request: Requête de refactoring validée
             **kwargs: Services additionnels incluant ctx, progress, llm_manager, parser
-        
+
         Returns:
             RefactoringResponse: Le code refactorisé
         """
@@ -272,24 +272,24 @@ class RefactoringTool(BaseTool):
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
         use_structured_output = kwargs.get('use_structured_output', True)
-        
-        # Log via ctx si disponible
+
+
         if ctx:
             await ctx.info("Analyse du code original...")
-        
-        # Analyse du code original
+
+
         original_metrics = self._analyze_code_metrics(request.code, request.language)
-        
-        # Construire le prompt
+
+
         prompt = self._build_refactoring_prompt(request)
         system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'."""
-        
+
         if ctx:
             await ctx.info("Refactoring en cours via LLM...")
-        
+
         try:
-            # Essayer d'utiliser structured output si ctx disponible (FastMCP 2.14.1+)
+
             if ctx is not None and use_structured_output:
                 try:
                     self.logger.debug("Utilisation du structured output avec LLMRefactoringResult")
@@ -301,22 +301,22 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                         result_type=LLMRefactoringResult,
                         temperature=0.5
                     )
-                    
+
                     if isinstance(llm_result, LLMRefactoringResult):
                         if ctx:
                             await ctx.info(f"Structured output: {llm_result.changes_count} modifications")
-                        
-                        # Construire les changes à partir du résultat structuré
-                        changes = [{"type": area, "description": f"Amélioration: {area}"} 
+
+
+                        changes = [{"type": area, "description": f"Amélioration: {area}"}
                                    for area in llm_result.improved_areas]
-                        
-                        # Métriques d'amélioration
+
+
                         improvement_metrics = {
                             "complexity_reduction": llm_result.complexity_reduction,
                             "changes_count": llm_result.changes_count,
                             "improved_areas": llm_result.improved_areas
                         }
-                        
+
                         return RefactoringResponse(
                             refactored_code=llm_result.refactored_code,
                             original_code=request.code,
@@ -327,8 +327,8 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                         )
                 except Exception as e:
                     self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
-            
-            # Fallback: génération sans structured output
+
+
             refactored_code = await self.sample_llm(
                 prompt=prompt,
                 ctx=ctx,
@@ -336,16 +336,16 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code refactoré.",
                 temperature=0.5
             )
-            
+
             if ctx:
                 await ctx.info("Analyse des améliorations...")
-            
-            # Analyse du code refactorisé
+
+
             new_metrics = self._analyze_code_metrics(refactored_code, request.language)
             improvement_metrics = self._calculate_improvements(original_metrics, new_metrics)
             changes = self._identify_changes(request, refactored_code)
             explanation = self._generate_explanation(request.refactoring_type, changes, improvement_metrics)
-            
+
             return RefactoringResponse(
                 refactored_code=refactored_code,
                 original_code=request.code,
@@ -354,7 +354,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 explanation=explanation,
                 improvement_metrics=improvement_metrics
             )
-            
+
         except Exception as e:
             self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._perform_local_refactoring(request, parser)
@@ -387,11 +387,11 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             "```"
         ]
 
-        # Paramètres spécifiques
+
         if request.parameters:
             prompt_parts.insert(-3, f"Paramètres spécifiques: {request.parameters}")
 
-        # Instructions par langage
+
         language_instructions = self._get_refactoring_instructions(request.language, request.refactoring_type)
         if language_instructions:
             prompt_parts.insert(-3, f"Instructions {request.language}: {language_instructions}")
@@ -449,7 +449,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             "complexity_score": 0
         }
 
-        # Comptage des commentaires
+
         comment_patterns = {
             "python": ["#"],
             "javascript": ["//", "/*"],
@@ -465,7 +465,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                     metrics["comment_lines"] += 1
                     break
 
-        # Comptage des fonctions et classes
+
         if language.lower() == "python":
             metrics["function_count"] = sum(1 for line in non_empty_lines if line.strip().startswith("def "))
             metrics["class_count"] = sum(1 for line in non_empty_lines if line.strip().startswith("class "))
@@ -473,7 +473,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             metrics["function_count"] = sum(1 for line in non_empty_lines if "function " in line.lower())
             metrics["class_count"] = sum(1 for line in non_empty_lines if "class " in line.lower())
 
-        # Score de complexité basique
+
         complexity_indicators = ["if ", "for ", "while ", "switch ", "case ", "try ", "catch ", "except "]
         for line in non_empty_lines:
             for indicator in complexity_indicators:
@@ -486,13 +486,13 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         """Calcule les améliorations entre l'original et le code refactorisé."""
         improvements = {}
 
-        # Changement en pourcentage
+
         for key in ["code_lines", "complexity_score"]:
             if original[key] > 0:
                 change = ((refactored[key] - original[key]) / original[key]) * 100
                 improvements[f"{key}_change_percent"] = round(change, 2)
 
-        # Métriques d'amélioration
+
         improvements.update({
             "lines_reduced": original["code_lines"] - refactored["code_lines"],
             "complexity_reduced": original["complexity_score"] - refactored["complexity_score"],
@@ -506,7 +506,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         """Identifie les changements effectués."""
         changes = []
 
-        # Changement principal basé sur le type
+
         change_descriptions = {
             "rename": "Variables, fonctions et classes renommées pour plus de clarté",
             "extract": "Code dupliqué extrait en fonctions réutilisables",
@@ -522,7 +522,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             "parameters": request.parameters or {}
         })
 
-        # Analyse basique des différences
+
         original_lines = len(request.code.split('\n'))
         refactored_lines = len(refactored_code.split('\n'))
 
@@ -542,7 +542,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             f"Refactoring de type '{refactoring_type}' appliqué avec succès."
         ]
 
-        # Résumé des améliorations
+
         if improvements.get("lines_reduced", 0) > 0:
             explanation_parts.append(f"Réduction de {improvements['lines_reduced']} lignes de code.")
 
@@ -552,7 +552,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         if improvements.get("comments_added", 0) > 0:
             explanation_parts.append(f"Ajout de {improvements['comments_added']} lignes de commentaires.")
 
-        # Description des changements
+
         for change in changes:
             explanation_parts.append(change["description"])
 
@@ -561,16 +561,16 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
     def _perform_local_refactoring(self, request: RefactoringRequest, parser=None) -> RefactoringResponse:
         """Effectue un refactoring local basique sans LLM."""
 
-        # Refactoring basique selon le type
+
         if request.refactoring_type == "clean":
             refactored_code = self._clean_code_basic(request.code, request.language)
         elif request.refactoring_type == "simplify":
             refactored_code = self._simplify_code_basic(request.code, request.language)
         else:
-            # Pour les autres types, on nettoie au minimum
+
             refactored_code = self._clean_code_basic(request.code, request.language)
 
-        # Calcul des métriques
+
         original_metrics = self._analyze_code_metrics(request.code, request.language)
         new_metrics = self._analyze_code_metrics(refactored_code, request.language)
         improvement_metrics = self._calculate_improvements(original_metrics, new_metrics)
@@ -598,16 +598,16 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         cleaned_lines = []
 
         for line in lines:
-            # Suppression des espaces en fin de ligne
+
             cleaned_line = line.rstrip()
 
-            # Suppression des lignes vides multiples
+
             if cleaned_line == "" and cleaned_lines and cleaned_lines[-1] == "":
                 continue
 
             cleaned_lines.append(cleaned_line)
 
-        # Suppression des lignes vides en fin de fichier
+
         while cleaned_lines and cleaned_lines[-1] == "":
             cleaned_lines.pop()
 
@@ -615,13 +615,13 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
 
     def _simplify_code_basic(self, code: str, language: str) -> str:
         """Simplification basique du code."""
-        # Pour l'instant, on applique juste le nettoyage
-        # Une vraie simplification nécessiterait une analyse syntaxique avancée
+
+
         cleaned = self._clean_code_basic(code, language)
 
-        # Simplifications basiques par langage
+
         if language.lower() == "python":
-            # Remplacement de certains patterns simples
+
             cleaned = cleaned.replace("== True", "")
             cleaned = cleaned.replace("== False", " is False")
             cleaned = cleaned.replace("!= True", " is not True")
@@ -629,7 +629,6 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         return cleaned
 
 
-# Fonction de compatibilité pour l'ancien système
 def refactor_code(request: RefactoringRequest, parser=None, llm_manager=None) -> RefactoringResponse:
     """
     Fonction de compatibilité avec l'ancien système.

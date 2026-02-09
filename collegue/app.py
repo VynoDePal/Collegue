@@ -11,28 +11,16 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from fastmcp import FastMCP
 from collegue.config import settings
 
-try:
-    import sentry_sdk
-    if settings.SENTRY_DSN:
-        sentry_sdk.init(
-            dsn=settings.SENTRY_DSN,
-            environment=settings.SENTRY_ENVIRONMENT,
-            send_default_pii=True,
-            traces_sample_rate=1.0,
-            profiles_sample_rate=1.0,
-        )
-        logging.getLogger(__name__).info(f"Sentry initialisé pour l'environnement: {settings.SENTRY_ENVIRONMENT}")
-except ImportError:
-    logging.getLogger(__name__).warning("sentry-sdk non installé, monitoring désactivé")
-
-try:
-    from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
-    SAMPLING_HANDLER_AVAILABLE = True
-except ImportError:
-    OpenAISamplingHandler = None
-    SAMPLING_HANDLER_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
+
+if settings.SENTRY_DSN:
+	import sentry_sdk
+	sentry_sdk.init(
+		dsn=settings.SENTRY_DSN,
+		environment=settings.SENTRY_ENVIRONMENT,
+		traces_sample_rate=1.0,
+	)
+	logger.info(f"Sentry initialisé (env: {settings.SENTRY_ENVIRONMENT})")
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if parent_dir not in sys.path:
@@ -69,19 +57,6 @@ if settings.OAUTH_ENABLED:
             logger.error(f"Erreur lors de la configuration OAuth: {e}")
             auth_provider = None
 
-sampling_handler = None
-if SAMPLING_HANDLER_AVAILABLE and settings.llm_api_key:
-    try:
-        sampling_handler = OpenAISamplingHandler(
-            api_key=settings.llm_api_key,
-            base_url=settings.LLM_BASE_URL,
-            default_model=settings.llm_model
-        )
-        logger.info(f"Sampling handler configuré avec modèle: {settings.llm_model}")
-    except Exception as e:
-        logger.warning(f"Impossible de configurer le sampling handler: {e}")
-        sampling_handler = None
-
 
 @asynccontextmanager
 async def app_lifespan(app_instance):
@@ -98,9 +73,8 @@ async def app_lifespan(app_instance):
     else:
         logger.info("Watchdog autonome désactivé (WATCHDOG_ENABLED != true)")
     
-    yield  # L'application tourne ici
+    yield
     
-    # Shutdown
     if watchdog_enabled:
         try:
             from collegue.autonomous.watchdog import stop_background_watchdog
@@ -113,8 +87,6 @@ app = FastMCP(
     host=settings.HOST,
     port=settings.PORT,
     auth=auth_provider,
-    sampling_handler=sampling_handler,
-    sampling_handler_behavior="fallback",
     lifespan=app_lifespan
 )
 
@@ -128,8 +100,6 @@ def _http_method(method: str):
     return _decorator
 
 def _norm(path: str) -> str:
-    """Convertit "/api/foo/{bar}" -> "api.foo.{bar}" (sans slash initial).
-    FastMCP exige des noms de ressources valides sans '/'."""
     return path.lstrip("/").replace("/", ".") or "root"
 
 for _m in ("get", "post", "put", "delete", "patch", "options", "head"):
@@ -227,7 +197,6 @@ async def health_endpoint():
 
 @app.get("/.well-known/oauth-authorization-server")
 def get_oauth_metadata():
-    """Expose les métadonnées du serveur d'autorisation OAuth."""
     if settings.OAUTH_ENABLED and settings.OAUTH_ISSUER:
         token_endpoint = f"{settings.OAUTH_ISSUER.rstrip('/')}/protocol/openid-connect/token"
         jwks_uri = f"{settings.OAUTH_ISSUER.rstrip('/')}/protocol/openid-connect/certs"
@@ -240,16 +209,10 @@ def get_oauth_metadata():
             "grant_types_supported": ["client_credentials"],
             "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
         }
-    # Si OAuth n'est pas activé, retourner une ressource vide ou une erreur
-    # pour indiquer que le service n'est pas un serveur d'autorisation.
     return {}
 
-# Endpoint de découverte OAuth Protected Resource (MCP)
 @app.get("/.well-known/oauth-protected-resource")
 def get_oauth_protected_resource():
-    """Expose les métadonnées de ressource protégée pour MCP.
-    Indique aux clients MCP quel(s) Authorization Server(s) utiliser.
-    """
     if settings.OAUTH_ENABLED and settings.OAUTH_ISSUER:
         auth_server = (settings.OAUTH_AUTH_SERVER_PUBLIC or settings.OAUTH_ISSUER).rstrip('/')
         return {

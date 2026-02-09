@@ -54,7 +54,7 @@ interface HelloProps {
 
 const Hello: React.FC<HelloProps> = ({ initialName }) => {
   const [name, setName] = useState<string>(initialName);
-  
+
   return <h1>Hello, {name}!</h1>;
 };
 
@@ -199,9 +199,9 @@ interface User {
 const handler = (req: Request): Response => {
   const url = new URL(req.url);
   const userId = url.pathname.split('/').pop();
-  
+
   const user: User = { id: userId || '0', name: 'Test User' };
-  
+
   return new Response(JSON.stringify(user), {
     headers: { "content-type": "application/json" },
   });
@@ -269,15 +269,15 @@ import { makeAutoObservable } from "mobx";
 
 class TodoStore {
   todos: string[] = [];
-  
+
   constructor() {
     makeAutoObservable(this);
   }
-  
+
   addTodo(task: string) {
     this.todos.push(task);
   }
-  
+
   get todoCount() {
     return this.todos.length;
   }
@@ -333,7 +333,7 @@ describe('sum function', () => {
   test('adds 1 + 2 to equal 3', () => {
     expect(sum(1, 2)).toBe(3);
   });
-  
+
   test('handles negative numbers', () => {
     expect(sum(-1, -2)).toBe(-3);
   });
@@ -358,7 +358,7 @@ describe('sum function', () => {
   it('adds 1 + 2 to equal 3', () => {
     expect(sum(1, 2)).toBe(3);
   });
-  
+
   it('handles negative numbers', () => {
     expect(sum(-1, -2)).toBe(-3);
   });
@@ -380,11 +380,11 @@ describe('sum function', () => {
 describe('Login Page', () => {
   it('successfully logs in', () => {
     cy.visit('/login');
-    
+
     cy.get('[data-cy=username]').type('testuser');
     cy.get('[data-cy=password]').type('password123');
     cy.get('[data-cy=submit]').click();
-    
+
     cy.url().should('include', '/dashboard');
     cy.get('[data-cy=welcome-message]').should('contain', 'Welcome, Test User');
   });
@@ -407,11 +407,11 @@ import { test, expect } from '@playwright/test';
 
 test('login flow', async ({ page }) => {
   await page.goto('/login');
-  
+
   await page.fill('[data-testid="username"]', 'testuser');
   await page.fill('[data-testid="password"]', 'password123');
   await page.click('[data-testid="login-button"]');
-  
+
   await expect(page).toHaveURL(/.*dashboard/);
   await expect(page.locator('[data-testid="welcome"]')).toContainText('Welcome, Test User');
 });
@@ -422,7 +422,7 @@ test('login flow', async ({ page }) => {
 def register(app: FastMCP, app_state: dict):
     """
     Enregistre les ressources de frameworks TypeScript dans l'application FastMCP.
-    
+
     Args:
         app: L'application FastMCP
         app_state: L'état de l'application
@@ -431,51 +431,51 @@ def register(app: FastMCP, app_state: dict):
     def typescript_frontend_frameworks() -> str:
         """Fournit des informations sur les frameworks frontend TypeScript."""
         return json.dumps(FRONTEND_FRAMEWORKS)
-    
+
     @app.resource("collegue://typescript/frameworks/backend")
     def typescript_backend_frameworks() -> str:
         """Fournit des informations sur les frameworks backend TypeScript."""
         return json.dumps(BACKEND_FRAMEWORKS)
-    
+
     @app.resource("collegue://typescript/frameworks/state_management")
     def typescript_state_management() -> str:
         """Fournit des informations sur les bibliothèques de gestion d'état TypeScript."""
         return json.dumps(STATE_MANAGEMENT)
-    
+
     @app.resource("collegue://typescript/frameworks/testing")
     def typescript_testing_libraries() -> str:
         """Fournit des informations sur les bibliothèques de test TypeScript."""
         return json.dumps(TESTING_LIBRARIES)
-    
+
     @app.resource("collegue://typescript/frameworks/{framework_name}")
     def typescript_framework_example(framework_name: str) -> str:
         """
         Fournit un exemple d'utilisation pour un framework TypeScript spécifique.
-        
+
         Args:
             framework_name: Nom du framework TypeScript (ex: 'Angular', 'React', 'NestJS', etc.)
         """
         if not framework_name:
             return json.dumps({"error": "Framework name is required"})
-        
-        # Rechercher dans les frameworks frontend
+
+
         for name, info in FRONTEND_FRAMEWORKS.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
-        
-        # Rechercher dans les frameworks backend
+
+
         for name, info in BACKEND_FRAMEWORKS.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
-        
-        # Rechercher dans les bibliothèques de gestion d'état
+
+
         for name, info in STATE_MANAGEMENT.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
-        
-        # Rechercher dans les bibliothèques de test
+
+
         for name, info in TESTING_LIBRARIES.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
-        
+
         return json.dumps({"error": f"Framework '{framework_name}' not found"})

@@ -29,7 +29,7 @@ class FileContent(BaseModel):
 class SecretScanRequest(BaseModel):
     """Modèle de requête pour le scan de secrets."""
     target: Optional[str] = Field(
-        None, 
+        None,
         description="Cible du scan: fichier ou dossier (utiliser 'content' ou 'files' pour MCP)"
     )
     content: Optional[str] = Field(
@@ -45,7 +45,7 @@ class SecretScanRequest(BaseModel):
         description="Type de scan: 'file', 'directory', 'content', 'batch' ou 'auto'"
     )
     language: Optional[str] = Field(
-        None, 
+        None,
         description="Langage du code (optionnel, pour filtrer les patterns)"
     )
     include_patterns: Optional[List[str]] = Field(
@@ -61,26 +61,26 @@ class SecretScanRequest(BaseModel):
         description="Seuil de sévérité minimum: 'low', 'medium', 'high', 'critical'"
     )
     max_file_size: Optional[int] = Field(
-        1024 * 1024,  # 1MB
+        1024 * 1024,
         description="Taille max des fichiers à scanner (bytes)",
         ge=1024,
         le=10 * 1024 * 1024
     )
-    
+
     @field_validator('scan_type')
     def validate_scan_type(cls, v):
         valid = ['auto', 'file', 'directory', 'content', 'batch']
         if v not in valid:
             raise ValueError(f"Type de scan '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
-    
+
     @field_validator('severity_threshold')
     def validate_severity(cls, v):
         valid = ['low', 'medium', 'high', 'critical']
         if v not in valid:
             raise ValueError(f"Sévérité '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
-    
+
     def model_post_init(self, __context):
         """Valide qu'au moins une source de données est fournie."""
         if not self.target and not self.content and not self.files:
@@ -125,7 +125,7 @@ class SecretScanResponse(BaseModel):
 class SecretScanTool(BaseTool):
     """
     Outil de détection de secrets dans le code.
-    
+
     Détecte:
     - Clés API (AWS, GCP, Azure, OpenAI, Stripe, etc.)
     - Tokens (JWT, OAuth, Bearer, GitHub, GitLab)
@@ -133,74 +133,73 @@ class SecretScanTool(BaseTool):
     - Clés privées (RSA, SSH, PGP)
     - Connection strings (bases de données)
     - Variables d'environnement sensibles exposées
-    
+
     Basé sur des patterns regex éprouvés (similaires à gitleaks, trufflehog).
     """
 
-    # Patterns de détection de secrets
-    # Format: (nom, pattern regex, sévérité, description)
+
     SECRET_PATTERNS = [
-        # AWS
+
         ("aws_access_key", r"(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}", "critical", "Clé d'accès AWS"),
         ("aws_secret_key", r"(?i)aws[_\-]?secret[_\-]?(?:access[_\-]?)?key['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+=]{40})", "critical", "Clé secrète AWS"),
-        
-        # Google Cloud
+
+
         ("gcp_api_key", r"AIza[0-9A-Za-z\-_]{35}", "high", "Clé API Google Cloud"),
         ("gcp_service_account", r"\"type\":\s*\"service_account\"", "high", "Compte de service GCP"),
-        
-        # Azure
+
+
         ("azure_storage_key", r"(?i)(?:DefaultEndpointsProtocol|AccountKey)\s*=\s*[A-Za-z0-9+/=]{86,}", "critical", "Clé de stockage Azure"),
-        
-        # OpenAI / LLM
+
+
         ("openai_api_key", r"sk-[A-Za-z0-9]{48}", "critical", "Clé API OpenAI"),
         ("anthropic_api_key", r"sk-ant-[A-Za-z0-9\-]{93}", "critical", "Clé API Anthropic"),
-        ("openrouter_api_key", r"sk-or-v1-[A-Za-z0-9]{64}", "critical", "Clé API OpenRouter"),
-        
-        # GitHub / GitLab
+        ("gemini_api_key", r"AIzaSy[A-Za-z0-9_-]{33}", "critical", "Clé API Google Gemini"),
+
+
         ("github_token", r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}", "critical", "Token GitHub"),
         ("github_oauth", r"gho_[A-Za-z0-9]{36}", "critical", "Token OAuth GitHub"),
         ("gitlab_token", r"glpat-[A-Za-z0-9\-]{20,}", "critical", "Token GitLab"),
-        
-        # Bases de données
+
+
         ("postgres_uri", r"postgres(?:ql)?://[^:]+:[^@]+@[^/]+/\w+", "high", "URI PostgreSQL avec credentials"),
         ("mysql_uri", r"mysql://[^:]+:[^@]+@[^/]+/\w+", "high", "URI MySQL avec credentials"),
         ("mongodb_uri", r"mongodb(?:\+srv)?://[^:]+:[^@]+@", "high", "URI MongoDB avec credentials"),
         ("redis_uri", r"redis://:[^@]+@", "high", "URI Redis avec password"),
-        
-        # JWT et tokens
+
+
         ("jwt_token", r"eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*", "medium", "Token JWT"),
         ("bearer_token", r"(?i)bearer\s+[A-Za-z0-9\-_\.]{20,}", "medium", "Token Bearer"),
-        
-        # Clés privées
+
+
         ("private_key_rsa", r"-----BEGIN (?:RSA )?PRIVATE KEY-----", "critical", "Clé privée RSA"),
         ("private_key_openssh", r"-----BEGIN OPENSSH PRIVATE KEY-----", "critical", "Clé privée OpenSSH"),
         ("private_key_ec", r"-----BEGIN EC PRIVATE KEY-----", "critical", "Clé privée EC"),
         ("private_key_pgp", r"-----BEGIN PGP PRIVATE KEY BLOCK-----", "critical", "Clé privée PGP"),
-        
-        # Stripe
+
+
         ("stripe_secret_key", r"sk_live_[0-9a-zA-Z]{24,}", "critical", "Clé secrète Stripe"),
         ("stripe_publishable", r"pk_live_[0-9a-zA-Z]{24,}", "medium", "Clé publique Stripe (live)"),
-        
-        # Slack
+
+
         ("slack_token", r"xox[baprs]-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*", "high", "Token Slack"),
         ("slack_webhook", r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+", "high", "Webhook Slack"),
-        
-        # SendGrid / Twilio
+
+
         ("sendgrid_api_key", r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}", "high", "Clé API SendGrid"),
         ("twilio_api_key", r"SK[0-9a-fA-F]{32}", "high", "Clé API Twilio"),
-        
-        # NPM
+
+
         ("npm_token", r"(?i)npm[_\-]?token['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9\-]{36})", "high", "Token NPM"),
-        
-        # Mots de passe génériques
+
+
         ("password_assignment", r"(?i)(?:password|passwd|pwd|secret|token)['\"]?\s*[:=]\s*['\"]([^'\"]{8,})['\"]", "medium", "Mot de passe hardcodé"),
         ("password_in_url", r"://[^:]+:([^@]{8,})@", "high", "Mot de passe dans URL"),
-        
-        # Variables d'environnement exposées
+
+
         ("env_secret", r"(?i)(?:export\s+)?(?:API_KEY|SECRET_KEY|AUTH_TOKEN|DATABASE_PASSWORD|DB_PASSWORD)['\"]?\s*=\s*['\"]?([A-Za-z0-9\-_/+=]{16,})", "medium", "Secret dans variable d'environnement"),
     ]
-    
-    # Extensions de fichiers à scanner par défaut
+
+
     DEFAULT_EXTENSIONS = {
         '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.yaml', '.yml',
         '.env', '.env.local', '.env.development', '.env.production',
@@ -211,17 +210,17 @@ class SecretScanTool(BaseTool):
         '.cs', '.vb', '.fs',
         '.sql', '.prisma',
         '.toml', '.lock',
-        '.md', '.txt', '.rst',  # Documentation peut contenir des exemples
+        '.md', '.txt', '.rst',
     }
-    
-    # Fichiers/dossiers à exclure par défaut
+
+
     DEFAULT_EXCLUDES = {
         'node_modules', '.git', '__pycache__', '.venv', 'venv', 'env',
         '.idea', '.vscode', 'dist', 'build', 'target', 'bin', 'obj',
         '*.min.js', '*.min.css', '*.map', '*.lock',
         '.pytest_cache', '.mypy_cache', '.tox', 'coverage',
     }
-    
+
     SEVERITY_LEVELS = {'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
 
     def get_name(self) -> str:
@@ -237,8 +236,8 @@ class SecretScanTool(BaseTool):
         return SecretScanResponse
 
     def get_supported_languages(self) -> List[str]:
-        # Secret scan fonctionne sur n'importe quel type de fichier texte
-        # Les secrets peuvent être dans du code, des configs, des fichiers env, etc.
+
+
         return [
             "python", "typescript", "javascript", "java", "go", "rust", "ruby", "php",
             "json", "yaml", "yml", "toml", "xml", "html", "css", "scss",
@@ -246,15 +245,15 @@ class SecretScanTool(BaseTool):
             "dockerfile", "docker", "shell", "bash", "sh", "zsh", "powershell",
             "sql", "graphql", "terraform", "tf", "hcl", "any"
         ]
-    
+
     def validate_language(self, language: str) -> bool:
         """Override: accepte n'importe quel langage pour le scan de secrets."""
-        # Pour secret_scan, on accepte n'importe quel langage car les secrets
-        # peuvent être dans n'importe quel type de fichier
+
+
         return True
 
     def is_long_running(self) -> bool:
-        return False  # Le scan est généralement rapide
+        return False
 
     def get_usage_description(self) -> str:
         return (
@@ -324,7 +323,7 @@ class SecretScanTool(BaseTool):
             "azure": "Utilisez Azure Key Vault. Régénérez cette clé dans le portail Azure.",
             "openai": "Stockez la clé dans une variable d'environnement. Régénérez la clé sur platform.openai.com.",
             "anthropic": "Utilisez une variable d'environnement. Régénérez la clé sur console.anthropic.com.",
-            "openrouter": "Stockez la clé dans .env. Régénérez sur openrouter.ai/keys.",
+            "gemini": "Stockez la clé dans .env. Régénérez sur aistudio.google.com/apikey.",
             "github": "Révoquez ce token sur github.com/settings/tokens. Utilisez GITHUB_TOKEN dans CI/CD.",
             "gitlab": "Révoquez ce token. Utilisez des variables CI/CD GitLab.",
             "postgres": "Utilisez des variables d'environnement pour les credentials de BDD.",
@@ -342,38 +341,38 @@ class SecretScanTool(BaseTool):
             "password": "Ne jamais hardcoder de mots de passe. Utilisez des variables d'environnement ou un vault.",
             "env": "Ne jamais committer de fichiers .env contenant des secrets.",
         }
-        
+
         for key, rec in recommendations.items():
             if key in secret_type.lower():
                 return rec
-        
+
         return "Supprimez ce secret du code et utilisez une méthode sécurisée (variables d'environnement, vault)."
 
     def _should_scan_file(self, filepath: str, include_patterns: List[str], exclude_patterns: List[str]) -> bool:
         """Détermine si un fichier doit être scanné."""
         import fnmatch
-        
+
         filename = os.path.basename(filepath)
-        
-        # Vérifier les exclusions
+
+
         for pattern in exclude_patterns:
             if fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(filename, pattern):
                 return False
-            # Vérifier si un dossier parent est exclu
+
             for part in filepath.split(os.sep):
                 if fnmatch.fnmatch(part, pattern):
                     return False
-        
-        # Vérifier les inclusions
+
+
         if include_patterns:
             for pattern in include_patterns:
                 if fnmatch.fnmatch(filepath, pattern) or fnmatch.fnmatch(filename, pattern):
                     return True
             return False
-        
-        # Par défaut, scanner les extensions connues
+
+
         ext = os.path.splitext(filepath)[1].lower()
-        # Fichiers sans extension comme .env, .gitignore
+
         if not ext and filename.startswith('.'):
             return True
         return ext in self.DEFAULT_EXTENSIONS
@@ -382,88 +381,88 @@ class SecretScanTool(BaseTool):
         """Scanne le contenu pour trouver des secrets."""
         findings = []
         threshold_level = self.SEVERITY_LEVELS.get(severity_threshold, 1)
-        
+
         lines = content.split('\n')
-        
+
         for name, pattern, severity, description in self.SECRET_PATTERNS:
             if self.SEVERITY_LEVELS.get(severity, 1) < threshold_level:
                 continue
-            
+
             try:
                 regex = re.compile(pattern)
                 for match in regex.finditer(content):
-                    # Trouver la ligne et la colonne
+
                     start = match.start()
                     line_num = content[:start].count('\n') + 1
                     line_start = content.rfind('\n', 0, start) + 1
                     col_num = start - line_start + 1
-                    
-                    # Extraire le contexte (la ligne complète)
+
+
                     if line_num <= len(lines):
                         line_content = lines[line_num - 1]
                     else:
                         line_content = match.group()
-                    
-                    # Masquer le secret
+
+
                     matched_text = match.group()
                     masked_match = self._mask_secret(matched_text)
-                    
-                    # Remplacer le secret dans la ligne par la version masquée
+
+
                     masked_line = line_content.replace(matched_text, masked_match)
-                    
+
                     findings.append(SecretFinding(
                         type=name,
                         severity=severity,
                         file=filepath,
                         line=line_num,
                         column=col_num,
-                        match=masked_line.strip()[:200],  # Limiter la longueur
+                        match=masked_line.strip()[:200],
                         rule=description,
                         recommendation=self._get_recommendation(name)
                     ))
             except re.error as e:
                 self.logger.warning(f"Erreur regex pour {name}: {e}")
-        
+
         return findings
 
     def _scan_file(self, filepath: str, severity_threshold: str, max_size: int) -> List[SecretFinding]:
         """Scanne un fichier pour trouver des secrets."""
         try:
-            # Vérifier la taille
+
             if os.path.getsize(filepath) > max_size:
                 self.logger.debug(f"Fichier ignoré (trop grand): {filepath}")
                 return []
-            
+
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
-            
+
             return self._scan_content(content, filepath, severity_threshold)
         except Exception as e:
             self.logger.warning(f"Erreur lecture {filepath}: {e}")
             return []
 
-    def _scan_directory(self, dirpath: str, include_patterns: List[str], exclude_patterns: List[str], 
+    def _scan_directory(self, dirpath: str, include_patterns: List[str], exclude_patterns: List[str],
                        severity_threshold: str, max_size: int) -> tuple:
         """Scanne un répertoire récursivement."""
         findings = []
         files_scanned = 0
-        
+
         for root, dirs, files in os.walk(dirpath):
-            # Filtrer les dossiers exclus
+
             dirs[:] = [d for d in dirs if d not in self.DEFAULT_EXCLUDES]
-            
+
             for filename in files:
                 filepath = os.path.join(root, filename)
                 rel_path = os.path.relpath(filepath, dirpath)
-                
+
                 if self._should_scan_file(rel_path, include_patterns, exclude_patterns):
                     file_findings = self._scan_file(filepath, severity_threshold, max_size)
-                    # Utiliser le chemin relatif dans les findings
+
                     for finding in file_findings:
                         finding.file = rel_path
                     findings.extend(file_findings)
                     files_scanned += 1
-        
+
         return findings, files_scanned
 
     def _execute_core_logic(self, request: SecretScanRequest, **kwargs) -> SecretScanResponse:
@@ -471,50 +470,50 @@ class SecretScanTool(BaseTool):
         findings = []
         files_scanned = 0
         files_with_secrets = []
-        
-        # Préparer les patterns
+
+
         include_patterns = request.include_patterns or []
         exclude_patterns = list(self.DEFAULT_EXCLUDES) + (request.exclude_patterns or [])
-        
-        # Mode 1: BATCH - Liste de fichiers (RECOMMANDÉ pour MCP)
+
+
         if request.files:
             self.logger.info(f"Scan batch de {len(request.files)} fichier(s)")
             for file_item in request.files:
-                # Vérifier les patterns d'inclusion/exclusion
+
                 if not self._should_scan_file(file_item.path, include_patterns, exclude_patterns):
                     self.logger.debug(f"Fichier ignoré (pattern): {file_item.path}")
                     continue
-                
-                # Vérifier la taille
+
+
                 if len(file_item.content) > request.max_file_size:
                     self.logger.debug(f"Fichier ignoré (trop grand): {file_item.path}")
                     continue
-                
-                # Scanner le contenu
+
+
                 file_findings = self._scan_content(
-                    file_item.content, 
-                    file_item.path, 
+                    file_item.content,
+                    file_item.path,
                     request.severity_threshold
                 )
-                
+
                 if file_findings:
                     files_with_secrets.append(file_item.path)
                     for finding in file_findings:
                         finding.file = file_item.path
                     findings.extend(file_findings)
-                
+
                 files_scanned += 1
-        
-        # Mode 2: Contenu unique fourni directement
+
+
         elif request.content:
             findings = self._scan_content(request.content, "[content]", request.severity_threshold)
             files_scanned = 1
             if findings:
                 files_with_secrets.append("[content]")
-        
-        # Mode 3: Chemin de fichier/dossier (accès système de fichiers requis)
+
+
         elif request.target:
-            # Déterminer le type de scan
+
             scan_type = request.scan_type
             if scan_type == 'auto':
                 if os.path.isfile(request.target):
@@ -522,16 +521,16 @@ class SecretScanTool(BaseTool):
                 elif os.path.isdir(request.target):
                     scan_type = 'directory'
                 else:
-                    # Fallback: traiter comme contenu si le chemin n'existe pas
+
                     scan_type = 'content'
-            
-            # Exécuter le scan
+
+
             if scan_type == 'file':
                 if not os.path.isfile(request.target):
                     raise ToolValidationError(f"Fichier '{request.target}' inexistant. Utilisez 'content' pour passer du code directement.")
                 findings = self._scan_file(request.target, request.severity_threshold, request.max_file_size)
                 files_scanned = 1
-                
+
             elif scan_type == 'directory':
                 if not os.path.isdir(request.target):
                     raise ToolValidationError(f"Répertoire '{request.target}' inexistant. Utilisez 'content' pour passer du code directement.")
@@ -539,21 +538,21 @@ class SecretScanTool(BaseTool):
                     request.target, include_patterns, exclude_patterns,
                     request.severity_threshold, request.max_file_size
                 )
-                
+
             elif scan_type == 'content':
-                # Traiter target comme du contenu
+
                 findings = self._scan_content(request.target, None, request.severity_threshold)
                 files_scanned = 1
-        
-        # Compter par sévérité
+
+
         severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
         for finding in findings:
             severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
-        
-        # Limiter le nombre de findings retournés
+
+
         limited_findings = findings[:100]
-        
-        # Construire le résumé détaillé
+
+
         if not findings:
             summary = f"✅ Aucun secret détecté dans {files_scanned} fichier(s) scanné(s)."
         else:
@@ -568,7 +567,7 @@ class SecretScanTool(BaseTool):
                 if len(files_with_secrets) > 10:
                     summary_parts.append(f"... et {len(files_with_secrets) - 10} autres fichiers.")
             summary = " ".join(summary_parts)
-        
+
         return SecretScanResponse(
             clean=len(findings) == 0,
             total_findings=len(findings),

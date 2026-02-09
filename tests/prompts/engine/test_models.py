@@ -17,7 +17,7 @@ from collegue.prompts.engine.models import (
 
 class TestPromptVariable(unittest.TestCase):
     """Tests pour la classe PromptVariable."""
-    
+
     def test_create_variable(self):
         """Test de création d'une variable de prompt."""
         var = PromptVariable(
@@ -26,7 +26,7 @@ class TestPromptVariable(unittest.TestCase):
             type=PromptVariableType.STRING,
             required=True
         )
-        
+
         self.assertEqual(var.name, "test_var")
         self.assertEqual(var.description, "Variable de test")
         self.assertEqual(var.type, PromptVariableType.STRING)
@@ -34,7 +34,7 @@ class TestPromptVariable(unittest.TestCase):
         self.assertIsNone(var.default)
         self.assertIsNone(var.options)
         self.assertIsNone(var.example)
-    
+
     def test_variable_with_options(self):
         """Test d'une variable avec options."""
         var = PromptVariable(
@@ -45,11 +45,11 @@ class TestPromptVariable(unittest.TestCase):
             default="standard",
             options=["simple", "standard", "détaillé"]
         )
-        
+
         self.assertEqual(var.name, "level")
         self.assertEqual(var.default, "standard")
         self.assertEqual(var.options, ["simple", "standard", "détaillé"])
-    
+
     def test_variable_validation(self):
         """Test de validation des types de variables."""
         var_string = PromptVariable(
@@ -58,21 +58,21 @@ class TestPromptVariable(unittest.TestCase):
             type=PromptVariableType.STRING,
             required=True
         )
-        
+
         var_int = PromptVariable(
             name="age",
             description="Âge",
             type=PromptVariableType.INTEGER,
             required=True
         )
-        
+
         var_bool = PromptVariable(
             name="active",
             description="Actif",
             type=PromptVariableType.BOOLEAN,
             required=True
         )
-        
+
         self.assertEqual(var_string.type, PromptVariableType.STRING)
         self.assertEqual(var_int.type, PromptVariableType.INTEGER)
         self.assertEqual(var_bool.type, PromptVariableType.BOOLEAN)
@@ -80,7 +80,7 @@ class TestPromptVariable(unittest.TestCase):
 
 class TestPromptTemplate(unittest.TestCase):
     """Tests pour la classe PromptTemplate."""
-    
+
     def test_create_template(self):
         """Test de création d'un template de prompt."""
         template = PromptTemplate(
@@ -105,7 +105,7 @@ class TestPromptTemplate(unittest.TestCase):
             category="test",
             tags=["test", "exemple"]
         )
-        
+
         self.assertEqual(template.id, "test_template")
         self.assertEqual(template.name, "Template de test")
         self.assertEqual(template.description, "Un template pour les tests")
@@ -115,7 +115,7 @@ class TestPromptTemplate(unittest.TestCase):
         self.assertEqual(template.tags, ["test", "exemple"])
         self.assertEqual(template.version, "1.0.0")
         self.assertFalse(template.is_public)
-    
+
     def test_template_with_provider_specific(self):
         """Test d'un template avec des versions spécifiques par fournisseur."""
         template = PromptTemplate(
@@ -137,7 +137,7 @@ class TestPromptTemplate(unittest.TestCase):
                 "anthropic": "Version Anthropic: {var}"
             }
         )
-        
+
         self.assertEqual(template.template, "Version par défaut: {var}")
         self.assertEqual(template.provider_specific["openai"], "Version OpenAI: {var}")
         self.assertEqual(template.provider_specific["anthropic"], "Version Anthropic: {var}")
@@ -145,7 +145,7 @@ class TestPromptTemplate(unittest.TestCase):
 
 class TestPromptCategory(unittest.TestCase):
     """Tests pour la classe PromptCategory."""
-    
+
     def test_create_category(self):
         """Test de création d'une catégorie."""
         category = PromptCategory(
@@ -153,13 +153,13 @@ class TestPromptCategory(unittest.TestCase):
             name="Catégorie de test",
             description="Une catégorie pour les tests"
         )
-        
+
         self.assertEqual(category.id, "test_category")
         self.assertEqual(category.name, "Catégorie de test")
         self.assertEqual(category.description, "Une catégorie pour les tests")
         self.assertIsNone(category.parent_id)
         self.assertIsNone(category.icon)
-    
+
     def test_category_with_parent(self):
         """Test d'une catégorie avec parent."""
         category = PromptCategory(
@@ -169,7 +169,7 @@ class TestPromptCategory(unittest.TestCase):
             parent_id="parent_category",
             icon="folder"
         )
-        
+
         self.assertEqual(category.id, "sub_category")
         self.assertEqual(category.parent_id, "parent_category")
         self.assertEqual(category.icon, "folder")
@@ -177,12 +177,12 @@ class TestPromptCategory(unittest.TestCase):
 
 class TestPromptExecution(unittest.TestCase):
     """Tests pour la classe PromptExecution."""
-    
+
     def test_create_execution(self):
         """Test de création d'une exécution de prompt."""
         execution_id = str(uuid.uuid4())
         template_id = "test_template"
-        
+
         execution = PromptExecution(
             id=execution_id,
             template_id=template_id,
@@ -192,7 +192,7 @@ class TestPromptExecution(unittest.TestCase):
             timestamp=datetime.now(),
             provider="openai"
         )
-        
+
         self.assertEqual(execution.id, execution_id)
         self.assertEqual(execution.template_id, template_id)
         self.assertEqual(execution.variables, {"test": "valeur", "variable": "autre"})
@@ -201,19 +201,19 @@ class TestPromptExecution(unittest.TestCase):
         self.assertEqual(execution.execution_time, 0.5)
         self.assertIsNone(execution.result)
         self.assertIsNone(execution.feedback)
-    
+
     def test_execution_with_error(self):
         """Test d'une exécution avec erreur."""
         execution = PromptExecution(
             id=str(uuid.uuid4()),
             template_id="test_error",
             variables={"var": "test"},
-            formatted_prompt="",  # Prompt vide mais obligatoire
+            formatted_prompt="",
             execution_time=0.1,
             timestamp=datetime.now(),
-            result="Variable manquante: {autre_var}"  # L'erreur est stockée dans le résultat
+            result="Variable manquante: {autre_var}"
         )
-        
+
         self.assertEqual(execution.template_id, "test_error")
         self.assertEqual(execution.variables, {"var": "test"})
         self.assertEqual(execution.formatted_prompt, "")
@@ -223,10 +223,10 @@ class TestPromptExecution(unittest.TestCase):
 
 class TestPromptLibrary(unittest.TestCase):
     """Tests pour la classe PromptLibrary."""
-    
+
     def test_create_library(self):
         """Test de création d'une bibliothèque de prompts."""
-        # Création des templates et catégories sous forme de dictionnaires
+
         templates_dict = {
             "template1": PromptTemplate(
                 id="template1",
@@ -259,7 +259,7 @@ class TestPromptLibrary(unittest.TestCase):
                 category="cat2"
             )
         }
-        
+
         categories_dict = {
             "cat1": PromptCategory(
                 id="cat1",
@@ -272,12 +272,12 @@ class TestPromptLibrary(unittest.TestCase):
                 description="Deuxième catégorie"
             )
         }
-        
+
         library = PromptLibrary(
             templates=templates_dict,
             categories=categories_dict
         )
-        
+
         self.assertEqual(len(library.templates), 2)
         self.assertEqual(len(library.categories), 2)
         self.assertEqual(library.templates["template1"].id, "template1")

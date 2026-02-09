@@ -57,7 +57,7 @@ Si vous souhaitez héberger votre propre instance du serveur Collègue (backend 
     ```
 
 2.  **Configuration**
-    Copiez le fichier d'exemple et configurez vos clés API (OpenRouter, etc.) :
+    Copiez le fichier d'exemple et configurez votre clé API Google Gemini :
     ```bash
     cp .env.example .env
     ```

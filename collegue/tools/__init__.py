@@ -6,7 +6,7 @@ import importlib
 import inspect
 from typing import Dict, List, Type, Any, Optional
 
-# Rendre FastMCP optionnel pour permettre l'exécution en mode "watchdog" léger
+
 try:
     from fastmcp import FastMCP, Context
 except ImportError:
@@ -27,7 +27,7 @@ class ToolInfoResponse(BaseModel):
     required_config: List[str]
     metrics_count: int
     success_rate: float
-    # Nouvelles informations détaillées
+
     usage_description: str
     parameters: Dict[str, Any]
     examples: List[Dict[str, Any]]
@@ -136,7 +136,6 @@ class ToolRegistry:
         return info
 
 
-# Instance globale du registry
 _registry = ToolRegistry()
 
 
@@ -172,7 +171,7 @@ def register_tools(app: FastMCP, app_state: dict):
 def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
     """
     Enregistre les endpoints d'un outil dans FastMCP.
-    
+
     Les outils longs (is_long_running=True) sont enregistrés avec task=True pour
     s'exécuter en tâche de fond avec support de progression (FastMCP v2.14+).
 
@@ -227,5 +226,3 @@ def _register_tool_endpoints(app: FastMCP, tool: BaseTool, app_state: dict):
             except Exception as e:
                 tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")
                 raise
-
-

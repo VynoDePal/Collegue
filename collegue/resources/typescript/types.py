@@ -245,7 +245,7 @@ TYPE_UTILITIES = {
 def register(app: FastMCP, app_state: dict):
     """
     Enregistre les ressources de types TypeScript dans l'application FastMCP.
-    
+
     Args:
         app: L'application FastMCP
         app_state: L'état de l'application
@@ -257,49 +257,49 @@ def register(app: FastMCP, app_state: dict):
             "primitive_types": PRIMITIVE_TYPES,
             "complex_types": COMPLEX_TYPES
         })
-    
+
     @app.resource("collegue://typescript/interfaces")
     def typescript_interfaces() -> str:
         """Fournit des informations sur les interfaces TypeScript."""
         return json.dumps(INTERFACES)
-    
+
     @app.resource("collegue://typescript/generics")
     def typescript_generics() -> str:
         """Fournit des informations sur les génériques TypeScript."""
         return json.dumps(GENERICS)
-    
+
     @app.resource("collegue://typescript/type_utilities")
     def typescript_type_utilities() -> str:
         """Fournit des informations sur les utilitaires de types TypeScript."""
         return json.dumps(TYPE_UTILITIES)
-    
+
     @app.resource("collegue://typescript/type_examples/{type_name}")
     def typescript_type_examples(type_name: str) -> str:
         """
         Fournit des exemples d'utilisation pour un type TypeScript spécifique.
-        
+
         Args:
             type_name: Nom du type TypeScript (ex: 'string', 'array', 'interface', etc.)
         """
-        # Rechercher dans les types primitifs
+
         if type_name.lower() in PRIMITIVE_TYPES:
             return json.dumps(PRIMITIVE_TYPES[type_name.lower()])
-        
-        # Rechercher dans les types complexes
+
+
         if type_name.lower() in COMPLEX_TYPES:
             return json.dumps(COMPLEX_TYPES[type_name.lower()])
-        
-        # Rechercher dans les interfaces
+
+
         if type_name.lower() in INTERFACES:
             return json.dumps(INTERFACES[type_name.lower()])
-        
-        # Rechercher dans les génériques
+
+
         if type_name.lower() in GENERICS:
             return json.dumps(GENERICS[type_name.lower()])
-        
-        # Rechercher dans les utilitaires de types
+
+
         utility_name = f"{type_name}<T>" if not type_name.endswith(">") else type_name
         if utility_name in TYPE_UTILITIES:
             return json.dumps(TYPE_UTILITIES[utility_name])
-        
+
         return json.dumps({"error": f"Type '{type_name}' not found"})

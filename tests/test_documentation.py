@@ -6,7 +6,7 @@ import sys
 import os
 from pathlib import Path
 
-# Ajouter le répertoire parent au chemin pour pouvoir importer collegue
+
 parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
@@ -21,7 +21,7 @@ from collegue.tools.documentation import (
 
 class TestDocumentation(unittest.TestCase):
     """Tests pour les fonctionnalités de génération de documentation."""
-    
+
     def setUp(self):
         """Initialisation des tests."""
         self.tool = DocumentationTool()
@@ -34,7 +34,7 @@ def add(a, b):
 class Calculator:
     def __init__(self):
         self.result = 0
-        
+
     def add(self, a, b):
         self.result = a + b
         return self.result
@@ -50,7 +50,7 @@ class Calculator {
     constructor() {
         this.result = 0;
     }
-    
+
     add(a, b) {
         this.result = a + b;
         return this.result;
@@ -64,39 +64,39 @@ from typing import List, Optional
 
 class DataProcessor:
     \"\"\"Processeur de données avec support asynchrone.\"\"\"
-    
+
     def __init__(self, batch_size: int = 100):
         \"\"\"Initialise le processeur.
-        
+
         Args:
             batch_size: Taille des lots de traitement
         \"\"\"
         self.batch_size = batch_size
         self.processed_count = 0
-    
+
     async def process_batch(self, data: List[str]) -> List[str]:
         \"\"\"Traite un lot de données de manière asynchrone.
-        
+
         Args:
             data: Liste des données à traiter
-            
+
         Returns:
             Liste des données traitées
-            
+
         Raises:
             ValueError: Si la liste est vide
         \"\"\"
         if not data:
             raise ValueError("La liste ne peut pas être vide")
-        
+
         processed = []
         for item in data:
             processed_item = await self._process_item(item)
             processed.append(processed_item)
-        
+
         self.processed_count += len(processed)
         return processed
-    
+
     async def _process_item(self, item: str) -> str:
         \"\"\"Traite un élément individuel.\"\"\"
         await asyncio.sleep(0.01)  # Simulation de traitement
@@ -107,26 +107,26 @@ class DataProcessor:
         """Test d'instanciation de DocumentationTool."""
         tool = DocumentationTool()
 
-        # Vérification des méthodes de base
+
         self.assertEqual(tool.get_name(), "code_documentation")
         self.assertIsNotNone(tool.get_description())
         self.assertEqual(tool.get_request_model(), DocumentationRequest)
         self.assertEqual(tool.get_response_model(), DocumentationResponse)
 
-        # Vérification des langages supportés
+
         supported_languages = tool.get_supported_languages()
         self.assertIn("python", supported_languages)
         self.assertIn("javascript", supported_languages)
         self.assertIn("typescript", supported_languages)
 
-        # Vérification des formats supportés
+
         supported_formats = tool.get_supported_formats()
         self.assertIn("markdown", supported_formats)
         self.assertIn("rst", supported_formats)
         self.assertIn("html", supported_formats)
         self.assertIn("docstring", supported_formats)
 
-        # Vérification des styles supportés
+
         supported_styles = tool.get_supported_styles()
         self.assertIn("standard", supported_styles)
         self.assertIn("detailed", supported_styles)
@@ -142,9 +142,9 @@ class DataProcessor:
             doc_style="standard",
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
@@ -164,9 +164,9 @@ class DataProcessor:
             doc_style="standard",
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "rst")
@@ -174,7 +174,7 @@ class DataProcessor:
         self.assertIn("add", response.documentation)
         self.assertIn("Calculator", response.documentation)
         self.assertTrue(len(response.documented_elements) > 0)
-    
+
     def test_generate_documentation_python_html(self):
         """Test de génération de documentation Python au format HTML."""
         request = DocumentationRequest(
@@ -184,9 +184,9 @@ class DataProcessor:
             doc_style="standard",
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "html")
@@ -195,7 +195,7 @@ class DataProcessor:
         self.assertIn("add", response.documentation)
         self.assertIn("Calculator", response.documentation)
         self.assertTrue(len(response.documented_elements) > 0)
-    
+
     def test_generate_documentation_javascript(self):
         """Test de génération de documentation JavaScript."""
         request = DocumentationRequest(
@@ -205,14 +205,14 @@ class DataProcessor:
             doc_style="standard",
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "javascript")
         self.assertEqual(response.format, "markdown")
         self.assertIn("# Documentation", response.documentation)
-    
+
     def test_generate_documentation_detailed(self):
         """Test de génération de documentation détaillée."""
         request = DocumentationRequest(
@@ -222,9 +222,9 @@ class DataProcessor:
             doc_style="detailed",
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
@@ -240,9 +240,9 @@ class DataProcessor:
             doc_style="minimal",
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
@@ -258,9 +258,9 @@ class DataProcessor:
             include_examples=True,
             session_id="test-session"
         )
-        
+
         response = generate_documentation(request)
-        
+
         self.assertIsInstance(response, DocumentationResponse)
         self.assertEqual(response.language, "python")
         self.assertEqual(response.format, "markdown")
@@ -278,7 +278,7 @@ class DataProcessor:
             doc_style="standard",
             session_id="test-session"
         )
-        
+
         with self.assertRaises(ToolValidationError):
             generate_documentation(request)
 

@@ -26,7 +26,7 @@ class PromptVariable(BaseModel):
     type: PromptVariableType = PromptVariableType.STRING
     required: bool = True
     default: Optional[Any] = None
-    options: Optional[List[Any]] = None  # Pour les variables avec choix limités
+    options: Optional[List[Any]] = None
     example: Optional[Any] = None
 
 
@@ -39,7 +39,7 @@ class PromptTemplate(BaseModel):
     variables: List[PromptVariable] = []
     category: str
     tags: List[str] = []
-    provider_specific: Dict[str, str] = {}  # Versions spécifiques par fournisseur
+    provider_specific: Dict[str, str] = {}
     examples: List[Dict[str, Any]] = []
     created_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
     updated_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
@@ -65,7 +65,7 @@ class PromptExecution(BaseModel):
     provider: Optional[str] = None
     formatted_prompt: str
     result: Optional[str] = None
-    execution_time: float  # en secondes
+    execution_time: float
     timestamp: datetime.datetime = Field(default_factory=datetime.datetime.now)
     user_id: Optional[str] = None
     feedback: Optional[Dict[str, Any]] = None

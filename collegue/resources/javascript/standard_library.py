@@ -10,7 +10,7 @@ class JavaScriptAPIReference(BaseModel):
     """Modèle pour une référence d'API JavaScript."""
     name: str
     description: str
-    type: str  # 'method', 'property', 'object', 'function'
+    type: str
     syntax: Optional[str] = None
     parameters: List[Dict[str, str]] = []
     return_value: Optional[Dict[str, str]] = None
@@ -19,7 +19,7 @@ class JavaScriptAPIReference(BaseModel):
     mdn_url: Optional[str] = None
 
 JS_STANDARD_APIS = {
-    # Objets globaux
+
     "array": {
         "name": "Array",
         "description": "Objet global utilisé pour la construction de tableaux",
@@ -81,8 +81,8 @@ JS_STANDARD_APIS = {
         ],
         "browser_compatibility": {"chrome": True, "firefox": True, "safari": True, "edge": True}
     },
-    
-    # DOM API
+
+
     "document": {
         "name": "Document",
         "description": "Interface représentant une page web chargée dans le navigateur",
@@ -94,8 +94,8 @@ JS_STANDARD_APIS = {
         ],
         "browser_compatibility": {"chrome": True, "firefox": True, "safari": True, "edge": True}
     },
-    
-    # ES6+ Features
+
+
     "async_await": {
         "name": "async/await",
         "description": "Syntaxe permettant d'écrire du code asynchrone de manière synchrone",
@@ -133,22 +133,22 @@ def get_all_apis() -> List[str]:
 
 def get_apis_by_type(api_type: str) -> List[str]:
     """Récupère la liste des APIs d'un type spécifique."""
-    return [name for name, data in JS_STANDARD_APIS.items() 
+    return [name for name, data in JS_STANDARD_APIS.items()
             if data.get("type") == api_type]
 
 def register_stdlib(app, app_state):
     """Enregistre les ressources de la bibliothèque standard JavaScript."""
-    
+
     @app.resource("collegue://javascript/stdlib/index")
     def get_js_stdlib_index() -> str:
         """Liste toutes les APIs JavaScript disponibles."""
         return json.dumps(get_all_apis())
-    
+
     @app.resource("collegue://javascript/stdlib/type/{api_type}")
     def get_js_apis_by_type_resource(api_type: str) -> str:
         """Liste les APIs d'un type spécifique."""
         return json.dumps(get_apis_by_type(api_type))
-    
+
     @app.resource("collegue://javascript/stdlib/{api_name}")
     def get_js_api_resource(api_name: str) -> str:
         """Récupère les informations d'une API spécifique."""

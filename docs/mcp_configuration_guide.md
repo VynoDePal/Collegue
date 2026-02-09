@@ -79,8 +79,8 @@ INFO:mcp.server.streamable_http_manager:Created new transport with session ID: c
 {
   "collegue": {
     "serverUrl": "http://localhost:8088/mcp/",
-    "LLM_MODEL": "openai/gpt-4o-mini",
-    "LLM_API_KEY": "sk-or-v1-votre-cle-api-openrouter"
+    "LLM_MODEL": "gemini-3-flash-preview",
+    "LLM_API_KEY": "AIzaSy-votre-cle-api-gemini"
   }
 }
 ```
@@ -95,14 +95,14 @@ Le système utilise la priorité suivante pour les paramètres :
 ### Exemple de priorité
 - Si `LLM_MODEL` est défini dans mcp_config.json → utilise cette valeur
 - Sinon, si `LLM_MODEL` est dans .env → utilise la valeur .env
-- Sinon → utilise la valeur par défaut "openai/gpt-5-mini"
+- Sinon → utilise la valeur par défaut "gemini-3-flash-preview"
 
 ## 🔧 Installation et Configuration
 
 ### Prérequis
 - Python 3.10+
 - Docker et Docker Compose
-- Clé API OpenRouter ([obtenir une clé](https://openrouter.ai/keys))
+- Clé API Google Gemini ([obtenir une clé](https://aistudio.google.com/apikey))
 
 ### Installation locale
 ```bash
@@ -124,8 +124,8 @@ pip install -r requirements.txt
 Créez un fichier `.env` à la racine :
 ```env
 # Configuration de base (sera surchargée par MCP si défini)
-LLM_API_KEY=sk-or-v1-your-api-key-here
-LLM_MODEL=openai/gpt-4o-mini
+LLM_API_KEY=AIzaSy-your-api-key-here
+LLM_MODEL=gemini-3-flash-preview
 
 # Configuration serveur
 HOST=0.0.0.0
@@ -135,27 +135,25 @@ PORT=4121
 OAUTH_ENABLED=false
 ```
 
-## 🎯 Modèles OpenRouter Disponibles
+## 🎯 Modèles Google Gemini Disponibles
 
 ### Modèles Gratuits
 ```json
-"LLM_MODEL": "google/gemini-2.0-flash-exp:free"
-"LLM_MODEL": "meta-llama/llama-3.2-11b-vision-instruct:free"
-"LLM_MODEL": "google/gemini-flash-1.5-8b:free"
+"LLM_MODEL": "gemini-3-flash-preview"
+"LLM_MODEL": "gemini-2.5-flash"
+"LLM_MODEL": "gemini-2.5-flash-lite"
 ```
 
 ### Modèles Économiques
 ```json
-"LLM_MODEL": "openai/gpt-4o-mini"        // Recommandé - Rapide et économique
-"LLM_MODEL": "anthropic/claude-3.5-haiku" // Très rapide
-"LLM_MODEL": "deepseek/deepseek-chat"     // Bon rapport qualité/prix
+"LLM_MODEL": "gemini-2.5-flash"        // Recommandé - Rapide et économique
+"LLM_MODEL": "gemini-2.5-pro"         // Haute performance
 ```
 
 ### Modèles Performants
 ```json
-"LLM_MODEL": "openai/gpt-4o"              // GPT-4 optimisé
-"LLM_MODEL": "anthropic/claude-3.5-sonnet" // Claude performant
-"LLM_MODEL": "google/gemini-pro-1.5"       // Gemini haut de gamme
+"LLM_MODEL": "gemini-2.5-pro"           // Gemini Pro optimisé
+"LLM_MODEL": "gemini-3-flash"           // Gemini 3 Flash
 ```
 
 ## 🐳 Utilisation avec Docker
@@ -166,7 +164,7 @@ OAUTH_ENABLED=false
 docker-compose up -d
 
 # Avec paramètres MCP personnalisés
-MCP_LLM_MODEL="openai/gpt-4o" MCP_LLM_API_KEY="sk-or-v1-xxx" docker-compose up -d
+MCP_LLM_MODEL="gemini-3-flash-preview" MCP_LLM_API_KEY="AIzaSy-xxx" docker-compose up -d
 ```
 
 ### Services disponibles
@@ -207,8 +205,8 @@ print(result)
 3. **Rotation régulière** des clés API
 4. **Limiter les permissions** de la clé API si possible
 
-### Format de Clé API OpenRouter
-Les clés OpenRouter commencent toujours par `sk-or-v1-`
+### Format de Clé API Google Gemini
+Les clés Google Gemini commencent toujours par `AIzaSy`
 
 ## 🐛 Dépannage
 
@@ -216,11 +214,11 @@ Les clés OpenRouter commencent toujours par `sk-or-v1-`
 **Solutions :**
 1. Vérifiez votre mcp_config.json dans Windsurf
 2. Vérifiez le fichier .env
-3. Format correct : `sk-or-v1-xxxxx`
+3. Format correct : `AIzaSy-xxxxx`
 
 ### Erreur : "Modèle non disponible"
 **Solutions :**
-1. Vérifiez que le modèle existe sur [OpenRouter](https://openrouter.ai/models)
+1. Vérifiez que le modèle existe sur [Google AI Studio](https://aistudio.google.com)
 2. Certains modèles nécessitent des crédits
 3. Utilisez un modèle gratuit pour tester
 
@@ -243,8 +241,8 @@ DEBUG=true docker-compose up
 {
   "collegue": {
     "serverUrl": "http://localhost:8088/mcp/",
-    "LLM_MODEL": "google/gemini-2.0-flash-exp:free",
-    "LLM_API_KEY": "sk-or-v1-dev-key"
+    "LLM_MODEL": "gemini-3-flash-preview",
+    "LLM_API_KEY": "AIzaSy-dev-key"
   }
 }
 ```
@@ -254,8 +252,8 @@ DEBUG=true docker-compose up
 {
   "collegue": {
     "serverUrl": "https://collegue.example.com/mcp/",
-    "LLM_MODEL": "openai/gpt-4o",
-    "LLM_API_KEY": "sk-or-v1-prod-key"
+    "LLM_MODEL": "gemini-2.5-pro",
+    "LLM_API_KEY": "AIzaSy-prod-key"
   }
 }
 ```
@@ -265,8 +263,8 @@ DEBUG=true docker-compose up
 {
   "collegue": {
     "serverUrl": "http://localhost:8088/mcp/",
-    "LLM_MODEL": "openai/gpt-4o-mini",
-    "LLM_API_KEY": "sk-or-v1-test-key"
+    "LLM_MODEL": "gemini-2.5-flash",
+    "LLM_API_KEY": "AIzaSy-test-key"
   }
 }
 ```
@@ -274,9 +272,9 @@ DEBUG=true docker-compose up
 ## 💡 Tips et Astuces
 
 1. **Commencez avec un modèle gratuit** pour tester la configuration
-2. **Utilisez gpt-4o-mini** pour un bon équilibre performance/coût
-3. **Surveillez votre usage** sur [OpenRouter Dashboard](https://openrouter.ai/dashboard)
-4. **Configurez des limites** de dépenses dans OpenRouter
+2. **Utilisez gemini-3-flash-preview** pour un bon équilibre performance/coût
+3. **Surveillez votre usage** sur [Google Cloud Console](https://console.cloud.google.com/billing)
+4. **Configurez des limites** de dépenses dans Google Cloud
 5. **Testez différents modèles** pour trouver le meilleur pour votre usage
 
 ## 📞 Support
@@ -284,6 +282,6 @@ DEBUG=true docker-compose up
 Pour toute question :
 - Consultez le [README principal](../README.md)
 - Ouvrez une issue sur GitHub
-- Consultez la [documentation OpenRouter](https://openrouter.ai/docs)
+- Consultez la [documentation Google Gemini API](https://ai.google.dev/gemini-api/docs)
 
 Le serveur Collègue MCP est maintenant prêt pour utilisation !

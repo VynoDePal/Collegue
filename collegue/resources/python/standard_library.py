@@ -18,7 +18,7 @@ class PythonModuleReference(BaseModel):
     url: Optional[str] = None
 
 STDLIB_MODULES = {
-    # Modules de base
+
     "os": {
         "name": "os",
         "description": "Interface portable avec le système d'exploitation",
@@ -64,7 +64,7 @@ STDLIB_MODULES = {
             {"title": "Remplacement", "code": "import re\nresult = re.sub(r'\\d+', 'X', 'abc123')"}
         ]
     },
-    # Modules de données
+
     "collections": {
         "name": "collections",
         "description": "Types de conteneurs spécialisés",
@@ -74,7 +74,7 @@ STDLIB_MODULES = {
             {"title": "defaultdict", "code": "from collections import defaultdict\nd = defaultdict(list)"}
         ]
     },
-    # Modules de concurrence
+
     "threading": {
         "name": "threading",
         "description": "Exécution de code en parallèle via des threads",
@@ -107,7 +107,7 @@ def get_all_modules() -> List[str]:
 
 def register_stdlib(app, app_state):
     """Enregistre les ressources de la bibliothèque standard Python."""
-    
+
     @app.resource("collegue://python/stdlib/index")
     def get_stdlib_index() -> str:
         """Liste tous les modules de la bibliothèque standard Python disponibles."""

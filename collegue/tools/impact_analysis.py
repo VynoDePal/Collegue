@@ -58,14 +58,14 @@ class ImpactAnalysisRequest(BaseModel):
         "fast",
         description="Profondeur: 'fast' (heuristiques, ~10ms) ou 'deep' (enrichissement IA, +2-3s)"
     )
-    
+
     @field_validator('confidence_mode')
     def validate_confidence_mode(cls, v):
         valid = ['conservative', 'balanced', 'aggressive']
         if v not in valid:
             raise ValueError(f"Mode '{v}' invalide. Utilisez: {', '.join(valid)}")
         return v
-    
+
     @field_validator('analysis_depth')
     def validate_analysis_depth(cls, v):
         valid = ['fast', 'deep']
@@ -142,7 +142,7 @@ class ImpactAnalysisResponse(BaseModel):
         description="Actions de suivi"
     )
     analysis_summary: str = Field(..., description="Résumé de l'analyse")
-    # Champs enrichis par IA (mode deep uniquement)
+
     llm_insights: Optional[List[LLMInsight]] = Field(
         None,
         description="Insights IA (mode deep uniquement): analyse sémantique, risques business, suggestions"
@@ -160,17 +160,17 @@ class ImpactAnalysisResponse(BaseModel):
 class ImpactAnalysisTool(BaseTool):
     """
     Outil d'analyse d'impact des changements de code.
-    
+
     Analyse un changement décrit en langage naturel et:
     - Identifie les fichiers potentiellement impactés
     - Détecte les risques (breaking changes, sécurité, etc.)
     - Génère des requêtes de recherche pour l'IDE
     - Recommande les tests à exécuter
-    
+
     Fonctionne sur le contenu des fichiers fournis (compatible MCP isolé).
     """
 
-    # Patterns pour extraire les identifiants du change_intent
+
     IDENTIFIER_PATTERNS = [
         r"renommer\s+['\"`]?(\w+)['\"`]?\s+(?:en|vers|to)\s+['\"`]?(\w+)['\"`]?",
         r"rename\s+['\"`]?(\w+)['\"`]?\s+(?:to|as)\s+['\"`]?(\w+)['\"`]?",
@@ -183,19 +183,19 @@ class ImpactAnalysisTool(BaseTool):
         r"changer\s+(?:l[ea']?\s*)?['\"`]?(\w+)['\"`]?",
         r"change\s+['\"`]?(\w+)['\"`]?",
         r"/api/[\w/]+",
-        r"[A-Z][a-z]+(?:[A-Z][a-z]+)+",  # CamelCase
-        r"[a-z]+(?:_[a-z]+)+",  # snake_case
+        r"[A-Z][a-z]+(?:[A-Z][a-z]+)+",
+        r"[a-z]+(?:_[a-z]+)+",
     ]
-    
-    # Patterns d'API REST
+
+
     API_PATTERNS = [
         r"(?:GET|POST|PUT|DELETE|PATCH)\s+(/[\w/{}:-]+)",
         r"@(?:app|router|api)\.(?:get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]",
         r"fetch\s*\(\s*['\"`]([^'\"`]+)['\"`]",
         r"axios\.(?:get|post|put|delete|patch)\s*\(\s*['\"`]([^'\"`]+)['\"`]",
     ]
-    
-    # Patterns de risque
+
+
     RISK_PATTERNS = {
         'breaking_change': [
             (r"def\s+(\w+)\s*\([^)]*\)\s*:", "Modification de signature de fonction"),
@@ -290,7 +290,7 @@ class ImpactAnalysisTool(BaseTool):
     def _extract_identifiers_from_intent(self, intent: str) -> Set[str]:
         """Extrait les identifiants mentionnés dans l'intention de changement."""
         identifiers = set()
-        
+
         for pattern in self.IDENTIFIER_PATTERNS:
             matches = re.findall(pattern, intent, re.IGNORECASE)
             for match in matches:
@@ -298,28 +298,28 @@ class ImpactAnalysisTool(BaseTool):
                     identifiers.update(m for m in match if m and len(m) > 2)
                 elif match and len(match) > 2:
                     identifiers.add(match)
-        
-        # Extraire aussi les mots CamelCase ou snake_case explicites
+
+
         words = re.findall(r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)+|[a-z]+(?:_[a-z]+)+)\b', intent)
         identifiers.update(w for w in words if len(w) > 3)
-        
+
         return identifiers
 
     def _extract_api_endpoints(self, intent: str, files: List[FileInput]) -> Set[str]:
         """Extrait les endpoints API mentionnés."""
         endpoints = set()
-        
-        # Depuis l'intent
+
+
         for pattern in self.API_PATTERNS:
             matches = re.findall(pattern, intent, re.IGNORECASE)
             endpoints.update(matches)
-        
-        # Depuis les fichiers
+
+
         for file in files:
             for pattern in self.API_PATTERNS:
                 matches = re.findall(pattern, file.content)
                 endpoints.update(matches)
-        
+
         return endpoints
 
     def _analyze_python_imports(self, content: str, filepath: str) -> List[Tuple[str, str]]:
@@ -336,7 +336,7 @@ class ImpactAnalysisTool(BaseTool):
                     for alias in node.names:
                         imports.append((f"{module}.{alias.name}", filepath))
         except SyntaxError:
-            # Fallback regex
+
             import_matches = re.findall(r'^(?:from\s+([\w.]+)\s+)?import\s+([\w,\s]+)', content, re.MULTILINE)
             for match in import_matches:
                 module, names = match
@@ -364,18 +364,18 @@ class ImpactAnalysisTool(BaseTool):
     def _find_usages(self, identifier: str, files: List[FileInput]) -> List[ImpactedFile]:
         """Trouve les usages d'un identifiant dans les fichiers."""
         impacted = []
-        
-        # Patterns de recherche pour l'identifiant
+
+
         patterns = [
             rf'\b{re.escape(identifier)}\b',
             rf'\b{re.escape(identifier.lower())}\b',
             rf'\b{re.escape(identifier.replace("_", "-"))}\b',
         ]
-        
+
         for file in files:
             for pattern in patterns:
                 if re.search(pattern, file.content, re.IGNORECASE):
-                    # Compter les occurrences
+
                     count = len(re.findall(pattern, file.content, re.IGNORECASE))
                     impacted.append(ImpactedFile(
                         path=file.path,
@@ -384,18 +384,18 @@ class ImpactAnalysisTool(BaseTool):
                         impact_type="direct"
                     ))
                     break
-        
+
         return impacted
 
     def _analyze_risks(self, intent: str, files: List[FileInput], diff: Optional[str]) -> List[RiskNote]:
         """Analyse les risques potentiels."""
         risks = []
-        
-        # Analyser le diff si disponible
+
+
         content_to_analyze = diff or intent
         for file in files:
             content_to_analyze += "\n" + file.content
-        
+
         for category, patterns in self.RISK_PATTERNS.items():
             for pattern, description in patterns:
                 if re.search(pattern, content_to_analyze, re.IGNORECASE):
@@ -406,10 +406,10 @@ class ImpactAnalysisTool(BaseTool):
                         confidence="medium",
                         severity=severity
                     ))
-        
-        # Risques spécifiques basés sur l'intent
+
+
         intent_lower = intent.lower()
-        
+
         if any(kw in intent_lower for kw in ["supprimer", "delete", "remove"]):
             risks.append(RiskNote(
                 category="breaking_change",
@@ -417,7 +417,7 @@ class ImpactAnalysisTool(BaseTool):
                 confidence="high",
                 severity="high"
             ))
-        
+
         if any(kw in intent_lower for kw in ["renommer", "rename"]):
             risks.append(RiskNote(
                 category="breaking_change",
@@ -425,7 +425,7 @@ class ImpactAnalysisTool(BaseTool):
                 confidence="high",
                 severity="medium"
             ))
-        
+
         if any(kw in intent_lower for kw in ["api", "endpoint", "route"]):
             risks.append(RiskNote(
                 category="compat",
@@ -433,47 +433,47 @@ class ImpactAnalysisTool(BaseTool):
                 confidence="medium",
                 severity="medium"
             ))
-        
+
         return risks
 
-    def _generate_search_queries(self, identifiers: Set[str], endpoints: Set[str], 
+    def _generate_search_queries(self, identifiers: Set[str], endpoints: Set[str],
                                   files: List[FileInput]) -> List[SearchQuery]:
         """Génère des requêtes de recherche pour compléter l'analyse."""
         queries = []
-        
+
         for identifier in list(identifiers)[:10]:
             queries.append(SearchQuery(
                 query=identifier,
                 rationale=f"Trouver toutes les références à '{identifier}'",
                 search_type="symbol"
             ))
-        
+
         for endpoint in list(endpoints)[:5]:
             queries.append(SearchQuery(
                 query=endpoint,
                 rationale=f"Trouver les appels à l'endpoint '{endpoint}'",
                 search_type="text"
             ))
-        
-        # Patterns génériques utiles
+
+
         if any(f.path.endswith(('.py',)) for f in files):
             queries.append(SearchQuery(
                 query=r"from\s+\.\w+\s+import",
                 rationale="Trouver les imports relatifs (peuvent être impactés)",
                 search_type="regex"
             ))
-        
+
         return queries
 
-    def _recommend_tests(self, identifiers: Set[str], files: List[FileInput], 
+    def _recommend_tests(self, identifiers: Set[str], files: List[FileInput],
                          risks: List[RiskNote]) -> List[TestRecommendation]:
         """Recommande les tests à exécuter."""
         tests = []
-        
-        # Déterminer le framework de test probable
+
+
         has_python = any(f.path.endswith('.py') for f in files)
         has_js = any(f.path.endswith(('.js', '.ts', '.jsx', '.tsx')) for f in files)
-        
+
         if has_python:
             tests.append(TestRecommendation(
                 command="pytest --tb=short -v",
@@ -481,7 +481,7 @@ class ImpactAnalysisTool(BaseTool):
                 scope="unit",
                 priority="high"
             ))
-            
+
             for identifier in list(identifiers)[:3]:
                 tests.append(TestRecommendation(
                     command=f"pytest -k '{identifier}' -v",
@@ -489,7 +489,7 @@ class ImpactAnalysisTool(BaseTool):
                     scope="unit",
                     priority="medium"
                 ))
-        
+
         if has_js:
             tests.append(TestRecommendation(
                 command="npm test -- --passWithNoTests",
@@ -497,15 +497,15 @@ class ImpactAnalysisTool(BaseTool):
                 scope="unit",
                 priority="high"
             ))
-            
+
             tests.append(TestRecommendation(
                 command="npx jest --findRelatedTests <changed-files>",
                 rationale="Tests liés aux fichiers modifiés",
                 scope="unit",
                 priority="medium"
             ))
-        
-        # Tests basés sur les risques
+
+
         if any(r.category == "breaking_change" for r in risks):
             tests.append(TestRecommendation(
                 command="# Exécuter tests d'intégration complets",
@@ -513,7 +513,7 @@ class ImpactAnalysisTool(BaseTool):
                 scope="integration",
                 priority="high"
             ))
-        
+
         if any(r.category == "security" for r in risks):
             tests.append(TestRecommendation(
                 command="# Exécuter tests de sécurité",
@@ -521,19 +521,19 @@ class ImpactAnalysisTool(BaseTool):
                 scope="integration",
                 priority="high"
             ))
-        
+
         return tests
 
     def _generate_followups(self, risks: List[RiskNote], impacted_count: int) -> List[FollowupAction]:
         """Génère les actions de suivi recommandées."""
         followups = []
-        
+
         if impacted_count > 5:
             followups.append(FollowupAction(
                 action="Considérer un refactoring incrémental au lieu d'un changement massif",
                 rationale=f"{impacted_count} fichiers impactés: risque élevé de régression"
             ))
-        
+
         if any(r.category == "breaking_change" for r in risks):
             followups.append(FollowupAction(
                 action="Documenter le breaking change dans le CHANGELOG",
@@ -543,7 +543,7 @@ class ImpactAnalysisTool(BaseTool):
                 action="Vérifier les dépendances externes qui utilisent ce code",
                 rationale="D'autres projets peuvent être impactés"
             ))
-        
+
         if any(r.category == "data_migration" for r in risks):
             followups.append(FollowupAction(
                 action="Préparer un script de migration de données",
@@ -553,22 +553,22 @@ class ImpactAnalysisTool(BaseTool):
                 action="Tester la migration sur un environnement de staging",
                 rationale="Éviter la perte de données en production"
             ))
-        
+
         if any(r.category == "security" for r in risks):
             followups.append(FollowupAction(
                 action="Faire une revue de sécurité du changement",
                 rationale="Risque sécurité identifié"
             ))
-        
+
         followups.append(FollowupAction(
             action="Mettre à jour la documentation si nécessaire",
             rationale="Garder la documentation synchronisée avec le code"
         ))
-        
+
         return followups
 
     async def _deep_analysis_with_llm(
-        self, 
+        self,
         request: ImpactAnalysisRequest,
         static_results: Dict[str, Any],
         llm_manager=None,
@@ -576,25 +576,25 @@ class ImpactAnalysisTool(BaseTool):
     ) -> Tuple[Optional[List[LLMInsight]], Optional[str]]:
         """
         Enrichit l'analyse avec le LLM (mode deep).
-        
+
         Retourne (insights, semantic_summary) ou (None, None) si erreur.
         """
         try:
-            # Utiliser le llm_manager passé ou celui de l'instance
+
             manager = llm_manager or self.llm_manager
             if not manager:
                 self.logger.warning("LLM manager non disponible pour analyse deep")
                 return None, None
-            
-            # Préparer le contexte pour le LLM
+
+
             files_summary = []
-            for f in request.files[:5]:  # Limiter pour ne pas exploser le contexte
+            for f in request.files[:5]:
                 preview = f.content[:500] + "..." if len(f.content) > 500 else f.content
                 files_summary.append(f"## {f.path}\n```\n{preview}\n```")
-            
+
             static_risks = [f"- {r['category']}: {r['note']}" for r in static_results.get('risks', [])]
             static_impacts = [f"- {i['path']}: {i['reason']}" for i in static_results.get('impacted_files', [])]
-            
+
             prompt = f"""Analyse l'impact du changement suivant sur la codebase.
 
 ## Changement prévu
@@ -615,16 +615,16 @@ class ImpactAnalysisTool(BaseTool):
 ---
 
 Fournis une analyse enrichie au format JSON strict:
-{{
+{
   "semantic_summary": "Résumé concis de ce que fait réellement ce changement et son impact global",
   "insights": [
-    {{
+    {
       "category": "semantic|architectural|business|suggestion",
       "insight": "L'insight détaillé",
       "confidence": "low|medium|high"
-    }}
+    }
   ]
-}}
+}
 
 Catégories d'insights:
 - **semantic**: Compréhension du sens réel du changement (au-delà de la syntaxe)
@@ -634,48 +634,48 @@ Catégories d'insights:
 
 Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
-            # Appeler le LLM
+
             response = await manager.async_generate(prompt)
-            
+
             if not response:
                 return None, None
-            
-            # Parser la réponse JSON
+
+
             try:
-                # Nettoyer la réponse (enlever les backticks markdown si présents)
+
                 clean_response = response.strip()
                 if clean_response.startswith("```"):
                     clean_response = clean_response.split("\n", 1)[1]
                 if clean_response.endswith("```"):
                     clean_response = clean_response.rsplit("```", 1)[0]
                 clean_response = clean_response.strip()
-                
+
                 data = json.loads(clean_response)
-                
+
                 semantic_summary = data.get("semantic_summary", "")
                 raw_insights = data.get("insights", [])
-                
+
                 insights = []
-                for item in raw_insights[:10]:  # Limiter
+                for item in raw_insights[:10]:
                     if isinstance(item, dict) and "insight" in item:
                         insights.append(LLMInsight(
                             category=item.get("category", "suggestion"),
                             insight=item["insight"],
                             confidence=item.get("confidence", "medium")
                         ))
-                
+
                 self.logger.info(f"Analyse deep: {len(insights)} insights générés")
                 return insights, semantic_summary
-                
+
             except json.JSONDecodeError as e:
                 self.logger.warning(f"Erreur parsing réponse LLM: {e}")
-                # Fallback: utiliser la réponse brute comme résumé
+
                 return [LLMInsight(
                     category="suggestion",
                     insight=response[:500],
                     confidence="low"
                 )], None
-                
+
         except Exception as e:
             self.logger.error(f"Erreur analyse deep: {e}")
             return None, None
@@ -683,19 +683,19 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
     def _execute_core_logic(self, request: ImpactAnalysisRequest, **kwargs) -> ImpactAnalysisResponse:
         """Exécute l'analyse d'impact."""
         self.logger.info(f"Analyse d'impact: {request.change_intent[:50]}...")
-        
-        # Récupérer les services depuis kwargs
+
+
         llm_manager = kwargs.get('llm_manager') or self.llm_manager
         ctx = kwargs.get('ctx')
-        
-        # Extraire les identifiants et endpoints
+
+
         identifiers = self._extract_identifiers_from_intent(request.change_intent)
         endpoints = self._extract_api_endpoints(request.change_intent, request.files)
-        
+
         self.logger.debug(f"Identifiants extraits: {identifiers}")
         self.logger.debug(f"Endpoints extraits: {endpoints}")
-        
-        # Analyser les imports de chaque fichier
+
+
         all_imports = []
         for file in request.files:
             lang = file.language or self._detect_language(file.path)
@@ -703,22 +703,22 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 all_imports.extend(self._analyze_python_imports(file.content, file.path))
             elif lang in ('typescript', 'javascript'):
                 all_imports.extend(self._analyze_js_imports(file.content, file.path))
-        
-        # Trouver les fichiers impactés
+
+
         impacted_files = []
         seen_paths = set()
-        
+
         for identifier in identifiers:
             for impact in self._find_usages(identifier, request.files):
                 if impact.path not in seen_paths:
                     impacted_files.append(impact)
                     seen_paths.add(impact.path)
-        
-        # Ajuster la confiance selon le mode
+
+
         if request.confidence_mode == 'conservative':
             impacted_files = [f for f in impacted_files if f.confidence == 'high']
         elif request.confidence_mode == 'aggressive':
-            # Ajouter des fichiers avec imports potentiellement liés
+
             for module, filepath in all_imports:
                 for identifier in identifiers:
                     if identifier.lower() in module.lower() and filepath not in seen_paths:
@@ -729,36 +729,36 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                             impact_type="indirect"
                         ))
                         seen_paths.add(filepath)
-        
-        # Analyser les risques
+
+
         risks = self._analyze_risks(request.change_intent, request.files, request.diff)
-        
-        # Générer les requêtes de recherche
+
+
         search_queries = self._generate_search_queries(identifiers, endpoints, request.files)
-        
-        # Recommander les tests
+
+
         tests = self._recommend_tests(identifiers, request.files, risks)
-        
-        # Générer les followups
+
+
         followups = self._generate_followups(risks, len(impacted_files))
-        
-        # Construire le résumé
+
+
         risk_summary = ""
         if risks:
             critical_risks = [r for r in risks if r.severity in ('high', 'critical')]
             if critical_risks:
                 risk_summary = f" ⚠️ {len(critical_risks)} risque(s) important(s) détecté(s)."
-        
-        # Mode deep: enrichissement IA
+
+
         llm_insights = None
         semantic_summary = None
         analysis_depth_used = "fast"
-        
+
         if request.analysis_depth == "deep":
             self.logger.info("Mode deep: enrichissement IA en cours...")
             analysis_depth_used = "deep"
-            
-            # Préparer les résultats statiques pour le LLM
+
+
             static_results = {
                 'impacted_files': [
                     {'path': f.path, 'reason': f.reason, 'confidence': f.confidence}
@@ -769,34 +769,34 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                     for r in risks[:10]
                 ]
             }
-            
-            # Appeler l'analyse LLM (async)
+
+
             try:
                 coro = self._deep_analysis_with_llm(request, static_results, llm_manager, ctx)
                 try:
                     loop = asyncio.get_running_loop()
-                    # Déjà dans un contexte async - utiliser un thread
+
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         future = executor.submit(asyncio.run, coro)
                         llm_insights, semantic_summary = future.result(timeout=30)
                 except RuntimeError:
-                    # Pas de loop en cours - on peut utiliser asyncio.run
+
                     llm_insights, semantic_summary = asyncio.run(coro)
             except Exception as e:
                 self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
-                # Continuer sans insights IA
-        
+
+
         analysis_summary = (
             f"Analyse de '{request.change_intent[:50]}...': "
             f"{len(impacted_files)} fichier(s) potentiellement impacté(s), "
             f"{len(risks)} risque(s) identifié(s), "
             f"{len(tests)} test(s) recommandé(s).{risk_summary}"
         )
-        
+
         if analysis_depth_used == "deep" and llm_insights:
             analysis_summary += f" 🤖 {len(llm_insights)} insight(s) IA."
-        
+
         return ImpactAnalysisResponse(
             change_summary=request.change_intent,
             impacted_files=impacted_files[:50],

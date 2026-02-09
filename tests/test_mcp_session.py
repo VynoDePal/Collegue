@@ -18,22 +18,22 @@ class MCPStreamableClient:
 
     def _extract_session_id(self, response_text: str) -> Optional[str]:
         """Extrait l'ID de session de la réponse SSE"""
-        # Rechercher l'ID de session dans les logs ou headers
+
         session_match = re.search(r'session[_\s]?ID[:\s]+([a-f0-9-]+)', response_text, re.IGNORECASE)
         if session_match:
             return session_match.group(1)
-        
-        # Rechercher l'ID de session au format JSON
+
+
         try:
-            # Essayer de parser la réponse comme JSON
+
             response_json = json.loads(response_text)
             if 'result' in response_json and 'sessionId' in response_json['result']:
                 return response_json['result']['sessionId']
         except (json.JSONDecodeError, KeyError):
             pass
-            
+
         return None
-    
+
     def _get_session_from_logs(self) -> Optional[str]:
         """Récupère l'ID de session depuis les logs Docker"""
         try:
@@ -42,26 +42,26 @@ class MCPStreamableClient:
                 ['docker', 'compose', 'logs', 'collegue-app', '--tail', '50'],
                 capture_output=True, text=True, timeout=10
             )
-            
+
             if result.returncode == 0:
-                # Chercher le dernier ID de session créé
+
                 matches = re.findall(r'Created new transport with session ID: ([a-f0-9-]+)', result.stdout)
                 if matches:
-                    return matches[-1]  # Retourner le plus récent
+                    return matches[-1]
         except Exception as e:
             print(f"Erreur lors de la récupération des logs: {e}")
-        
+
         return None
 
     def initialize(self) -> bool:
         """Initialise la connexion MCP"""
         try:
-            # Configuration spécifique pour transport http
+
             init_headers = self.headers.copy()
             init_headers["Accept"] = "application/json, text/event-stream"
             init_headers["Content-Type"] = "application/json"
-            
-            # Requête d'initialisation avec les paramètres requis pour MCP
+
+
             response = requests.post(
                 self.base_url,
                 json={
@@ -79,17 +79,17 @@ class MCPStreamableClient:
                             "name": "Test Client",
                             "version": "1.0.0"
                         },
-                        "transport": "http"  # Spécifier explicitement le transport
+                        "transport": "http"
                     }
                 },
                 headers=init_headers,
                 timeout=10
             )
-            
+
             print(f"Initialize response: {response.status_code}")
             print(f"Response text: {response.text[:500]}...")
-            
-            # Vérifier les headers de réponse pour l'ID de session
+
+
             if 'X-Session-ID' in response.headers:
                 self.session_id = response.headers['X-Session-ID']
                 print(f"✅ Session ID trouvé dans les headers: {self.session_id}")
@@ -97,23 +97,23 @@ class MCPStreamableClient:
                 self.session_id = response.headers['MCP-Session-ID']
                 print(f"✅ Session ID trouvé dans les headers: {self.session_id}")
             else:
-                # Essayer d'extraire l'ID de session du corps de la réponse
+
                 self.session_id = self._extract_session_id(response.text)
                 if not self.session_id:
-                    # Essayer de récupérer depuis les logs Docker
+
                     print("Tentative de récupération de l'ID de session depuis les logs...")
                     self.session_id = self._get_session_from_logs()
-            
+
             if self.session_id:
                 print(f"✅ Session ID trouvé: {self.session_id}")
-                # Ajouter l'ID de session aux headers pour les requêtes futures
+
                 self.headers["X-Session-ID"] = self.session_id
                 self.headers["MCP-Session-ID"] = self.session_id
             else:
                 print("⚠️ Session ID non trouvé, les requêtes suivantes pourraient échouer")
-            
+
             return response.status_code == 200
-            
+
         except Exception as e:
             print(f"❌ Erreur lors de l'initialisation: {e}")
             return False
@@ -121,17 +121,17 @@ class MCPStreamableClient:
     def list_tools(self) -> bool:
         """Liste les outils disponibles"""
         try:
-            # Utiliser l'URL de base sans paramètre de requête
+
             url = self.base_url
-            
-            # Préparer les headers avec l'ID de session
+
+
             request_headers = self.headers.copy()
             if self.session_id:
-                # Ajouter l'ID de session dans les headers de différentes façons pour assurer la compatibilité
+
                 request_headers["X-Session-ID"] = self.session_id
                 request_headers["MCP-Session-ID"] = self.session_id
-                
-                # Ajouter l'ID de session dans le corps de la requête JSON-RPC
+
+
                 request_json = {
                     "jsonrpc": "2.0",
                     "id": 2,
@@ -147,19 +147,19 @@ class MCPStreamableClient:
                     "method": "tools/list",
                     "params": {}
                 }
-            
+
             response = requests.post(
                 url,
                 json=request_json,
                 headers=request_headers,
                 timeout=10
             )
-            
+
             print(f"Tools list response: {response.status_code}")
             print(f"Response text: {response.text[:500]}...")
-            
+
             return response.status_code == 200
-            
+
         except Exception as e:
             print(f"❌ Erreur lors de la liste des outils: {e}")
             return False
@@ -167,17 +167,17 @@ class MCPStreamableClient:
     def list_resources(self) -> bool:
         """Liste les ressources disponibles"""
         try:
-            # Utiliser l'URL de base sans paramètre de requête
+
             url = self.base_url
-            
-            # Préparer les headers avec l'ID de session
+
+
             request_headers = self.headers.copy()
             if self.session_id:
-                # Ajouter l'ID de session dans les headers de différentes façons pour assurer la compatibilité
+
                 request_headers["X-Session-ID"] = self.session_id
                 request_headers["MCP-Session-ID"] = self.session_id
-                
-                # Ajouter l'ID de session dans le corps de la requête JSON-RPC
+
+
                 request_json = {
                     "jsonrpc": "2.0",
                     "id": 3,
@@ -193,19 +193,19 @@ class MCPStreamableClient:
                     "method": "resources/list",
                     "params": {}
                 }
-            
+
             response = requests.post(
                 url,
                 json=request_json,
                 headers=request_headers,
                 timeout=10
             )
-            
+
             print(f"Resources list response: {response.status_code}")
             print(f"Response text: {response.text[:500]}...")
-            
+
             return response.status_code == 200
-            
+
         except Exception as e:
             print(f"❌ Erreur lors de la liste des ressources: {e}")
             return False
@@ -213,20 +213,20 @@ class MCPStreamableClient:
 def test_mcp_with_session():
     """Test complet MCP avec gestion de session"""
     print("🚀 Test de connexion MCP avec gestion de session\n")
-    
+
     client = MCPStreamableClient("http://localhost:8088/mcp/")
-    
+
     print("1. Test d'initialisation...")
     if not client.initialize():
         print("❌ Échec de l'initialisation")
         return False
-    
+
     print("\n2. Test de liste des outils...")
     client.list_tools()
-    
+
     print("\n3. Test de liste des ressources...")
     client.list_resources()
-    
+
     print("\n✅ Tests terminés!")
     return True
 

@@ -5,7 +5,7 @@ import sys
 import os
 from pathlib import Path
 
-# Ajouter le répertoire parent au chemin pour pouvoir importer collegue
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from collegue.core import ToolOrchestrator
@@ -21,32 +21,32 @@ from collegue.core.tool_llm_manager import ToolLLMManager
 from unittest import mock
 from unittest.mock import patch, MagicMock, AsyncMock
 
-# Initialisation de l'application FastMCP (minimal pour les tests)
+
 settings = Settings()
 app = FastMCP(title="TestApp", description="Test App", version="0.1.0")
 
-# Création d'un dictionnaire d'état pour stocker les composants partagés
+
 app_state = {}
 
-# Enregistrement des composants core et des outils comme dans l'application principale
+
 register_core(app, app_state)
 register_tools(app, app_state)
 
-# Récupération de l'orchestrateur depuis app_state après initialisation complète
+
 orchestrator = app_state["orchestrator"]
 context_manager = app_state["context_manager"]
 
 async def test_components_integration():
     """Test d'intégration des trois composants principaux"""
     print("=== Test d'intégration des composants du Core Engine ===")
-    
+
     session_id = "test_session_123"
     context_manager.create_context(session_id, metadata={"user_id": "test_user", "session_name": "Test Session"})
     print(f"Session créée avec ID: {session_id}")
-    
+
     llm_manager = ToolLLMManager()
     orchestrator.app_state["llm_manager"] = llm_manager
-    
+
     def analyze_code(code, language=None, context=None):
         """Analyse le code fourni"""
         print(f"Analyse du code avec langue: {language}")
@@ -55,39 +55,39 @@ async def test_components_integration():
         if context and "session_id" in context:
             context_manager.add_code_to_context(context["session_id"], code)
         return result
-    
+
     def get_context(session_id, context=None):
         """Récupère le contexte d'une session"""
         return context_manager.get_context(session_id)
-    
+
     async def suggest_tools_for_query(query, session_id=None, context=None):
         """Suggère des outils en fonction d'une requête"""
         session_context = None
         if session_id:
             session_context = context_manager.get_context(session_id)
         return orchestrator.suggest_tools(query, session_context)
-    
+
     orchestrator.register_tool(
-        "analyze_code", 
-        analyze_code, 
+        "analyze_code",
+        analyze_code,
         "Analyse le code fourni et extrait sa structure",
         category="code_analysis"
     )
-    
+
     orchestrator.register_tool(
-        "get_context", 
-        get_context, 
+        "get_context",
+        get_context,
         "Récupère le contexte d'une session",
         category="context_management"
     )
-    
+
     orchestrator.register_tool(
-        "suggest_tools_for_query", 
-        suggest_tools_for_query, 
+        "suggest_tools_for_query",
+        suggest_tools_for_query,
         "Suggère des outils en fonction d'une requête",
         category="tool_suggestion"
     )
-    
+
     tools_chain = [
         {
             "name": "analyze_code",
@@ -103,10 +103,10 @@ async def test_components_integration():
             }
         }
     ]
-    
+
     chain_created = orchestrator.create_tool_chain("analyze_and_get_context", tools_chain)
     print(f"Chaîne d'outils créée: {chain_created}")
-    
+
     print("\n--- Test 1: Analyse de code ---")
     code_sample = """
 def calculate_sum(a, b):
@@ -116,22 +116,22 @@ def calculate_sum(a, b):
 class Calculator:
     def __init__(self):
         self.history = []
-        
+
     def add(self, a, b):
         result = a + b
         self.history.append(result)
         return result
 """
-    
+
     result = orchestrator.execute_tool("analyze_code", {
-        "code": code_sample, 
+        "code": code_sample,
         "language": "python",
         "context": {"session_id": session_id}
     })
-    
+
     print("Résultat brut de l'exécution:")
     print(result)
-    
+
     if "error" in result:
         print(f"Erreur lors de l'analyse: {result['error']}")
     else:
@@ -140,14 +140,14 @@ class Calculator:
         print(f"- Nombre de fonctions: {len(result.get('functions', []))}")
         print(f"- Nombre de classes: {len(result.get('classes', []))}")
         print(f"- Validité AST: {result.get('ast_valid', False)}")
-    
-    # Test 2: Récupération du contexte
+
+
     print("\n--- Test 2: Récupération du contexte ---")
     context_result = orchestrator.execute_tool("get_context", {"session_id": session_id})
-    
+
     print("Résultat brut de l'exécution:")
     print(context_result)
-    
+
     if "error" in context_result:
         print(f"Erreur lors de la récupération du contexte: {context_result['error']}")
     else:
@@ -155,40 +155,40 @@ class Calculator:
         print(f"- Session ID: {context_result['session_id']}")
         print(f"- Utilisateur: {context_result['metadata'].get('user_id', 'N/A')}")
         print(f"- Nombre d'entrées de code: {len(context_result.get('code_history', []))}")
-    
-    # Test 3: Suggestion d'outils
+
+
     print("\n--- Test 3: Suggestion d'outils ---")
     suggestions_result = await orchestrator.execute_tool_async("suggest_tools_for_query", {
-        "query": "analyser le code python", 
+        "query": "analyser le code python",
         "session_id": session_id
     })
-    
+
     print("Résultat brut de l'exécution:")
     print(suggestions_result)
-    
+
     if "error" in suggestions_result:
         print(f"Erreur lors de la suggestion d'outils: {suggestions_result['error']}")
     else:
         print("\nSuggestions d'outils:")
-        # Supposant que suggestions_result est une liste de suggestions
+
         if isinstance(suggestions_result, list):
             for suggestion in suggestions_result:
                 print(f"- Outil: {suggestion.get('name', 'N/A')}, Score: {suggestion.get('relevance', 'N/A')}")
         elif isinstance(suggestions_result, dict) and 'suggestions' in suggestions_result:
              for suggestion in suggestions_result['suggestions']:
-                print(f"- Outil: {suggestion.get('name', 'N/A')}, Score: {suggestion.get('relevance', 'N/A')}")       
+                print(f"- Outil: {suggestion.get('name', 'N/A')}, Score: {suggestion.get('relevance', 'N/A')}")
         else:
             print(f"Format de réponse inattendu pour les suggestions: {suggestions_result}")
-            
-    # Test 4: Exécution d'une chaîne d'outils
+
+
     print("\n--- Test 4: Exécution d'une chaîne d'outils ---")
     chain_result = await orchestrator.execute_tool_async("analyze_and_get_context", {
         "context": {"session_id": session_id}
     })
-    
+
     print("Résultat brut de l'exécution:")
     print(chain_result)
-    
+
     if "error" in chain_result:
         print(f"Erreur lors de l'exécution de la chaîne d'outils: {chain_result['error']}")
     else:
@@ -201,24 +201,24 @@ class Calculator:
                 print(f"- Résultat: {result_data}")
         else:
             print(f"- Résultat: {chain_result}")
-    
-    # Test 5: Historique d'exécution
+
+
     print("\n--- Test 5: Historique d'exécution ---")
     history = orchestrator.get_execution_history(limit=3)
-    
+
     print(f"Dernières {len(history)} exécutions:")
     for entry in history:
         print(f"- {entry['timestamp']}: {entry['tool_name']} (succès: {entry['success']})")
-    
+
     print("\n--- Mocking ToolLLMManager for LLM tool tests ---")
     with patch.object(ToolLLMManager, 'sync_generate') as mock_sync_generate:
         mock_sync_generate.return_value = "Mocked LLM Response for the tool."
 
-        # Test 6: Refactoring (LLM)
+
         print("\n--- Test 8: Refactoring (LLM) ---")
-        
+
         from collegue.tools.refactoring import refactor_code, RefactoringRequest
-        
+
         refactoring_request = RefactoringRequest(
             code="def add(a, b): return a + b",
             language="python",
@@ -226,7 +226,7 @@ class Calculator:
             session_id=session_id,
             parameters={}
         )
-        
+
         class MockRefactorLLMService:
             def __init__(self):
                 self.llm_config = MagicMock()
@@ -236,32 +236,32 @@ class Calculator:
                     \"\"\"Add two numbers together and return the result.\"\"\"
                     return a + b
                 """)
-        
+
         mock_llm_service = MockRefactorLLMService()
         mock_parser = MagicMock()
         response = refactor_code(refactoring_request, parser=mock_parser, llm_manager=mock_llm_service)
-        
+
         refactor_result = response.model_dump()
         print(f"Résultat brut: {refactor_result}")
-        
+
         mock_llm_service.sync_generate.assert_called_once()
-        
+
         assert "refactored_code" in refactor_result, "Response should contain 'refactored_code' field"
         assert "changes" in refactor_result, "Response should contain 'changes' field"
         print(f"Mocked LLM call for refactor_code: OK (Output: {refactor_result.get('refactored_code','')[:50]}...)")
 
-        # Test 9: Documentation Generation (LLM)
+
         print("\n--- Test 9: Documentation Generation (LLM) ---")
-        
+
         from collegue.tools.documentation import generate_documentation, DocumentationRequest
-        
+
         doc_request = DocumentationRequest(
             code="def add(a, b): return a + b",
             language="python",
             doc_style="numpy",
             session_id=session_id
         )
-        
+
         class MockDocLLMService:
             def __init__(self):
                 self.llm_config = MagicMock()
@@ -269,14 +269,14 @@ class Calculator:
                 self.sync_generate = MagicMock(return_value="""
                     def add(a, b):
                         \"\"\"Add two numbers together.
-                        
+
                         Parameters
                         ----------
                         a : int
                             First number to add
                         b : int
                             Second number to add
-                            
+
                         Returns
                         -------
                         int
@@ -284,31 +284,31 @@ class Calculator:
                         \"\"\"
                         return a + b
                     """)
-        
+
         mock_llm_service = MockDocLLMService()
         mock_parser = MagicMock()
         response = generate_documentation(doc_request, parser=mock_parser, llm_manager=mock_llm_service)
-        
+
         doc_result = response.model_dump()
         print(f"Résultat brut: {doc_result}")
-        
+
         mock_llm_service.sync_generate.assert_called_once()
-        
+
         assert "documentation" in doc_result, "Response should contain 'documentation' field"
         print(f"Mocked LLM call for generate_documentation: OK (Output: {doc_result.get('documentation','')[:50]}...)")
 
-        # Test 10: Test Generation (LLM)
+
         print("\n--- Test 10: Test Generation (LLM) ---")
-        
+
         from collegue.tools.test_generation import generate_tests, TestGenerationRequest
-        
+
         test_request = TestGenerationRequest(
             code="def add(a, b): return a + b",
             language="python",
             test_framework="pytest",
             session_id=session_id
         )
-        
+
         class MockTestLLMService:
             def __init__(self):
                 self.llm_config = MagicMock()
@@ -319,16 +319,16 @@ class Calculator:
                     assert add(0, 0) == 0
                     assert add(-1, 1) == 0
                 """)
-        
+
         mock_llm_service = MockTestLLMService()
         mock_parser = MagicMock()
         response = generate_tests(test_request, parser=mock_parser, llm_manager=mock_llm_service)
-        
+
         test_result = response.model_dump()
         print(f"Résultat brut: {test_result}")
-        
+
         mock_llm_service.sync_generate.assert_called_once()
-        
+
         assert "test_code" in test_result, "Response should contain 'test_code' field"
         print(f"Mocked LLM call for generate_tests: OK (Output: {test_result.get('test_code','')[:50]}...)")
 

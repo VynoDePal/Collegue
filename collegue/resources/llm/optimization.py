@@ -129,34 +129,34 @@ def optimize_prompt(prompt: str, optimization_id: str, provider: Optional[str] =
     optimization = get_optimization(optimization_id)
     if not optimization:
         return None
-    
-    # Sélectionner les modificateurs spécifiques au fournisseur si disponibles
+
+
     modifiers = optimization.template_modifiers
     if provider and provider in optimization.provider_specific:
         modifiers = optimization.provider_specific[provider]
-    
-    # Appliquer les modificateurs
+
+
     optimized_prompt = prompt
-    
+
     if "prefix" in modifiers:
         prefix = modifiers["prefix"]
         if examples and "{examples}" in prefix:
             prefix = prefix.replace("{examples}", examples)
         optimized_prompt = prefix + " " + optimized_prompt
-    
+
     if "suffix" in modifiers:
         optimized_prompt = optimized_prompt + " " + modifiers["suffix"]
-    
+
     return optimized_prompt
 
 def register_optimization(app, app_state):
     """Enregistre les ressources d'optimisation des prompts LLM."""
-    
+
     @app.resource("collegue://llm/optimizations/index")
     def get_prompt_optimizations_index() -> str:
         """Liste toutes les optimisations de prompts disponibles."""
         return json.dumps(get_all_optimizations())
-    
+
     @app.resource("collegue://llm/optimizations/{optimization_id}")
     def get_optimization_resource(optimization_id: str) -> str:
         """Récupère les informations d'une optimisation spécifique."""

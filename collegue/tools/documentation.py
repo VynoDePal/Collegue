@@ -180,10 +180,10 @@ class DocumentationTool(BaseTool):
 
     def validate_request(self, request: BaseModel) -> bool:
         """Validation étendue pour les requêtes de documentation."""
-        # Validation de base
+
         super().validate_request(request)
 
-        # Validation du format
+
         if hasattr(request, 'doc_format') and request.doc_format:
             supported_formats = self.get_supported_formats()
             if request.doc_format not in supported_formats:
@@ -192,7 +192,7 @@ class DocumentationTool(BaseTool):
                     f"Formats supportés: {supported_formats}"
                 )
 
-        # Validation du style
+
         if hasattr(request, 'doc_style') and request.doc_style:
             supported_styles = self.get_supported_styles()
             if request.doc_style not in supported_styles:
@@ -229,9 +229,9 @@ class DocumentationTool(BaseTool):
                     "include_examples": str(request.include_examples),
                     "focus_on": request.focus_on or "all",
                     "file_path": request.file_path or "unknown",
-                    "code_elements": str(code_elements[:5]) if code_elements else "[]"  # Limiter pour éviter un prompt trop long
+                    "code_elements": str(code_elements[:5]) if code_elements else "[]"
                 }
-                
+
                 try:
                     if asyncio.iscoroutinefunction(self.prepare_prompt):
                         loop = asyncio.get_event_loop()
@@ -247,10 +247,10 @@ class DocumentationTool(BaseTool):
                 except Exception as e:
                     self.logger.debug(f"Fallback vers _build_documentation_prompt: {e}")
                     prompt = self._build_documentation_prompt(request, code_elements)
-                
+
                 generated_docs = llm_manager.sync_generate(prompt)
 
-                # Post-traitement de la documentation
+
                 formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
 
                 coverage = self._calculate_coverage(code_elements, formatted_docs)
@@ -274,37 +274,37 @@ class DocumentationTool(BaseTool):
     async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
         """
         Version async de la logique de génération de documentation (FastMCP 2.14+).
-        
+
         Utilise ctx.sample() pour les appels LLM avec fallback vers ToolLLMManager.
-        
+
         Args:
             request: Requête de documentation validée
             **kwargs: Services additionnels incluant ctx, llm_manager, parser
-        
+
         Returns:
             DocumentationResponse: La documentation générée
         """
         ctx = kwargs.get('ctx')
         llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
-        
+
         if ctx:
             await ctx.info("Analyse du code...")
-        
-        # Analyse du code pour identifier les éléments à documenter
+
+
         code_elements = self._analyze_code_elements(request.code, request.language, parser)
-        
-        # Construire le prompt
+
+
         prompt = self._build_documentation_prompt(request, code_elements)
         system_prompt = f"""Tu es un expert en documentation de code {request.language}.
 Génère une documentation claire, complète et bien structurée au format {request.doc_format or 'markdown'}.
 Style de documentation: {request.doc_style or 'standard'}."""
-        
+
         if ctx:
             await ctx.info("Génération de la documentation via LLM...")
-        
+
         try:
-            # Utiliser sample_llm (ctx.sample() prioritaire, fallback vers llm_manager)
+
             generated_docs = await self.sample_llm(
                 prompt=prompt,
                 ctx=ctx,
@@ -312,19 +312,19 @@ Style de documentation: {request.doc_style or 'standard'}."""
                 system_prompt=system_prompt,
                 temperature=0.5
             )
-            
+
             if ctx:
                 await ctx.info("Documentation générée, formatage...")
-            
-            # Post-traitement de la documentation
+
+
             formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
-            
-            # Calcul de la couverture
+
+
             coverage = self._calculate_coverage(code_elements, formatted_docs)
-            
-            # Génération de suggestions
+
+
             suggestions = self._generate_documentation_suggestions(request, code_elements, coverage)
-            
+
             return DocumentationResponse(
                 documentation=formatted_docs,
                 language=request.language,
@@ -333,7 +333,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
                 coverage=coverage,
                 suggestions=suggestions
             )
-            
+
         except Exception as e:
             self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._generate_fallback_documentation(request, code_elements, parser)
@@ -347,13 +347,13 @@ Style de documentation: {request.doc_style or 'standard'}."""
         """
         elements = []
 
-        # Utilisation du parser si disponible
+
         if parser and hasattr(parser, f'parse_{language.lower()}'):
             try:
                 parse_method = getattr(parser, f'parse_{language.lower()}')
                 parsed = parse_method(code)
 
-                # Extraction des fonctions
+
                 if 'functions' in parsed:
                     for func in parsed['functions']:
                         elements.append({
@@ -365,7 +365,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
                             "complexity": self._estimate_complexity(func)
                         })
 
-                # Extraction des classes
+
                 if 'classes' in parsed:
                     for cls in parsed['classes']:
                         elements.append({
@@ -381,7 +381,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
             except Exception as e:
                 self.logger.debug(f"Erreur parsing avec parser: {e}")
 
-        # Analyse basique sans parser
+
         return self._basic_element_analysis(code, language)
 
     def _basic_element_analysis(self, code: str, language: str) -> List[Dict[str, str]]:
@@ -393,12 +393,12 @@ Style de documentation: {request.doc_style or 'standard'}."""
             for i, line in enumerate(lines):
                 line_stripped = line.strip()
 
-                # Fonctions
+
                 if line_stripped.startswith("def "):
                     func_signature = line_stripped
                     func_name = func_signature.split("def ")[1].split("(")[0].strip()
 
-                    # Recherche de docstring
+
                     docstring = ""
                     if i + 1 < len(lines) and '"""' in lines[i + 1]:
                         docstring = "Docstring présente"
@@ -412,7 +412,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
                         "complexity": "medium"
                     })
 
-                # Classes
+
                 elif line_stripped.startswith("class "):
                     class_signature = line_stripped
                     class_name = class_signature.split("class ")[1].split("(")[0].split(":")[0].strip()
@@ -430,7 +430,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
             for i, line in enumerate(lines):
                 line_stripped = line.strip()
 
-                # Fonctions
+
                 if 'function ' in line_stripped or '=>' in line_stripped:
                     func_name = "anonymous"
                     if line_stripped.startswith('function '):
@@ -447,7 +447,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
                         "complexity": "medium"
                     })
 
-                # Classes
+
                 elif line_stripped.startswith('class '):
                     class_name = line_stripped.split('class ')[1].split(' ')[0].split('{')[0].strip()
 
@@ -464,7 +464,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
     def _estimate_complexity(self, element: Dict[str, Any]) -> str:
         """Estime la complexité d'un élément de code."""
-        # Estimation basique basée sur le nombre de paramètres et la longueur
+
         params_count = len(element.get('params', []))
 
         if params_count <= 2:
@@ -508,7 +508,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
             ""
         ]
 
-        # Ajout du code
+
         prompt_parts.extend([
             f"```{request.language}",
             request.code,
@@ -516,22 +516,22 @@ Style de documentation: {request.doc_style or 'standard'}."""
             ""
         ])
 
-        # Éléments identifiés
+
         if elements:
             prompt_parts.append("Éléments identifiés à documenter :")
-            for element in elements[:10]:  # Limiter à 10 éléments pour le prompt
+            for element in elements[:10]:
                 prompt_parts.append(f"- {element['type']}: {element['name']} (ligne {element['line_number']})")
             prompt_parts.append("")
 
-        # Focus spécifique
+
         if request.focus_on and request.focus_on != "all":
             prompt_parts.append(f"Concentre-toi sur les {request.focus_on}")
 
-        # Exemples d'utilisation
+
         if request.include_examples:
             prompt_parts.append("Inclus des exemples d'utilisation pratiques pour chaque élément principal.")
 
-        # Instructions par langage
+
         language_instructions = self._get_language_doc_instructions(request.language)
         if language_instructions:
             prompt_parts.append(f"Instructions {request.language}: {language_instructions}")
@@ -559,20 +559,20 @@ Style de documentation: {request.doc_style or 'standard'}."""
             return self._convert_to_html_format(docs)
         elif format_type == "rst":
             return self._convert_to_rst_format(docs)
-        # Pour markdown et json, on retourne tel quel (assumant que le LLM a généré dans le bon format)
+
         return docs
 
     def _convert_to_docstring_format(self, docs: str, language: str) -> str:
         """Convertit la documentation en format docstring selon le langage."""
         if language.lower() == "python":
-            # Conversion basique en docstring Python
+
             lines = docs.split('\n')
             formatted_lines = ['"""']
             formatted_lines.extend(lines)
             formatted_lines.append('"""')
             return '\n'.join(formatted_lines)
         elif language.lower() in ["javascript", "typescript"]:
-            # Conversion en JSDoc
+
             lines = docs.split('\n')
             formatted_lines = ['/**']
             for line in lines:
@@ -583,7 +583,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
     def _convert_to_html_format(self, docs: str) -> str:
         """Conversion basique en HTML."""
-        # Conversion très basique Markdown vers HTML
+
         html_docs = docs.replace('# ', '<h1>').replace('\n# ', '</h1>\n<h1>')
         html_docs = html_docs.replace('## ', '<h2>').replace('\n## ', '</h2>\n<h2>')
         html_docs = html_docs.replace('### ', '<h3>').replace('\n### ', '</h3>\n<h3>')
@@ -592,9 +592,9 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
     def _convert_to_rst_format(self, docs: str) -> str:
         """Conversion basique en reStructuredText."""
-        # Conversion très basique Markdown vers RST
+
         rst_docs = docs.replace('# ', '').replace('## ', '').replace('### ', '')
-        # Ajouter des délimiteurs RST basiques
+
         lines = rst_docs.split('\n')
         formatted_lines = []
         for line in lines:
@@ -623,34 +623,34 @@ Style de documentation: {request.doc_style or 'standard'}."""
         """Génère des suggestions d'amélioration de la documentation."""
         suggestions = []
 
-        # Suggestions basées sur la couverture
+
         if coverage < 80:
             suggestions.append(f"Couverture documentation faible ({coverage:.1f}%). Documenter les éléments manquants.")
 
-        # Suggestions par type d'élément
+
         functions_without_docs = [e for e in elements if e['type'] == 'function' and not e.get('description')]
         if functions_without_docs:
             suggestions.append(f"{len(functions_without_docs)} fonction(s) sans documentation détectée(s).")
 
-        # Suggestions par format
+
         if request.doc_format == "docstring":
             suggestions.append("Intégrer les docstrings directement dans le code source.")
 
-        # Suggestions par style
+
         if request.doc_style == "api":
             suggestions.append("Considérer l'ajout d'exemples de requêtes/réponses pour une API complète.")
 
-        # Suggestions génériques
+
         if not request.include_examples:
             suggestions.append("Ajouter des exemples d'utilisation pour améliorer la compréhension.")
 
-        return suggestions[:5]  # Limiter à 5 suggestions
+        return suggestions[:5]
 
     def _generate_fallback_documentation(self, request: DocumentationRequest,
                                        elements: List[Dict[str, str]], parser=None) -> DocumentationResponse:
         """Génère une documentation basique sans LLM."""
 
-        # Génération de documentation basique
+
         doc_parts = [
             f"# Documentation - {request.language.title()}",
             "",
@@ -659,7 +659,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
             ""
         ]
 
-        # Documentation des fonctions
+
         functions = [e for e in elements if e['type'] == 'function']
         if functions:
             doc_parts.extend([
@@ -675,7 +675,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
                     ""
                 ])
 
-        # Documentation des classes
+
         classes = [e for e in elements if e['type'] == 'class']
         if classes:
             doc_parts.extend([
@@ -692,13 +692,13 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
         documentation = "\n".join(doc_parts)
 
-        # Formatage selon le type demandé
+
         formatted_docs = self._format_documentation(documentation, request.doc_format or "markdown", request.language)
 
-        # Calcul de la couverture
+
         coverage = self._calculate_coverage(elements, formatted_docs)
 
-        # Suggestions
+
         suggestions = [
             "Documentation générée automatiquement. Recommandation: utiliser un LLM pour une documentation plus riche.",
             "Ajouter des descriptions détaillées pour chaque élément.",
@@ -715,7 +715,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         )
 
 
-# Fonction de compatibilité pour l'ancien système
 def generate_documentation(request: DocumentationRequest, parser=None, llm_manager=None) -> DocumentationResponse:
     """
     Fonction de compatibilité avec l'ancien système.

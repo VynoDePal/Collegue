@@ -19,7 +19,7 @@ class JavaScriptFrameworkReference(BaseModel):
     examples: List[Dict[str, str]] = []
 
 JS_FRAMEWORKS = {
-    # Frontend Frameworks
+
     "react": {
         "name": "React",
         "description": "Bibliothèque JavaScript pour construire des interfaces utilisateur",
@@ -62,8 +62,8 @@ JS_FRAMEWORKS = {
             {"title": "Service", "code": "import { Injectable } from '@angular/core';\n\n@Injectable({\n  providedIn: 'root'\n})\nexport class DataService {\n  getData() {\n    return ['item1', 'item2', 'item3'];\n  }\n}"}
         ]
     },
-    
-    # Backend Frameworks
+
+
     "express": {
         "name": "Express.js",
         "description": "Framework web minimaliste pour Node.js",
@@ -92,8 +92,8 @@ JS_FRAMEWORKS = {
             {"title": "Service", "code": "import { Injectable } from '@nestjs/common';\n\n@Injectable()\nexport class CatsService {\n  private readonly cats = [];\n\n  create(cat) {\n    this.cats.push(cat);\n  }\n\n  findAll() {\n    return this.cats;\n  }\n}"}
         ]
     },
-    
-    # Testing Frameworks
+
+
     "jest": {
         "name": "Jest",
         "description": "Framework de test JavaScript avec un focus sur la simplicité",
@@ -136,22 +136,22 @@ def get_all_frameworks() -> List[str]:
 
 def get_frameworks_by_category(category: str) -> List[str]:
     """Récupère la liste des frameworks d'une catégorie spécifique."""
-    return [name for name, data in JS_FRAMEWORKS.items() 
+    return [name for name, data in JS_FRAMEWORKS.items()
             if category in data.get("categories", [])]
 
 def register_frameworks(app, app_state):
     """Enregistre les ressources des frameworks JavaScript."""
-    
+
     @app.resource("collegue://javascript/frameworks/index")
     def get_js_frameworks_index() -> str:
         """Liste tous les frameworks JavaScript disponibles."""
         return json.dumps(get_all_frameworks())
-    
+
     @app.resource("collegue://javascript/frameworks/category/{category}")
     def get_js_frameworks_by_category_resource(category: str) -> str:
         """Liste les frameworks d'une catégorie spécifique."""
         return json.dumps(get_frameworks_by_category(category))
-    
+
     @app.resource("collegue://javascript/frameworks/{framework_name}")
     def get_js_framework_resource(framework_name: str) -> str:
         """Récupère les informations d'un framework spécifique."""
