@@ -32,6 +32,9 @@ def register_resources(app, app_state):
         from .llm import register as register_llm
         register_llm(app, app_state)
         
+        from .skills import register_skills
+        register_skills(app, app_state)
+        
         print("✅ Toutes les ressources ont été chargées avec succès")
         
     except ImportError as e:
