@@ -1,0 +1,122 @@
+# Mocha Test Generation Templates
+# Templates for generating JavaScript/TypeScript tests with Mocha + Chai
+
+test_structure:
+  imports_commonjs: |
+    const { expect } = require('chai');
+    const { describe, it, before, after, beforeEach, afterEach } = require('mocha');
+    {additional_imports}
+
+  imports_esm: |
+    import { expect } from 'chai';
+    import { describe, it, before, after, beforeEach, afterEach } from 'mocha';
+
+  describe_block: |
+    describe('{suite_name}', function() {
+        {setup_code}
+        
+        {test_cases}
+    });
+
+  test_case: |
+    it('{test_description}', function({done_param}) {
+        // Arrange
+        {arrange_code}
+        
+        // Act
+        {act_code}
+        
+        // Assert
+        {assertions}
+        
+        {done_call}
+    });
+
+  async_test: |
+    it('{test_description}', async function() {
+        // Arrange
+        {arrange_code}
+        
+        // Act
+        const result = await {function_call};
+        
+        // Assert
+        {assertions}
+    });
+
+  before_each: |
+    beforeEach(function() {
+        {setup_code}
+    });
+
+  after_each: |
+    afterEach(function() {
+        {teardown_code}
+    });
+
+  before_all: |
+    before(function() {
+        {global_setup}
+    });
+
+  after_all: |
+    after(function() {
+        {global_teardown}
+    });
+
+patterns:
+  simple_function: |
+    it('{name}', function() {
+        const result = {function_call};
+        expect(result).to.exist;
+    });
+
+  promise_test: |
+    it('{name}', function() {
+        return {function_call}.then(result => {
+            expect(result).to.exist;
+        });
+    });
+
+  async_await: |
+    it('{name}', async function() {
+        const result = await {function_call};
+        expect(result).to.exist;
+    });
+
+  callback_test: |
+    it('{name}', function(done) {
+        {function_call}(result => {
+            expect(result).to.exist;
+            done();
+        });
+    });
+
+  timeout_test: |
+    it('{name}', function(done) {
+        this.timeout({timeout_ms});
+        {function_call};
+        setTimeout(done, {delay});
+    });
+
+assertions_chai:
+  equal: "expect({actual}).to.equal({expected});"
+  deep_equal: "expect({actual}).to.deep.equal({expected});"
+  exist: "expect({value}).to.exist;"
+  be_null: "expect({value}).to.be.null;"
+  be_true: "expect({value}).to.be.true;"
+  be_false: "expect({value}).to.be.false;"
+  be_above: "expect({value}).to.be.above({threshold});"
+  be_below: "expect({value}).to.be.below({threshold});"
+  include: "expect({array}).to.include({item});"
+  contain: "expect({string}).to.contain({substring});"
+  throw_error: "expect(() => {code}).to.throw({error_type});"
+  match: "expect({value}).to.match({regex});"
+  have_property: "expect({object}).to.have.property('{property}');"
+  have_length: "expect({array}).to.have.length({length});"
+
+assertions_should:
+  equal: "{value}.should.equal({expected});"
+  exist: "{value}.should.exist;"
+  be_true: "{value}.should.be.true();"
+  include: "{array}.should.include({item});"

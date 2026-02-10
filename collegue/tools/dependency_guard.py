@@ -264,7 +264,6 @@ class DependencyGuardTool(BaseTool):
         return dependencies
 
     def _check_pypi_existence(self, package_name: str) -> Dict[str, Any]:
-        """Vérifie si un package existe sur PyPI."""
         try:
             result = subprocess.run(
                 ['pip', 'index', 'versions', package_name],
@@ -706,7 +705,6 @@ class DependencyGuardTool(BaseTool):
                 ))
 
         severity_counts = aggregate_severities(issues)
-
 
         total_deps = len(deps)
         total_issues = len(issues)

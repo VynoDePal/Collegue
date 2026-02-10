@@ -348,7 +348,6 @@ class BaseTool(ABC):
         }
 
     def _calculate_success_rate(self) -> float:
-        """Calcule le taux de succès de l'outil."""
         if not self.metrics:
             return 0.0
 
@@ -393,23 +392,7 @@ class BaseTool(ABC):
         ctx: Optional[Any] = None,
         timeout: int = 30
     ) -> BaseModel:
-        """Execute with LLM fallback pattern - standardise la logique LLM + fallback local.
 
-        Pattern utilisé par 6 tools: documentation, refactoring, test_generation,
-        repo_consistency_check, iac_guardrails_scan, impact_analysis.
-
-        Args:
-            request: La requête à traiter
-            llm_manager: Le gestionnaire LLM (peut être None)
-            context_builder: Fonction pour construire le contexte du prompt
-            llm_processor: Fonction pour traiter la réponse LLM et créer le résultat
-            fallback: Fonction de fallback appelée si LLM échoue ou est indisponible
-            ctx: Contexte de progression (optionnel)
-            timeout: Timeout en secondes pour l'appel LLM
-
-        Returns:
-            Le résultat du traitement (LLM ou fallback)
-        """
         if llm_manager is None:
             self.logger.debug("LLM manager non disponible, utilisation du fallback")
             return fallback(request)
@@ -444,15 +427,6 @@ class BaseTool(ABC):
 
     @asynccontextmanager
     async def progress_tracker(self, ctx: Optional[Any], total_steps: int):
-        """Context manager pour le suivi de progression dans les outils async.
-
-        Usage:
-            async with self.progress_tracker(ctx, 4) as progress:
-                # step 1
-                progress.step = 1
-                # step 2
-                progress.step = 2
-        """
         class Progress:
             def __init__(self, tool, ctx, total):
                 self.tool = tool
