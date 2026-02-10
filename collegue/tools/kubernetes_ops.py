@@ -9,6 +9,7 @@ import json
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .clients import KubernetesClient, APIError
 
 try:
     from kubernetes import client, config
@@ -619,12 +620,349 @@ class KubernetesOpsTool(BaseTool):
                 raise ToolExecutionError(f"{resource_type} '{name}' introuvable dans '{namespace}'")
             raise ToolExecutionError(f"Erreur API Kubernetes: {e.reason}")
 
+    def _get_kubernetes_client(self, request: KubernetesRequest) -> KubernetesClient:
+        """Create and configure KubernetesClient from request."""
+        return KubernetesClient(
+            kubeconfig=request.kubeconfig,
+            context=request.context,
+            namespace=request.namespace
+        )
+
+    def _transform_pods(self, pods_data: List[Dict]) -> List[PodInfo]:
+        """Transform raw pod data into PodInfo objects."""
+        result = []
+        for pod in pods_data:
+            metadata = pod.get('metadata', {})
+            spec = pod.get('spec', {})
+            status = pod.get('status', {})
+
+            # Count restarts and containers
+            restarts = 0
+            containers = []
+            ready_count = 0
+            total_count = 0
+
+            container_statuses = status.get('container_statuses', []) or []
+            for cs in container_statuses:
+                restarts += cs.get('restart_count', 0)
+                containers.append(cs.get('name', ''))
+                total_count += 1
+                if cs.get('ready'):
+                    ready_count += 1
+
+            result.append(PodInfo(
+                name=metadata.get('name', ''),
+                namespace=metadata.get('namespace', ''),
+                status=status.get('phase', 'Unknown'),
+                ready=f"{ready_count}/{total_count}",
+                restarts=restarts,
+                age=self._format_age(metadata.get('creation_timestamp')),
+                node=spec.get('node_name'),
+                ip=status.get('pod_ip'),
+                containers=containers,
+                labels=metadata.get('labels', {})
+            ))
+        return result
+
+    def _transform_pod_detail(self, pod_data: Dict) -> PodDetail:
+        """Transform raw pod data into PodDetail object."""
+        metadata = pod_data.get('metadata', {})
+        spec = pod_data.get('spec', {})
+        status = pod_data.get('status', {})
+
+        containers = []
+        container_statuses = status.get('container_statuses', []) or []
+        for cs in container_statuses:
+            state = "unknown"
+            reason = None
+            message = None
+
+            if cs.get('state', {}).get('running'):
+                state = "running"
+            elif cs.get('state', {}).get('waiting'):
+                state = "waiting"
+                reason = cs['state']['waiting'].get('reason')
+                message = cs['state']['waiting'].get('message')
+            elif cs.get('state', {}).get('terminated'):
+                state = "terminated"
+                reason = cs['state']['terminated'].get('reason')
+                message = cs['state']['terminated'].get('message')
+
+            containers.append(ContainerStatus(
+                name=cs.get('name', ''),
+                ready=cs.get('ready', False),
+                restart_count=cs.get('restart_count', 0),
+                state=state,
+                reason=reason,
+                message=message,
+                image=cs.get('image', '')
+            ))
+
+        conditions = []
+        for c in status.get('conditions', []):
+            conditions.append({
+                "type": c.get('type'),
+                "status": c.get('status'),
+                "reason": c.get('reason'),
+                "message": c.get('message')
+            })
+
+        annotations = metadata.get('annotations', {}) or {}
+
+        return PodDetail(
+            name=metadata.get('name', ''),
+            namespace=metadata.get('namespace', ''),
+            status=status.get('phase', 'Unknown'),
+            phase=status.get('phase', 'Unknown'),
+            node=spec.get('node_name'),
+            ip=status.get('pod_ip'),
+            start_time=status.get('start_time'),
+            containers=containers,
+            conditions=conditions,
+            labels=metadata.get('labels', {}),
+            annotations=dict(list(annotations.items())[:10])
+        )
+
+    def _transform_deployments(self, deployments_data: List[Dict]) -> List[DeploymentInfo]:
+        """Transform raw deployment data into DeploymentInfo objects."""
+        result = []
+        for dep in deployments_data:
+            metadata = dep.get('metadata', {})
+            spec = dep.get('spec', {})
+            status = dep.get('status', {})
+
+            template_spec = spec.get('template', {}).get('spec', {})
+            containers = template_spec.get('containers', [])
+            image = containers[0].get('image') if containers else None
+
+            selector = spec.get('selector', {})
+            strategy_obj = spec.get('strategy', {})
+
+            result.append(DeploymentInfo(
+                name=metadata.get('name', ''),
+                namespace=metadata.get('namespace', ''),
+                replicas=f"{status.get('ready_replicas', 0)}/{spec.get('replicas', 0)}",
+                ready=status.get('ready_replicas', 0),
+                available=status.get('available_replicas', 0),
+                age=self._format_age(metadata.get('creation_timestamp')),
+                selector=selector.get('match_labels', {}),
+                strategy=strategy_obj.get('type', 'RollingUpdate'),
+                image=image
+            ))
+        return result
+
+    def _transform_deployment(self, dep_data: Dict) -> DeploymentInfo:
+        """Transform raw deployment data into DeploymentInfo object."""
+        metadata = dep_data.get('metadata', {})
+        spec = dep_data.get('spec', {})
+        status = dep_data.get('status', {})
+
+        template_spec = spec.get('template', {}).get('spec', {})
+        containers = template_spec.get('containers', [])
+        image = containers[0].get('image') if containers else None
+
+        selector = spec.get('selector', {})
+        strategy_obj = spec.get('strategy', {})
+
+        return DeploymentInfo(
+            name=metadata.get('name', ''),
+            namespace=metadata.get('namespace', ''),
+            replicas=f"{status.get('ready_replicas', 0)}/{spec.get('replicas', 0)}",
+            ready=status.get('ready_replicas', 0),
+            available=status.get('available_replicas', 0),
+            age=self._format_age(metadata.get('creation_timestamp')),
+            selector=selector.get('match_labels', {}),
+            strategy=strategy_obj.get('type', 'RollingUpdate'),
+            image=image
+        )
+
+    def _transform_services(self, services_data: List[Dict]) -> List[ServiceInfo]:
+        """Transform raw service data into ServiceInfo objects."""
+        result = []
+        for svc in services_data:
+            metadata = svc.get('metadata', {})
+            spec = svc.get('spec', {})
+            status = svc.get('status', {})
+
+            ports = []
+            for p in spec.get('ports', []):
+                port_str = f"{p.get('port')}"
+                if p.get('node_port'):
+                    port_str += f":{p['node_port']}"
+                port_str += f"/{p.get('protocol', 'TCP')}"
+                ports.append(port_str)
+
+            external_ip = None
+            lb = status.get('load_balancer', {})
+            ingress = lb.get('ingress', [])
+            if ingress:
+                external_ip = ingress[0].get('ip') or ingress[0].get('hostname')
+
+            result.append(ServiceInfo(
+                name=metadata.get('name', ''),
+                namespace=metadata.get('namespace', ''),
+                type=spec.get('type', 'ClusterIP'),
+                cluster_ip=spec.get('cluster_ip'),
+                external_ip=external_ip,
+                ports=ports,
+                selector=spec.get('selector', {}),
+                age=self._format_age(metadata.get('creation_timestamp'))
+            ))
+        return result
+
+    def _transform_namespaces(self, namespaces_data: List[Dict]) -> List[NamespaceInfo]:
+        """Transform raw namespace data into NamespaceInfo objects."""
+        result = []
+        for ns in namespaces_data:
+            metadata = ns.get('metadata', {})
+            status = ns.get('status', {})
+
+            result.append(NamespaceInfo(
+                name=metadata.get('name', ''),
+                status=status.get('phase', 'Unknown'),
+                age=self._format_age(metadata.get('creation_timestamp')),
+                labels=metadata.get('labels', {})
+            ))
+        return result
+
+    def _transform_events(self, events_data: List[Dict]) -> List[EventInfo]:
+        """Transform raw event data into EventInfo objects."""
+        result = []
+        for e in events_data:
+            metadata = e.get('metadata', {})
+
+            source = e.get('source', {})
+            source_str = f"{source.get('component', '')}/{source.get('host', '')}" if source else ""
+
+            involved = e.get('involved_object', {})
+            involved_str = f"{involved.get('kind', '')}/{involved.get('name', '')}" if involved else ""
+
+            result.append(EventInfo(
+                name=metadata.get('name', ''),
+                namespace=metadata.get('namespace', ''),
+                type=e.get('type', 'Normal'),
+                reason=e.get('reason', ''),
+                message=e.get('message', ''),
+                source=source_str,
+                first_timestamp=str(e.get('first_timestamp')) if e.get('first_timestamp') else None,
+                last_timestamp=str(e.get('last_timestamp')) if e.get('last_timestamp') else None,
+                count=e.get('count', 1),
+                involved_object=involved_str
+            ))
+        return result
+
+    def _transform_nodes(self, nodes_data: List[Dict]) -> List[NodeInfo]:
+        """Transform raw node data into NodeInfo objects."""
+        result = []
+        for node in nodes_data:
+            metadata = node.get('metadata', {})
+            status = node.get('status', {})
+
+            # Extract roles
+            roles = []
+            for label, value in metadata.get('labels', {}).items():
+                if label.startswith("node-role.kubernetes.io/"):
+                    roles.append(label.split("/")[1])
+
+            # Get status
+            node_status = "Unknown"
+            for condition in status.get('conditions', []):
+                if condition.get('type') == "Ready":
+                    node_status = "Ready" if condition.get('status') == "True" else "NotReady"
+                    break
+
+            node_info = status.get('node_info', {})
+            capacity = status.get('capacity', {})
+
+            result.append(NodeInfo(
+                name=metadata.get('name', ''),
+                status=node_status,
+                roles=roles or ["<none>"],
+                age=self._format_age(metadata.get('creation_timestamp')),
+                version=node_info.get('kubelet_version', '?'),
+                os=node_info.get('os_image', '?'),
+                cpu=str(capacity.get('cpu', '?')),
+                memory=str(capacity.get('memory', '?')),
+                pods=str(capacity.get('pods', '?'))
+            ))
+        return result
+
+    def _transform_node(self, node_data: Dict) -> NodeInfo:
+        """Transform raw node data into NodeInfo object."""
+        metadata = node_data.get('metadata', {})
+        status = node_data.get('status', {})
+
+        roles = []
+        for label, value in metadata.get('labels', {}).items():
+            if label.startswith("node-role.kubernetes.io/"):
+                roles.append(label.split("/")[1])
+
+        node_status = "Unknown"
+        for condition in status.get('conditions', []):
+            if condition.get('type') == "Ready":
+                node_status = "Ready" if condition.get('status') == "True" else "NotReady"
+                break
+
+        node_info = status.get('node_info', {})
+        capacity = status.get('capacity', {})
+
+        return NodeInfo(
+            name=metadata.get('name', ''),
+            status=node_status,
+            roles=roles or ["<none>"],
+            age=self._format_age(metadata.get('creation_timestamp')),
+            version=node_info.get('kubelet_version', '?'),
+            os=node_info.get('os_image', '?'),
+            cpu=str(capacity.get('cpu', '?')),
+            memory=str(capacity.get('memory', '?')),
+            pods=str(capacity.get('pods', '?'))
+        )
+
+    def _transform_configmaps(self, configmaps_data: List[Dict]) -> List[ConfigMapInfo]:
+        """Transform raw configmap data into ConfigMapInfo objects."""
+        result = []
+        for cm in configmaps_data:
+            metadata = cm.get('metadata', {})
+            data = cm.get('data', {}) or {}
+
+            result.append(ConfigMapInfo(
+                name=metadata.get('name', ''),
+                namespace=metadata.get('namespace', ''),
+                data_keys=list(data.keys()),
+                age=self._format_age(metadata.get('creation_timestamp'))
+            ))
+        return result
+
+    def _transform_secrets(self, secrets_data: List[Dict]) -> List[SecretInfo]:
+        """Transform raw secret data into SecretInfo objects."""
+        result = []
+        for s in secrets_data:
+            metadata = s.get('metadata', {})
+            data = s.get('data', {}) or {}
+
+            result.append(SecretInfo(
+                name=metadata.get('name', ''),
+                namespace=metadata.get('namespace', ''),
+                type=s.get('type', 'Opaque'),
+                data_keys=list(data.keys()),
+                age=self._format_age(metadata.get('creation_timestamp'))
+            ))
+        return result
+
     def _execute_core_logic(self, request: KubernetesRequest, **kwargs) -> KubernetesResponse:
         """Exécute la logique principale."""
-        self._load_config(request.kubeconfig, request.context)
+        client = self._get_kubernetes_client(request)
 
         if request.command == 'list_pods':
-            pods = self._list_pods(request.namespace, request.label_selector, request.field_selector)
+            response = client.list_pods(
+                namespace=request.namespace,
+                label_selector=request.label_selector,
+                field_selector=request.field_selector
+            )
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list pods")
+            pods_data = response.data or []
+            pods = self._transform_pods(pods_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -635,7 +973,10 @@ class KubernetesOpsTool(BaseTool):
         elif request.command == 'get_pod':
             if not request.name:
                 raise ToolExecutionError("name requis pour get_pod")
-            pod = self._get_pod(request.name, request.namespace)
+            response = client.get_pod(request.name, request.namespace)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get pod")
+            pod = self._transform_pod_detail(response.data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -646,10 +987,16 @@ class KubernetesOpsTool(BaseTool):
         elif request.command == 'pod_logs':
             if not request.name:
                 raise ToolExecutionError("name requis pour pod_logs")
-            logs = self._get_pod_logs(
-                request.name, request.namespace, request.container,
-                request.tail_lines, request.previous
+            response = client.get_pod_logs(
+                name=request.name,
+                namespace=request.namespace,
+                container=request.container,
+                tail_lines=request.tail_lines,
+                previous=request.previous
             )
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get pod logs")
+            logs = response.data or ""
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -658,7 +1005,11 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_deployments':
-            deployments = self._list_deployments(request.namespace, request.label_selector)
+            response = client.list_deployments(request.namespace)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list deployments")
+            deployments_data = response.data or []
+            deployments = self._transform_deployments(deployments_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -669,7 +1020,10 @@ class KubernetesOpsTool(BaseTool):
         elif request.command == 'get_deployment':
             if not request.name:
                 raise ToolExecutionError("name requis pour get_deployment")
-            deployment = self._get_deployment(request.name, request.namespace)
+            response = client.get_deployment(request.name, request.namespace)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get deployment")
+            deployment = self._transform_deployment(response.data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -678,7 +1032,11 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_services':
-            services = self._list_services(request.namespace, request.label_selector)
+            response = client.list_services(request.namespace)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list services")
+            services_data = response.data or []
+            services = self._transform_services(services_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -687,7 +1045,11 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_namespaces':
-            namespaces = self._list_namespaces()
+            response = client.list_namespaces()
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list namespaces")
+            namespaces_data = response.data or []
+            namespaces = self._transform_namespaces(namespaces_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -696,7 +1058,14 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_events':
-            events = self._list_events(request.namespace, request.field_selector)
+            response = client.list_events(
+                namespace=request.namespace,
+                field_selector=request.field_selector
+            )
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list events")
+            events_data = response.data or []
+            events = self._transform_events(events_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -705,7 +1074,11 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_nodes':
-            nodes = self._list_nodes()
+            response = client.list_nodes()
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list nodes")
+            nodes_data = response.data or []
+            nodes = self._transform_nodes(nodes_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -716,10 +1089,14 @@ class KubernetesOpsTool(BaseTool):
         elif request.command == 'get_node':
             if not request.name:
                 raise ToolExecutionError("name requis pour get_node")
-            nodes = self._list_nodes()
-            node = next((n for n in nodes if n.name == request.name), None)
-            if not node:
+            response = client.list_nodes()
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get node")
+            nodes_data = response.data or []
+            node_dict = next((n for n in nodes_data if n.get('metadata', {}).get('name') == request.name), None)
+            if not node_dict:
                 raise ToolExecutionError(f"Nœud '{request.name}' introuvable")
+            node = self._transform_node(node_dict)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -728,7 +1105,11 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_configmaps':
-            configmaps = self._list_configmaps(request.namespace)
+            response = client.list_configmaps(request.namespace)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list configmaps")
+            configmaps_data = response.data or []
+            configmaps = self._transform_configmaps(configmaps_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -737,7 +1118,11 @@ class KubernetesOpsTool(BaseTool):
             )
 
         elif request.command == 'list_secrets':
-            secrets = self._list_secrets(request.namespace)
+            response = client.list_secrets(request.namespace)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list secrets")
+            secrets_data = response.data or []
+            secrets = self._transform_secrets(secrets_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
@@ -748,7 +1133,15 @@ class KubernetesOpsTool(BaseTool):
         elif request.command == 'describe_resource':
             if not request.name or not request.resource_type:
                 raise ToolExecutionError("name et resource_type requis pour describe_resource")
-            yaml_output = self._describe_resource(request.resource_type, request.name, request.namespace)
+            response = client.describe_resource(
+                resource_type=request.resource_type,
+                name=request.name,
+                namespace=request.namespace
+            )
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to describe resource")
+            import yaml
+            yaml_output = yaml.dump(response.data, default_flow_style=False, allow_unicode=True)
             return KubernetesResponse(
                 success=True,
                 command=request.command,

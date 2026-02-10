@@ -8,6 +8,7 @@ import re
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .clients import PostgresClient, APIError
 
 try:
     import psycopg2
@@ -416,99 +417,225 @@ class PostgresDBTool(BaseTool):
         query = f'SELECT * FROM "{schema}"."{table_name}" LIMIT {limit}'
         return self._execute_query(conn, query, limit)
 
+    def _get_postgres_client(self, request: PostgresRequest) -> PostgresClient:
+        """Create and configure PostgresClient from request."""
+        return PostgresClient(
+            connection_string=request.connection_string,
+            schema=request.schema_name
+        )
+
+    def _transform_tables(self, tables_data: List[Dict], schema_name: str) -> List[TableInfo]:
+        """Transform raw table data into TableInfo objects."""
+        result = []
+        for row in tables_data:
+            size_str = row.get('total_size', 'N/A')
+            result.append(TableInfo(
+                name=row.get('table_name', ''),
+                schema_name=schema_name,
+                type="table",
+                row_count=row.get('row_count'),
+                size=size_str
+            ))
+        return result
+
+    def _transform_columns(self, columns_data: List[Dict]) -> List[ColumnInfo]:
+        """Transform raw column data into ColumnInfo objects."""
+        result = []
+        for row in columns_data:
+            result.append(ColumnInfo(
+                name=row.get('column_name', ''),
+                type=row.get('data_type', ''),
+                nullable=row.get('is_nullable', 'YES') == 'YES',
+                default=row.get('column_default'),
+                is_primary_key=row.get('is_pk', False),
+                is_foreign_key=row.get('is_fk', False),
+                references=row.get('references')
+            ))
+        return result
+
+    def _transform_indexes(self, indexes_data: List[Dict]) -> List[IndexInfo]:
+        """Transform raw index data into IndexInfo objects."""
+        result = []
+        for row in indexes_data:
+            # Parse indexdef to extract columns
+            index_def = row.get('indexdef', '')
+            columns = []
+            if '(' in index_def and ')' in index_def:
+                cols_str = index_def.split('(')[1].split(')')[0]
+                columns = [c.strip() for c in cols_str.split(',')]
+
+            result.append(IndexInfo(
+                name=row.get('indexname', ''),
+                table=row.get('tablename', ''),
+                columns=columns,
+                is_unique='UNIQUE' in index_def.upper(),
+                is_primary=False,
+                type='btree'
+            ))
+        return result
+
+    def _transform_foreign_keys(self, fks_data: List[Dict]) -> List[ForeignKeyInfo]:
+        """Transform raw foreign key data into ForeignKeyInfo objects."""
+        result = []
+        for row in fks_data:
+            result.append(ForeignKeyInfo(
+                name=row.get('constraint_name', ''),
+                table=row.get('table_name', ''),
+                column=row.get('column_name', ''),
+                references_table=row.get('foreign_table_name', ''),
+                references_column=row.get('foreign_column_name', '')
+            ))
+        return result
+
+    def _transform_query_result(self, data: List[Dict], limit: int) -> QueryResult:
+        """Transform raw query data into QueryResult object."""
+        if not data:
+            return QueryResult(columns=[], rows=[], row_count=0, truncated=False)
+
+        columns = list(data[0].keys()) if data else []
+        rows = []
+        for row in data[:limit]:
+            serialized = {}
+            for k, v in row.items():
+                if hasattr(v, 'isoformat'):
+                    serialized[k] = v.isoformat()
+                elif isinstance(v, (bytes, bytearray)):
+                    serialized[k] = f"<binary {len(v)} bytes>"
+                else:
+                    serialized[k] = v
+            rows.append(serialized)
+
+        return QueryResult(
+            columns=columns,
+            rows=rows,
+            row_count=len(rows),
+            truncated=len(data) >= limit
+        )
+
     def _execute_core_logic(self, request: PostgresRequest, **kwargs) -> PostgresResponse:
         """Exécute la logique principale."""
-        conn = None
-        try:
-            conn = self._get_connection(request.connection_string)
+        client = self._get_postgres_client(request)
 
-            if request.command == 'list_schemas':
-                schemas = self._list_schemas(conn)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ {len(schemas)} schéma(s) trouvé(s)",
-                    schemas=schemas
-                )
+        if request.command == 'list_schemas':
+            response = client.list_schemas()
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list schemas")
+            schemas = [row.get('schema_name') for row in response.data]
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ {len(schemas)} schéma(s) trouvé(s)",
+                schemas=schemas
+            )
 
-            elif request.command == 'list_tables':
-                tables = self._list_tables(conn, request.schema_name)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ {len(tables)} table(s) dans '{request.schema_name}'",
-                    tables=tables
-                )
+        elif request.command == 'list_tables':
+            response = client.list_tables(request.schema_name)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list tables")
+            tables_data = response.data or []
+            tables = self._transform_tables(tables_data, request.schema_name)
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ {len(tables)} table(s) dans '{request.schema_name}'",
+                tables=tables
+            )
 
-            elif request.command == 'describe_table':
-                if not request.table_name:
-                    raise ToolExecutionError("table_name requis pour describe_table")
-                columns = self._describe_table(conn, request.table_name, request.schema_name)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ Table '{request.schema_name}.{request.table_name}': {len(columns)} colonne(s)",
-                    columns=columns
-                )
+        elif request.command == 'describe_table':
+            if not request.table_name:
+                raise ToolExecutionError("table_name requis pour describe_table")
+            response = client.describe_table(request.table_name, request.schema_name)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to describe table")
+            columns_data = response.data or []
+            columns = self._transform_columns(columns_data)
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Table '{request.schema_name}.{request.table_name}': {len(columns)} colonne(s)",
+                columns=columns
+            )
 
-            elif request.command == 'indexes':
-                if not request.table_name:
-                    raise ToolExecutionError("table_name requis pour indexes")
-                indexes = self._get_indexes(conn, request.table_name, request.schema_name)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ {len(indexes)} index sur '{request.table_name}'",
-                    indexes=indexes
-                )
+        elif request.command == 'indexes':
+            if not request.table_name:
+                raise ToolExecutionError("table_name requis pour indexes")
+            response = client.get_indexes(request.table_name, request.schema_name)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get indexes")
+            indexes_data = response.data or []
+            indexes = self._transform_indexes(indexes_data)
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ {len(indexes)} index sur '{request.table_name}'",
+                indexes=indexes
+            )
 
-            elif request.command == 'foreign_keys':
-                if not request.table_name:
-                    raise ToolExecutionError("table_name requis pour foreign_keys")
-                fks = self._get_foreign_keys(conn, request.table_name, request.schema_name)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ {len(fks)} clé(s) étrangère(s) sur '{request.table_name}'",
-                    foreign_keys=fks
-                )
+        elif request.command == 'foreign_keys':
+            if not request.table_name:
+                raise ToolExecutionError("table_name requis pour foreign_keys")
+            response = client.get_foreign_keys(request.table_name, request.schema_name)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get foreign keys")
+            fks_data = response.data or []
+            fks = self._transform_foreign_keys(fks_data)
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ {len(fks)} clé(s) étrangère(s) sur '{request.table_name}'",
+                foreign_keys=fks
+            )
 
-            elif request.command == 'table_stats':
-                if not request.table_name:
-                    raise ToolExecutionError("table_name requis pour table_stats")
-                stats = self._get_table_stats(conn, request.table_name, request.schema_name)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ Statistiques de '{request.table_name}'",
-                    stats=stats
-                )
+        elif request.command == 'table_stats':
+            if not request.table_name:
+                raise ToolExecutionError("table_name requis pour table_stats")
+            response = client.get_table_stats(request.table_name, request.schema_name)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get table stats")
+            stats_data = response.data
+            stats = {
+                "total_size": stats_data.get('total_size', 'N/A') if stats_data else 'N/A',
+                "table_size": stats_data.get('table_size', 'N/A') if stats_data else 'N/A',
+                "indexes_size": stats_data.get('indexes_size', 'N/A') if stats_data else 'N/A',
+                "live_rows": stats_data.get('live_rows', 0) if stats_data else 0,
+                "dead_rows": stats_data.get('dead_rows', 0) if stats_data else 0,
+                "last_vacuum": stats_data.get('last_vacuum') if stats_data else None,
+                "last_analyze": stats_data.get('last_analyze') if stats_data else None
+            }
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Statistiques de '{request.table_name}'",
+                stats=stats
+            )
 
-            elif request.command == 'sample_data':
-                if not request.table_name:
-                    raise ToolExecutionError("table_name requis pour sample_data")
-                result = self._sample_data(conn, request.table_name, request.schema_name, request.limit)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ {result.row_count} ligne(s) de '{request.table_name}'",
-                    query_result=result
-                )
+        elif request.command == 'sample_data':
+            if not request.table_name:
+                raise ToolExecutionError("table_name requis pour sample_data")
+            response = client.sample_data(request.table_name, request.schema_name, request.limit)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to sample data")
+            result = self._transform_query_result(response.data, request.limit)
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ {result.row_count} ligne(s) de '{request.table_name}'",
+                query_result=result
+            )
 
-            elif request.command == 'query':
-                if not request.query:
-                    raise ToolExecutionError("query requis pour command=query")
-                result = self._execute_query(conn, request.query, request.limit)
-                return PostgresResponse(
-                    success=True,
-                    command=request.command,
-                    message=f"✅ Requête exécutée: {result.row_count} ligne(s)",
-                    query_result=result
-                )
+        elif request.command == 'query':
+            if not request.query:
+                raise ToolExecutionError("query requis pour command=query")
+            response = client.execute_query(request.query, request.limit)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to execute query")
+            result = self._transform_query_result(response.data, request.limit)
+            return PostgresResponse(
+                success=True,
+                command=request.command,
+                message=f"✅ Requête exécutée: {result.row_count} ligne(s)",
+                query_result=result
+            )
 
-            else:
-                raise ToolExecutionError(f"Commande inconnue: {request.command}")
-
-        finally:
-            if conn:
-                conn.close()
+        else:
+            raise ToolExecutionError(f"Commande inconnue: {request.command}")

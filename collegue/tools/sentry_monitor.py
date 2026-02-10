@@ -8,6 +8,7 @@ import os
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .clients import SentryClient, APIError
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -542,17 +543,83 @@ class SentryMonitorTool(BaseTool):
             url=r.get('url')
         ) for r in data[:limit]]
 
-    def _list_repos(self, org: str, token: Optional[str], sentry_url: Optional[str]) -> List[RepoInfo]:
-        """Liste les dépôts liés à l'organisation."""
-        data = self._api_get(f"/organizations/{org}/repos/", token, sentry_url)
+    def _get_sentry_client(self, request: SentryRequest) -> SentryClient:
+        """Create and configure SentryClient from request."""
+        return SentryClient(
+            token=request.token,
+            organization=request.organization,
+            base_url=request.sentry_url or "https://sentry.io"
+        )
 
-        return [RepoInfo(
-            id=r['id'],
-            name=r['name'],
-            provider=r.get('provider', {}).get('id') if isinstance(r.get('provider'), dict) else r.get('provider'),
-            url=r.get('url'),
-            status=r.get('status', 'active')
-        ) for r in data]
+    def _transform_events(self, events_data: List[Dict]) -> List[EventInfo]:
+        """Transform raw Sentry event data into EventInfo objects."""
+        events = []
+        for e in events_data:
+            # Extract stacktrace from entries
+            stacktrace = None
+            entries = e.get('entries', [])
+            for entry in entries:
+                if entry.get('type') == 'exception':
+                    exc_data = entry.get('data', {})
+                    values = exc_data.get('values', [])
+                    if values:
+                        frames = values[0].get('stacktrace', {}).get('frames', [])
+                        if frames:
+                            st_lines = []
+                            for frame in frames[-10:]:
+                                filename = frame.get('filename', '?')
+                                lineno = frame.get('lineNo', '?')
+                                func = frame.get('function', '?')
+                                context = frame.get('context', [])
+                                st_lines.append(f'  File "{filename}", line {lineno}, in {func}')
+                                if context:
+                                    for ctx in context[-3:]:
+                                        if isinstance(ctx, list) and len(ctx) >= 2:
+                                            st_lines.append(f'    {ctx[1]}')
+                            stacktrace = "\n".join(st_lines)
+                    break
+
+            # Extract tags
+            tags = {}
+            for tag in e.get('tags', []):
+                if isinstance(tag, dict):
+                    tags[tag.get('key', '')] = tag.get('value', '')
+
+            # Extract user context
+            user_ctx = e.get('user')
+            if user_ctx:
+                user_ctx = {
+                    'id': user_ctx.get('id'),
+                    'email': user_ctx.get('email'),
+                    'username': user_ctx.get('username'),
+                    'ip_address': user_ctx.get('ip_address')
+                }
+
+            # Extract request context
+            request_ctx = None
+            for entry in entries:
+                if entry.get('type') == 'request':
+                    req_data = entry.get('data', {})
+                    request_ctx = {
+                        'url': req_data.get('url'),
+                        'method': req_data.get('method'),
+                        'headers': dict(list(req_data.get('headers', []))[:5]) if req_data.get('headers') else None
+                    }
+                    break
+
+            events.append(EventInfo(
+                event_id=e.get('eventID', ''),
+                title=e.get('title', ''),
+                message=e.get('message'),
+                platform=e.get('platform'),
+                timestamp=e.get('dateCreated', ''),
+                tags=tags,
+                context=e.get('context', {}),
+                stacktrace=stacktrace,
+                user=user_ctx,
+                request=request_ctx
+            ))
+        return events
 
     def _execute_core_logic(self, request: SentryRequest, **kwargs) -> SentryResponse:
         """Exécute la logique principale."""
@@ -596,7 +663,19 @@ class SentryMonitorTool(BaseTool):
             )
 
         if request.command == 'list_projects':
-            projects = self._list_projects(org, request.token, request.sentry_url)
+            client = self._get_sentry_client(request)
+            response = client.list_projects()
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list projects")
+            projects_data = response.data or []
+            projects = [ProjectInfo(
+                id=p['id'],
+                slug=p['slug'],
+                name=p['name'],
+                platform=p.get('platform'),
+                status=p.get('status', 'active'),
+                organization=p.get('organization', {})
+            ) for p in projects_data]
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -605,7 +684,18 @@ class SentryMonitorTool(BaseTool):
             )
 
         elif request.command == 'list_repos':
-            repos = self._list_repos(org, request.token, request.sentry_url)
+            client = self._get_sentry_client(request)
+            response = client.list_repos()
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list repos")
+            repos_data = response.data or []
+            repos = [RepoInfo(
+                id=r['id'],
+                name=r['name'],
+                provider=r.get('provider', {}).get('id') if isinstance(r.get('provider'), dict) else r.get('provider'),
+                url=r.get('url'),
+                status=r.get('status', 'active')
+            ) for r in repos_data]
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -616,7 +706,20 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'get_project':
             if not request.project:
                 raise ToolExecutionError("project requis pour get_project")
-            project_info = self._get_project(org, request.project, request.token, request.sentry_url)
+            client = self._get_sentry_client(request)
+            response = client.get_project(request.project)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get project")
+            data = response.data or {}
+            project_info = ProjectInfo(
+                id=data['id'],
+                slug=data['slug'],
+                name=data['name'],
+                platform=data.get('platform'),
+                status=data.get('status', 'active'),
+                options=data.get('options', {}),
+                organization=data.get('organization', {})
+            )
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -625,10 +728,30 @@ class SentryMonitorTool(BaseTool):
             )
 
         elif request.command == 'list_issues':
-            issues = self._list_issues(
-                org, request.project, request.query,
-                request.token, request.sentry_url, request.limit
+            client = self._get_sentry_client(request)
+            response = client.list_issues(
+                project=request.project,
+                query=request.query or "is:unresolved",
+                limit=request.limit
             )
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list issues")
+            issues_data = response.data or []
+            issues = [IssueInfo(
+                id=i['id'],
+                short_id=i['shortId'],
+                title=i['title'],
+                culprit=i.get('culprit'),
+                level=i.get('level', 'error'),
+                status=i.get('status', 'unresolved'),
+                count=i.get('count', 0),
+                user_count=i.get('userCount', 0),
+                first_seen=i['firstSeen'],
+                last_seen=i['lastSeen'],
+                permalink=i['permalink'],
+                is_unhandled=i.get('isUnhandled', False),
+                type=i.get('type', 'error')
+            ) for i in issues_data[:request.limit]]
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -639,7 +762,26 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'get_issue':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour get_issue")
-            issue = self._get_issue(request.issue_id, token, request.sentry_url, org)
+            client = self._get_sentry_client(request)
+            response = client.get_issue(request.issue_id)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get issue")
+            data = response.data or {}
+            issue = IssueInfo(
+                id=data['id'],
+                short_id=data['shortId'],
+                title=data['title'],
+                culprit=data.get('culprit'),
+                level=data.get('level', 'error'),
+                status=data.get('status', 'unresolved'),
+                count=data.get('count', 0),
+                user_count=data.get('userCount', 0),
+                first_seen=data['firstSeen'],
+                last_seen=data['lastSeen'],
+                permalink=data['permalink'],
+                is_unhandled=data.get('isUnhandled', False),
+                type=data.get('type', 'error')
+            )
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -650,9 +792,13 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'issue_events':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_events")
-            events = self._get_issue_events(
-                request.issue_id, token, request.sentry_url, request.limit, org
-            )
+            client = self._get_sentry_client(request)
+            response = client.get_issue_events(request.issue_id)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get issue events")
+            events_data = response.data or []
+            # Transform events data to EventInfo objects
+            events = self._transform_events(events_data[:request.limit])
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -663,7 +809,16 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'issue_tags':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_tags")
-            tags = self._get_issue_tags(request.issue_id, token, request.sentry_url, org)
+            client = self._get_sentry_client(request)
+            response = client.get_issue_tags(request.issue_id)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get issue tags")
+            tags_data = response.data or []
+            tags = [TagDistribution(
+                key=t['key'],
+                name=t.get('name', t['key']),
+                values=t.get('topValues', [])[:10]
+            ) for t in tags_data]
             return SentryResponse(
                 success=True,
                 command=request.command,
@@ -674,9 +829,19 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'project_stats':
             if not request.project:
                 raise ToolExecutionError("project requis pour project_stats")
-            stats = self._get_project_stats(
-                org, request.project, request.time_range,
-                request.token, request.sentry_url
+            client = self._get_sentry_client(request)
+            response = client.get_project_stats(request.project, request.time_range)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to get project stats")
+            stats_data = response.data or {}
+            # Extract stats from response
+            total_events = stats_data.get('total', 0)
+            unresolved = stats_data.get('unresolved', 0)
+            stats = ProjectStats(
+                project=request.project,
+                total_events=total_events,
+                unresolved_issues=unresolved,
+                events_24h=stats_data.get('24h', 0)
             )
             return SentryResponse(
                 success=True,
@@ -686,9 +851,20 @@ class SentryMonitorTool(BaseTool):
             )
 
         elif request.command == 'list_releases':
-            releases = self._list_releases(
-                org, request.project, request.token, request.sentry_url, request.limit
-            )
+            client = self._get_sentry_client(request)
+            response = client.list_releases(project=request.project, limit=request.limit)
+            if not response.success:
+                raise ToolExecutionError(response.error_message or "Failed to list releases")
+            releases_data = response.data or []
+            releases = [ReleaseInfo(
+                version=r['version'],
+                short_version=r.get('shortVersion', r['version'][:20]),
+                date_created=r['dateCreated'],
+                first_event=r.get('firstEvent'),
+                last_event=r.get('lastEvent'),
+                new_groups=r.get('newGroups', 0),
+                url=r.get('url')
+            ) for r in releases_data[:request.limit]]
             return SentryResponse(
                 success=True,
                 command=request.command,

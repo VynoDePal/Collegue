@@ -220,3 +220,31 @@ def validate_doc_format(value: str) -> str:
 def validate_doc_style(value: str) -> str:
     """Valide un style de documentation."""
     return validate_in_list(['standard', 'detailed', 'minimal', 'api'], value)
+
+
+def validate_test_framework(value: str) -> str:
+    """Valide un framework de test."""
+    return validate_in_list(['pytest', 'jest', 'mocha', 'unittest', 'vitest'], value)
+
+
+def validate_k8s_command(value: str) -> str:
+    """Valide une commande Kubernetes."""
+    valid_commands = [
+        'list_pods', 'get_pod', 'pod_logs', 'list_deployments',
+        'get_deployment', 'list_services', 'list_namespaces',
+        'list_nodes', 'describe_resource', 'list_configmaps', 'list_secrets'
+    ]
+    return validate_in_list(valid_commands, value)
+
+
+def validate_postgres_command(value: str) -> str:
+    """Valide une commande PostgreSQL."""
+    return validate_in_list(['list_schemas', 'list_tables', 'describe_table', 'query'], value)
+
+
+def validate_sentry_command(value: str) -> str:
+    """Valide une commande Sentry."""
+    return validate_in_list([
+        'list_projects', 'list_issues', 'get_issue',
+        'issue_events', 'project_stats', 'list_releases'
+    ], value)

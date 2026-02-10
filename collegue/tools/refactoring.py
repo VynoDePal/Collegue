@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
 from .shared import run_async_from_sync
+from .llm_helpers import RefactoringRequestBuilder
 
 
 class RefactoringRequest(BaseModel):
@@ -301,39 +302,15 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             return self._perform_local_refactoring(request, parser)
 
     def _build_refactoring_prompt(self, request: RefactoringRequest) -> str:
-        refactoring_instructions = {
-            "rename": "Renomme les variables, fonctions et classes avec des noms plus descriptifs et clairs",
-            "extract": "Extrait les blocs de code répétitifs en fonctions/méthodes réutilisables",
-            "simplify": "Simplifie la logique complexe, réduis la complexité cyclomatique",
-            "optimize": "Optimise les performances du code, améliore l'efficacité",
-            "clean": "Nettoie le code en supprimant les éléments inutiles et en améliorant la lisibilité",
-            "modernize": "Met à jour le code pour utiliser les patterns et syntaxes modernes du langage"
-        }
+        """Build refactoring prompt using RefactoringRequestBuilder."""
+        builder = RefactoringRequestBuilder(tool_name="refactoring")
 
-        prompt_parts = [
-            f"Refactorise le code {request.language} suivant selon le type '{request.refactoring_type}':",
-            f"Instructions: {refactoring_instructions.get(request.refactoring_type, 'Améliore le code')}",
-            "",
-            f"```{request.language}",
-            request.code,
-            "```"
-        ]
-
-        if request.parameters:
-            prompt_parts.insert(-3, f"Paramètres spécifiques: {request.parameters}")
-
-
-        language_instructions = self._get_refactoring_instructions(request.language, request.refactoring_type)
-        if language_instructions:
-            prompt_parts.insert(-3, f"Instructions {request.language}: {language_instructions}")
-
-        prompt_parts.extend([
-            "",
-            "Fournis uniquement le code refactorisé sans explications supplémentaires.",
-            "Préserve la fonctionnalité originale du code."
-        ])
-
-        return "\n".join(prompt_parts)
+        return (builder
+            .refactor_as(request.refactoring_type)
+            .for_language(request.language)
+            .preserve_behavior(True)
+            .with_code(request.code, request.language)
+            .build())
 
     def _get_refactoring_instructions(self, language: str, refactoring_type: str) -> str:
         instructions = {

@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
 from .shared import run_async_from_sync
+from .llm_helpers import DocumentationRequestBuilder
 
 
 class DocumentationRequest(BaseModel):
@@ -399,54 +400,18 @@ Style de documentation: {request.doc_style or 'standard'}."""
             return "high"
 
     def _build_documentation_prompt(self, request: DocumentationRequest, elements: List[Dict[str, str]]) -> str:
+        """Build documentation prompt using DocumentationRequestBuilder."""
+        builder = DocumentationRequestBuilder(tool_name="documentation")
 
-        style_instructions = {
-            "standard": "Génère une documentation claire et concise avec descriptions, paramètres et valeurs de retour",
-            "detailed": "Génère une documentation très détaillée avec exemples, cas d'usage et notes techniques",
-            "minimal": "Génère une documentation minimale avec seulement les informations essentielles",
-            "api": "Génère une documentation de style API avec format standardisé pour chaque fonction/classe",
-            "tutorial": "Génère une documentation de style tutoriel avec explications pédagogiques"
-        }
-
-        format_instructions = {
-            "markdown": "Utilise le format Markdown avec en-têtes appropriés",
-            "rst": "Utilise le format reStructuredText",
-            "html": "Génère du HTML bien formaté",
-            "docstring": "Génère des docstrings dans le style du langage",
-            "json": "Retourne la documentation structurée en JSON"
-        }
-
-        prompt_parts = [
-            f"Génère une documentation pour le code {request.language} suivant :",
-            f"Style: {style_instructions.get(request.doc_style, style_instructions['standard'])}",
-            f"Format: {format_instructions.get(request.doc_format, format_instructions['markdown'])}",
-            ""
-        ]
-
-        prompt_parts.extend([
-            f"```{request.language}",
-            request.code,
-            "```",
-            ""
-        ])
-
-        if elements:
-            prompt_parts.append("Éléments identifiés à documenter :")
-            for element in elements[:10]:
-                prompt_parts.append(f"- {element['type']}: {element['name']} (ligne {element['line_number']})")
-            prompt_parts.append("")
-
-        if request.focus_on and request.focus_on != "all":
-            prompt_parts.append(f"Concentre-toi sur les {request.focus_on}")
-
-        if request.include_examples:
-            prompt_parts.append("Inclus des exemples d'utilisation pratiques pour chaque élément principal.")
-
-        language_instructions = self._get_language_doc_instructions(request.language)
-        if language_instructions:
-            prompt_parts.append(f"Instructions {request.language}: {language_instructions}")
-
-        return "\n".join(prompt_parts)
+        return (builder
+            .for_language(request.language)
+            .with_style(request.doc_style or "standard")
+            .with_format(request.doc_format or "markdown")
+            .with_examples(request.include_examples or False)
+            .focus_on(request.focus_on or "all")
+            .with_elements(elements)
+            .with_code(request.code, request.language)
+            .build())
 
     def _get_language_doc_instructions(self, language: str) -> str:
         instructions = {
