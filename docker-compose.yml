@@ -2,7 +2,7 @@ services:
   collegue-app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/collegue/Dockerfile
     image: collegue-app:latest
     restart: always
     networks:
@@ -71,8 +71,8 @@ services:
 
   nginx:
     build:
-      context: ./nginx
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: docker/nginx/Dockerfile
     restart: always
     ports:
       - "8088:80"
