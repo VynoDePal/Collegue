@@ -13,7 +13,7 @@ import pathlib
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 from .shared import run_async_from_sync
 from ._run_tests import RunTestsTool, RunTestsRequest
-from . import _test_templates
+from . import test_generators_adapter as _test_templates
 
 
 class TestGenerationRequest(BaseModel):

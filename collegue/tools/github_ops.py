@@ -132,7 +132,6 @@ class GitHubOpsTool(BaseTool):
         self._files = None
 
     def _init_commands(self, token: Optional[str] = None):
-        """Initialize command instances with token."""
         if self._repos is None:
             self._repos = RepoCommands(token=token, logger=self.logger)
             self._prs = PRCommands(token=token, logger=self.logger)
