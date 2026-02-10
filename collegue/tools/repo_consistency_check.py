@@ -23,7 +23,7 @@ from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from collections import defaultdict
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileInput, aggregate_severities, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .shared import ConsistencyIssue, FileInput, aggregate_severities, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
 from .analyzers.python import PythonAnalyzer
 from .analyzers.javascript import JavaScriptAnalyzer
 
@@ -91,16 +91,6 @@ class ConsistencyCheckRequest(BaseModel):
                 raise ValueError(f"Check '{check}' invalide. Utilisez: {', '.join(valid)}")
         return v
 
-class ConsistencyIssue(BaseModel):
-    kind: str = Field(..., description="Type: unused_import, unused_var, dead_code, duplication, unresolved_symbol")
-    severity: str = Field(..., description="Sévérité: info, low, medium, high")
-    path: str = Field(..., description="Chemin du fichier")
-    line: Optional[int] = Field(None, description="Numéro de ligne")
-    column: Optional[int] = Field(None, description="Numéro de colonne")
-    message: str = Field(..., description="Description du problème")
-    confidence: int = Field(..., description="Confiance 0-100")
-    suggested_fix: Optional[str] = Field(None, description="Suggestion de correction")
-    engine: str = Field("embedded-rules", description="Moteur utilisé")
 class LLMInsight(BaseModel):
     category: str = Field(..., description="Catégorie: pattern, architecture, debt, suggestion")
     insight: str = Field(..., description="L'insight détaillé")

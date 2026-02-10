@@ -14,6 +14,22 @@ import yaml
 from pydantic import BaseModel, Field
 
 
+class ConsistencyIssue(BaseModel):
+	"""Issue de cohérence détectée dans le code.
+
+	Modèle Pydantic partagé entre repo_consistency_check et les analyzers.
+	"""
+	kind: str = Field(..., description="Type: unused_import, unused_var, dead_code, duplication, unresolved_symbol")
+	severity: str = Field(..., description="Sévérité: info, low, medium, high")
+	path: str = Field(..., description="Chemin du fichier")
+	line: Optional[int] = Field(None, description="Numéro de ligne")
+	column: Optional[int] = Field(None, description="Numéro de colonne")
+	message: str = Field(..., description="Description du problème")
+	confidence: int = Field(..., description="Confiance 0-100")
+	suggested_fix: Optional[str] = Field(None, description="Suggestion de correction")
+	engine: str = Field("embedded-rules", description="Moteur utilisé")
+
+
 class FileInput(BaseModel):
     """Un fichier avec son chemin et contenu."""
     path: str = Field(..., description="Chemin relatif du fichier")

@@ -8,23 +8,7 @@ Analyzes JS/TS code for:
 import re
 from typing import List, Dict, Any
 from .base import BaseAnalyzer
-
-
-class ConsistencyIssue:
-    """Issue de cohérence détectée (copie locale pour éviter import circulaire)."""
-
-    def __init__(self, kind: str, severity: str, path: str, line: int, message: str,
-                 confidence: int = 80, suggested_fix: str = None, engine: str = "",
-                 column: int = None):
-        self.kind = kind
-        self.severity = severity
-        self.path = path
-        self.line = line
-        self.message = message
-        self.confidence = confidence
-        self.suggested_fix = suggested_fix
-        self.engine = engine
-        self.column = column
+from ..shared import ConsistencyIssue
 
 
 class JavaScriptAnalyzer(BaseAnalyzer):
