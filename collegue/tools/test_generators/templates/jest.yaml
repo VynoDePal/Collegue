@@ -1,0 +1,105 @@
+# Jest Test Generation Templates
+# Templates for generating JavaScript/TypeScript tests with Jest framework
+
+test_structure:
+  imports_js: |
+    const { functionName } = require('./module');
+    {additional_imports}
+
+  imports_ts: |
+    import { {functionName} } from './module';
+    import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
+
+  describe_block: |
+    describe('{suite_name}', () => {
+        {setup_code}
+        
+        {test_cases}
+    });
+
+  test_case: |
+    it('{test_description}', {async_modifier}() => {
+        // Arrange
+        {arrange_code}
+        
+        // Act
+        {act_code}
+        
+        // Assert
+        {assertions}
+    });
+
+  async_test: |
+    it('{test_description}', async () => {
+        // Arrange
+        {arrange_code}
+        
+        // Act
+        const result = await {function_call};
+        
+        // Assert
+        {assertions}
+    });
+
+  before_each: |
+    beforeEach(() => {
+        {setup_code}
+    });
+
+  after_each: |
+    afterEach(() => {
+        {teardown_code}
+    });
+
+  mock_template: |
+    jest.mock('./{module_name}', () => ({
+        {mocked_function}: jest.fn().mockReturnValue({return_value})
+    }));
+
+  spy_template: |
+    const spy = jest.spyOn({object}, '{method}');
+    {test_code}
+    expect(spy).toHaveBeenCalledWith({expected_args});
+
+patterns:
+  simple_function: |
+    it('{name}', () => {
+        const result = {function_call};
+        expect(result).toBeDefined();
+    });
+
+  promise_test: |
+    it('{name}', () => {
+        return {function_call}.then(result => {
+            expect(result).toBeDefined();
+        });
+    });
+
+  async_await: |
+    it('{name}', async () => {
+        const result = await {function_call};
+        expect(result).toBeDefined();
+    });
+
+  each_test: |
+    it.each([
+        [{input_1}, {expected_1}],
+        [{input_2}, {expected_2}],
+    ])('{name} with %s', ({params}, expected) => {
+        const result = {function_call};
+        expect(result).toBe(expected);
+    });
+
+assertions:
+  toBe: "expect({actual}).toBe({expected});"
+  toEqual: "expect({actual}).toEqual({expected});"
+  toBeNull: "expect({value}).toBeNull();"
+  toBeDefined: "expect({value}).toBeDefined();"
+  toBeTruthy: "expect({value}).toBeTruthy();"
+  toBeFalsy: "expect({value}).toBeFalsy();"
+  toContain: "expect({array}).toContain({item});"
+  toThrow: "expect(() => {code}).toThrow();"
+  toHaveBeenCalled: "expect({mock}).toHaveBeenCalled();"
+  toHaveBeenCalledWith: "expect({mock}).toHaveBeenCalledWith({args});"
+  resolves: "await expect({promise}).resolves.toBe({expected});"
+  rejects: "await expect({promise}).rejects.toThrow();"
