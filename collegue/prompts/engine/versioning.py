@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PromptVersion:
-    """Représente une version d'un template de prompt."""
     id: str
     template_id: str
     version: str
@@ -32,20 +31,15 @@ class PromptVersion:
     metadata: Dict[str, Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convertit en dictionnaire."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PromptVersion':
-        """Crée une instance depuis un dictionnaire."""
         return cls(**data)
 
-
 class PromptVersionManager:
-    """Gestionnaire de versions des prompts avec tracking de performance."""
 
     def __init__(self, storage_path: str = None):
-        """Initialise le gestionnaire de versions."""
         self.storage_path = storage_path or os.path.join(
             os.path.dirname(__file__), '..', 'versions'
         )
@@ -55,7 +49,6 @@ class PromptVersionManager:
         self._load_versions()
 
     def _load_versions(self) -> None:
-        """Charge les versions depuis le stockage."""
         if os.path.exists(self.versions_file):
             try:
                 with open(self.versions_file, 'r', encoding='utf-8') as f:
@@ -69,7 +62,6 @@ class PromptVersionManager:
                 self.versions_cache = {}
 
     def _save_versions(self) -> None:
-        """Sauvegarde les versions dans le stockage."""
         try:
             data = {}
             for template_id, versions in self.versions_cache.items():
@@ -82,7 +74,6 @@ class PromptVersionManager:
 
     def create_version(self, template_id: str, content: str,
                       variables: List[Dict[str, Any]], version: str = None) -> PromptVersion:
-        """Crée une nouvelle version d'un template."""
         if version is None:
             version = self._get_next_version(template_id)
 
@@ -106,7 +97,6 @@ class PromptVersionManager:
         return prompt_version
 
     def get_best_version(self, template_id: str) -> Optional[PromptVersion]:
-        """Récupère la version avec le meilleur score de performance."""
         versions = self.versions_cache.get(template_id, [])
         if not versions:
             return None
@@ -121,7 +111,6 @@ class PromptVersionManager:
         return versions[-1] if versions else None
 
     def _get_next_version(self, template_id: str) -> str:
-        """Génère le prochain numéro de version."""
         versions = self.versions_cache.get(template_id, [])
         if not versions:
             return "1.0.0"
@@ -132,15 +121,7 @@ class PromptVersionManager:
         return '.'.join(parts)
 
     def get_version(self, template_id: str, version: str) -> Optional[PromptVersion]:
-        """Récupère une version spécifique d'un template.
 
-        Args:
-            template_id: ID du template
-            version: Numéro de version (ex: "1.0.0", "v2", "experimental")
-
-        Returns:
-            PromptVersion ou None si non trouvée
-        """
         versions = self.versions_cache.get(template_id, [])
 
         for v in versions:
@@ -153,15 +134,6 @@ class PromptVersionManager:
         return None
 
     def _create_virtual_version(self, template_id: str, version_name: str) -> PromptVersion:
-        """Crée une version virtuelle pour les templates YAML non versionnés.
-
-        Args:
-            template_id: ID du template
-            version_name: Nom de la version (default, v2, experimental, etc.)
-
-        Returns:
-            PromptVersion virtuelle
-        """
         now = datetime.now().isoformat()
         return PromptVersion(
             id=f"{template_id}_{version_name}",
@@ -176,24 +148,10 @@ class PromptVersionManager:
         )
 
     def get_all_versions(self, template_id: str) -> List[PromptVersion]:
-        """Récupère toutes les versions d'un template.
-
-        Args:
-            template_id: ID du template
-
-        Returns:
-            Liste des versions disponibles
-        """
         return self.versions_cache.get(template_id, [])
 
     def update_metrics(self, template_id: str, version: str, metrics: Dict[str, Any]) -> None:
-        """Met à jour les métriques de performance d'une version.
 
-        Args:
-            template_id: ID du template
-            version: Numéro de version
-            metrics: Dictionnaire des métriques à mettre à jour
-        """
         versions = self.versions_cache.get(template_id, [])
 
         for v in versions:
@@ -226,12 +184,7 @@ class PromptVersionManager:
             self._save_versions()
 
     def update_metrics_for_version(self, version: PromptVersion, metrics: Dict[str, Any]) -> None:
-        """Met à jour les métriques directement sur un objet PromptVersion.
 
-        Args:
-            version: Objet PromptVersion à mettre à jour
-            metrics: Dictionnaire des métriques
-        """
         if 'success_rate' in metrics:
             version.success_rate = metrics['success_rate']
         if 'avg_execution_time' in metrics:
@@ -246,25 +199,13 @@ class PromptVersionManager:
             version.performance_score = self._calculate_performance_score(version)
 
     def _calculate_performance_score(self, version: PromptVersion) -> float:
-        """Calcule le score de performance d'une version.
-
-        Args:
-            version: Version dont on calcule le score
-
-        Returns:
-            Score de performance (0.0 à 1.0)
-        """
 
         score = 0.0
-
-
         score += version.success_rate * 0.4
-
 
         if version.average_generation_time > 0:
             speed_score = max(0, 1.0 - (version.average_generation_time / 5.0))
             score += speed_score * 0.3
-
 
         if version.average_tokens > 0:
             token_efficiency = max(0, 1.0 - (version.average_tokens / 2000))
@@ -275,16 +216,7 @@ class PromptVersionManager:
     def update_performance_metrics(self, template_id: str, version: str,
                                   success: bool, execution_time: float,
                                   tokens_used: int, user_satisfaction: float = None) -> None:
-        """Met à jour les métriques de performance après une exécution.
 
-        Args:
-            template_id: ID du template
-            version: Numéro de version
-            success: Si l'exécution était réussie
-            execution_time: Temps d'exécution en secondes
-            tokens_used: Nombre de tokens utilisés
-            user_satisfaction: Score de satisfaction utilisateur (optionnel)
-        """
         versions = self.versions_cache.get(template_id, [])
 
         for v in versions:

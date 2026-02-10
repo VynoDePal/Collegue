@@ -3,7 +3,8 @@ Base Tool - Classe de base pour tous les outils du projet Collègue
 """
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Callable
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 from datetime import datetime
@@ -382,10 +383,98 @@ class BaseTool(ABC):
             }
         ]
 
-    def get_capabilities(self) -> List[str]:
-        return [
-            f"Traitement de code en {', '.join(self.get_supported_languages())}",
-            "Validation des entrées",
-            "Collecte de métriques",
-            "Gestion d'erreurs"
-        ]
+    async def execute_with_llm_fallback(
+        self,
+        request: BaseModel,
+        llm_manager: Optional[Any],
+        context_builder: Callable[[BaseModel], Dict[str, Any]],
+        llm_processor: Callable[[str], BaseModel],
+        fallback: Callable[[BaseModel], BaseModel],
+        ctx: Optional[Any] = None,
+        timeout: int = 30
+    ) -> BaseModel:
+        """Execute with LLM fallback pattern - standardise la logique LLM + fallback local.
+
+        Pattern utilisé par 6 tools: documentation, refactoring, test_generation,
+        repo_consistency_check, iac_guardrails_scan, impact_analysis.
+
+        Args:
+            request: La requête à traiter
+            llm_manager: Le gestionnaire LLM (peut être None)
+            context_builder: Fonction pour construire le contexte du prompt
+            llm_processor: Fonction pour traiter la réponse LLM et créer le résultat
+            fallback: Fonction de fallback appelée si LLM échoue ou est indisponible
+            ctx: Contexte de progression (optionnel)
+            timeout: Timeout en secondes pour l'appel LLM
+
+        Returns:
+            Le résultat du traitement (LLM ou fallback)
+        """
+        if llm_manager is None:
+            self.logger.debug("LLM manager non disponible, utilisation du fallback")
+            return fallback(request)
+
+        try:
+            if ctx:
+                await ctx.info("Préparation du prompt...")
+
+            context = context_builder(request)
+
+            if asyncio.iscoroutinefunction(self.prepare_prompt):
+                prompt = await self.prepare_prompt(request, context=context)
+            else:
+                prompt = self.prepare_prompt(request, context=context)
+
+            if ctx:
+                await ctx.info("Génération via LLM...")
+
+            raw_response = llm_manager.sync_generate(prompt)
+            result = llm_processor(raw_response)
+
+            if ctx:
+                await ctx.info("Traitement terminé")
+
+            return result
+
+        except Exception as e:
+            self.logger.warning(f"Erreur LLM, fallback local: {e}")
+            if ctx:
+                await ctx.info(f"Fallback: {str(e)[:50]}")
+            return fallback(request)
+
+    @asynccontextmanager
+    async def progress_tracker(self, ctx: Optional[Any], total_steps: int):
+        """Context manager pour le suivi de progression dans les outils async.
+
+        Usage:
+            async with self.progress_tracker(ctx, 4) as progress:
+                # step 1
+                progress.step = 1
+                # step 2
+                progress.step = 2
+        """
+        class Progress:
+            def __init__(self, tool, ctx, total):
+                self.tool = tool
+                self.ctx = ctx
+                self.total = total
+                self._step = 0
+
+            @property
+            def step(self):
+                return self._step
+
+            @step.setter
+            def step(self, value):
+                self._step = value
+                if self.ctx:
+                    asyncio.create_task(
+                        self.ctx.report_progress(progress=value, total=self.total)
+                    )
+
+        progress = Progress(self, ctx, total_steps)
+        if ctx:
+            await ctx.report_progress(progress=0, total=total_steps)
+        yield progress
+        if ctx:
+            await ctx.report_progress(progress=total_steps, total=total_steps)

@@ -6,7 +6,6 @@ from .python import PythonParser
 
 
 def detect_language(content: str, filename: Optional[str] = None) -> str:
-    """Détecte le langage de programmation à partir du contenu et/ou du nom de fichier."""
     if filename:
         ext = os.path.splitext(filename)[1].lower()
         if ext == '.py':
@@ -60,9 +59,7 @@ def detect_language(content: str, filename: Optional[str] = None) -> str:
         return 'any'
     return best
 
-
 def parse_file(content: str, filename: Optional[str] = None) -> ParseResult:
-    """Parse un fichier en détectant automatiquement le langage."""
     language = detect_language(content, filename)
 
     if language == 'python':
@@ -74,16 +71,12 @@ def parse_file(content: str, filename: Optional[str] = None) -> ParseResult:
 
     return parser.parse()
 
-
 def resolve_relative_import(
     source: str,
     current_file: str,
     file_modules: Dict[str, str],
 ) -> Optional[str]:
-    """Résout un import relatif vers un chemin absolu.
 
-    Supporte les chemins multi-niveaux (../../foo/bar).
-    """
     if not source.startswith('.'):
         return None
 
@@ -112,13 +105,11 @@ def resolve_relative_import(
 
     return None
 
-
 def resolve_module_to_file(
     module: str,
     file_modules: Dict[str, str],
     current_file: Optional[str] = None,
 ) -> Optional[str]:
-    """Résout un nom de module vers un chemin de fichier."""
     if module.startswith('.'):
         if current_file:
             return resolve_relative_import(module, current_file, file_modules)
@@ -134,9 +125,7 @@ def resolve_module_to_file(
 
     return None
 
-
 def get_unused_imports(parse_result: ParseResult) -> List[Import]:
-    """Détecte les imports non utilisés dans un fichier."""
     if not parse_result.imports:
         return []
 
@@ -156,9 +145,7 @@ def get_unused_imports(parse_result: ParseResult) -> List[Import]:
 
     return unused
 
-
 def get_unused_declarations(parse_result: ParseResult) -> List[str]:
-    """Détecte les déclarations non utilisées dans un fichier."""
     if not parse_result.declarations:
         return []
 

@@ -19,7 +19,10 @@ import json
 from typing import Optional, Dict, Any, List, Type, Tuple
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileInput, load_rules, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .shared import FileInput, aggregate_severities, load_rules, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .scanners.kubernetes import KubernetesScanner
+from .scanners.terraform import TerraformScanner
+from .scanners.dockerfile import DockerfileScanner
 
 
 class CustomPolicy(BaseModel):
@@ -217,6 +220,12 @@ class IacGuardrailsScanTool(BaseTool):
             }
         ]
 
+    def __init__(self, config=None, app_state=None):
+        super().__init__(config, app_state)
+        self._k8s_scanner = KubernetesScanner(logger=self.logger)
+        self._tf_scanner = TerraformScanner(logger=self.logger)
+        self._dockerfile_scanner = DockerfileScanner(logger=self.logger)
+
     def get_capabilities(self) -> List[str]:
         return [
             "Scan de sécurité Kubernetes (basé sur Pod Security Standards)",
@@ -370,6 +379,27 @@ class IacGuardrailsScanTool(BaseTool):
                 findings.extend(self._apply_regex_rule(rule, content, filepath, lines))
 
         return findings
+
+    def _convert_findings(self, scanner_findings: list) -> list:
+        """Convert scanner findings to IacFinding objects."""
+        from .scanners import IacFinding as ScannerFinding
+        result = []
+        for f in scanner_findings:
+            if isinstance(f, ScannerFinding):
+                result.append(IacFinding(
+                    rule_id=f.rule_id,
+                    severity=f.severity,
+                    path=f.path,
+                    line=f.line,
+                    title=f.rule_title,
+                    description=f.message,
+                    remediation=f.remediation,
+                    references=f.references,
+                    engine=f.engine
+                ))
+            else:
+                result.append(f)
+        return result
 
     def _apply_custom_policies(self, content: str, filepath: str,
                                 policies: List[CustomPolicy]) -> List[IacFinding]:
@@ -715,19 +745,22 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 rules_count += len(self.K8S_RULES['baseline'])
                 if request.policy_profile == 'strict':
                     rules_count += len(self.K8S_RULES['strict'])
-                all_findings.extend(self._scan_kubernetes(file.content, file.path, request.policy_profile))
+                findings = self._k8s_scanner.scan(file.content, file.path, request.policy_profile)
+                all_findings.extend(self._convert_findings(findings))
 
             elif file_type == 'terraform':
                 rules_count += len(self.TF_RULES['baseline'])
                 if request.policy_profile == 'strict':
                     rules_count += len(self.TF_RULES['strict'])
-                all_findings.extend(self._scan_terraform(file.content, file.path, request.policy_profile))
+                findings = self._tf_scanner.scan(file.content, file.path, request.policy_profile)
+                all_findings.extend(self._convert_findings(findings))
 
             elif file_type == 'dockerfile':
                 rules_count += len(self.DOCKERFILE_RULES['baseline'])
                 if request.policy_profile == 'strict':
                     rules_count += len(self.DOCKERFILE_RULES['strict'])
-                all_findings.extend(self._scan_dockerfile(file.content, file.path, request.policy_profile))
+                findings = self._dockerfile_scanner.scan(file.content, file.path, request.policy_profile)
+                all_findings.extend(self._convert_findings(findings))
 
             if request.custom_policies:
                 rules_count += len(request.custom_policies)
@@ -741,9 +774,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 seen.add(key)
                 unique_findings.append(f)
 
-        severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-        for finding in unique_findings:
-            severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
+        severity_counts = aggregate_severities(unique_findings)
 
         passed = severity_counts['critical'] == 0 and severity_counts['high'] == 0
 

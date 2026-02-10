@@ -9,7 +9,6 @@ import uuid
 
 
 class PromptVariableType(str, Enum):
-    """Types de variables supportés dans les prompts personnalisés."""
     STRING = "string"
     INTEGER = "integer"
     FLOAT = "float"
@@ -18,9 +17,7 @@ class PromptVariableType(str, Enum):
     LIST = "list"
     OBJECT = "object"
 
-
 class PromptVariable(BaseModel):
-    """Définition d'une variable de prompt avec validation."""
     name: str
     description: str
     type: PromptVariableType = PromptVariableType.STRING
@@ -29,9 +26,7 @@ class PromptVariable(BaseModel):
     options: Optional[List[Any]] = None
     example: Optional[Any] = None
 
-
 class PromptTemplate(BaseModel):
-    """Modèle complet pour un template de prompt personnalisé."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str
@@ -47,18 +42,14 @@ class PromptTemplate(BaseModel):
     is_public: bool = False
     version: str = "1.0.0"
 
-
 class PromptCategory(BaseModel):
-    """Catégorie de prompts pour l'organisation."""
     id: str
     name: str
     description: str
     parent_id: Optional[str] = None
     icon: Optional[str] = None
 
-
 class PromptExecution(BaseModel):
-    """Enregistrement d'une exécution de prompt."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     template_id: str
     variables: Dict[str, Any]
@@ -70,9 +61,7 @@ class PromptExecution(BaseModel):
     user_id: Optional[str] = None
     feedback: Optional[Dict[str, Any]] = None
 
-
 class PromptLibrary(BaseModel):
-    """Bibliothèque complète de prompts personnalisés."""
     templates: Dict[str, PromptTemplate] = {}
     categories: Dict[str, PromptCategory] = {}
     history: List[PromptExecution] = []

@@ -141,6 +141,29 @@ def run_async_from_sync(coro, timeout: int = 30):
     except RuntimeError:
         return asyncio.run(coro)
 
+def aggregate_severities(items: List[Any], severity_attr: str = 'severity', default_levels: Optional[List[str]] = None) -> Dict[str, int]:
+    """Compte les occurrences par niveau de sévérité.
+
+    Utilisé par dependency_guard, iac_guardrails_scan, secret_scan,
+    repo_consistency_check pour agréger les résultats d'analyse.
+
+    Args:
+        items: Liste d'objets ayant un attribut sévérité
+        severity_attr: Nom de l'attribut de sévérité (défaut: 'severity')
+        default_levels: Liste des niveaux de sévérité attendus (défaut: critical, high, medium, low)
+
+    Returns:
+        Dict avec les comptes pour chaque niveau de sévérité
+    """
+    levels = default_levels or ['critical', 'high', 'medium', 'low']
+    counts = {level: 0 for level in levels}
+    for item in items:
+        sev = getattr(item, severity_attr, 'low').lower()
+        if sev in counts:
+            counts[sev] += 1
+    return counts
+
+
 def normalize_language(language: str) -> str:
 
     normalized = language.strip().lower()
@@ -161,3 +184,39 @@ def normalize_language(language: str) -> str:
     }
 
     return aliases.get(normalized, normalized)
+
+
+# Validators standardisés pour Pydantic field_validator
+def validate_in_list(valid_values: List[str], value: str) -> str:
+    """Valide qu'une valeur est dans une liste de valeurs autorisées."""
+    if value not in valid_values:
+        raise ValueError(f"Valeur '{value}' invalide. Utilisez: {', '.join(valid_values)}")
+    return value
+
+
+def validate_language(value: str, supported: Optional[List[str]] = None) -> str:
+    """Valide et normalise un langage de programmation."""
+    normalized = normalize_language(value)
+    if supported and normalized not in supported:
+        raise ValueError(f"Langage '{value}' non supporté. Utilisez: {', '.join(supported)}")
+    return normalized
+
+
+def validate_confidence_mode(value: str) -> str:
+    """Valide un mode de confiance pour l'analyse d'impact."""
+    return validate_in_list(['conservative', 'balanced', 'aggressive'], value)
+
+
+def validate_refactoring_type(value: str) -> str:
+    """Valide un type de refactoring."""
+    return validate_in_list(['rename', 'extract', 'simplify', 'optimize', 'clean', 'modernize', 'security'], value)
+
+
+def validate_doc_format(value: str) -> str:
+    """Valide un format de documentation."""
+    return validate_in_list(['markdown', 'rst', 'html', 'docstring', 'json'], value)
+
+
+def validate_doc_style(value: str) -> str:
+    """Valide un style de documentation."""
+    return validate_in_list(['standard', 'detailed', 'minimal', 'api'], value)

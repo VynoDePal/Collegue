@@ -5,10 +5,15 @@ Permet à Collègue d'interagir avec GitHub sans changer de fenêtre.
 """
 import logging
 import os
-import base64
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .github_commands import GitHubClient
+from .github_commands.repos import RepoCommands, RepoInfo
+from .github_commands.prs import PRCommands, PRInfo, FileChange, Comment
+from .github_commands.issues import IssueCommands, IssueInfo
+from .github_commands.branches import BranchCommands, BranchInfo, CommitInfo
+from .github_commands.files import FileCommands
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -69,73 +74,12 @@ class GitHubRequest(BaseModel):
             raise ValueError(f"Commande invalide. Valides: {valid}")
         return v
 
-class RepoInfo(BaseModel):
+class SearchResult(BaseModel):
     name: str
-    full_name: str
-    description: Optional[str] = None
+    path: str
+    repository: str
     html_url: str
-    default_branch: str
-    language: Optional[str] = None
-    stars: int = 0
-    forks: int = 0
-    open_issues: int = 0
-    is_private: bool = False
-    updated_at: str
-
-class PRInfo(BaseModel):
-    number: int
-    title: str
-    state: str
-    html_url: str
-    user: str
-    base_branch: str
-    head_branch: str
-    created_at: str
-    updated_at: str
-    mergeable: Optional[bool] = None
-    additions: int = 0
-    deletions: int = 0
-    changed_files: int = 0
-    labels: List[str] = []
-    draft: bool = False
-
-class IssueInfo(BaseModel):
-    number: int
-    title: str
-    state: str
-    html_url: str
-    user: str
-    created_at: str
-    updated_at: str
-    labels: List[str] = []
-    assignees: List[str] = []
-    comments: int = 0
-    body: Optional[str] = None
-
-class FileChange(BaseModel):
-    filename: str
-    status: str
-    additions: int
-    deletions: int
-    patch: Optional[str] = None
-
-class Comment(BaseModel):
-    id: int
-    user: str
-    body: str
-    created_at: str
-    html_url: str
-
-class BranchInfo(BaseModel):
-    name: str
-    sha: str
-    protected: bool = False
-class CommitInfo(BaseModel):
-    sha: str
-    message: str
-    author: str
-    date: str
-    html_url: str
+    score: float
 
 class WorkflowRun(BaseModel):
     id: int
@@ -145,13 +89,6 @@ class WorkflowRun(BaseModel):
     html_url: str
     created_at: str
     head_branch: str
-
-class SearchResult(BaseModel):
-    name: str
-    path: str
-    repository: str
-    html_url: str
-    score: float
 
 class GitHubResponse(BaseModel):
     success: bool
@@ -176,12 +113,6 @@ class GitHubResponse(BaseModel):
 class GitHubOpsTool(BaseTool):
     API_BASE = "https://api.github.com"
 
-    def _get_token_from_http_headers(self) -> Optional[str]:
-        if get_http_headers is None:
-            return None
-        headers = get_http_headers() or {}
-        return headers.get("x-github-token") or headers.get("x-collegue-github-token")
-
     tool_name = "github_ops"
     tool_description = (
         "Interagit avec l'API GitHub. IMPORTANT: Pour list_prs, list_issues, get_repo, "
@@ -191,6 +122,29 @@ class GitHubOpsTool(BaseTool):
     request_model = GitHubRequest
     response_model = GitHubResponse
     supported_languages = []
+
+    def __init__(self, config=None, app_state=None):
+        super().__init__(config, app_state)
+        self._repos = None
+        self._prs = None
+        self._issues = None
+        self._branches = None
+        self._files = None
+
+    def _init_commands(self, token: Optional[str] = None):
+        """Initialize command instances with token."""
+        if self._repos is None:
+            self._repos = RepoCommands(token=token, logger=self.logger)
+            self._prs = PRCommands(token=token, logger=self.logger)
+            self._issues = IssueCommands(token=token, logger=self.logger)
+            self._branches = BranchCommands(token=token, logger=self.logger)
+            self._files = FileCommands(token=token, logger=self.logger)
+
+    def _get_token_from_http_headers(self) -> Optional[str]:
+        if get_http_headers is None:
+            return None
+        headers = get_http_headers() or {}
+        return headers.get("x-github-token") or headers.get("x-collegue-github-token")
 
     def _get_headers(self, token: Optional[str] = None) -> Dict[str, str]:
         gh_token = token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
@@ -207,6 +161,37 @@ class GitHubOpsTool(BaseTool):
 
     def _has_token(self, token: Optional[str] = None) -> bool:
         return bool(token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers())
+
+    def _list_workflows(self, owner: str, repo: str, token: Optional[str], limit: int) -> List[WorkflowRun]:
+        """List workflow runs for a repository."""
+        data = self._api_get(f"/repos/{owner}/{repo}/actions/runs", token, {"per_page": limit})
+        runs = data.get('workflow_runs', [])
+        return [WorkflowRun(
+            id=r['id'],
+            name=r['name'],
+            status=r['status'],
+            conclusion=r.get('conclusion'),
+            html_url=r['html_url'],
+            created_at=r['created_at'],
+            head_branch=r['head_branch']
+        ) for r in runs[:limit]]
+
+    def _search_code(self, query: str, owner: Optional[str], repo: Optional[str], token: Optional[str], limit: int) -> List[SearchResult]:
+        """Search code on GitHub."""
+        q = query
+        if owner and repo:
+            q += f" repo:{owner}/{repo}"
+        elif owner:
+            q += f" user:{owner}"
+        data = self._api_get("/search/code", token, {"q": q, "per_page": limit})
+        items = data.get('items', [])
+        return [SearchResult(
+            name=i['name'],
+            path=i['path'],
+            repository=i['repository']['full_name'],
+            html_url=i['html_url'],
+            score=i.get('score', 0)
+        ) for i in items[:limit]]
 
     def _api_get(self, endpoint: str, token: Optional[str] = None, params: Optional[Dict] = None) -> Any:
         if not HAS_REQUESTS:
@@ -597,6 +582,7 @@ class GitHubOpsTool(BaseTool):
 
     def _execute_core_logic(self, request: GitHubRequest, **kwargs) -> GitHubResponse:
         token = request.token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers()
+        self._init_commands(token)
 
         if token and request.owner and HAS_CONFIG_REGISTRY:
             try:
@@ -615,7 +601,7 @@ class GitHubOpsTool(BaseTool):
                 pass
 
         if request.command == 'list_repos':
-            repos = self._list_repos(request.owner, request.token, request.limit)
+            repos = self._repos.list_repos(request.owner, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -626,7 +612,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'get_repo':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour get_repo")
-            repo = self._get_repo(request.owner, request.repo, request.token)
+            repo = self._repos.get_repo(request.owner, request.repo)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -637,7 +623,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'list_prs':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour list_prs")
-            prs = self._list_prs(request.owner, request.repo, request.state, request.token, request.limit)
+            prs = self._prs.list_prs(request.owner, request.repo, request.state, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -648,7 +634,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'get_pr':
             if not request.owner or not request.repo or not request.pr_number:
                 raise ToolExecutionError("owner, repo et pr_number requis pour get_pr")
-            pr = self._get_pr(request.owner, request.repo, request.pr_number, request.token)
+            pr = self._prs.get_pr(request.owner, request.repo, request.pr_number)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -659,7 +645,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'pr_files':
             if not request.owner or not request.repo or not request.pr_number:
                 raise ToolExecutionError("owner, repo et pr_number requis pour pr_files")
-            files = self._get_pr_files(request.owner, request.repo, request.pr_number, request.token, request.limit)
+            files = self._prs.get_pr_files(request.owner, request.repo, request.pr_number, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -670,7 +656,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'pr_comments':
             if not request.owner or not request.repo or not request.pr_number:
                 raise ToolExecutionError("owner, repo et pr_number requis pour pr_comments")
-            comments = self._get_pr_comments(request.owner, request.repo, request.pr_number, request.token, request.limit)
+            comments = self._prs.get_pr_comments(request.owner, request.repo, request.pr_number, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -681,7 +667,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'list_issues':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour list_issues")
-            issues = self._list_issues(request.owner, request.repo, request.state, request.token, request.limit)
+            issues = self._issues.list_issues(request.owner, request.repo, request.state, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -692,7 +678,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'get_issue':
             if not request.owner or not request.repo or not request.issue_number:
                 raise ToolExecutionError("owner, repo et issue_number requis pour get_issue")
-            issue = self._get_issue(request.owner, request.repo, request.issue_number, request.token)
+            issue = self._issues.get_issue(request.owner, request.repo, request.issue_number)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -703,7 +689,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'repo_branches':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour repo_branches")
-            branches = self._list_branches(request.owner, request.repo, request.token, request.limit)
+            branches = self._branches.list_branches(request.owner, request.repo, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -714,7 +700,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'repo_commits':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour repo_commits")
-            commits = self._list_commits(request.owner, request.repo, request.branch, request.token, request.limit)
+            commits = self._branches.list_commits(request.owner, request.repo, request.branch, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -725,7 +711,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'list_workflows':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour list_workflows")
-            workflows = self._list_workflows(request.owner, request.repo, request.token, request.limit)
+            workflows = self._list_workflows(request.owner, request.repo, token, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -734,10 +720,9 @@ class GitHubOpsTool(BaseTool):
             )
 
         elif request.command == 'workflow_runs':
-
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour workflow_runs")
-            workflows = self._list_workflows(request.owner, request.repo, request.token, request.limit)
+            workflows = self._list_workflows(request.owner, request.repo, token, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -748,7 +733,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'search_code':
             if not request.query:
                 raise ToolExecutionError("query requis pour search_code")
-            results = self._search_code(request.query, request.owner, request.repo, request.token, request.limit)
+            results = self._search_code(request.query, request.owner, request.repo, token, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -759,7 +744,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'create_pr':
             if not request.owner or not request.repo or not request.title or not request.head or not request.base:
                 raise ToolExecutionError("owner, repo, title, head, base requis pour create_pr")
-            pr = self._create_pr(request.owner, request.repo, request.title, request.head, request.base, request.body, request.token)
+            pr = self._prs.create_pr(request.owner, request.repo, request.title, request.head, request.base, request.body)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -770,7 +755,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'create_issue':
             if not request.owner or not request.repo or not request.title:
                 raise ToolExecutionError("owner, repo, title requis pour create_issue")
-            issue = self._create_issue(request.owner, request.repo, request.title, request.body, request.token)
+            issue = self._issues.create_issue(request.owner, request.repo, request.title, request.body)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -781,7 +766,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'create_branch':
             if not request.owner or not request.repo or not request.branch:
                 raise ToolExecutionError("owner, repo, branch requis pour create_branch")
-            b_info = self._create_branch(request.owner, request.repo, request.branch, request.from_branch, request.token)
+            b_info = self._branches.create_branch(request.owner, request.repo, request.branch, request.from_branch)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -792,7 +777,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'update_file':
             if not request.owner or not request.repo or not request.path or not request.message or request.content is None:
                 raise ToolExecutionError("owner, repo, path, message, content requis pour update_file")
-            result = self._update_file(request.owner, request.repo, request.path, request.message, request.content, request.branch, request.token)
+            result = self._files.update_file(request.owner, request.repo, request.path, request.message, request.content, request.branch)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -803,7 +788,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'get_file':
             if not request.owner or not request.repo or not request.path:
                 raise ToolExecutionError("owner, repo et path requis pour get_file")
-            file_data = self._get_file_content(request.owner, request.repo, request.path, request.branch, request.token)
+            file_data = self._files.get_file_content(request.owner, request.repo, request.path, request.branch)
             return GitHubResponse(
                 success=True,
                 command=request.command,

@@ -219,7 +219,6 @@ class PromptEngine:
 
     def record_execution_result(self, execution_id: str, result: str,
                                execution_time: float) -> bool:
-        """Enregistre le résultat d'une exécution de prompt."""
         for execution in self.library.history:
             if execution.id == execution_id:
                 execution.result = result
@@ -228,7 +227,6 @@ class PromptEngine:
         return False
 
     def add_feedback(self, execution_id: str, feedback: Dict[str, Any]) -> bool:
-        """Ajoute un feedback à une exécution de prompt."""
         for execution in self.library.history:
             if execution.id == execution_id:
                 execution.feedback = feedback

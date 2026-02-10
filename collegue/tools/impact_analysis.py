@@ -18,7 +18,10 @@ import json
 from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileInput, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .shared import (
+    FileInput, detect_language_from_extension, parse_llm_json_response,
+    run_async_from_sync, validate_fast_deep, validate_confidence_mode
+)
 
 
 class ImpactAnalysisRequest(BaseModel):
@@ -53,14 +56,11 @@ class ImpactAnalysisRequest(BaseModel):
     )
 
     @field_validator('confidence_mode')
-    def validate_confidence_mode(cls, v):
-        valid = ['conservative', 'balanced', 'aggressive']
-        if v not in valid:
-            raise ValueError(f"Mode '{v}' invalide. Utilisez: {', '.join(valid)}")
-        return v
+    def _validate_confidence_mode(cls, v):
+        return validate_confidence_mode(v)
 
     @field_validator('analysis_depth')
-    def validate_analysis_depth(cls, v):
+    def _validate_analysis_depth(cls, v):
         return validate_fast_deep(v)
 
 class ImpactedFile(BaseModel):

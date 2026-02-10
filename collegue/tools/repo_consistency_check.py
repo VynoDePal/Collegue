@@ -23,7 +23,9 @@ from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from collections import defaultdict
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileInput, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .shared import FileInput, aggregate_severities, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .analyzers.python import PythonAnalyzer
+from .analyzers.javascript import JavaScriptAnalyzer
 
 
 class ConsistencyCheckRequest(BaseModel):
@@ -203,6 +205,11 @@ class RepoConsistencyCheckTool(BaseTool):
             }
         ]
 
+    def __init__(self, config=None, app_state=None):
+        super().__init__(config, app_state)
+        self._python_analyzer = PythonAnalyzer(logger=self.logger)
+        self._js_analyzer = JavaScriptAnalyzer(logger=self.logger)
+
     def get_capabilities(self) -> List[str]:
         return [
             "Détection d'imports non utilisés (Python, JS/TS)",
@@ -216,264 +223,6 @@ class RepoConsistencyCheckTool(BaseTool):
     def _detect_language(self, filepath: str) -> str:
         return detect_language_from_extension(filepath)
 
-    def _analyze_python_unused_imports(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        issues = []
-
-        try:
-            tree = ast.parse(content)
-        except SyntaxError as e:
-            issues.append(ConsistencyIssue(
-                kind="syntax_error",
-                severity="high",
-                path=filepath,
-                line=e.lineno,
-                message=f"Erreur de syntaxe: {e.msg}",
-                confidence=100,
-                engine="ast-parser"
-            ))
-            return issues
-
-        imports = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    name = alias.asname or alias.name.split('.')[0]
-                    imports[name] = (node.lineno, alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    if name != '*':
-                        imports[name] = (node.lineno, f"{node.module}.{alias.name}")
-
-        used_names = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name):
-                used_names.add(node.id)
-            elif isinstance(node, ast.Attribute):
-
-                if isinstance(node.value, ast.Name):
-                    used_names.add(node.value.id)
-            elif isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name):
-                    used_names.add(node.func.id)
-                elif isinstance(node.func, ast.Attribute):
-                    if isinstance(node.func.value, ast.Name):
-                        used_names.add(node.func.value.id)
-
-        for name, (line, full_import) in imports.items():
-            if name not in used_names:
-                issues.append(ConsistencyIssue(
-                    kind="unused_import",
-                    severity="low",
-                    path=filepath,
-                    line=line,
-                    message=f"Import '{full_import}' (as '{name}') non utilisé",
-                    confidence=90,
-                    suggested_fix=f"Supprimer: import {full_import}" if '.' not in full_import else f"Supprimer l'import de {name}",
-                    engine="ast-analyzer"
-                ))
-
-        return issues
-
-    def _analyze_python_unused_vars(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        issues = []
-
-        try:
-            tree = ast.parse(content)
-        except SyntaxError:
-            return issues
-
-        class VariableVisitor(ast.NodeVisitor):
-            def __init__(self):
-                self.scopes = [{}]
-                self.issues = []
-
-            def visit_FunctionDef(self, node):
-                self.scopes.append({})
-
-                for arg in node.args.args:
-                    if arg.arg not in ('self', 'cls') and not arg.arg.startswith('_'):
-                        self.scopes[-1][arg.arg] = (node.lineno, False)
-                self.generic_visit(node)
-                self._check_scope(filepath)
-                self.scopes.pop()
-
-            def visit_AsyncFunctionDef(self, node):
-                self.visit_FunctionDef(node)
-
-            def visit_Assign(self, node):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        name = target.id
-                        if not name.startswith('_'):
-                            self.scopes[-1][name] = (node.lineno, False)
-                self.generic_visit(node)
-
-            def visit_Name(self, node):
-                if isinstance(node.ctx, ast.Load):
-                    for scope in self.scopes:
-                        if node.id in scope:
-                            scope[node.id] = (scope[node.id][0], True)
-                self.generic_visit(node)
-
-            def _check_scope(self, path):
-                for name, (line, used) in self.scopes[-1].items():
-                    if not used and not name.startswith('_'):
-                        self.issues.append(ConsistencyIssue(
-                            kind="unused_var",
-                            severity="medium",
-                            path=path,
-                            line=line,
-                            message=f"Variable '{name}' assignée mais jamais utilisée",
-                            confidence=80,
-                            suggested_fix=f"Supprimer ou préfixer avec _ : _{name}",
-                            engine="ast-analyzer"
-                        ))
-
-        visitor = VariableVisitor()
-        visitor.visit(tree)
-        return visitor.issues
-
-    def _analyze_python_dead_code(self, content: str, filepath: str, all_contents: str) -> List[ConsistencyIssue]:
-        issues = []
-
-        try:
-            tree = ast.parse(content)
-        except SyntaxError:
-            return issues
-
-        definitions = {}
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-
-                if not node.name.startswith('_'):
-                    definitions[node.name] = (node.lineno, 'function')
-            elif isinstance(node, ast.ClassDef):
-                if not node.name.startswith('_'):
-                    definitions[node.name] = (node.lineno, 'class')
-
-        for name, (line, kind) in definitions.items():
-
-            patterns = [
-                rf'\b{re.escape(name)}\s*\(',
-                rf'\b{re.escape(name)}\b',
-            ]
-
-            usage_count = 0
-            for pattern in patterns:
-                matches = list(re.finditer(pattern, all_contents))
-                usage_count += len(matches)
-
-            if usage_count <= 1:
-                issues.append(ConsistencyIssue(
-                    kind="dead_code",
-                    severity="medium",
-                    path=filepath,
-                    line=line,
-                    message=f"{kind.capitalize()} '{name}' défini(e) mais jamais utilisé(e)",
-                    confidence=70,
-                    suggested_fix=f"Supprimer si inutile, ou vérifier si exporté/utilisé ailleurs",
-                    engine="usage-analyzer"
-                ))
-
-        return issues
-
-    def _analyze_js_unused_imports(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        issues = []
-
-        import_patterns = [
-
-            r"import\s*\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]",
-
-            r"import\s+(\w+)\s+from\s*['\"]([^'\"]+)['\"]",
-
-            r"import\s*\*\s*as\s+(\w+)\s+from\s*['\"]([^'\"]+)['\"]",
-        ]
-
-        imports = {}
-        lines = content.split('\n')
-
-        for i, line in enumerate(lines, 1):
-            for pattern in import_patterns:
-                match = re.search(pattern, line)
-                if match:
-                    names_str = match.group(1)
-
-                    for name_part in names_str.split(','):
-                        name_part = name_part.strip()
-                        if ' as ' in name_part:
-                            name = name_part.split(' as ')[1].strip()
-                        else:
-                            name = name_part.strip()
-                        if name and re.match(r'^\w+$', name):
-                            imports[name] = (i, match.group(0))
-
-
-        for name, (line, import_stmt) in imports.items():
-
-            pattern = rf'\b{re.escape(name)}\b'
-            matches = list(re.finditer(pattern, content))
-
-            usage_count = 0
-            for m in matches:
-                match_line = content[:m.start()].count('\n') + 1
-                if match_line != line:
-                    usage_count += 1
-
-            if usage_count == 0:
-                issues.append(ConsistencyIssue(
-                    kind="unused_import",
-                    severity="low",
-                    path=filepath,
-                    line=line,
-                    message=f"Import '{name}' non utilisé",
-                    confidence=85,
-                    suggested_fix=f"Supprimer '{name}' de l'import",
-                    engine="regex-analyzer"
-                ))
-
-        return issues
-
-    def _analyze_js_unused_vars(self, content: str, filepath: str) -> List[ConsistencyIssue]:
-        issues = []
-
-        decl_patterns = [
-            r"(?:const|let|var)\s+(\w+)\s*=",
-            r"(?:const|let|var)\s+\{([^}]+)\}\s*=",
-        ]
-
-        declarations = {}
-        lines = content.split('\n')
-
-        for i, line in enumerate(lines, 1):
-            for pattern in decl_patterns:
-                matches = re.finditer(pattern, line)
-                for match in matches:
-                    names_str = match.group(1)
-
-                    for name in re.findall(r'\b(\w+)\b', names_str):
-                        if not name.startswith('_') and name not in ('const', 'let', 'var'):
-                            declarations[name] = i
-
-        for name, line in declarations.items():
-            pattern = rf'\b{re.escape(name)}\b'
-            matches = list(re.finditer(pattern, content))
-
-            usage_count = sum(1 for m in matches if content[:m.start()].count('\n') + 1 != line)
-
-            if usage_count == 0:
-                issues.append(ConsistencyIssue(
-                    kind="unused_var",
-                    severity="medium",
-                    path=filepath,
-                    line=line,
-                    message=f"Variable '{name}' déclarée mais jamais utilisée",
-                    confidence=75,
-                    suggested_fix=f"Supprimer ou préfixer avec _ : _{name}",
-                    engine="regex-analyzer"
-                ))
-
-        return issues
 
     def _analyze_duplication(self, files: List[FileInput], min_lines: int = 5) -> List[ConsistencyIssue]:
         issues = []
@@ -883,17 +632,17 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
             if lang == 'python':
                 if 'unused_imports' in checks:
-                    all_issues.extend(self._analyze_python_unused_imports(file.content, file.path))
+                    all_issues.extend(self._python_analyzer.analyze_unused_imports(file.content, file.path))
                 if 'unused_vars' in checks:
-                    all_issues.extend(self._analyze_python_unused_vars(file.content, file.path))
+                    all_issues.extend(self._python_analyzer.analyze_unused_vars(file.content, file.path))
                 if 'dead_code' in checks:
-                    all_issues.extend(self._analyze_python_dead_code(file.content, file.path, all_contents))
+                    all_issues.extend(self._python_analyzer.analyze_dead_code(file.content, file.path, all_contents))
 
             elif lang in ('typescript', 'javascript'):
                 if 'unused_imports' in checks:
-                    all_issues.extend(self._analyze_js_unused_imports(file.content, file.path))
+                    all_issues.extend(self._js_analyzer.analyze_unused_imports(file.content, file.path))
                 if 'unused_vars' in checks:
-                    all_issues.extend(self._analyze_js_unused_vars(file.content, file.path))
+                    all_issues.extend(self._js_analyzer.analyze_unused_vars(file.content, file.path))
 
         if 'duplication' in checks and len(request.files) > 1:
             all_issues.extend(self._analyze_duplication(request.files))
@@ -903,9 +652,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
         all_issues = [i for i in all_issues if i.confidence >= request.min_confidence]
 
-        severity_counts = {'high': 0, 'medium': 0, 'low': 0, 'info': 0}
-        for issue in all_issues:
-            severity_counts[issue.severity] = severity_counts.get(issue.severity, 0) + 1
+        severity_counts = aggregate_severities(all_issues, default_levels=['high', 'medium', 'low', 'info'])
 
         summary = {
             'total': len(all_issues),

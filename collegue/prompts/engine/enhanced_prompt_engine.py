@@ -16,30 +16,22 @@ logger = logging.getLogger(__name__)
 
 
 class EnhancedPromptEngine(PromptEngine):
-    """Extension du PromptEngine avec versioning, optimisation et A/B testing."""
 
     def __init__(self, templates_dir: str = None, storage_dir: str = None):
-        """Initialise le moteur de prompts amélioré."""
         super().__init__(storage_path=storage_dir)
-
         self.version_manager = PromptVersionManager(storage_dir)
         self.language_optimizer = LanguageOptimizer()
-
         self.ab_testing_enabled = True
         self.exploration_rate = 0.1
-
         self.performance_cache: Dict[str, Dict[str, float]] = {}
-
-
         self.templates: Dict[str, PromptTemplate] = {}
-
         self.tool_templates_dir = os.path.join(
             os.path.dirname(__file__), '..', 'templates', 'tools'
         )
         self._load_tool_templates()
 
     def _load_tool_templates(self) -> None:
-        """Charge les templates YAML spécifiques aux outils."""
+
         if not os.path.exists(self.tool_templates_dir):
             Path(self.tool_templates_dir).mkdir(parents=True, exist_ok=True)
             return
@@ -86,18 +78,7 @@ class EnhancedPromptEngine(PromptEngine):
         language: Optional[str] = None,
         version: Optional[str] = None
     ) -> Tuple[str, str]:
-        """
-        Récupère un prompt optimisé pour un outil.
 
-        Args:
-            tool_name: Nom de l'outil
-            context: Contexte avec les variables
-            language: Langage de programmation
-            version: Version spécifique (ou auto-sélection)
-
-        Returns:
-            Tuple (prompt formaté, version utilisée)
-        """
         category = f"tool/{tool_name.lower()}"
         templates = self.get_templates_by_category(category)
 
@@ -129,15 +110,7 @@ class EnhancedPromptEngine(PromptEngine):
         return prompt, prompt_version.version
 
     def _select_version_ab_testing(self, template_id: str) -> Optional[PromptVersion]:
-        """
-        Sélectionne une version en utilisant l'algorithme epsilon-greedy.
 
-        Args:
-            template_id: ID du template
-
-        Returns:
-            Version sélectionnée
-        """
         if not self.ab_testing_enabled:
             return self.version_manager.get_best_version(template_id)
 
@@ -152,16 +125,7 @@ class EnhancedPromptEngine(PromptEngine):
         return None
 
     def _format_version_prompt(self, version: PromptVersion, variables: Dict[str, Any]) -> str:
-        """
-        Formate un prompt versionné avec les variables.
 
-        Args:
-            version: Version du prompt
-            variables: Variables à injecter
-
-        Returns:
-            Prompt formaté
-        """
         prompt = version.content
 
         for key, value in variables.items():
@@ -172,15 +136,7 @@ class EnhancedPromptEngine(PromptEngine):
         return prompt
 
     def _get_default_template(self, tool_name: str) -> Optional[PromptTemplate]:
-        """
-        Récupère un template par défaut pour un outil.
 
-        Args:
-            tool_name: Nom de l'outil
-
-        Returns:
-            Template par défaut ou None
-        """
         all_templates = self.get_all_templates()
         for template in all_templates:
             if tool_name.lower() in template.name.lower():
@@ -196,17 +152,7 @@ class EnhancedPromptEngine(PromptEngine):
         success: bool,
         user_feedback: Optional[float] = None
     ) -> None:
-        """
-        Enregistre les performances d'une exécution.
 
-        Args:
-            template_id: ID du template
-            version: Version utilisée
-            execution_time: Temps d'exécution
-            tokens_used: Tokens consommés
-            success: Succès de l'exécution
-            user_feedback: Note utilisateur (0-1)
-        """
         self.version_manager.update_performance_metrics(
             template_id=template_id,
             version=version,
@@ -236,9 +182,7 @@ class EnhancedPromptEngine(PromptEngine):
 
             success_score = prompt_version.success_rate * 40
 
-
             time_score = max(0, (10 - prompt_version.average_generation_time) / 10) * 30
-
 
             token_score = max(0, (2000 - prompt_version.average_tokens) / 2000) * 20
 
@@ -261,15 +205,6 @@ class EnhancedPromptEngine(PromptEngine):
             }
 
     def get_performance_report(self, template_id: str) -> Dict[str, Any]:
-        """
-        Génère un rapport de performance pour un template.
-
-        Args:
-            template_id: ID du template
-
-        Returns:
-            Rapport avec métriques par version
-        """
         versions = self.version_manager.get_all_versions(template_id)
 
         report = {

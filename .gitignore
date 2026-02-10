@@ -244,6 +244,7 @@ cython_debug/
 # template of A/B testing
 collegue/prompts/templates/templates/
 collegue/prompts/versions/versions.json
+collegue/prompts/interface/
 
 # AI
 .ai/

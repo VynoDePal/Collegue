@@ -18,7 +18,7 @@ import re
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileContent
+from .shared import FileContent, aggregate_severities
 
 
 class SecretScanRequest(BaseModel):
@@ -525,9 +525,7 @@ class SecretScanTool(BaseTool):
                 files_scanned = 1
 
 
-        severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-        for finding in findings:
-            severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
+        severity_counts = aggregate_severities(findings)
 
 
         limited_findings = findings[:100]

@@ -22,6 +22,7 @@ import urllib.error
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
+from .shared import aggregate_severities
 
 
 class DependencyGuardRequest(BaseModel):
@@ -704,9 +705,7 @@ class DependencyGuardTool(BaseTool):
                     cve_ids=[vuln.get('vulnerability_id')] if vuln.get('vulnerability_id') else None
                 ))
 
-        severity_counts = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-        for issue in issues:
-            severity_counts[issue.severity] = severity_counts.get(issue.severity, 0) + 1
+        severity_counts = aggregate_severities(issues)
 
 
         total_deps = len(deps)
