@@ -27,14 +27,10 @@ def register_prompts(app, app_state):
     try:
         from .engine.enhanced_prompt_engine import EnhancedPromptEngine
 
-        from .interface import register_interfaces
-
         prompt_engine = EnhancedPromptEngine()
         app_state["prompt_engine"] = prompt_engine
 
         logger.info("EnhancedPromptEngine initialisé avec versioning et optimisation")
-
-        register_interfaces(app, app_state)
 
         logger.info("Système de prompts personnalisés enregistré avec succès")
 

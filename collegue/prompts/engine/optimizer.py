@@ -8,8 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class LanguageOptimizer:
-    """Optimise les prompts selon le langage de programmation cible."""
-
 
     LANGUAGE_RULES = {
         "python": {
@@ -67,24 +65,11 @@ class LanguageOptimizer:
     }
 
     def __init__(self):
-        """Initialise l'optimiseur de langage."""
         self.custom_rules: Dict[str, Dict[str, Any]] = {}
 
     def optimize_prompt(self, base_prompt: str, language: str,
                        context: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Optimise un prompt selon le langage cible.
-
-        Args:
-            base_prompt: Prompt de base à optimiser
-            language: Langage de programmation cible
-            context: Contexte additionnel (framework, style, etc.)
-
-        Returns:
-            Prompt optimisé pour le langage
-        """
         language_lower = language.lower()
-
 
         rules = self.LANGUAGE_RULES.get(language_lower, {})
         if not rules:
@@ -116,26 +101,11 @@ class LanguageOptimizer:
         return "\n".join(optimized_parts)
 
     def add_custom_rules(self, language: str, rules: Dict[str, Any]) -> None:
-        """
-        Ajoute des règles personnalisées pour un langage.
-
-        Args:
-            language: Langage concerné
-            rules: Règles personnalisées
-        """
         self.custom_rules[language.lower()] = rules
         logger.info(f"Règles personnalisées ajoutées pour {language}")
 
     def get_language_context(self, language: str) -> Dict[str, Any]:
-        """
-        Récupère le contexte complet d'un langage.
 
-        Args:
-            language: Langage demandé
-
-        Returns:
-            Contexte du langage avec toutes les règles
-        """
         language_lower = language.lower()
         base_rules = self.LANGUAGE_RULES.get(language_lower, {})
         custom_rules = self.custom_rules.get(language_lower, {})
@@ -146,16 +116,6 @@ class LanguageOptimizer:
         return context
 
     def suggest_improvements(self, prompt: str, language: str) -> List[str]:
-        """
-        Suggère des améliorations pour un prompt.
-
-        Args:
-            prompt: Prompt à analyser
-            language: Langage cible
-
-        Returns:
-            Liste de suggestions d'amélioration
-        """
         suggestions = []
         language_lower = language.lower()
         rules = self.LANGUAGE_RULES.get(language_lower, {})
