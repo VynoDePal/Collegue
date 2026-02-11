@@ -1,20 +1,14 @@
 """
 Core Engine - Composants principaux du MCP Collègue
+
+Les composants partagés (CodeParser, ContextManager, PromptEngine)
+sont initialisés dans le lifespan FastMCP (app.py → core_lifespan)
+et accessibles via ctx.lifespan_context dans les tools.
 """
 from .parser import CodeParser
-from .context import ContextManager
-from .orchestrator import ToolOrchestrator
 
 
-def register_core(app, app_state):
+def register_core(app):
     """Enregistre les composants du Core Engine dans l'application FastMCP."""
-    app_state["parser"] = CodeParser()
-    app_state["context_manager"] = ContextManager()
-    app_state["orchestrator"] = ToolOrchestrator()
-
-
-    from .auth import setup_oauth_auth
-    setup_oauth_auth(app, app_state)
-
-    from . import endpoints
-    endpoints.register(app, app_state)
+    from .meta_orchestrator import register_meta_orchestrator
+    register_meta_orchestrator(app)
