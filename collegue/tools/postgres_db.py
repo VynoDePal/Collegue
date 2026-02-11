@@ -150,6 +150,7 @@ class PostgresDBTool(BaseTool):
 
     tool_name = "postgres_db"
     tool_description = "Inspecte et interroge les bases de données PostgreSQL (schéma, tables, requêtes lecture seule)"
+    tags = {"integration", "database"}
     request_model = PostgresRequest
     response_model = PostgresResponse
     supported_languages = ["sql"]
