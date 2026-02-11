@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from collegue.config import settings
-from collegue.core.tool_llm_manager import ToolLLMManager
+from collegue.resources.llm.providers import LLMConfig, generate_text
 from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
 from collegue.tools.github_ops import GitHubOpsTool, GitHubRequest
 from collegue.autonomous.config_registry import get_config_registry, UserConfig
@@ -140,8 +140,14 @@ class AutoFixer:
     def __init__(self, user_config: Optional[UserConfig] = None):
         self.sentry = SentryMonitorTool()
         self.github = GitHubOpsTool()
-        self.llm = ToolLLMManager()
         self.user_config = user_config
+        # Initialize LLM config directly instead of using ToolLLMManager
+        self._llm_config = LLMConfig(
+            model_name=settings.llm_model,
+            api_key=settings.llm_api_key,
+            max_tokens=settings.MAX_TOKENS,
+            temperature=0.7,
+        )
 
     def _get_sentry_org(self) -> Optional[str]:
         """Récupère l'organisation Sentry depuis config, env ou headers."""
@@ -363,10 +369,24 @@ class AutoFixer:
             logger.info(f"🌐 Recherche web: {search_query[:80]}...")
 
             try:
-                web_response, web_citations = await self.llm.async_generate_with_web_search(
-                    prompt=f"Trouve des solutions pour cette erreur Python:\n{error_type}: {error_message}",
-                    max_results=5
+                # Use direct LLM call instead of ToolLLMManager
+                web_config = LLMConfig(
+                    model_name=settings.llm_model,
+                    api_key=settings.llm_api_key,
+                    max_tokens=settings.MAX_TOKENS,
+                    temperature=0.7,
+                    use_search_grounding=True
                 )
+                web_response_obj = await generate_text(
+                    web_config,
+                    f"Trouve des solutions pour cette erreur Python:\n{error_type}: {error_message}"
+                )
+                web_response = web_response_obj.text
+                web_citations = [
+                    annotation.get("url_citation", {}) 
+                    for annotation in web_response_obj.annotations 
+                    if isinstance(annotation, dict) and annotation.get("type") == "url_citation"
+                ]
 
                 if web_citations:
                     web_context = "\n\n## SOLUTIONS WEB (contexte additionnel)\n"
@@ -427,7 +447,8 @@ Analyse cette erreur et génère un correctif MINIMAL.
 Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
 
         try:
-            analysis_json = await self.llm.async_generate(prompt)
+            llm_response = await generate_text(self._llm_config, prompt)
+            analysis_json = llm_response.text
 
 
             match = re.search(r'```json\s*(.*?)\s*```', analysis_json, re.DOTALL)
