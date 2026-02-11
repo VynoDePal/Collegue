@@ -14,6 +14,8 @@ from .github_commands.prs import PRCommands, PRInfo, FileChange, Comment
 from .github_commands.issues import IssueCommands, IssueInfo
 from .github_commands.branches import BranchCommands, BranchInfo, CommitInfo
 from .github_commands.files import FileCommands
+from .github_commands.workflows import WorkflowCommands, WorkflowRun
+from .github_commands.search import SearchCommands, SearchResult
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -114,6 +116,7 @@ class GitHubOpsTool(BaseTool):
     API_BASE = "https://api.github.com"
 
     tool_name = "github_ops"
+    tags = {"integration", "devops"}
     tool_description = (
         "Interagit avec l'API GitHub. IMPORTANT: Pour list_prs, list_issues, get_repo, "
         "vous DEVEZ fournir 'owner' ET 'repo' (ex: owner='microsoft', repo='vscode'). "
@@ -130,6 +133,8 @@ class GitHubOpsTool(BaseTool):
         self._issues = None
         self._branches = None
         self._files = None
+        self._workflows = None
+        self._search = None
 
     def _init_commands(self, token: Optional[str] = None):
         if self._repos is None:
@@ -138,6 +143,8 @@ class GitHubOpsTool(BaseTool):
             self._issues = IssueCommands(token=token, logger=self.logger)
             self._branches = BranchCommands(token=token, logger=self.logger)
             self._files = FileCommands(token=token, logger=self.logger)
+            self._workflows = WorkflowCommands(token=token, logger=self.logger)
+            self._search = SearchCommands(token=token, logger=self.logger)
 
     def _get_token_from_http_headers(self) -> Optional[str]:
         if get_http_headers is None:
@@ -160,37 +167,6 @@ class GitHubOpsTool(BaseTool):
 
     def _has_token(self, token: Optional[str] = None) -> bool:
         return bool(token or os.environ.get('GITHUB_TOKEN') or self._get_token_from_http_headers())
-
-    def _list_workflows(self, owner: str, repo: str, token: Optional[str], limit: int) -> List[WorkflowRun]:
-        """List workflow runs for a repository."""
-        data = self._api_get(f"/repos/{owner}/{repo}/actions/runs", token, {"per_page": limit})
-        runs = data.get('workflow_runs', [])
-        return [WorkflowRun(
-            id=r['id'],
-            name=r['name'],
-            status=r['status'],
-            conclusion=r.get('conclusion'),
-            html_url=r['html_url'],
-            created_at=r['created_at'],
-            head_branch=r['head_branch']
-        ) for r in runs[:limit]]
-
-    def _search_code(self, query: str, owner: Optional[str], repo: Optional[str], token: Optional[str], limit: int) -> List[SearchResult]:
-        """Search code on GitHub."""
-        q = query
-        if owner and repo:
-            q += f" repo:{owner}/{repo}"
-        elif owner:
-            q += f" user:{owner}"
-        data = self._api_get("/search/code", token, {"q": q, "per_page": limit})
-        items = data.get('items', [])
-        return [SearchResult(
-            name=i['name'],
-            path=i['path'],
-            repository=i['repository']['full_name'],
-            html_url=i['html_url'],
-            score=i.get('score', 0)
-        ) for i in items[:limit]]
 
     def _api_get(self, endpoint: str, token: Optional[str] = None, params: Optional[Dict] = None) -> Any:
         if not HAS_REQUESTS:
@@ -395,38 +371,6 @@ class GitHubOpsTool(BaseTool):
             date=c['commit']['author']['date'],
             html_url=c['html_url']
         ) for c in data[:limit]]
-
-    def _list_workflows(self, owner: str, repo: str, token: Optional[str], limit: int) -> List[WorkflowRun]:
-        data = self._api_get(f"/repos/{owner}/{repo}/actions/runs", token, {"per_page": limit})
-        runs = data.get('workflow_runs', [])
-
-        return [WorkflowRun(
-            id=r['id'],
-            name=r['name'],
-            status=r['status'],
-            conclusion=r.get('conclusion'),
-            html_url=r['html_url'],
-            created_at=r['created_at'],
-            head_branch=r['head_branch']
-        ) for r in runs[:limit]]
-
-    def _search_code(self, query: str, owner: Optional[str], repo: Optional[str], token: Optional[str], limit: int) -> List[SearchResult]:
-        q = query
-        if owner and repo:
-            q += f" repo:{owner}/{repo}"
-        elif owner:
-            q += f" user:{owner}"
-
-        data = self._api_get("/search/code", token, {"q": q, "per_page": limit})
-        items = data.get('items', [])
-
-        return [SearchResult(
-            name=i['name'],
-            path=i['path'],
-            repository=i['repository']['full_name'],
-            html_url=i['html_url'],
-            score=i.get('score', 0)
-        ) for i in items[:limit]]
 
     def _api_post(self, endpoint: str, data: Dict, token: Optional[str] = None) -> Any:
         if not HAS_REQUESTS:
@@ -710,7 +654,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'list_workflows':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour list_workflows")
-            workflows = self._list_workflows(request.owner, request.repo, token, request.limit)
+            workflows = self._workflows.list_workflows(request.owner, request.repo, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -721,7 +665,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'workflow_runs':
             if not request.owner or not request.repo:
                 raise ToolExecutionError("owner et repo requis pour workflow_runs")
-            workflows = self._list_workflows(request.owner, request.repo, token, request.limit)
+            workflows = self._workflows.list_workflows(request.owner, request.repo, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,
@@ -732,7 +676,7 @@ class GitHubOpsTool(BaseTool):
         elif request.command == 'search_code':
             if not request.query:
                 raise ToolExecutionError("query requis pour search_code")
-            results = self._search_code(request.query, request.owner, request.repo, token, request.limit)
+            results = self._search.search_code(request.query, request.owner, request.repo, request.limit)
             return GitHubResponse(
                 success=True,
                 command=request.command,

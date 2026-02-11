@@ -6,7 +6,34 @@ from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
 from .shared import run_async_from_sync
-from .llm_helpers import DocumentationRequestBuilder
+
+
+# Documentation prompt building - extracted from llm_helpers
+STYLE_INSTRUCTIONS = {
+    "standard": "Génère une documentation claire et concise avec descriptions, paramètres et valeurs de retour",
+    "detailed": "Génère une documentation très détaillée avec exemples, cas d'usage et notes techniques",
+    "minimal": "Génère une documentation minimale avec seulement les informations essentielles",
+    "api": "Génère une documentation de style API avec format standardisé pour chaque fonction/classe",
+    "tutorial": "Génère une documentation de style tutoriel avec explications pédagogiques"
+}
+
+FORMAT_INSTRUCTIONS = {
+    "markdown": "Utilise le format Markdown avec en-têtes appropriés",
+    "rst": "Utilise le format reStructuredText",
+    "html": "Génère du HTML bien formaté",
+    "docstring": "Génère des docstrings dans le style du langage",
+    "json": "Retourne la documentation structurée en JSON"
+}
+
+LANGUAGE_INSTRUCTIONS = {
+    "python": "Utilise les conventions PEP 257 pour les docstrings, inclus les types avec les paramètres",
+    "javascript": "Utilise JSDoc format avec @param, @returns, @example",
+    "typescript": "Inclus les types TypeScript dans la documentation, utilise @param avec types",
+    "java": "Utilise Javadoc format avec @param, @return, @throws",
+    "c#": "Utilise XML documentation format avec <summary>, <param>, <returns>",
+    "go": "Utilise les conventions Go avec commentaires au-dessus des déclarations",
+    "rust": "Utilise les doc comments avec /// et inclus les exemples avec ```"
+}
 
 
 class DocumentationRequest(BaseModel):
@@ -30,6 +57,7 @@ class DocumentationResponse(BaseModel):
 class DocumentationTool(BaseTool):
     tool_name = "code_documentation"
     tool_description = "Génère automatiquement de la documentation pour le code dans différents formats"
+    tags = {"generation"}
     request_model = DocumentationRequest
     response_model = DocumentationResponse
     supported_languages = ["python", "javascript", "typescript", "java", "c#", "go", "rust", "php"]
@@ -183,34 +211,27 @@ class DocumentationTool(BaseTool):
         return True
 
     def _execute_core_logic(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
-        llm_manager = kwargs.get('llm_manager')
+        ctx = kwargs.get('ctx')
         parser = kwargs.get('parser')
 
         code_elements = self._analyze_code_elements(request.code, request.language, parser)
 
-        if llm_manager is not None:
+        if ctx:
             try:
-                context = {
-                    "code": request.code,
-                    "language": request.language,
-                    "doc_style": request.doc_style or "standard",
-                    "doc_format": request.doc_format or "markdown",
-                    "include_examples": str(request.include_examples),
-                    "focus_on": request.focus_on or "all",
-                    "file_path": request.file_path or "unknown",
-                    "code_elements": str(code_elements[:5]) if code_elements else "[]"
-                }
+                prompt = self._build_documentation_prompt(request, code_elements)
+                system_prompt = f"""Tu es un expert en documentation de code {request.language}.
+Génère une documentation claire, complète et bien structurée au format {request.doc_format or 'markdown'}.
+Style de documentation: {request.doc_style or 'standard'}."""
 
-                try:
-                    if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        prompt = run_async_from_sync(self.prepare_prompt(request, context=context))
-                    else:
-                        prompt = self.prepare_prompt(request, context=context)
-                except Exception as e:
-                    self.logger.debug(f"Fallback vers _build_documentation_prompt: {e}")
-                    prompt = self._build_documentation_prompt(request, code_elements)
+                # Use ctx.sample() via run_async_from_sync for sync context
+                result = run_async_from_sync(ctx.sample(
+                    messages=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.5,
+                    max_tokens=2000
+                ))
 
-                generated_docs = llm_manager.sync_generate(prompt)
+                generated_docs = result.text
 
                 formatted_docs = self._format_documentation(generated_docs, request.doc_format, request.language)
 
@@ -227,7 +248,7 @@ class DocumentationTool(BaseTool):
                 )
 
             except Exception as e:
-                self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
+                self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
                 return self._generate_fallback_documentation(request, code_elements, parser)
         else:
             return self._generate_fallback_documentation(request, code_elements, parser)
@@ -251,13 +272,14 @@ Style de documentation: {request.doc_style or 'standard'}."""
             await ctx.info("Génération de la documentation via LLM...")
 
         try:
-            generated_docs = await self.sample_llm(
-                prompt=prompt,
-                ctx=ctx,
-                llm_manager=llm_manager,
+            # Use ctx.sample() directly instead of sample_llm helper
+            result = await ctx.sample(
+                messages=prompt,
                 system_prompt=system_prompt,
-                temperature=0.5
+                temperature=0.5,
+                max_tokens=2000
             )
+            generated_docs = result.text
 
             if ctx:
                 await ctx.info("Documentation générée, formatage...")
@@ -399,19 +421,54 @@ Style de documentation: {request.doc_style or 'standard'}."""
         else:
             return "high"
 
-    def _build_documentation_prompt(self, request: DocumentationRequest, elements: List[Dict[str, str]]) -> str:
-        """Build documentation prompt using DocumentationRequestBuilder."""
-        builder = DocumentationRequestBuilder(tool_name="documentation")
+    def _build_documentation_prompt(self, request, elements: List[Dict[str, str]]) -> str:
+        """Build documentation prompt."""
+        language = request.language
+        style = request.doc_style or "standard"
+        format_type = request.doc_format or "markdown"
+        include_examples = request.include_examples or False
+        focus_on = request.focus_on or "all"
 
-        return (builder
-            .for_language(request.language)
-            .with_style(request.doc_style or "standard")
-            .with_format(request.doc_format or "markdown")
-            .with_examples(request.include_examples or False)
-            .focus_on(request.focus_on or "all")
-            .with_elements(elements)
-            .with_code(request.code, request.language)
-            .build())
+        # Build prompt parts
+        prompt_parts = [
+            f"Génère une documentation pour le code {language} suivant",
+            f"",
+            f"Style: {STYLE_INSTRUCTIONS.get(style, STYLE_INSTRUCTIONS['standard'])}",
+            f"Format: {FORMAT_INSTRUCTIONS.get(format_type, FORMAT_INSTRUCTIONS['markdown'])}",
+            f""
+        ]
+
+        # Add code block
+        prompt_parts.extend([
+            f"```{language}",
+            request.code,
+            f"```",
+            f""
+        ])
+
+        # Add elements if available
+        if elements:
+            prompt_parts.append("Éléments identifiés à documenter :")
+            for element in elements[:10]:
+                prompt_parts.append(f"- {element['type']}: {element['name']} (ligne {element['line_number']})")
+            prompt_parts.append("")
+
+        # Add focus instruction
+        if focus_on != "all":
+            prompt_parts.append(f"Concentre-toi sur les {focus_on}")
+            prompt_parts.append("")
+
+        # Add examples instruction
+        if include_examples:
+            prompt_parts.append("Inclus des exemples d'utilisation pratiques pour chaque élément principal")
+            prompt_parts.append("")
+
+        # Add language-specific instructions
+        lang_instructions = LANGUAGE_INSTRUCTIONS.get(language.lower(), "")
+        if lang_instructions:
+            prompt_parts.append(f"Instructions {language}: {lang_instructions}")
+
+        return "\n".join(prompt_parts)
 
     def _get_language_doc_instructions(self, language: str) -> str:
         instructions = {

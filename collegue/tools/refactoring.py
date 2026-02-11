@@ -1,13 +1,50 @@
 """
-Refactoring - Outil de refactoring et d'amélioration de code
+Refactoring - Outil de refactoring de code intelligent
 """
-import re
 import asyncio
+import re
 from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
 from .shared import run_async_from_sync
-from .llm_helpers import RefactoringRequestBuilder
+
+
+# Refactoring prompt building - extracted from llm_helpers
+REFACTORING_TYPES = {
+    "rename": "Renommer des variables, fonctions ou classes pour améliorer la clarté",
+    "extract": "Extraire du code en fonctions ou méthodes réutilisables",
+    "simplify": "Simplifier la logique complexe et les conditions imbriquées",
+    "optimize": "Optimiser les performances et l'efficacité",
+    "clean": "Nettoyer le code mort, imports inutilisés et code superflu",
+    "modernize": "Moderniser le code vers les patterns contemporains"
+}
+
+REFACTORING_LANGUAGE_INSTRUCTIONS = {
+    "python": {
+        "rename": "Utilise les conventions PEP 8 (snake_case, PascalCase)",
+        "extract": "Crée des fonctions avec type hints et docstrings",
+        "simplify": "Utilise comprehensions, walrus operator",
+        "optimize": "Utilise set, deque, évite les boucles inutiles",
+        "clean": "Supprime imports inutiles, utilise f-strings",
+        "modernize": "Utilise dataclasses, type hints, pathlib"
+    },
+    "javascript": {
+        "rename": "Utilise camelCase pour variables/fonctions",
+        "extract": "Crée des fonctions avec JSDoc, arrow functions",
+        "simplify": "Utilise destructuring, template literals",
+        "optimize": "Utilise Map/Set, évite les mutations",
+        "clean": "Supprime var, utilise const/let",
+        "modernize": "Utilise ES6+, async/await, modules ES6"
+    },
+    "typescript": {
+        "rename": "Utilise camelCase avec types explicites",
+        "extract": "Crée des fonctions typées avec génériques",
+        "simplify": "Utilise union types, optional chaining",
+        "optimize": "Types stricts, évite 'any'",
+        "clean": "Supprime types redondants",
+        "modernize": "Utilise strict mode, utility types"
+    }
+}
 
 
 class RefactoringRequest(BaseModel):
@@ -44,6 +81,7 @@ class LLMRefactoringResult(BaseModel):
 class RefactoringTool(BaseTool):
     tool_name = "code_refactoring"
     tool_description = "Refactorise et améliore le code selon différents types de transformations"
+    tags = {"generation", "quality"}
     request_model = RefactoringRequest
     response_model = RefactoringResponse
     supported_languages = ["python", "javascript", "typescript", "java", "c#"]
@@ -169,32 +207,27 @@ class RefactoringTool(BaseTool):
         return True
 
     def _execute_core_logic(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
-
-        llm_manager = kwargs.get('llm_manager')
+        ctx = kwargs.get('ctx')
         parser = kwargs.get('parser')
 
         original_metrics = self._analyze_code_metrics(request.code, request.language)
 
-        if llm_manager is not None:
+        if ctx:
             try:
-                context = {
-                    "code": request.code,
-                    "language": request.language,
-                    "refactoring_type": request.refactoring_type,
-                    "parameters": str(request.parameters) if request.parameters else "default settings",
-                    "file_path": request.file_path or "unknown"
-                }
+                prompt = self._build_refactoring_prompt(request)
+                system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
+Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.
+Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
-                try:
-                    if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        prompt = run_async_from_sync(self.prepare_prompt(request, context=context))
-                    else:
-                        prompt = self.prepare_prompt(request, context=context)
-                except Exception as e:
-                    self.logger.debug(f"Fallback vers _build_refactoring_prompt: {e}")
-                    prompt = self._build_refactoring_prompt(request)
+                # Use ctx.sample() via run_async_from_sync for sync context
+                result = run_async_from_sync(ctx.sample(
+                    messages=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.5,
+                    max_tokens=2000
+                ))
 
-                refactored_code = llm_manager.sync_generate(prompt)
+                refactored_code = result.text
                 new_metrics = self._analyze_code_metrics(refactored_code, request.language)
                 improvement_metrics = self._calculate_improvements(original_metrics, new_metrics)
                 changes = self._identify_changes(request, refactored_code)
@@ -211,7 +244,7 @@ class RefactoringTool(BaseTool):
                 )
 
             except Exception as e:
-                self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
+                self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
                 return self._perform_local_refactoring(request, parser)
         else:
             return self._perform_local_refactoring(request, parser)
@@ -239,46 +272,48 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             if ctx is not None and use_structured_output:
                 try:
                     self.logger.debug("Utilisation du structured output avec LLMRefactoringResult")
-                    llm_result = await self.sample_llm(
-                        prompt=prompt,
-                        ctx=ctx,
-                        llm_manager=llm_manager,
+                    # Use ctx.sample() directly with result_type for structured output
+                    llm_result = await ctx.sample(
+                        messages=prompt,
                         system_prompt=system_prompt,
                         result_type=LLMRefactoringResult,
-                        temperature=0.5
+                        temperature=0.5,
+                        max_tokens=2000
                     )
 
-                    if isinstance(llm_result, LLMRefactoringResult):
+                    if isinstance(llm_result.result, LLMRefactoringResult):
+                        result_data = llm_result.result
                         if ctx:
-                            await ctx.info(f"Structured output: {llm_result.changes_count} modifications")
+                            await ctx.info(f"Structured output: {result_data.changes_count} modifications")
 
                         changes = [{"type": area, "description": f"Amélioration: {area}"}
-                                   for area in llm_result.improved_areas]
+                                   for area in result_data.improved_areas]
 
                         improvement_metrics = {
-                            "complexity_reduction": llm_result.complexity_reduction,
-                            "changes_count": llm_result.changes_count,
-                            "improved_areas": llm_result.improved_areas
+                            "complexity_reduction": result_data.complexity_reduction,
+                            "changes_count": result_data.changes_count,
+                            "improved_areas": result_data.improved_areas
                         }
 
                         return RefactoringResponse(
-                            refactored_code=llm_result.refactored_code,
+                            refactored_code=result_data.refactored_code,
                             original_code=request.code,
                             language=request.language,
                             changes=changes,
-                            explanation=llm_result.changes_summary,
+                            explanation=result_data.changes_summary,
                             improvement_metrics=improvement_metrics
                         )
                 except Exception as e:
                     self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
 
-            refactored_code = await self.sample_llm(
-                prompt=prompt,
-                ctx=ctx,
-                llm_manager=llm_manager,
+            # Use ctx.sample() directly for text generation
+            result = await ctx.sample(
+                messages=prompt,
                 system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code refactoré.",
-                temperature=0.5
+                temperature=0.5,
+                max_tokens=2000
             )
+            refactored_code = result.text
 
             if ctx:
                 await ctx.info("Analyse des améliorations...")
@@ -301,16 +336,36 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._perform_local_refactoring(request, parser)
 
-    def _build_refactoring_prompt(self, request: RefactoringRequest) -> str:
-        """Build refactoring prompt using RefactoringRequestBuilder."""
-        builder = RefactoringRequestBuilder(tool_name="refactoring")
+    def _build_refactoring_prompt(self, request) -> str:
+        """Build refactoring prompt."""
+        language = request.language
+        refactoring_type = request.refactoring_type
+        code = request.code
 
-        return (builder
-            .refactor_as(request.refactoring_type)
-            .for_language(request.language)
-            .preserve_behavior(True)
-            .with_code(request.code, request.language)
-            .build())
+        refactoring_desc = REFACTORING_TYPES.get(refactoring_type, "Améliorer la qualité du code")
+
+        prompt_parts = [
+            f"Effectue un refactoring de type '{refactoring_type}'",
+            f"Description: {refactoring_desc}",
+            f"IMPORTANT: Préserve exactement le comportement du code original",
+            f"Langage: {language}",
+            f""
+        ]
+
+        # Add code block
+        prompt_parts.extend([
+            f"```{language}",
+            code,
+            f"```",
+            f""
+        ])
+
+        # Add language-specific instructions
+        lang_instructions = REFACTORING_LANGUAGE_INSTRUCTIONS.get(language.lower(), {})
+        if refactoring_type in lang_instructions:
+            prompt_parts.append(f"Conventions {language}: {lang_instructions[refactoring_type]}")
+
+        return "\n".join(prompt_parts)
 
     def _get_refactoring_instructions(self, language: str, refactoring_type: str) -> str:
         instructions = {

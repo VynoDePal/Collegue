@@ -181,6 +181,7 @@ class ImpactAnalysisTool(BaseTool):
 
     tool_name = "impact_analysis"
     tool_description = "Analyse l'impact d'un changement de code: fichiers impactés, risques, tests à lancer"
+    tags = {"analysis"}
     request_model = ImpactAnalysisRequest
     response_model = ImpactAnalysisResponse
     supported_languages = ["python", "typescript", "javascript", "java", "go", "rust", "ruby", "any"]
