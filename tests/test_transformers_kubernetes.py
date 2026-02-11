@@ -52,7 +52,7 @@ class TestFormatAge:
     def test_format_age_none(self):
         """Test avec valeur None."""
         result = _format_age(None)
-        assert result == "Unknown"
+        assert result == "N/A"
 
 
 class TestTransformPods:
@@ -69,18 +69,18 @@ class TestTransformPods:
             'metadata': {
                 'name': 'test-pod',
                 'namespace': 'default',
-                'creationTimestamp': '2024-01-01T00:00:00Z',
+                'creation_timestamp': '2024-01-01T00:00:00Z',
                 'labels': {'app': 'test'}
             },
             'status': {
                 'phase': 'Running',
-                'podIP': '10.0.0.1',
-                'containerStatuses': [
-                    {'name': 'container1', 'ready': True, 'restartCount': 0}
+                'pod_ip': '10.0.0.1',
+                'container_statuses': [
+                    {'name': 'container1', 'ready': True, 'restart_count': 0}
                 ]
             },
             'spec': {
-                'nodeName': 'node-1'
+                'node_name': 'node-1'
             }
         }]
         result = transform_pods(pod_data)
@@ -106,16 +106,16 @@ class TestTransformDeployments:
             'metadata': {
                 'name': 'test-deployment',
                 'namespace': 'default',
-                'creationTimestamp': '2024-01-01T00:00:00Z'
+                'creation_timestamp': '2024-01-01T00:00:00Z'
             },
             'spec': {
                 'replicas': 3,
-                'selector': {'matchLabels': {'app': 'test'}},
+                'selector': {'match_labels': {'app': 'test'}},
                 'strategy': {'type': 'RollingUpdate'}
             },
             'status': {
-                'readyReplicas': 2,
-                'availableReplicas': 2
+                'ready_replicas': 2,
+                'available_replicas': 2
             }
         }]
         result = transform_deployments(deployment_data)
@@ -139,12 +139,12 @@ class TestTransformServices:
             'metadata': {
                 'name': 'test-service',
                 'namespace': 'default',
-                'creationTimestamp': '2024-01-01T00:00:00Z'
+                'creation_timestamp': '2024-01-01T00:00:00Z'
             },
             'spec': {
                 'type': 'ClusterIP',
-                'clusterIP': '10.0.0.10',
-                'externalIPs': ['192.168.1.1'],
+                'cluster_ip': '10.0.0.10',
+                'external_ips': ['192.168.1.1'],
                 'ports': [{'port': 80}],
                 'selector': {'app': 'test'}
             }
@@ -226,7 +226,7 @@ class TestTransformNodes:
         node_data = [{
             'metadata': {
                 'name': 'test-node',
-                'creationTimestamp': '2024-01-01T00:00:00Z',
+                'creation_timestamp': '2024-01-01T00:00:00Z',
                 'labels': {
                     'node-role.kubernetes.io/master': 'true'
                 }
@@ -235,9 +235,9 @@ class TestTransformNodes:
                 'conditions': [
                     {'type': 'Ready', 'status': 'True'}
                 ],
-                'nodeInfo': {
-                    'kubeletVersion': 'v1.28.0',
-                    'osImage': 'Ubuntu 22.04'
+                'node_info': {
+                    'kubelet_version': 'v1.28.0',
+                    'os_image': 'Ubuntu 22.04'
                 },
                 'capacity': {
                     'cpu': '4',
