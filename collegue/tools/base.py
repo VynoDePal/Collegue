@@ -1,13 +1,14 @@
 """
 Base Tool - Classe de base pour tous les outils du projet Collègue
+
+Le timing, logging, error handling et caching sont gérés par les
+middleware FastMCP natifs configurés dans app.py.
 """
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type, Callable
-from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
-from datetime import datetime
 import asyncio
 
 
@@ -23,15 +24,6 @@ class ToolExecutionError(ToolError):
 class ToolConfigurationError(ToolError):
     pass
 
-class ToolMetrics(BaseModel):
-    tool_name: str
-    execution_time: float
-    success: bool
-    timestamp: datetime
-    input_size: Optional[int] = None
-    output_size: Optional[int] = None
-    error_message: Optional[str] = None
-
 class BaseTool(ABC):
     tool_name: str = ""
     tool_description: str = ""
@@ -39,29 +31,18 @@ class BaseTool(ABC):
     response_model: Optional[Type[BaseModel]] = None
     supported_languages: List[str] = ["python", "javascript", "typescript"]
     long_running: bool = False
+    tags: set = set()
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, app_state: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.app_state = app_state or {}
         self.logger = logging.getLogger(f"tools.{self.__class__.__name__}")
-        self.metrics: List[ToolMetrics] = []
 
         self.prompt_engine = self.app_state.get('prompt_engine')
         self.llm_manager = self.app_state.get('llm_manager')
         self.context_manager = self.app_state.get('context_manager')
 
-        self._setup_logging()
         self._validate_config()
-
-    def _setup_logging(self):
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-            self.logger.setLevel(self.config.get('log_level', logging.INFO))
 
     def _validate_config(self):
         required_configs = self.get_required_config_keys()
@@ -178,24 +159,6 @@ class BaseTool(ABC):
     def _execute_core_logic(self, request: BaseModel, **kwargs) -> BaseModel:
         pass
 
-    def _record_metrics(
-        self, start_time: datetime, success: bool,
-        request: Optional[BaseModel] = None, result: Optional[BaseModel] = None,
-        error_message: Optional[str] = None
-    ) -> float:
-        execution_time = (datetime.now() - start_time).total_seconds()
-        metrics = ToolMetrics(
-            tool_name=self.get_name(),
-            execution_time=execution_time,
-            success=success,
-            timestamp=start_time,
-            input_size=len(str(request)) if request else None,
-            output_size=len(str(result)) if result else None,
-            error_message=error_message,
-        )
-        self.metrics.append(metrics)
-        return execution_time
-
     def _validate_result(self, result: BaseModel) -> None:
         expected = self.get_response_model()
         if not isinstance(result, expected):
@@ -204,67 +167,31 @@ class BaseTool(ABC):
             )
 
     def execute(self, request: BaseModel, **kwargs) -> BaseModel:
-        start_time = datetime.now()
-        tool_name = self.get_name()
-
-        try:
-            self.logger.info(f"Début d'exécution de {tool_name}")
-            self.validate_request(request)
-            result = self._execute_core_logic(request, **kwargs)
-            self._validate_result(result)
-            execution_time = self._record_metrics(start_time, True, request, result)
-            self.logger.info(f"Exécution de {tool_name} réussie en {execution_time:.2f}s")
-            return result
-
-        except (ToolError, ValidationError) as e:
-            self._record_metrics(start_time, False, error_message=str(e))
-            self.logger.error(f"Erreur dans {tool_name}: {e}")
-            raise
-
-        except Exception as e:
-            error_msg = f"Erreur inattendue: {e}"
-            self._record_metrics(start_time, False, error_message=error_msg)
-            self.logger.error(f"Erreur inattendue dans {tool_name}: {e}")
-            raise ToolExecutionError(error_msg)
+        self.validate_request(request)
+        result = self._execute_core_logic(request, **kwargs)
+        self._validate_result(result)
+        return result
 
     async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
-        start_time = datetime.now()
-        tool_name = self.get_name()
         ctx = kwargs.get('ctx')
-        total_steps = 4
+        total_steps = 3
 
-        try:
-            self.logger.info(f"Début d'exécution async de {tool_name}")
-            if ctx:
-                await ctx.report_progress(progress=0, total=total_steps)
-            self.validate_request(request)
-            if ctx:
-                await ctx.report_progress(progress=1, total=total_steps)
+        if ctx:
+            await ctx.report_progress(progress=0, total=total_steps)
+        self.validate_request(request)
 
-            if hasattr(self, '_execute_core_logic_async'):
-                result = await self._execute_core_logic_async(request, **kwargs)
-            else:
-                result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
+        if ctx:
+            await ctx.report_progress(progress=1, total=total_steps)
 
-            if ctx:
-                await ctx.report_progress(progress=3, total=total_steps)
-            self._validate_result(result)
-            execution_time = self._record_metrics(start_time, True, request, result)
-            if ctx:
-                await ctx.report_progress(progress=total_steps, total=total_steps)
-            self.logger.info(f"Exécution async de {tool_name} réussie en {execution_time:.2f}s")
-            return result
+        if hasattr(self, '_execute_core_logic_async'):
+            result = await self._execute_core_logic_async(request, **kwargs)
+        else:
+            result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
 
-        except (ToolError, ValidationError) as e:
-            self._record_metrics(start_time, False, error_message=str(e))
-            self.logger.error(f"Erreur dans {tool_name}: {e}")
-            raise
-
-        except Exception as e:
-            error_msg = f"Erreur inattendue: {e}"
-            self._record_metrics(start_time, False, error_message=error_msg)
-            self.logger.error(f"Erreur inattendue dans {tool_name}: {e}")
-            raise ToolExecutionError(error_msg)
+        self._validate_result(result)
+        if ctx:
+            await ctx.report_progress(progress=total_steps, total=total_steps)
+        return result
 
     async def sample_llm(
         self,
@@ -277,39 +204,22 @@ class BaseTool(ABC):
     ) -> Any:
 
         if ctx is not None:
-            try:
-                self.logger.debug(f"Utilisation de ctx.sample() pour {self.get_name()}")
+            messages = prompt
+            if system_prompt:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
 
-
-                messages = prompt
-                if system_prompt:
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ]
-
-                if result_type:
-                    result = await ctx.sample(
-                        messages=messages,
-                        result_type=result_type,
-                        temperature=temperature
-                    )
-                    return result.result
-                else:
-                    result = await ctx.sample(
-                        messages=messages,
-                        temperature=temperature
-                    )
-                    return result.text or ""
-
-            except Exception as e:
-                self.logger.warning(f"ctx.sample() a échoué, fallback vers llm_manager: {e}")
+            result = await ctx.sample(
+                messages=messages,
+                result_type=result_type,
+                temperature=temperature
+            )
+            return result.result if result_type else (result.text or "")
 
         if llm_manager is not None:
-            self.logger.debug(f"Utilisation de ToolLLMManager pour {self.get_name()}")
             text = await llm_manager.async_generate(prompt, system_prompt)
-
-
             if result_type:
                 import json
                 try:
@@ -324,12 +234,6 @@ class BaseTool(ABC):
             "Aucun backend LLM disponible. Fournissez ctx (FastMCP) ou llm_manager."
         )
 
-    def get_metrics(self) -> List[ToolMetrics]:
-        return self.metrics.copy()
-
-    def clear_metrics(self):
-        self.metrics.clear()
-
     def get_info(self) -> Dict[str, Any]:
         return {
             "name": self.get_name(),
@@ -338,21 +242,11 @@ class BaseTool(ABC):
             "request_model": self.get_request_model().__name__,
             "response_model": self.get_response_model().__name__,
             "required_config": self.get_required_config_keys(),
-            "metrics_count": len(self.metrics),
-            "success_rate": self._calculate_success_rate(),
-
             "usage_description": self.get_usage_description(),
             "parameters": self.get_parameters_info(),
             "examples": self.get_examples(),
             "capabilities": self.get_capabilities()
         }
-
-    def _calculate_success_rate(self) -> float:
-        if not self.metrics:
-            return 0.0
-
-        successful = sum(1 for m in self.metrics if m.success)
-        return (successful / len(self.metrics)) * 100.0
 
     def get_usage_description(self) -> str:
         return f"Outil {self.get_name()}: {self.get_description()}"
@@ -381,74 +275,3 @@ class BaseTool(ABC):
                 "expected_response": "Réponse selon la logique de l'outil"
             }
         ]
-
-    async def execute_with_llm_fallback(
-        self,
-        request: BaseModel,
-        llm_manager: Optional[Any],
-        context_builder: Callable[[BaseModel], Dict[str, Any]],
-        llm_processor: Callable[[str], BaseModel],
-        fallback: Callable[[BaseModel], BaseModel],
-        ctx: Optional[Any] = None,
-        timeout: int = 30
-    ) -> BaseModel:
-
-        if llm_manager is None:
-            self.logger.debug("LLM manager non disponible, utilisation du fallback")
-            return fallback(request)
-
-        try:
-            if ctx:
-                await ctx.info("Préparation du prompt...")
-
-            context = context_builder(request)
-
-            if asyncio.iscoroutinefunction(self.prepare_prompt):
-                prompt = await self.prepare_prompt(request, context=context)
-            else:
-                prompt = self.prepare_prompt(request, context=context)
-
-            if ctx:
-                await ctx.info("Génération via LLM...")
-
-            raw_response = llm_manager.sync_generate(prompt)
-            result = llm_processor(raw_response)
-
-            if ctx:
-                await ctx.info("Traitement terminé")
-
-            return result
-
-        except Exception as e:
-            self.logger.warning(f"Erreur LLM, fallback local: {e}")
-            if ctx:
-                await ctx.info(f"Fallback: {str(e)[:50]}")
-            return fallback(request)
-
-    @asynccontextmanager
-    async def progress_tracker(self, ctx: Optional[Any], total_steps: int):
-        class Progress:
-            def __init__(self, tool, ctx, total):
-                self.tool = tool
-                self.ctx = ctx
-                self.total = total
-                self._step = 0
-
-            @property
-            def step(self):
-                return self._step
-
-            @step.setter
-            def step(self, value):
-                self._step = value
-                if self.ctx:
-                    asyncio.create_task(
-                        self.ctx.report_progress(progress=value, total=self.total)
-                    )
-
-        progress = Progress(self, ctx, total_steps)
-        if ctx:
-            await ctx.report_progress(progress=0, total=total_steps)
-        yield progress
-        if ctx:
-            await ctx.report_progress(progress=total_steps, total=total_steps)

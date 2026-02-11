@@ -207,6 +207,7 @@ class KubernetesOpsTool(BaseTool):
 
     tool_name = "kubernetes_ops"
     tool_description = "Inspecte les clusters Kubernetes: pods, logs, déploiements, services, événements"
+    tags = {"integration", "devops"}
     request_model = KubernetesRequest
     response_model = KubernetesResponse
     supported_languages = ["yaml"]

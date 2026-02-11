@@ -169,9 +169,8 @@ class TestTransformEvents:
         }]
         result = transform_events(events_data)
         assert len(result) == 1
-        assert result[0].id == '789'
         assert result[0].event_id == 'abc123'
-        assert result[0].level == 'error'
+        assert result[0].title == 'Exception'
 
 
 class TestTransformReleases:

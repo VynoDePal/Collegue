@@ -1,39 +1,35 @@
 """
 Resources - Ressources de référence pour les langages et frameworks
 """
+import os
+import logging
 
-def register_resources(app, app_state):
-    """Enregistre les ressources dans l'application FastMCP."""
-    
-    import os
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    modules = ['language_references.py', 'framework_docs.py']
-    for module in modules:
-        module_path = os.path.join(current_dir, module)
-        if not os.path.exists(module_path):
-            with open(module_path, 'w') as f:
-                f.write(f'"""\n{module[:-3].replace("_", " ").title()} - Module à implémenter\n"""\n\ndef register(app, app_state):\n    """Enregistre les fonctionnalités dans l\'application FastMCP."""\n    pass\n')
-    
-    if "resource_manager" not in app_state:
-        from collegue.core.resource_manager import ResourceManager
-        app_state["resource_manager"] = ResourceManager()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def register_resources(app):
+    """
+    Enregistre les ressources MCP (langages, frameworks, skills).
+    Les sous-modules reçoivent un dict vide pour rétrocompatibilité.
+    """
+    _compat = {}
     
     try:
         from .python import register as register_python
-        register_python(app, app_state)
+        register_python(app, _compat)
         
         from .javascript import register as register_javascript
-        register_javascript(app, app_state)
+        register_javascript(app, _compat)
         
         from .typescript import register as register_typescript
-        register_typescript(app, app_state)
+        register_typescript(app, _compat)
         
         from .llm import register as register_llm
-        register_llm(app, app_state)
+        register_llm(app, _compat)
         
         from .skills import register_skills
-        register_skills(app, app_state)
+        register_skills(app, _compat)
         
         print("✅ Toutes les ressources ont été chargées avec succès")
         

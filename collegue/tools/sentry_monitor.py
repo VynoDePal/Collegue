@@ -207,6 +207,7 @@ class SentryMonitorTool(BaseTool):
 
     tool_name = "sentry_monitor"
     tool_description = "Récupère les erreurs, stacktraces et statistiques depuis Sentry pour prioriser le debugging"
+    tags = {"integration", "monitoring"}
     request_model = SentryRequest
     response_model = SentryResponse
     supported_languages = []

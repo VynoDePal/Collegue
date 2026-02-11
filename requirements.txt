@@ -1,4 +1,4 @@
-fastmcp>=2.14.0,<3
+fastmcp[tasks,openai]==3.0.0b2
 fastapi>=0.116.1
 uvicorn>=0.35.0
 pydantic==2.12.5
@@ -13,4 +13,6 @@ google-genai>=1.62.0
 requests>=2.31.0
 psycopg2-binary>=2.9.9
 kubernetes>=29.0.0
-sentry-sdk==2.49.0
+sentry-sdk[opentelemetry]==2.49.0
+opentelemetry-sdk>=1.28.0
+opentelemetry-api>=1.28.0

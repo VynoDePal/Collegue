@@ -265,10 +265,10 @@ class TestToolsIntegration(unittest.TestCase):
     """Tests d'intégration des outils de sécurité."""
 
     def test_all_tools_registered(self):
-        from collegue.tools import get_registry
+        from collegue.tools import _discover_tools
 
-        registry = get_registry()
-        tool_names = registry.list_tools()
+        tool_classes = _discover_tools()
+        tool_names = [cls.__name__ for cls in tool_classes]
 
         self.assertIn('SecretScanTool', tool_names)
         self.assertIn('DependencyGuardTool', tool_names)

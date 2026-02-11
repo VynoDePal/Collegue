@@ -148,6 +148,7 @@ class RunTestsTool(BaseTool):
 
     tool_name = "run_tests"
     tool_description = "Exécute des tests unitaires (pytest, unittest, jest, mocha) et retourne des résultats structurés"
+    tags = {"testing"}
     request_model = RunTestsRequest
     response_model = RunTestsResponse
     supported_languages = ["python", "typescript", "javascript"]

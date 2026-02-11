@@ -1,157 +1,182 @@
-import json
+"""
+Skills Provider - Migration vers FastMCP 3.0 SkillsDirectoryProvider
+"""
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def _get_skills_dir() -> Path:
-	candidates = []
+def get_skills_dir() -> Path:
+    """
+    Trouve le dossier skills/ en utilisant les mêmes priorités que l'ancien système
+    """
+    import os
+    
+    candidates = []
+    
+    env_path = os.environ.get('COLLEGUE_SKILLS_DIR')
+    if env_path:
+        candidates.append(("env", Path(env_path)))
+    
+    candidates.append(("__file__", Path(__file__).resolve().parent.parent.parent / "skills"))
+    candidates.append(("cwd", Path.cwd() / "skills"))
+    candidates.append(("workdir", Path("/app/skills")))
+    
+    for label, path in candidates:
+        if path.is_dir():
+            logger.info("SKILLS_DIR résolu via %s: %s", label, path)
+            return path
+    
+    logger.error(
+        "Dossier skills/ introuvable! Chemins testés: %s",
+        ", ".join(f"{label}={path}" for label, path in candidates),
+    )
+    return candidates[1][1]
 
-	env_path = os.environ.get('COLLEGUE_SKILLS_DIR')
-	if env_path:
-		candidates.append(("env", Path(env_path)))
 
-	candidates.append(("__file__", Path(__file__).resolve().parent.parent.parent / "skills"))
-	candidates.append(("cwd", Path.cwd() / "skills"))
-	candidates.append(("workdir", Path("/app/skills")))
+def register_skills(app: Any, app_state: dict):
+    """
+    Enregistre les skills en utilisant FastMCP SkillsDirectoryProvider (3.0+)
+    """
+    try:
+        # Tenter d'importer SkillsDirectoryProvider (FastMCP 3.0+)
+        from fastmcp.server.providers.skills import SkillsDirectoryProvider
+        
+        skills_dir = get_skills_dir()
+        
+        if skills_dir.is_dir():
+            # Ajouter le provider FastMCP natif
+            app.add_provider(SkillsDirectoryProvider(roots=skills_dir))
+            logger.info(f"SkillsProvider FastMCP enregistré avec le dossier: {skills_dir}")
+            
+            # Compter les skills pour information
+            skill_count = len([d for d in skills_dir.iterdir() if d.is_dir() and (d / "SKILL.md").exists()])
+            print(f"✅ {skill_count} skills chargés via SkillsProvider FastMCP")
+        else:
+            logger.warning(f"Dossier skills introuvable: {skills_dir}")
+            
+    except ImportError:
+        # Fallback: utiliser l'ancien système si FastMCP 3.0 n'est pas disponible
+        logger.warning("SkillsProvider FastMCP 3.0 non disponible, utilisation du fallback")
+        _register_skills_fallback(app, app_state)
 
-	for label, path in candidates:
-		if path.is_dir():
-			logger.info("SKILLS_DIR résolu via %s: %s", label, path)
-			return path
 
-	logger.error(
-		"Dossier skills/ introuvable! Chemins testés: %s",
-		", ".join(f"{label}={path}" for label, path in candidates),
-	)
-	return candidates[1][1]
-
-
-SKILLS_DIR = _get_skills_dir()
-def _discover_skills() -> Dict[str, Dict[str, Any]]:
-	skills: Dict[str, Dict[str, Any]] = {}
-	if not SKILLS_DIR.is_dir():
-		logger.warning("Dossier skills/ introuvable: %s", SKILLS_DIR)
-		return skills
-	for entry in sorted(SKILLS_DIR.iterdir()):
-		if not entry.is_dir():
-			continue
-		skill_md = entry / "SKILL.md"
-		if not skill_md.exists():
-			continue
-		skill_name = entry.name
-		annexes: List[str] = []
-		for f in sorted(entry.rglob("*")):
-			if f.is_file() and f.name != "SKILL.md":
-				rel = f.relative_to(entry)
-				annexes.append(str(rel))
-		description = _extract_description(skill_md)
-		skills[skill_name] = {
-			"name": skill_name,
-			"description": description,
-			"files": ["SKILL.md"] + annexes,
-		}
-	return skills
-def _extract_description(skill_md: Path) -> str:
-	try:
-		text = skill_md.read_text(encoding="utf-8")
-		if text.startswith("---"):
-			parts = text.split("---", 2)
-			if len(parts) >= 3:
-				for line in parts[1].splitlines():
-					line = line.strip()
-					if line.startswith("description:"):
-						desc = line[len("description:"):].strip()
-						return desc[:200]
-		for line in text.splitlines():
-			stripped = line.strip()
-			if stripped.startswith("# "):
-				return stripped[2:].strip()[:200]
-	except Exception:
-		pass
-	return "Skill Collègue"
-def _read_skill_file(skill_name: str, file_path: str) -> Optional[str]:
-	target = (SKILLS_DIR / skill_name / file_path).resolve()
-	if not str(target).startswith(str(SKILLS_DIR)):
-		logger.warning("Path traversal détecté: %s", file_path)
-		return None
-	if not target.is_file():
-		return None
-	try:
-		return target.read_text(encoding="utf-8")
-	except Exception as e:
-		logger.error("Erreur lecture %s: %s", target, e)
-		return None
-def _register_annex(app: Any, skill_name: str, file_name: str) -> None:
-	uri = f"collegue://skills/{skill_name}/{file_name}"
-	resource_name = f"skill_{skill_name}_{file_name.replace('/', '_').replace('.', '_')}"
-	resource_desc = f"Fichier annexe '{file_name}' du skill '{skill_name}'."
-
-	@app.resource(
-		uri,
-		name=resource_name,
-		description=resource_desc,
-	)
-	def _read_annex() -> str:
-		content = _read_skill_file(skill_name, file_name)
-		if content is None:
-			return json.dumps(
-				{"error": f"Fichier '{file_name}' introuvable"},
-				ensure_ascii=False,
-			)
-		return content
-def register_skills(app: Any, app_state: Any) -> None:
-	skills_index = _discover_skills()
-	logger.info(
-		"Skills découverts: %s",
-		list(skills_index.keys()),
-	)
-	@app.resource(
-		"collegue://skills",
-		name="get_skills_index",
-		description="Liste tous les skills Collègue disponibles (code-review, security-audit, refactoring, CI/CD, toolkit).",
-	)
-	def get_skills_index() -> str:
-		refreshed = _discover_skills()
-		return json.dumps(
-			{
-				"skills": list(refreshed.values()),
-				"total": len(refreshed),
-				"usage": (
-					"Lisez un skill via collegue://skills/{name} "
-					"ou un fichier annexe via "
-					"collegue://skills/{name}/{file}"
-				),
-			},
-			ensure_ascii=False,
-			indent=2,
-		)
-	@app.resource(
-		"collegue://skills/{skill_name}",
-		name="get_skill_content",
-		description="Récupère le contenu complet d'un skill par son nom (ex: code-review, security-audit, collegue-toolkit).",
-	)
-	def get_skill_main(skill_name: str) -> str:
-		content = _read_skill_file(skill_name, "SKILL.md")
-		if content is None:
-			return json.dumps(
-				{
-					"error": f"Skill '{skill_name}' non trouvé",
-					"available": list(_discover_skills().keys()),
-				},
-				ensure_ascii=False,
-			)
-		return content
-	for skill_name, skill_info in skills_index.items():
-		for file_name in skill_info["files"]:
-			if file_name == "SKILL.md":
-				continue
-			_register_annex(app, skill_name, file_name)
-	count = len(skills_index)
-	logger.info(
-		"%d skill(s) enregistré(s) comme MCP Resources", count,
-	)
-	print(f"  📚 {count} skill(s) exposé(s) comme MCP Resources")
+def _register_skills_fallback(app: Any, app_state: dict):
+    """
+    Fallback utilisant l'ancien système de resources MCP
+    """
+    import json
+    from typing import Dict, List
+    
+    skills_dir = get_skills_dir()
+    
+    def _discover_skills() -> Dict[str, Dict[str, Any]]:
+        skills: Dict[str, Dict[str, Any]] = {}
+        if not skills_dir.is_dir():
+            return skills
+            
+        for entry in sorted(skills_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.exists():
+                continue
+                
+            skill_name = entry.name
+            annexes: List[str] = []
+            for f in sorted(entry.rglob("*")):
+                if f.is_file() and f.name != "SKILL.md":
+                    rel = f.relative_to(entry)
+                    annexes.append(str(rel))
+            
+            skills[skill_name] = {
+                "name": skill_name,
+                "path": str(entry),
+                "annexes": annexes
+            }
+        
+        return skills
+    
+    def _extract_description(skill_md_path: Path) -> str:
+        try:
+            with open(skill_md_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Extraire la description du frontmatter YAML
+            if content.startswith('---'):
+                end_idx = content.find('---', 3)
+                if end_idx != -1:
+                    frontmatter = content[3:end_idx]
+                    for line in frontmatter.split('\n'):
+                        if line.startswith('description:'):
+                            return line.split(':', 1)[1].strip().strip('"')
+            
+            # Fallback: première ligne du contenu
+            lines = content[end_idx + 3:].strip().split('\n') if '---' in content else content.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    return line[:100] + "..." if len(line) > 100 else line
+            
+            return "Skill sans description"
+            
+        except Exception:
+            return "Skill sans description"
+    
+    def _register_annex(app, skill_name: str, skill_path: Path, annex_file: str):
+        relative_path = f"{skill_name}/{annex_file}"
+        full_path = skill_path / annex_file
+        
+        @app.resource(uri=f"collegue://skills/{relative_path}")
+        def get_annex():
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except Exception as e:
+                return f"Erreur lecture {annex_file}: {e}"
+        
+        # Renommer la fonction pour éviter les conflits
+        get_annex.__name__ = f"get_{skill_name}_{annex_file.replace('/', '_')}"
+    
+    skills = _discover_skills()
+    
+    # Enregistrer l'index des skills
+    @app.resource(uri="collegue://skills")
+    def list_skills():
+        return json.dumps({
+            "skills": [
+                {
+                    "name": name,
+                    "description": _extract_description(Path(info["path"]) / "SKILL.md"),
+                    "annexes": info["annexes"]
+                }
+                for name, info in skills.items()
+            ]
+        }, indent=2)
+    
+    # Enregistrer chaque skill et ses annexes
+    for skill_name, info in skills.items():
+        skill_path = Path(info["path"])
+        skill_md = skill_path / "SKILL.md"
+        
+        @app.resource(uri=f"collegue://skills/{skill_name}")
+        def get_skill():
+            try:
+                with open(skill_md, 'r', encoding='utf-8') as f:
+                    return f.read()
+            except Exception as e:
+                return f"Erreur lecture SKILL.md: {e}"
+        
+        # Renommer la fonction pour éviter les conflits
+        get_skill.__name__ = f"get_{skill_name}"
+        
+        # Enregistrer les fichiers annexes
+        for annex_file in info["annexes"]:
+            _register_annex(app, skill_name, skill_path, annex_file)
+    
+    if skills:
+        print(f"✅ {len(skills)} skills chargés via fallback MCP resources")
+    else:
+        print("⚠️ Aucun skill trouvé")

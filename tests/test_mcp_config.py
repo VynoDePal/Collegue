@@ -52,20 +52,18 @@ def test_config_priority():
         print(f"   - Modèle depuis ENV: {settings.llm_model}")
         print(f"   - API Key depuis ENV: {settings.llm_api_key[:20]}...")
 
-        print("\n3. Test avec paramètres MCP (priorité max):")
-        mcp_params = {
-            "LLM_MODEL": "gemini-3-flash-preview",
-            "LLM_API_KEY": "AIzaSy-mcp-test-key"
-        }
+        print("\n3. Test avec paramètres ENV (priorité ENV > DEFAULT):")
+        os.environ["LLM_MODEL"] = "gemini-3-flash-preview"
+        os.environ["LLM_API_KEY"] = "AIzaSy-mcp-test-key"
 
-        settings.update_from_mcp(mcp_params)
-        print(f"   - Modèle depuis MCP: {settings.llm_model}")
-        print(f"   - API Key depuis MCP: {settings.llm_api_key[:20]}...")
+        settings = Settings()
+        print(f"   - Modèle depuis ENV: {settings.llm_model}")
+        print(f"   - API Key depuis ENV: {settings.llm_api_key[:20]}...")
 
-        assert settings.llm_model == "gemini-3-flash-preview", "MCP devrait avoir priorité sur ENV"
-        assert settings.llm_api_key == "AIzaSy-mcp-test-key", "MCP API key devrait avoir priorité"
+        assert settings.llm_model == "gemini-3-flash-preview", "ENV devrait overrider DEFAULT"
+        assert settings.llm_api_key == "AIzaSy-mcp-test-key", "ENV API key devrait overrider DEFAULT"
 
-        print("\n✅ Test de priorité réussi: MCP > ENV > DEFAULT")
+        print("\n✅ Test de priorité réussi: ENV > DEFAULT")
 
     finally:
         if original_env_model:
@@ -116,12 +114,9 @@ def test_different_models():
 
         try:
 
+            os.environ["LLM_MODEL"] = model_info["model"]
+            os.environ["LLM_API_KEY"] = test_api_key
             settings = Settings()
-            mcp_params = {
-                "LLM_MODEL": model_info["model"],
-                "LLM_API_KEY": test_api_key
-            }
-            settings.update_from_mcp(mcp_params)
 
 
             assert settings.llm_model == model_info["model"]
@@ -190,8 +185,9 @@ def simulate_windsurf_config():
         if 'LLM_API_KEY' in collegue_config:
             mcp_params['LLM_API_KEY'] = collegue_config['LLM_API_KEY']
 
+        for k, v in mcp_params.items():
+            os.environ[k] = v
         settings = Settings()
-        settings.update_from_mcp(mcp_params)
 
         print(f"\n   Résultat:")
         if mcp_params:
@@ -208,9 +204,8 @@ def test_error_handling():
     print("="*60)
 
     print("\n1. Test sans clé API:")
+    os.environ.pop("LLM_API_KEY", None)
     settings = Settings()
-    settings._mcp_llm_api_key = None
-    settings.LLM_API_KEY = None
 
     try:
         manager = ToolLLMManager(settings)
@@ -219,12 +214,9 @@ def test_error_handling():
         print(f"   ✅ Erreur correctement levée: {str(e)}")
 
     print("\n2. Test avec modèle invalide:")
+    os.environ["LLM_MODEL"] = "gemini-3-flash-preview"
+    os.environ["LLM_API_KEY"] = "AIzaSy-test"
     settings = Settings()
-    mcp_params = {
-        "LLM_MODEL": "gemini-3-flash-preview",
-        "LLM_API_KEY": "AIzaSy-test"
-    }
-    settings.update_from_mcp(mcp_params)
 
     try:
         manager = ToolLLMManager(settings)

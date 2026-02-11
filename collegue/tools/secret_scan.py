@@ -220,6 +220,7 @@ class SecretScanTool(BaseTool):
 
     tool_name = "secret_scan"
     tool_description = "Scanne le code pour détecter les secrets exposés (clés API, tokens, mots de passe)"
+    tags = {"security", "analysis"}
     request_model = SecretScanRequest
     response_model = SecretScanResponse
     supported_languages = [

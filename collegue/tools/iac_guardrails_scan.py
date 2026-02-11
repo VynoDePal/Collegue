@@ -177,6 +177,7 @@ class IacGuardrailsScanTool(BaseTool):
 
     tool_name = "iac_guardrails_scan"
     tool_description = "Scanne Terraform/K8s/Dockerfile pour détecter les configurations dangereuses (least privilege)"
+    tags = {"security", "analysis", "devops"}
     request_model = IacGuardrailsRequest
     response_model = IacGuardrailsResponse
     supported_languages = ["terraform", "kubernetes", "dockerfile", "yaml", "hcl", "tf"]

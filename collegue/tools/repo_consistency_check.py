@@ -153,6 +153,7 @@ class ConsistencyCheckResponse(BaseModel):
 class RepoConsistencyCheckTool(BaseTool):
     tool_name = "repo_consistency_check"
     tool_description = "Détecte les incohérences dans le code: imports/variables inutilisés, code mort, duplication"
+    tags = {"analysis", "quality"}
     request_model = ConsistencyCheckRequest
     response_model = ConsistencyCheckResponse
     supported_languages = ["python", "typescript", "javascript", "auto"]
