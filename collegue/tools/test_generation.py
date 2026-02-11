@@ -87,6 +87,7 @@ class LLMTestGenerationResult(BaseModel):
 class TestGenerationTool(BaseTool):
     tool_name = "test_generation"
     tool_description = "Génère automatiquement des tests unitaires pour du code source"
+    tags = {"generation", "testing"}
     request_model = TestGenerationRequest
     response_model = TestGenerationResponse
     supported_languages = ["python", "javascript", "typescript", "java", "c#"]
@@ -322,35 +323,28 @@ class TestGenerationTool(BaseTool):
                     self.logger.warning(f"Impossible de supprimer le répertoire temporaire: {e}")
 
     def _execute_core_logic(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
-        llm_manager = kwargs.get('llm_manager')
+        ctx = kwargs.get('ctx')
         parser = kwargs.get('parser')
 
         self.validate_language(request.language)
 
-        if llm_manager is not None:
+        if ctx:
             try:
                 framework = request.test_framework or self._get_default_test_framework(request.language)
-                context = {
-                    "code": request.code,
-                    "language": request.language,
-                    "test_framework": framework,
-                    "include_mocks": str(request.include_mocks),
-                    "coverage_target": str(int(request.coverage_target * 100)) + "%" if request.coverage_target else "80%",
-                    "file_path": request.file_path or "unknown"
-                }
-                
-                try:
-                    if asyncio.iscoroutinefunction(self.prepare_prompt):
-                        prompt = run_async_from_sync(self.prepare_prompt(request, context=context))
-                    else:
-                        prompt = self.prepare_prompt(request, context=context)
-                except Exception as e:
-                    self.logger.debug(f"Fallback vers _build_test_generation_prompt: {e}")
-                    prompt = self._build_test_generation_prompt(request)
-                
-                generated_tests = llm_manager.sync_generate(prompt)
+                prompt = self._build_test_generation_prompt(request)
+                system_prompt = f"""Tu es un expert en tests unitaires {request.language} avec {framework}.
+Génère des tests complets, bien structurés et couvrant les cas limites."""
 
-                framework = request.test_framework or self._get_default_test_framework(request.language)
+                # Use ctx.sample() via run_async_from_sync for sync context
+                result = run_async_from_sync(ctx.sample(
+                    messages=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.5,
+                    max_tokens=2500
+                ))
+
+                generated_tests = result.text
+
                 tested_elements = self._extract_tested_elements(request.code, request.language, parser)
                 estimated_coverage = self._estimate_coverage(tested_elements, request.code, request.coverage_target)
                 test_file_path = None
@@ -380,7 +374,7 @@ class TestGenerationTool(BaseTool):
                     validation_result=validation_result
                 )
             except Exception as e:
-                self.logger.warning(f"Erreur avec LLM, utilisation du fallback: {e}")
+                self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
                 return self._generate_fallback_tests(request, parser)
         else:
             return self._generate_fallback_tests(request, parser)
@@ -406,25 +400,26 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
             if ctx is not None and use_structured_output:
                 try:
                     self.logger.debug("Utilisation du structured output avec LLMTestGenerationResult")
-                    llm_result = await self.sample_llm(
-                        prompt=prompt,
-                        ctx=ctx,
-                        llm_manager=llm_manager,
+                    # Use ctx.sample() directly with result_type for structured output
+                    llm_result = await ctx.sample(
+                        messages=prompt,
                         system_prompt=system_prompt,
                         result_type=LLMTestGenerationResult,
-                        temperature=0.5
+                        temperature=0.5,
+                        max_tokens=2500
                     )
                     
-                    if isinstance(llm_result, LLMTestGenerationResult):
-                        generated_tests = llm_result.test_code
+                    if isinstance(llm_result.result, LLMTestGenerationResult):
+                        result_data = llm_result.result
+                        generated_tests = result_data.test_code
                         tested_elements = []
-                        for func in llm_result.tested_functions:
+                        for func in result_data.tested_functions:
                             tested_elements.append({"type": "function", "name": func})
-                        for cls in llm_result.tested_classes:
+                        for cls in result_data.tested_classes:
                             tested_elements.append({"type": "class", "name": cls})
                         
                         if ctx:
-                            await ctx.info(f"Structured output: {llm_result.test_count} tests générés")
+                            await ctx.info(f"Structured output: {result_data.test_count} tests générés")
                         
                         test_file_path = None
                         if request.file_path and request.output_dir:
@@ -449,20 +444,21 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                             language=request.language,
                             framework=framework,
                             test_file_path=test_file_path,
-                            estimated_coverage=llm_result.coverage_estimate,
+                            estimated_coverage=result_data.coverage_estimate,
                             tested_elements=tested_elements,
                             validation_result=validation_result
                         )
                 except Exception as e:
                     self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
             
-            generated_tests = await self.sample_llm(
-                prompt=prompt,
-                ctx=ctx,
-                llm_manager=llm_manager,
+            # Use ctx.sample() directly for text generation
+            result = await ctx.sample(
+                messages=prompt,
                 system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code de test, sans explications.",
-                temperature=0.5
+                temperature=0.5,
+                max_tokens=2500
             )
+            generated_tests = result.text
             
             if ctx:
                 await ctx.info("Tests générés, analyse...")
