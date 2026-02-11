@@ -117,6 +117,7 @@ class DependencyGuardTool(BaseTool):
 
     tool_name = "dependency_guard"
     tool_description = "Valide les dépendances d'un projet (existence, versions, vulnérabilités, supply chain)"
+    tags = {"security", "analysis"}
     request_model = DependencyGuardRequest
     response_model = DependencyGuardResponse
     supported_languages = ["python", "typescript", "javascript"]
