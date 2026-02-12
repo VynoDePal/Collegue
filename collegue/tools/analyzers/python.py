@@ -8,16 +8,14 @@ Analyzes Python code for:
 """
 import ast
 import re
-from typing import List, Dict, Any, Optional, Set, Tuple
-from .base import BaseAnalyzer, AnalyzerError
-from ..shared import ConsistencyIssue
+from typing import List
+from .base import BaseAnalyzer
+from ...core.shared import ConsistencyIssue
 
 
 class PythonAnalyzer(BaseAnalyzer):
-	"""Analyzer for Python code."""
 
 	def analyze_unused_imports(self, code: str, filepath: str) -> List[ConsistencyIssue]:
-		"""Detect unused imports in Python code."""
 		issues = []
 		try:
 			tree = ast.parse(code)
@@ -60,7 +58,6 @@ class PythonAnalyzer(BaseAnalyzer):
 		return issues
 
 	def analyze_unused_vars(self, code: str, filepath: str) -> List[ConsistencyIssue]:
-		"""Detect unused variables in Python code."""
 		issues = []
 		try:
 			tree = ast.parse(code)
@@ -93,7 +90,6 @@ class PythonAnalyzer(BaseAnalyzer):
 		return issues
 
 	def _is_in_import_statement(self, pos: int, code: str) -> bool:
-		"""Check if position is within an import statement."""
 		lines = code[:pos].split('\n')
 		if not lines:
 			return False
@@ -101,7 +97,6 @@ class PythonAnalyzer(BaseAnalyzer):
 		return bool(re.match(r'^\s*(from\s+\S+\s+)?import\s', current_line))
 
 	def analyze_dead_code(self, code: str, filepath: str, all_contents: str = None) -> List[ConsistencyIssue]:
-		"""Detect dead code (unused functions/classes) in Python."""
 		issues = []
 		try:
 			tree = ast.parse(code)
