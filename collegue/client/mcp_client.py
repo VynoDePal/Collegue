@@ -39,7 +39,7 @@ class CollegueClient:
             self.config = {
                 "mcpServers": {
                     "collegue": {
-                        "command": "python",
+                        "command": sys.executable,
                         "args": [server_path]
                     }
                 }
@@ -61,7 +61,7 @@ class CollegueClient:
                 self.config = {
                     "mcpServers": {
                         "collegue": {
-                            "command": "python",
+                            "command": sys.executable,
                             "args": [server_path]
                         }
                     }
@@ -91,6 +91,60 @@ class CollegueClient:
         
         tools = await self.client.list_tools()
         return [tool.name for tool in tools]
+    
+    async def create_session(self) -> Dict[str, Any]:
+        if not self.client:
+            raise RuntimeError("Le client n'est pas initialisé. Utilisez 'async with CollegueClient() as client:'")
+        result = await self.client.call_tool('create_session', {})
+        data = result.data
+        if isinstance(data, dict) and data.get('session_id'):
+            self.session_id = data['session_id']
+        return data
+
+    async def get_session_context(self) -> Dict[str, Any]:
+        if not self.client:
+            raise RuntimeError("Le client n'est pas initialisé. Utilisez 'async with CollegueClient() as client:'")
+        if not self.session_id:
+            raise RuntimeError('session_id non défini')
+        result = await self.client.call_tool(
+            'get_session_context',
+            {
+                'request': {
+                    'session_id': self.session_id,
+                }
+            },
+        )
+        return result.data
+
+    async def analyze_code(self, code: str, language: str, file_path: str) -> Dict[str, Any]:
+        if not self.client:
+            raise RuntimeError("Le client n'est pas initialisé. Utilisez 'async with CollegueClient() as client:'")
+        result = await self.client.call_tool(
+            'analyze_code',
+            {
+                'request': {
+                    'code': code,
+                    'language': language,
+                    'session_id': self.session_id,
+                    'file_path': file_path,
+                }
+            },
+        )
+        return result.data
+
+    async def suggest_tools_for_query(self, query: str) -> Any:
+        if not self.client:
+            raise RuntimeError("Le client n'est pas initialisé. Utilisez 'async with CollegueClient() as client:'")
+        result = await self.client.call_tool(
+            'suggest_tools_for_query',
+            {
+                'request': {
+                    'query': query,
+                    'session_id': self.session_id,
+                }
+            },
+        )
+        return result.data
     
     async def generate_code_from_description(self, description: str, language: str, 
                                            constraints: List[str] = None) -> Dict[str, Any]:
