@@ -4,7 +4,9 @@ Kubernetes Transformers - Fonctions de transformation des données Kubernetes.
 Transforme les données brutes de l'API Kubernetes en modèles Pydantic typés.
 """
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
+
+from ...core.shared import normalize_keys
 
 if TYPE_CHECKING:
 	from ..kubernetes_ops import (
@@ -41,6 +43,7 @@ def _format_age(timestamp: Any) -> str:
 def transform_pods(pods_data: List[Dict[str, Any]]) -> List['PodInfo']:
 	"""Transform raw pod data into PodInfo objects."""
 	from ..kubernetes_ops import PodInfo
+	pods_data = normalize_keys(pods_data) or []
 	result = []
 	for pod in pods_data:
 		metadata = pod.get('metadata', {})
@@ -79,6 +82,7 @@ def transform_pods(pods_data: List[Dict[str, Any]]) -> List['PodInfo']:
 def transform_pod_detail(pod_data: Dict[str, Any]) -> 'PodDetail':
 	"""Transform raw pod data into PodDetail object."""
 	from ..kubernetes_ops import PodDetail, ContainerStatus
+	pod_data = normalize_keys(pod_data) or {}
 	metadata = pod_data.get('metadata', {})
 	spec = pod_data.get('spec', {})
 	status = pod_data.get('status', {})
@@ -140,6 +144,7 @@ def transform_pod_detail(pod_data: Dict[str, Any]) -> 'PodDetail':
 def transform_deployments(deployments_data: List[Dict[str, Any]]) -> List['DeploymentInfo']:
 	"""Transform raw deployment data into DeploymentInfo objects."""
 	from ..kubernetes_ops import DeploymentInfo
+	deployments_data = normalize_keys(deployments_data) or []
 	result = []
 	for dep in deployments_data:
 		metadata = dep.get('metadata', {})
@@ -170,6 +175,7 @@ def transform_deployments(deployments_data: List[Dict[str, Any]]) -> List['Deplo
 def transform_deployment(dep_data: Dict[str, Any]) -> 'DeploymentInfo':
 	"""Transform raw deployment data into DeploymentInfo object."""
 	from ..kubernetes_ops import DeploymentInfo
+	dep_data = normalize_keys(dep_data) or {}
 	metadata = dep_data.get('metadata', {})
 	spec = dep_data.get('spec', {})
 	status = dep_data.get('status', {})
@@ -197,6 +203,7 @@ def transform_deployment(dep_data: Dict[str, Any]) -> 'DeploymentInfo':
 def transform_services(services_data: List[Dict[str, Any]]) -> List['ServiceInfo']:
 	"""Transform raw service data into ServiceInfo objects."""
 	from ..kubernetes_ops import ServiceInfo
+	services_data = normalize_keys(services_data) or []
 	result = []
 	for svc in services_data:
 		metadata = svc.get('metadata', {})

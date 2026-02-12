@@ -3,7 +3,9 @@ Sentry Transformers - Fonctions de transformation des données Sentry.
 
 Transforme les données brutes de l'API Sentry en modèles Pydantic typés.
 """
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
+
+from ...core.shared import normalize_keys
 
 if TYPE_CHECKING:
 	from ..sentry_monitor import (
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
 
 def transform_projects(projects_data: List[Dict[str, Any]]) -> List['ProjectInfo']:
 	from ..sentry_monitor import ProjectInfo
+	projects_data = normalize_keys(projects_data) or []
 	return [ProjectInfo(
 		id=p['id'],
 		slug=p['slug'],
@@ -24,6 +27,7 @@ def transform_projects(projects_data: List[Dict[str, Any]]) -> List['ProjectInfo
 
 def transform_project(project_data: Dict[str, Any]) -> 'ProjectInfo':
 	from ..sentry_monitor import ProjectInfo
+	project_data = normalize_keys(project_data) or {}
 	return ProjectInfo(
 		id=project_data['id'],
 		slug=project_data['slug'],
@@ -36,42 +40,45 @@ def transform_project(project_data: Dict[str, Any]) -> 'ProjectInfo':
 
 def transform_issues(issues_data: List[Dict[str, Any]], limit: int = 100) -> List['IssueInfo']:
 	from ..sentry_monitor import IssueInfo
+	issues_data = normalize_keys(issues_data) or []
 	return [IssueInfo(
 		id=i['id'],
-		short_id=i['shortId'],
+		short_id=i.get('short_id') or i.get('shortid') or '',
 		title=i['title'],
 		culprit=i.get('culprit'),
 		level=i.get('level', 'error'),
 		status=i.get('status', 'unresolved'),
 		count=i.get('count', 0),
-		user_count=i.get('userCount', 0),
-		first_seen=i['firstSeen'],
-		last_seen=i['lastSeen'],
+		user_count=i.get('user_count', 0),
+		first_seen=i.get('first_seen') or '',
+		last_seen=i.get('last_seen') or '',
 		permalink=i['permalink'],
-		is_unhandled=i.get('isUnhandled', False),
+		is_unhandled=i.get('is_unhandled', False),
 		type=i.get('type', 'error')
 	) for i in issues_data[:limit]]
 
 def transform_issue(issue_data: Dict[str, Any]) -> 'IssueInfo':
 	from ..sentry_monitor import IssueInfo
+	issue_data = normalize_keys(issue_data) or {}
 	return IssueInfo(
 		id=issue_data['id'],
-		short_id=issue_data['shortId'],
+		short_id=issue_data.get('short_id') or issue_data.get('shortid') or '',
 		title=issue_data['title'],
 		culprit=issue_data.get('culprit'),
 		level=issue_data.get('level', 'error'),
 		status=issue_data.get('status', 'unresolved'),
 		count=issue_data.get('count', 0),
-		user_count=issue_data.get('userCount', 0),
-		first_seen=issue_data['firstSeen'],
-		last_seen=issue_data['lastSeen'],
+		user_count=issue_data.get('user_count', 0),
+		first_seen=issue_data.get('first_seen') or '',
+		last_seen=issue_data.get('last_seen') or '',
 		permalink=issue_data['permalink'],
-		is_unhandled=issue_data.get('isUnhandled', False),
+		is_unhandled=issue_data.get('is_unhandled', False),
 		type=issue_data.get('type', 'error')
 	)
 
 def transform_events(events_data: List[Dict[str, Any]], limit: int = 100) -> List['EventInfo']:
 	from ..sentry_monitor import EventInfo
+	events_data = normalize_keys(events_data) or []
 	events = []
 	for e in events_data[:limit]:
 		stacktrace = None
@@ -86,7 +93,7 @@ def transform_events(events_data: List[Dict[str, Any]], limit: int = 100) -> Lis
 						st_lines = []
 						for frame in frames[-10:]:
 							filename = frame.get('filename', '?')
-							lineno = frame.get('lineNo', '?')
+							lineno = frame.get('line_no', '?')
 							func = frame.get('function', '?')
 							context = frame.get('context', [])
 							st_lines.append(f'  File "{filename}", line {lineno}, in {func}')
@@ -123,11 +130,11 @@ def transform_events(events_data: List[Dict[str, Any]], limit: int = 100) -> Lis
 				break
 
 		events.append(EventInfo(
-			event_id=e.get('eventID', ''),
+			event_id=e.get('event_id', ''),
 			title=e.get('title', ''),
 			message=e.get('message'),
 			platform=e.get('platform'),
-			timestamp=e.get('dateCreated', ''),
+			timestamp=e.get('date_created', '') or e.get('timestamp', ''),
 			tags=tags,
 			context=e.get('context', {}),
 			stacktrace=stacktrace,
@@ -138,18 +145,20 @@ def transform_events(events_data: List[Dict[str, Any]], limit: int = 100) -> Lis
 
 def transform_releases(releases_data: List[Dict[str, Any]], limit: int = 100) -> List['ReleaseInfo']:
 	from ..sentry_monitor import ReleaseInfo
+	releases_data = normalize_keys(releases_data) or []
 	return [ReleaseInfo(
 		version=r['version'],
-		short_version=r.get('shortVersion', r['version'][:20]),
-		date_created=r['dateCreated'],
-		first_event=r.get('firstEvent'),
-		last_event=r.get('lastEvent'),
-		new_groups=r.get('newGroups', 0),
+		short_version=r.get('short_version', r['version'][:20]),
+		date_created=r['date_created'],
+		first_event=r.get('first_event'),
+		last_event=r.get('last_event'),
+		new_groups=r.get('new_groups', 0),
 		url=r.get('url')
 	) for r in releases_data[:limit]]
 
 def transform_repos(repos_data: List[Dict[str, Any]]) -> List['RepoInfo']:
 	from ..sentry_monitor import RepoInfo
+	repos_data = normalize_keys(repos_data) or []
 	return [RepoInfo(
 		id=r['id'],
 		name=r['name'],
@@ -160,10 +169,11 @@ def transform_repos(repos_data: List[Dict[str, Any]]) -> List['RepoInfo']:
 
 def transform_tags(tags_data: List[Dict[str, Any]]) -> List['TagDistribution']:
 	from ..sentry_monitor import TagDistribution
+	tags_data = normalize_keys(tags_data) or []
 	return [TagDistribution(
 		key=t['key'],
 		name=t.get('name', t['key']),
-		values=t.get('topValues', [])[:10]
+		values=t.get('top_values', [])[:10]
 	) for t in tags_data]
 
 def transform_project_stats(stats_data: Dict[str, Any], project: str) -> 'ProjectStats':
