@@ -90,15 +90,11 @@ def _register_tool_with_fastmcp(app: FastMCP, tool: BaseTool):
             lc = ctx.lifespan_context or {}
             kwargs = {
                 "parser": lc.get('parser'),
-                "llm_manager": lc.get('llm_manager'),
                 "context_manager": lc.get('context_manager'),
                 "ctx": ctx,
             }
-            
-            if is_long_running:
-                return await tool.execute_async(request, **kwargs)
-            else:
-                return tool.execute(request, **kwargs)
+
+            return await tool.execute_async(request, **kwargs)
                 
         except Exception as e:
             tool.logger.error(f"Erreur dans l'endpoint {tool_name}: {e}")

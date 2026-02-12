@@ -3,13 +3,14 @@ Refactoring - Outil de refactoring de code intelligent
 """
 import asyncio
 import re
+import ast
+import json
 from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
-from .shared import run_async_from_sync
+from ..core.shared import run_async_from_sync
 
 
-# Refactoring prompt building - extracted from llm_helpers
 REFACTORING_TYPES = {
     "rename": "Renommer des variables, fonctions ou classes pour améliorer la clarté",
     "extract": "Extraire du code en fonctions ou méthodes réutilisables",
@@ -43,6 +44,22 @@ REFACTORING_LANGUAGE_INSTRUCTIONS = {
         "optimize": "Types stricts, évite 'any'",
         "clean": "Supprime types redondants",
         "modernize": "Utilise strict mode, utility types"
+    },
+    "terraform": {
+        "rename": "Utilise snake_case pour les ressources et variables",
+        "extract": "Utilise des modules pour le code réutilisable",
+        "simplify": "Utilise for_each et dynamic blocks",
+        "optimize": "Réduit la duplication, utilise locals",
+        "clean": "Supprime les variables inutilisées, formate avec `terraform fmt` style",
+        "modernize": "Utilise les versions récentes des providers et syntaxes (ex: pas de interpolation syntaxe dépréciée)"
+    },
+    "hcl": {
+        "rename": "Utilise snake_case",
+        "extract": "Utilise des modules",
+        "simplify": "Utilise des expressions conditionnelles claires",
+        "optimize": "Utilise locals pour les valeurs répétées",
+        "clean": "Supprime les commentaires obsolètes",
+        "modernize": "Utilise la syntaxe HCL2"
     }
 }
 
@@ -84,7 +101,7 @@ class RefactoringTool(BaseTool):
     tags = {"generation", "quality"}
     request_model = RefactoringRequest
     response_model = RefactoringResponse
-    supported_languages = ["python", "javascript", "typescript", "java", "c#"]
+    supported_languages = ["python", "javascript", "typescript", "java", "c#", "terraform", "hcl"]
 
     def get_supported_refactoring_types(self) -> List[str]:
         return ["rename", "extract", "simplify", "optimize", "clean", "modernize"]
@@ -219,7 +236,6 @@ class RefactoringTool(BaseTool):
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.
 Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
-                # Use ctx.sample() via run_async_from_sync for sync context
                 result = run_async_from_sync(ctx.sample(
                     messages=prompt,
                     system_prompt=system_prompt,
@@ -251,7 +267,6 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
     async def _execute_core_logic_async(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         ctx = kwargs.get('ctx')
-        llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
         use_structured_output = kwargs.get('use_structured_output', True)
 
@@ -272,7 +287,6 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             if ctx is not None and use_structured_output:
                 try:
                     self.logger.debug("Utilisation du structured output avec LLMRefactoringResult")
-                    # Use ctx.sample() directly with result_type for structured output
                     llm_result = await ctx.sample(
                         messages=prompt,
                         system_prompt=system_prompt,
@@ -286,6 +300,16 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                         if ctx:
                             await ctx.info(f"Structured output: {result_data.changes_count} modifications")
 
+                        # Nettoyage et validation du code structuré
+                        cleaned_code = self._extract_code_block(result_data.refactored_code, request.language)
+                        
+                        # Validation syntaxique
+                        is_valid, error_msg = self._validate_code_syntax(cleaned_code, request.language)
+                        if not is_valid:
+                            self.logger.warning(f"Code structuré invalide: {error_msg}")
+                            if ctx:
+                                await ctx.warning(f"Attention: Code généré invalide ({error_msg})")
+
                         changes = [{"type": area, "description": f"Amélioration: {area}"}
                                    for area in result_data.improved_areas]
 
@@ -296,7 +320,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                         }
 
                         return RefactoringResponse(
-                            refactored_code=result_data.refactored_code,
+                            refactored_code=cleaned_code,
                             original_code=request.code,
                             language=request.language,
                             changes=changes,
@@ -306,14 +330,24 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 except Exception as e:
                     self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
 
-            # Use ctx.sample() directly for text generation
             result = await ctx.sample(
                 messages=prompt,
                 system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code refactoré.",
                 temperature=0.5,
                 max_tokens=2000
             )
-            refactored_code = result.text
+            
+            # Extraction et validation
+            refactored_code = self._extract_code_block(result.text, request.language)
+            
+            # Validation syntaxique (si possible)
+            is_valid, error_msg = self._validate_code_syntax(refactored_code, request.language)
+            if not is_valid:
+                self.logger.warning(f"Code généré syntaxiquement invalide: {error_msg}")
+                # On pourrait retenter ici, mais pour l'instant on log et on renvoie quand même 
+                # (l'utilisateur peut vouloir corriger manuellement)
+                if ctx:
+                    await ctx.warning(f"Attention: Le code généré semble contenir des erreurs de syntaxe: {error_msg}")
 
             if ctx:
                 await ctx.info("Analyse des améliorations...")
@@ -336,8 +370,60 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._perform_local_refactoring(request, parser)
 
+    def _extract_code_block(self, text: str, language: str) -> str:
+        """
+        Extrait le code d'un bloc markdown ```lang ... ``` ou retourne le texte brut nettoyé.
+        """
+        text = text.strip()
+        
+        # Regex pour capturer le contenu entre ```lang et ```
+        # On tente d'abord avec le langage spécifié
+        pattern = rf"```(?:{re.escape(language)}|{re.escape(language.lower())})?\s+(.*?)```"
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        
+        if match:
+            return match.group(1).strip()
+        
+        # Si pas de match avec langage, on cherche n'importe quel bloc de code
+        match_generic = re.search(r"```\s*(.*?)```", text, re.DOTALL)
+        if match_generic:
+            return match_generic.group(1).strip()
+            
+        # Si aucun bloc de code, on suppose que tout le texte est du code (si pas trop de blabla)
+        # Mais souvent le LLM ajoute "Voici le code:" au début.
+        # On essaie de nettoyer les phrases introductives courantes
+        lines = text.split('\n')
+        if len(lines) > 0 and (lines[0].lower().startswith("voici") or lines[0].strip().endswith(":")):
+            return '\n'.join(lines[1:]).strip()
+            
+        return text
+
+    def _validate_code_syntax(self, code: str, language: str) -> tuple[bool, str]:
+        """
+        Vérifie si le code est syntaxiquement valide pour les langages supportés.
+        Retourne (is_valid, error_message).
+        """
+        lang = language.lower()
+        
+        if lang == "python":
+            try:
+                ast.parse(code)
+                return True, ""
+            except SyntaxError as e:
+                return False, f"Ligne {e.lineno}: {e.msg}"
+                
+        elif lang == "json":
+            try:
+                json.loads(code)
+                return True, ""
+            except json.JSONDecodeError as e:
+                return False, str(e)
+                
+        # Pour les autres langages (JS, TS, Terraform), pas de validateur simple en Python pur sans lib tierce.
+        # On assume valide par défaut.
+        return True, ""
+
     def _build_refactoring_prompt(self, request) -> str:
-        """Build refactoring prompt."""
         language = request.language
         refactoring_type = request.refactoring_type
         code = request.code
@@ -352,7 +438,6 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             f""
         ]
 
-        # Add code block
         prompt_parts.extend([
             f"```{language}",
             code,
@@ -360,7 +445,6 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             f""
         ])
 
-        # Add language-specific instructions
         lang_instructions = REFACTORING_LANGUAGE_INSTRUCTIONS.get(language.lower(), {})
         if refactoring_type in lang_instructions:
             prompt_parts.append(f"Conventions {language}: {lang_instructions[refactoring_type]}")
@@ -570,6 +654,6 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         return cleaned
 
 
-def refactor_code(request: RefactoringRequest, parser=None, llm_manager=None) -> RefactoringResponse:
+def refactor_code(request: RefactoringRequest, parser=None) -> RefactoringResponse:
     tool = RefactoringTool()
-    return tool.execute(request, parser=parser, llm_manager=llm_manager)
+    return tool.execute(request, parser=parser)

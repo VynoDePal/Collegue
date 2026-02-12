@@ -3,9 +3,8 @@ Kubernetes API client for cluster operations.
 
 Provides a client for common Kubernetes operations with kubectl-like interface.
 """
-from typing import Any, Dict, List, Optional
-
-from .base import APIClient, APIResponse, APIError
+from typing import List, Optional
+from .base import APIResponse
 
 
 class KubernetesClient:
@@ -22,7 +21,6 @@ class KubernetesClient:
         self.namespace = namespace
         self.timeout = timeout
 
-        # Try to import kubernetes client
         try:
             from kubernetes import client, config
             self._k8s_client = client
@@ -34,7 +32,6 @@ class KubernetesClient:
             self._use_kubectl = True
 
     def _get_kubectl_args(self) -> List[str]:
-        """Build kubectl command arguments."""
         args = ["kubectl"]
 
         if self.kubeconfig:
@@ -48,7 +45,6 @@ class KubernetesClient:
         return args
 
     def _run_kubectl(self, command: List[str]) -> APIResponse:
-        """Execute kubectl command."""
         import subprocess
 
         args = self._get_kubectl_args() + command
@@ -94,7 +90,6 @@ class KubernetesClient:
         label_selector: Optional[str] = None,
         field_selector: Optional[str] = None
     ) -> APIResponse:
-        """List pods in namespace."""
         if self._use_kubectl:
             cmd = ["get", "pods", "-o", "json"]
 
@@ -110,7 +105,6 @@ class KubernetesClient:
 
             return self._run_kubectl(cmd)
         else:
-            # Use Python client
             try:
                 self._k8s_config.load_kube_config(
                     config_file=self.kubeconfig,
@@ -133,7 +127,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def get_pod(self, name: str, namespace: Optional[str] = None) -> APIResponse:
-        """Get details of a specific pod."""
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "pod", name, "-n", ns, "-o", "json"])
@@ -159,7 +152,6 @@ class KubernetesClient:
         tail_lines: int = 100,
         previous: bool = False
     ) -> APIResponse:
-        """Get logs from a pod."""
         if self._use_kubectl:
             cmd = ["logs", name]
 
@@ -198,7 +190,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_deployments(self, namespace: Optional[str] = None) -> APIResponse:
-        """List deployments in namespace."""
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "deployments", "-n", ns, "-o", "json"])
@@ -242,7 +233,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_namespaces(self) -> APIResponse:
-        """List all namespaces."""
         if self._use_kubectl:
             return self._run_kubectl(["get", "namespaces", "-o", "json"])
         else:
@@ -262,7 +252,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def get_deployment(self, name: str, namespace: Optional[str] = None) -> APIResponse:
-        """Get details of a specific deployment."""
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "deployment", name, "-n", ns, "-o", "json"])
@@ -285,7 +274,6 @@ class KubernetesClient:
         namespace: Optional[str] = None,
         field_selector: Optional[str] = None
     ) -> APIResponse:
-        """List events in namespace."""
         if self._use_kubectl:
             cmd = ["get", "events", "-o", "json"]
             ns = namespace or self.namespace
@@ -309,7 +297,6 @@ class KubernetesClient:
 
                 events = v1.list_namespaced_event(**kwargs)
 
-                # Sort by timestamp (most recent first)
                 sorted_events = sorted(
                     events.items,
                     key=lambda e: e.last_timestamp or e.first_timestamp or e.metadata.creation_timestamp,
@@ -324,7 +311,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_nodes(self) -> APIResponse:
-        """List all nodes in the cluster."""
         if self._use_kubectl:
             return self._run_kubectl(["get", "nodes", "-o", "json"])
         else:
@@ -344,7 +330,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_configmaps(self, namespace: Optional[str] = None) -> APIResponse:
-        """List ConfigMaps in namespace."""
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "configmaps", "-n", ns, "-o", "json"])
@@ -366,7 +351,6 @@ class KubernetesClient:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_secrets(self, namespace: Optional[str] = None) -> APIResponse:
-        """List Secrets in namespace (metadata only)."""
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "secrets", "-n", ns, "-o", "json"])
@@ -398,7 +382,6 @@ class KubernetesClient:
         name: str,
         namespace: Optional[str] = None
     ) -> APIResponse:
-        """Describe a resource in YAML format."""
         if self._use_kubectl:
             cmd = ["get", resource_type, name, "-o", "yaml"]
             ns = namespace or self.namespace
@@ -435,7 +418,6 @@ class KubernetesClient:
                         error_message=f"Resource type '{resource_type}' not supported"
                     )
 
-                # Convert to dict and return as YAML-like structure
                 resource_dict = self._k8s_client.ApiClient().sanitize_for_serialization(resource)
                 return APIResponse(success=True, data=resource_dict)
             except Exception as e:

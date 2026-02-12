@@ -13,12 +13,11 @@ Bénéfice: Moins de breaking changes, meilleure couverture de tests.
 """
 import re
 import ast
-import asyncio
 import json
 from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import (
+from ..core.shared import (
     FileInput, detect_language_from_extension, parse_llm_json_response,
     run_async_from_sync, validate_fast_deep, validate_confidence_mode
 )
@@ -490,13 +489,11 @@ class ImpactAnalysisTool(BaseTool):
         self,
         request: ImpactAnalysisRequest,
         static_results: Dict[str, Any],
-        llm_manager=None,
         ctx=None
     ) -> Tuple[Optional[List[LLMInsight]], Optional[str]]:
         try:
-            manager = llm_manager or self.llm_manager
-            if not manager:
-                self.logger.warning("LLM manager non disponible pour analyse deep")
+            if ctx is None:
+                self.logger.warning("ctx non disponible pour analyse deep")
                 return None, None
 
             files_summary = []
@@ -546,7 +543,12 @@ Catégories d'insights:
 
 Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
-            response = await manager.async_generate(prompt)
+            result = await ctx.sample(
+                messages=prompt,
+                temperature=0.5,
+                max_tokens=2000,
+            )
+            response = result.text
             if not response:
                 return None, None
 
@@ -584,7 +586,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
     def _execute_core_logic(self, request: ImpactAnalysisRequest, **kwargs) -> ImpactAnalysisResponse:
         self.logger.info(f"Analyse d'impact: {request.change_intent[:50]}...")
         
-        llm_manager = kwargs.get('llm_manager') or self.llm_manager
         ctx = kwargs.get('ctx')
 
         identifiers = self._extract_identifiers_from_intent(request.change_intent)
@@ -639,7 +640,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         semantic_summary = None
         analysis_depth_used = "fast"
 
-        if request.analysis_depth == "deep":
+        if request.analysis_depth == "deep" and ctx is not None:
             self.logger.info("Mode deep: enrichissement IA en cours...")
             analysis_depth_used = "deep"
 
@@ -655,7 +656,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             }
 
             try:
-                coro = self._deep_analysis_with_llm(request, static_results, llm_manager, ctx)
+                coro = self._deep_analysis_with_llm(request, static_results, ctx=ctx)
                 llm_insights, semantic_summary = run_async_from_sync(coro, timeout=30)
             except Exception as e:
                 self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")

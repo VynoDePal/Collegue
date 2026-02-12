@@ -4,6 +4,13 @@ Script de test pour la configuration MCP dynamique du LLM.
 Teste la priorité de configuration et différents modèles.
 """
 
+import pytest
+
+pytest.skip(
+	"ToolLLMManager legacy remplacé par FastMCP ctx.sample",
+	allow_module_level=True,
+)
+
 import os
 import sys
 import json

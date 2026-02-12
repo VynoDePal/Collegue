@@ -19,10 +19,10 @@ import json
 import subprocess
 import urllib.request
 import urllib.error
-from typing import Optional, Dict, Any, List, Type
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import aggregate_severities
+from .base import BaseTool, ToolValidationError
+from ..core.shared import aggregate_severities
 
 
 class DependencyGuardRequest(BaseModel):

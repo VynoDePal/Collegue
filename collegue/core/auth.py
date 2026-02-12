@@ -49,6 +49,18 @@ def resolve_org(
     return resolve_token(request_org, env_var, *header_names)
 
 
+def resolve_postgres_url(
+	request_url: Optional[str],
+	*header_names: str,
+) -> Optional[str]:
+	return (
+		request_url
+		or os.environ.get('POSTGRES_URL')
+		or os.environ.get('DATABASE_URL')
+		or get_token_from_http_headers(*header_names)
+	)
+
+
 def register_config_with_github(
     owner: str,
     repo: Optional[str],

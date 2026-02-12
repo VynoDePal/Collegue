@@ -16,10 +16,10 @@ import re
 import yaml
 import asyncio
 import json
-from typing import Optional, Dict, Any, List, Type, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileInput, aggregate_severities, load_rules, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from .base import BaseTool
+from ..core.shared import FileInput, aggregate_severities, load_rules, parse_llm_json_response, validate_fast_deep
 from .scanners.kubernetes import KubernetesScanner
 from .scanners.terraform import TerraformScanner
 from .scanners.dockerfile import DockerfileScanner
@@ -563,12 +563,11 @@ class IacGuardrailsScanTool(BaseTool):
         self,
         request: IacGuardrailsRequest,
         findings: List[IacFinding],
-        llm_manager=None
+        ctx=None
     ) -> Tuple[Optional[List[LLMSecurityInsight]], float, float, str]:
         try:
-            manager = llm_manager or self.llm_manager
-            if not manager:
-                self.logger.warning("LLM manager non disponible pour analyse deep")
+            if ctx is None:
+                self.logger.warning("ctx non disponible pour analyse deep")
                 return None, *self._calculate_security_scores(findings)
 
 
@@ -628,7 +627,12 @@ Scores:
 
 Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
-            response = await manager.async_generate(prompt)
+            result = await ctx.sample(
+                messages=prompt,
+                temperature=0.5,
+                max_tokens=2000,
+            )
+            response = result.text
 
             if not response:
                 return None, *self._calculate_security_scores(findings)
@@ -680,7 +684,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         request: IacGuardrailsRequest,
         findings: List[IacFinding],
         remediations: List[RemediationAction],
-        llm_manager=None,
         ctx=None
     ) -> Optional[Dict[str, Any]]:
         try:
@@ -711,11 +714,13 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             )
 
             refactoring_tool = RefactoringTool(app_state=self.app_state)
-            result = refactoring_tool.execute(
-                refactoring_request,
-                llm_manager=llm_manager,
-                ctx=ctx
-            )
+            if ctx is not None:
+                result = await refactoring_tool.execute_async(
+                    refactoring_request,
+                    ctx=ctx,
+                )
+            else:
+                result = refactoring_tool.execute(refactoring_request)
 
             self.logger.info(f"Auto-remediation exécutée sur {params.get('file_path', 'fichier')}")
 
@@ -731,6 +736,78 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         except Exception as e:
             self.logger.error(f"Erreur auto-remediation: {e}")
             return None
+
+    async def _execute_core_logic_async(
+        self,
+        request: IacGuardrailsRequest,
+        **kwargs
+    ) -> IacGuardrailsResponse:
+        ctx = kwargs.get('ctx')
+        response = await asyncio.to_thread(self._execute_core_logic, request)
+        if ctx is None:
+            return response
+
+        llm_insights = response.llm_insights
+        security_score = response.security_score
+        compliance_score = response.compliance_score
+        risk_level = response.risk_level
+        analysis_depth_used = response.analysis_depth_used
+        auto_remediation_triggered = response.auto_remediation_triggered
+        auto_remediation_result = response.auto_remediation_result
+
+        if request.analysis_depth == 'deep':
+            analysis_depth_used = 'deep'
+            try:
+                llm_insights, security_score, compliance_score, risk_level = await self._deep_analysis_with_llm(
+                    request,
+                    response.findings,
+                    ctx=ctx,
+                )
+            except Exception as e:
+                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
+
+        suggested_remediations = self._generate_remediation_actions(
+            response.findings,
+            request.files,
+            security_score,
+        )
+
+        if (
+            request.auto_chain
+            and security_score < request.remediation_threshold
+            and suggested_remediations
+        ):
+            try:
+                auto_remediation_result = await self._execute_auto_remediation(
+                    request,
+                    response.findings,
+                    suggested_remediations,
+                    ctx=ctx,
+                )
+                if auto_remediation_result:
+                    auto_remediation_triggered = True
+            except Exception as e:
+                self.logger.warning(f"Erreur auto-remediation: {e}")
+
+        scan_summary = response.scan_summary
+        if analysis_depth_used == 'deep' and 'Score sécurité' not in scan_summary:
+            scan_summary += f" 🔒 Score sécurité: {security_score:.0%}, Compliance: {compliance_score:.0%} (risque: {risk_level})."
+            if llm_insights:
+                scan_summary += f" {len(llm_insights)} insight(s) IA."
+        if auto_remediation_triggered and 'Remédiation auto-déclenchée' not in scan_summary:
+            scan_summary += ' 🔧 Remédiation auto-déclenchée.'
+
+        return response.model_copy(update={
+            'llm_insights': llm_insights,
+            'security_score': security_score,
+            'compliance_score': compliance_score,
+            'risk_level': risk_level,
+            'analysis_depth_used': analysis_depth_used,
+            'suggested_remediations': suggested_remediations,
+            'auto_remediation_triggered': auto_remediation_triggered,
+            'auto_remediation_result': auto_remediation_result,
+            'scan_summary': scan_summary,
+        })
 
     def _execute_core_logic(self, request: IacGuardrailsRequest, **kwargs) -> IacGuardrailsResponse:
         self.logger.info(f"Scan IaC de {len(request.files)} fichier(s) avec profil '{request.policy_profile}'")
@@ -790,46 +867,18 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             'skipped': 0,
         }
 
-        llm_manager = kwargs.get('llm_manager') or self.llm_manager
-        ctx = kwargs.get('ctx')
-
         llm_insights = None
         analysis_depth_used = "fast"
         security_score = 1.0
         compliance_score = 1.0
         risk_level = "low"
 
-        if request.analysis_depth == "deep":
-            self.logger.info("Mode deep: enrichissement IA sécurité en cours...")
-            analysis_depth_used = "deep"
-
-            try:
-                coro = self._deep_analysis_with_llm(request, unique_findings, llm_manager)
-                llm_insights, security_score, compliance_score, risk_level = run_async_from_sync(coro, timeout=30)
-            except Exception as e:
-                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
-                security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
-        else:
-
-            security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
+        security_score, compliance_score, risk_level = self._calculate_security_scores(unique_findings)
 
         suggested_remediations = self._generate_remediation_actions(unique_findings, request.files, security_score)
 
         auto_remediation_triggered = False
         auto_remediation_result = None
-
-        if request.auto_chain and security_score < request.remediation_threshold and suggested_remediations:
-            self.logger.info(f"Auto-remediation: security_score {security_score:.2f} < seuil {request.remediation_threshold}")
-            try:
-                coro = self._execute_auto_remediation(
-                    request, unique_findings, suggested_remediations, llm_manager, ctx
-                )
-                auto_remediation_result = run_async_from_sync(coro, timeout=60)
-
-                if auto_remediation_result:
-                    auto_remediation_triggered = True
-            except Exception as e:
-                self.logger.warning(f"Erreur auto-remediation: {e}")
 
         if passed and not unique_findings:
             scan_summary = f"✅ Aucun problème de sécurité détecté dans {len(request.files)} fichier(s) IaC."
@@ -844,14 +893,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 f"Critique({severity_counts['critical']}), Haute({severity_counts['high']}), "
                 f"Moyenne({severity_counts['medium']}), Basse({severity_counts['low']})."
             )
-
-        if analysis_depth_used == "deep":
-            scan_summary += f" 🔒 Score sécurité: {security_score:.0%}, Compliance: {compliance_score:.0%} (risque: {risk_level})."
-            if llm_insights:
-                scan_summary += f" {len(llm_insights)} insight(s) IA."
-
-        if auto_remediation_triggered:
-            scan_summary += " 🔧 Remédiation auto-déclenchée."
 
         sarif_output = None
         if request.output_format == 'sarif':

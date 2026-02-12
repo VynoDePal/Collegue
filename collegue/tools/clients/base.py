@@ -21,7 +21,6 @@ class HTTPMethod(Enum):
 
 @dataclass
 class APIResponse:
-	"""Standardized API response wrapper."""
 	success: bool
 	data: Any = None
 	error_message: Optional[str] = None
@@ -35,7 +34,6 @@ class APIResponse:
 
 
 class APIError(Exception):
-	"""Exception for API errors with context."""
 
 	def __init__(
 		self,
@@ -54,15 +52,6 @@ T = TypeVar('T')
 
 
 class APIClient(ABC):
-	"""
-	Abstract base class for API clients.
-
-	Provides:
-	- Retry logic with exponential backoff
-	- Authentication handling
-	- Request/response logging
-	- Standardized error handling
-	"""
 
 	def __init__(
 		self,
@@ -82,18 +71,15 @@ class APIClient(ABC):
 		self.logger = logging.getLogger(f"clients.{self.__class__.__name__}")
 
 	def _get_auth_header(self) -> Dict[str, str]:
-		"""Get authentication headers. Override in subclasses for specific auth."""
 		if self.auth_token:
 			return {"Authorization": f"Bearer {self.auth_token}"}
 		return {}
 
 	def _build_url(self, endpoint: str) -> str:
-		"""Build full URL from endpoint."""
 		endpoint = endpoint.lstrip('/')
 		return f"{self.base_url}/{endpoint}"
 
 	def _build_headers(self, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-		"""Build complete headers for request."""
 		headers = {
 			"Content-Type": "application/json",
 			**self.default_headers,
@@ -104,15 +90,20 @@ class APIClient(ABC):
 		return headers
 
 	def _should_retry(self, error: Exception, status_code: int, retry_count: int) -> bool:
-		"""Determine if request should be retried."""
 		if retry_count >= self.max_retries:
 			return False
 
-		# Retry on network errors
 		if isinstance(error, (ConnectionError, TimeoutError)):
 			return True
 
-		# Retry on specific HTTP status codes
+		try:
+			import requests  # type: ignore
+			if isinstance(error, requests.RequestException):
+				if getattr(error, 'response', None) is None:
+					return True
+		except Exception:
+			pass
+
 		if status_code in (429, 500, 502, 503, 504):
 			return True
 
@@ -123,19 +114,7 @@ class APIClient(ABC):
 		operation: Callable[[], T],
 		operation_name: str = "request"
 	) -> T:
-		"""
-		Execute operation with retry logic.
 
-		Args:
-			operation: Callable that performs the actual request
-			operation_name: Name for logging
-
-		Returns:
-			Result of operation
-
-		Raises:
-			APIError: After max retries exceeded
-		"""
 		last_error = None
 
 		for attempt in range(self.max_retries + 1):
@@ -144,6 +123,9 @@ class APIClient(ABC):
 			except Exception as e:
 				last_error = e
 				status_code = getattr(e, 'status_code', 0)
+				response = getattr(e, 'response', None)
+				if response is not None:
+					status_code = getattr(response, 'status_code', status_code)
 
 				if not self._should_retry(e, status_code, attempt):
 					break
@@ -160,11 +142,6 @@ class APIClient(ABC):
 		raise APIError(error_msg)
 
 	def handle_response(self, response: Any, endpoint: str) -> APIResponse:
-		"""
-		Handle and parse API response.
-
-		Override in subclasses for service-specific response handling.
-		"""
 		try:
 			# Try to parse JSON
 			if hasattr(response, 'json'):
@@ -197,10 +174,8 @@ class APIClient(ABC):
 			)
 
 	def log_request(self, method: str, endpoint: str, **kwargs):
-		"""Log outgoing request."""
 		self.logger.debug(f"{method} {endpoint}")
 
 	def log_response(self, response: APIResponse, endpoint: str):
-		"""Log incoming response."""
 		status = "OK" if response.success else "FAIL"
 		self.logger.debug(f"{endpoint} -> {status} ({response.status_code})")

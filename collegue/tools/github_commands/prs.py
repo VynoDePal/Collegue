@@ -9,7 +9,6 @@ from ..clients import GitHubClient
 
 
 class PRInfo(BaseModel):
-	"""Pull request information."""
 	number: int
 	title: str
 	state: str
@@ -24,7 +23,6 @@ class PRInfo(BaseModel):
 
 
 class IssueInfo(BaseModel):
-	"""Issue information."""
 	number: int
 	title: str
 	state: str
@@ -40,14 +38,12 @@ class IssueInfo(BaseModel):
 
 
 class BranchInfo(BaseModel):
-	"""Branch information."""
 	name: str
 	commit: str
 	protected: bool = False
 
 
 class FileChange(BaseModel):
-	"""File change in a PR."""
 	filename: str
 	status: str
 	additions: int
@@ -57,7 +53,6 @@ class FileChange(BaseModel):
 
 
 class Comment(BaseModel):
-	"""PR comment information."""
 	id: int
 	user: str
 	body: str
@@ -67,11 +62,9 @@ class Comment(BaseModel):
 
 
 class PRCommands(GitHubClient):
-	"""Commands for pull request operations."""
 
 	def list_prs(self, owner: str, repo: str, state: str = 'open',
 				 limit: int = 30) -> List[PRInfo]:
-		"""List pull requests for a repository."""
 		data = self._api_get(
 			f"/repos/{owner}/{repo}/pulls",
 			{"state": state, "per_page": limit, "sort": "updated", "direction": "desc"}
@@ -92,7 +85,6 @@ class PRCommands(GitHubClient):
 		) for pr in data[:limit]]
 
 	def get_pr(self, owner: str, repo: str, pr_number: int) -> PRInfo:
-		"""Get pull request details."""
 		data = self._api_get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
 		return PRInfo(
 			number=data['number'],
@@ -162,7 +154,6 @@ class PRCommands(GitHubClient):
 
 	def create_pr(self, owner: str, repo: str, title: str, head: str,
 				  base: str, body: Optional[str] = None) -> PRInfo:
-		"""Create a new pull request."""
 		data = {
 			"title": title,
 			"head": head,

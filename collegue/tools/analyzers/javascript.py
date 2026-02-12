@@ -6,16 +6,14 @@ Analyzes JS/TS code for:
 - Unused variables
 """
 import re
-from typing import List, Dict, Any
+from typing import List
 from .base import BaseAnalyzer
-from ..shared import ConsistencyIssue
+from ...core.shared import ConsistencyIssue
 
 
 class JavaScriptAnalyzer(BaseAnalyzer):
-	"""Analyzer for JavaScript and TypeScript code."""
 
 	def analyze_unused_imports(self, code: str, filepath: str) -> List[ConsistencyIssue]:
-		"""Detect unused imports in JavaScript/TypeScript code."""
 		issues = []
 
 		import_patterns = [
@@ -67,7 +65,6 @@ class JavaScriptAnalyzer(BaseAnalyzer):
 		return issues
 
 	def analyze_unused_vars(self, code: str, filepath: str) -> List[ConsistencyIssue]:
-		"""Detect unused variables in JavaScript/TypeScript code."""
 		issues = []
 
 		decl_patterns = [

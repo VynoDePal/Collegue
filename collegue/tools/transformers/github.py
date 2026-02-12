@@ -3,7 +3,8 @@ GitHub Transformers - Fonctions de transformation des données GitHub.
 
 Transforme les données brutes de l'API GitHub en modèles Pydantic typés.
 """
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
+from ...core.shared import normalize_keys
 
 if TYPE_CHECKING:
 	from ..github_commands import (
@@ -13,8 +14,8 @@ if TYPE_CHECKING:
 
 
 def transform_repos(repos_data: List[Dict[str, Any]], limit: int = 30) -> List['RepoInfo']:
-	"""Transform raw repository data into RepoInfo models."""
 	from ..github_commands import RepoInfo
+	repos_data = normalize_keys(repos_data) or []
 	return [RepoInfo(
 		name=r['name'],
 		full_name=r['full_name'],
@@ -31,8 +32,8 @@ def transform_repos(repos_data: List[Dict[str, Any]], limit: int = 30) -> List['
 
 
 def transform_repo(repo_data: Dict[str, Any]) -> 'RepoInfo':
-	"""Transform single repository data into RepoInfo model."""
 	from ..github_commands import RepoInfo
+	repo_data = normalize_keys(repo_data) or {}
 	return RepoInfo(
 		name=repo_data['name'],
 		full_name=repo_data['full_name'],
@@ -49,8 +50,8 @@ def transform_repo(repo_data: Dict[str, Any]) -> 'RepoInfo':
 
 
 def transform_prs(prs_data: List[Dict[str, Any]], limit: int = 30) -> List['PRInfo']:
-	"""Transform raw PR data into PRInfo models."""
 	from ..github_commands import PRInfo
+	prs_data = normalize_keys(prs_data) or []
 	return [PRInfo(
 		number=pr['number'],
 		title=pr['title'],
@@ -67,8 +68,8 @@ def transform_prs(prs_data: List[Dict[str, Any]], limit: int = 30) -> List['PRIn
 
 
 def transform_pr(pr_data: Dict[str, Any]) -> 'PRInfo':
-	"""Transform single PR data into PRInfo model."""
 	from ..github_commands import PRInfo
+	pr_data = normalize_keys(pr_data) or {}
 	return PRInfo(
 		number=pr_data['number'],
 		title=pr_data['title'],
@@ -85,8 +86,8 @@ def transform_pr(pr_data: Dict[str, Any]) -> 'PRInfo':
 
 
 def transform_pr_files(files_data: List[Dict[str, Any]], limit: int = 100) -> List['FileChange']:
-	"""Transform PR file data into FileChange models."""
 	from ..github_commands import FileChange
+	files_data = normalize_keys(files_data) or []
 	return [FileChange(
 		filename=f['filename'],
 		status=f['status'],
@@ -98,8 +99,8 @@ def transform_pr_files(files_data: List[Dict[str, Any]], limit: int = 100) -> Li
 
 
 def transform_pr_comments(comments_data: List[Dict[str, Any]], limit: int = 100) -> List['Comment']:
-	"""Transform PR comment data into Comment models."""
 	from ..github_commands import Comment
+	comments_data = normalize_keys(comments_data) or []
 	return [Comment(
 		id=c['id'],
 		user=c['user']['login'],
@@ -111,12 +112,8 @@ def transform_pr_comments(comments_data: List[Dict[str, Any]], limit: int = 100)
 
 
 def transform_issues(issues_data: List[Dict[str, Any]], limit: int = 30) -> List['IssueInfo']:
-	"""Transform raw issue data into IssueInfo models.
-	
-	Filters out pull requests (GitHub returns PRs as issues).
-	"""
 	from ..github_commands import IssueInfo
-	# Filter out pull requests
+	issues_data = normalize_keys(issues_data) or []
 	issues = [i for i in issues_data if 'pull_request' not in i]
 	
 	return [IssueInfo(
@@ -135,8 +132,8 @@ def transform_issues(issues_data: List[Dict[str, Any]], limit: int = 30) -> List
 
 
 def transform_issue(issue_data: Dict[str, Any]) -> 'IssueInfo':
-	"""Transform single issue data into IssueInfo model."""
 	from ..github_commands import IssueInfo
+	issue_data = normalize_keys(issue_data) or {}
 	return IssueInfo(
 		number=issue_data['number'],
 		title=issue_data['title'],
@@ -153,8 +150,8 @@ def transform_issue(issue_data: Dict[str, Any]) -> 'IssueInfo':
 
 
 def transform_branches(branches_data: List[Dict[str, Any]], limit: int = 100) -> List['BranchInfo']:
-	"""Transform branch data into BranchInfo models."""
 	from ..github_commands import BranchInfo
+	branches_data = normalize_keys(branches_data) or []
 	return [BranchInfo(
 		name=b['name'],
 		commit_sha=b['commit']['sha'],
@@ -163,8 +160,8 @@ def transform_branches(branches_data: List[Dict[str, Any]], limit: int = 100) ->
 
 
 def transform_branch(branch_data: Dict[str, Any]) -> 'BranchInfo':
-	"""Transform single branch data into BranchInfo model."""
 	from ..github_commands import BranchInfo
+	branch_data = normalize_keys(branch_data) or {}
 	return BranchInfo(
 		name=branch_data['name'],
 		commit_sha=branch_data['commit']['sha'],
@@ -173,8 +170,8 @@ def transform_branch(branch_data: Dict[str, Any]) -> 'BranchInfo':
 
 
 def transform_workflow_runs(runs_data: List[Dict[str, Any]], limit: int = 30) -> List['WorkflowRun']:
-	"""Transform workflow run data into WorkflowRun models."""
 	from ..github_commands import WorkflowRun
+	runs_data = normalize_keys(runs_data) or []
 	return [WorkflowRun(
 		id=r['id'],
 		name=r['name'],
@@ -187,8 +184,8 @@ def transform_workflow_runs(runs_data: List[Dict[str, Any]], limit: int = 30) ->
 
 
 def transform_search_results(results_data: List[Dict[str, Any]], limit: int = 100) -> List['SearchResult']:
-	"""Transform code search results into SearchResult models."""
 	from ..github_commands import SearchResult
+	results_data = normalize_keys(results_data) or []
 	return [SearchResult(
 		name=r['name'],
 		path=r['path'],

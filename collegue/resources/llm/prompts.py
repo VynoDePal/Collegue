@@ -81,6 +81,65 @@ Les tests doivent:
                 }
             }
         ]
+    },
+
+    "code_refactoring": {
+        "name": "Refactoring de code",
+        "description": "Template pour refactoriser/améliorer un extrait de code.",
+        "template": """Refactorise le code {language} suivant selon l'objectif: {refactoring_type}
+
+```{language}
+{code}
+```
+
+Contraintes:
+- Préserver le comportement
+- Proposer une explication concise des changements
+
+Paramètres additionnels (optionnels):
+{parameters}
+""",
+        "variables": ["language", "code", "refactoring_type", "parameters"],
+        "category": "code_refactoring",
+        "provider_specific": {},
+        "examples": []
+    },
+
+    "impact_analysis": {
+        "name": "Analyse d'impact",
+        "description": "Template pour analyser l'impact d'un changement (risques, compat, sécurité).",
+        "template": """Analyse l'impact du changement suivant:
+
+{change_description}
+
+Contexte (optionnel):
+{context}
+
+Attendus:
+- Liste des risques (breaking changes, sécurité, données)
+- Recommandations de mitigation
+""",
+        "variables": ["change_description", "context"],
+        "category": "impact_analysis",
+        "provider_specific": {},
+        "examples": []
+    },
+
+    "repo_consistency_check": {
+        "name": "Contrôle de cohérence repo",
+        "description": "Template pour analyser la cohérence du repo (duplication, dead code, style).",
+        "template": """Analyse les problèmes de cohérence ci-dessous et propose des actions concrètes.
+
+Résumé des fichiers / extraits:
+{code_context}
+
+Issues détectées (JSON ou texte):
+{issues}
+""",
+        "variables": ["code_context", "issues"],
+        "category": "repo_consistency_check",
+        "provider_specific": {},
+        "examples": []
     }
 }
 

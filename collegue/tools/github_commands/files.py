@@ -10,11 +10,9 @@ from ..base import ToolExecutionError
 
 
 class FileCommands(GitHubClient):
-	"""Commands for file operations."""
 
 	def get_file_content(self, owner: str, repo: str, path: str,
 					   branch: Optional[str] = None) -> Dict[str, Any]:
-		"""Get file content from a repository."""
 		url = f"/repos/{owner}/{repo}/contents/{path}"
 		if branch:
 			url += f"?ref={branch}"
@@ -34,14 +32,12 @@ class FileCommands(GitHubClient):
 
 	def update_file(self, owner: str, repo: str, path: str, message: str,
 					content: str, branch: Optional[str] = None) -> Dict[str, Any]:
-		"""Update file content in a repository."""
-		# Get current file SHA if it exists
 		sha = None
 		try:
 			current = self.get_file_content(owner, repo, path, branch)
 			sha = current.get('sha')
 		except ToolExecutionError:
-			pass  # File doesn't exist, will create
+			pass
 
 		encoded_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
 

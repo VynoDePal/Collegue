@@ -39,7 +39,6 @@ class BaseTool(ABC):
         self.logger = logging.getLogger(f"tools.{self.__class__.__name__}")
 
         self.prompt_engine = self.app_state.get('prompt_engine')
-        self.llm_manager = self.app_state.get('llm_manager')
         self.context_manager = self.app_state.get('context_manager')
 
         self._validate_config()
@@ -197,7 +196,6 @@ class BaseTool(ABC):
         self,
         prompt: str,
         ctx=None,
-        llm_manager=None,
         system_prompt: Optional[str] = None,
         result_type: Optional[Type[BaseModel]] = None,
         temperature: float = 0.7
@@ -218,20 +216,8 @@ class BaseTool(ABC):
             )
             return result.result if result_type else (result.text or "")
 
-        if llm_manager is not None:
-            text = await llm_manager.async_generate(prompt, system_prompt)
-            if result_type:
-                import json
-                try:
-                    data = json.loads(text)
-                    return result_type(**data)
-                except (json.JSONDecodeError, ValidationError) as e:
-                    self.logger.warning(f"Impossible de parser en {result_type.__name__}: {e}")
-                    return text
-            return text
-
         raise ToolExecutionError(
-            "Aucun backend LLM disponible. Fournissez ctx (FastMCP) ou llm_manager."
+            "Aucun backend LLM disponible. Fournissez ctx (FastMCP)."
         )
 
     def get_info(self) -> Dict[str, Any]:

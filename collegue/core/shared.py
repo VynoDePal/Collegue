@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional, List
 import yaml
 from pydantic import BaseModel, Field
 
+import re
+
+from . import validators as _validators
+
 
 class ConsistencyIssue(BaseModel):
 	"""Issue de cohérence détectée dans le code.
@@ -39,10 +43,7 @@ class FileInput(BaseModel):
 FileContent = FileInput
 
 def validate_fast_deep(v: str) -> str:
-    valid = ['fast', 'deep']
-    if v not in valid:
-        raise ValueError(f"Valeur '{v}' invalide. Utilisez: {', '.join(valid)}")
-    return v
+	return _validators.validate_fast_deep(v)
 
 def detect_language_from_extension(filepath: str) -> str:
 
@@ -136,7 +137,46 @@ def parse_llm_json_response(raw: str) -> Dict[str, Any]:
     clean = clean.strip()
     return json.loads(clean)
 
-_RULES_DIR = Path(__file__).parent / 'rules'
+
+_CAMEL_1 = re.compile(r'(.)([A-Z][a-z]+)')
+_CAMEL_2 = re.compile(r'([a-z0-9])([A-Z])')
+_ACRONYM_BOUNDARY = re.compile(r'([A-Z]+)([A-Z][a-z])')
+
+
+def to_snake_case(name: str) -> str:
+	if not name:
+		return name
+
+	# Handle acronym boundaries: eventID -> event_ID, HTTPServer -> HTTP_Server
+	name = _ACRONYM_BOUNDARY.sub(r'\1_\2', name)
+	name = _CAMEL_1.sub(r'\1_\2', name)
+	name = _CAMEL_2.sub(r'\1_\2', name)
+	return name.lower()
+
+
+def normalize_keys(obj: Any) -> Any:
+	"""Normalise récursivement les clés dict (camelCase/PascalCase -> snake_case).
+
+	- dict: transforme toutes les clés string
+	- list/tuple: normalise chaque élément
+	- autres: renvoie tel quel
+	"""
+	if isinstance(obj, dict):
+		out: Dict[Any, Any] = {}
+		for k, v in obj.items():
+			key = to_snake_case(k) if isinstance(k, str) else k
+			out[key] = normalize_keys(v)
+		return out
+
+	if isinstance(obj, list):
+		return [normalize_keys(i) for i in obj]
+
+	if isinstance(obj, tuple):
+		return tuple(normalize_keys(i) for i in obj)
+
+	return obj
+
+_RULES_DIR = Path(__file__).parent.parent / 'tools' / 'rules'
 _rules_cache: Dict[str, Dict[str, list]] = {}
 
 def load_rules(rule_file: str) -> Dict[str, list]:
@@ -181,99 +221,63 @@ def aggregate_severities(items: List[Any], severity_attr: str = 'severity', defa
 
 
 def normalize_language(language: str) -> str:
-
-    normalized = language.strip().lower()
-
-    aliases = {
-        'js': 'javascript',
-        'ts': 'typescript',
-        'py': 'python',
-        'rb': 'ruby',
-        'golang': 'go',
-        'c#': 'csharp',
-        'c-sharp': 'csharp',
-        'csharp': 'csharp',
-        'f#': 'fsharp',
-        'f-sharp': 'fsharp',
-        'html': 'html',
-        'htm': 'html',
-    }
-
-    return aliases.get(normalized, normalized)
+	return _validators.normalize_language(language)
 
 
 # Validators standardisés pour Pydantic field_validator
 def validate_in_list(valid_values: List[str], value: str) -> str:
-    """Valide qu'une valeur est dans une liste de valeurs autorisées."""
-    if value not in valid_values:
-        raise ValueError(f"Valeur '{value}' invalide. Utilisez: {', '.join(valid_values)}")
-    return value
+	"""Valide qu'une valeur est dans une liste de valeurs autorisées."""
+	return _validators.validate_in_list(valid_values, value)
 
 
 def validate_language(value: str, supported: Optional[List[str]] = None) -> str:
-    """Valide et normalise un langage de programmation."""
-    normalized = normalize_language(value)
-    if supported and normalized not in supported:
-        raise ValueError(f"Langage '{value}' non supporté. Utilisez: {', '.join(supported)}")
-    return normalized
+	"""Valide et normalise un langage de programmation."""
+	return _validators.validate_language(value, supported)
 
 
 def validate_confidence_mode(value: str) -> str:
-    """Valide un mode de confiance pour l'analyse d'impact."""
-    return validate_in_list(['conservative', 'balanced', 'aggressive'], value)
+	"""Valide un mode de confiance pour l'analyse d'impact."""
+	return _validators.validate_confidence_mode(value)
 
 
 def validate_refactoring_type(value: str) -> str:
-    """Valide un type de refactoring."""
-    return validate_in_list(['rename', 'extract', 'simplify', 'optimize', 'clean', 'modernize', 'security'], value)
+	"""Valide un type de refactoring."""
+	return _validators.validate_refactoring_type(value)
 
 
 def validate_doc_format(value: str) -> str:
-    """Valide un format de documentation."""
-    return validate_in_list(['markdown', 'rst', 'html', 'docstring', 'json'], value)
+	"""Valide un format de documentation."""
+	return _validators.validate_doc_format(value)
 
 
 def validate_doc_style(value: str) -> str:
-    """Valide un style de documentation."""
-    return validate_in_list(['standard', 'detailed', 'minimal', 'api'], value)
+	"""Valide un style de documentation."""
+	return _validators.validate_doc_style(value)
 
 
 def validate_test_framework(value: str) -> str:
-    """Valide un framework de test."""
-    return validate_in_list(['pytest', 'jest', 'mocha', 'unittest', 'vitest'], value)
+	"""Valide un framework de test."""
+	return _validators.validate_test_framework(value)
 
 
 def validate_k8s_command(value: str) -> str:
-    """Valide une commande Kubernetes."""
-    valid_commands = [
-        'list_pods', 'get_pod', 'pod_logs', 'list_deployments',
-        'get_deployment', 'list_services', 'list_namespaces',
-        'list_nodes', 'describe_resource', 'list_configmaps', 'list_secrets'
-    ]
-    return validate_in_list(valid_commands, value)
+	"""Valide une commande Kubernetes."""
+	return _validators.validate_k8s_command(value)
 
 
 def validate_postgres_command(value: str) -> str:
-    """Valide une commande PostgreSQL."""
-    return validate_in_list(['list_schemas', 'list_tables', 'describe_table', 'query'], value)
+	"""Valide une commande PostgreSQL."""
+	return _validators.validate_postgres_command(value)
 
 
 def validate_sentry_command(value: str) -> str:
-    """Valide une commande Sentry."""
-    return validate_in_list([
-        'list_projects', 'list_issues', 'get_issue',
-        'issue_events', 'project_stats', 'list_releases'
-    ], value)
+	"""Valide une commande Sentry."""
+	return _validators.validate_sentry_command(value)
 
 
 def validate_github_command(value: str) -> str:
-    """Valide une commande GitHub."""
-    return validate_in_list([
-        'list_repos', 'get_repo', 'get_file', 'list_prs', 'get_pr', 'create_pr',
-        'list_issues', 'get_issue', 'create_issue', 'pr_files', 'pr_comments',
-        'repo_branches', 'create_branch', 'update_file',
-        'repo_commits', 'search_code', 'list_workflows', 'workflow_runs'
-    ], value)
+	"""Valide une commande GitHub."""
+	return _validators.validate_github_command(value)
 
 
 def create_command_validator(valid_commands: List[str], field_name: str = 'command'):
@@ -296,5 +300,5 @@ def create_command_validator(valid_commands: List[str], field_name: str = 'comma
         Fonction de validation compatible avec Pydantic field_validator
     """
     def validator(cls, v: str) -> str:
-        return validate_in_list(valid_commands, v)
+        return _validators.validate_in_list(valid_commands, v)
     return validator

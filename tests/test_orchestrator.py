@@ -1,6 +1,13 @@
 """
 Tests unitaires pour le ToolOrchestrator
 """
+import pytest
+
+pytest.skip(
+	"ToolOrchestrator supprimé volontairement (migration FastMCP)",
+	allow_module_level=True,
+)
+
 import sys
 import os
 import unittest

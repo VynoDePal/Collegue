@@ -11,12 +11,13 @@ from pydantic import BaseModel, Field, validator, field_validator
 import os
 import pathlib
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import run_async_from_sync
+from ..core.shared import run_async_from_sync
 from ._run_tests import RunTestsTool, RunTestsRequest
-from . import test_generators_adapter as _test_templates
+from .utils import test_generators_adapter as _test_templates
 
 
 class TestGenerationRequest(BaseModel):
+    __test__ = False
     code: str = Field(..., description="Code à tester", min_length=1)
     language: str = Field(..., description="Langage de programmation du code")
     session_id: Optional[str] = Field(None, description="Identifiant de session")
@@ -42,6 +43,7 @@ class TestGenerationRequest(BaseModel):
 
 
 class TestValidationResult(BaseModel):
+    __test__ = False
     validated: bool = Field(..., description="True si les tests ont été validés")
     success: bool = Field(..., description="True si tous les tests passent")
     total: int = Field(0, description="Nombre total de tests")
@@ -53,6 +55,7 @@ class TestValidationResult(BaseModel):
 
 
 class TestGenerationResponse(BaseModel):
+    __test__ = False
     test_code: str = Field(..., description="Code de test généré")
     language: str = Field(..., description="Langage du code de test")
     framework: str = Field(..., description="Framework de test utilisé")
@@ -85,6 +88,7 @@ class LLMTestGenerationResult(BaseModel):
     )
 
 class TestGenerationTool(BaseTool):
+    __test__ = False
     tool_name = "test_generation"
     tool_description = "Génère automatiquement des tests unitaires pour du code source"
     tags = {"generation", "testing"}
@@ -381,9 +385,11 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
 
     async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
         ctx = kwargs.get('ctx')
-        llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
         use_structured_output = kwargs.get('use_structured_output', True)
+        
+        if not ctx:
+            return self._generate_fallback_tests(request, parser)
         
         self.validate_language(request.language)
         
@@ -617,7 +623,7 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
             lines = code.split("\n")
             for i, line in enumerate(lines):
                 line = line.strip()
-                if "function " in line:
+                if "function " in line and not line.startswith("//"):
                     func_name = line.split("function ")[1].split("(")[0].strip()
                     if func_name:
                         functions.append({
@@ -626,7 +632,7 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                             "line": i + 1,
                             "params": line.split("(")[1].split(")")[0] if "(" in line and ")" in line else ""
                         })
-                elif "class " in line:
+                elif "class " in line and not line.startswith("//"):
                     class_name = line.split("class ")[1].split(" ")[0].split("{")[0].strip()
                     classes.append({
                         "type": "class",
@@ -830,5 +836,5 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
 
 _test_generation_tool = TestGenerationTool()
 
-def generate_tests(request: TestGenerationRequest, parser=None, llm_manager=None) -> TestGenerationResponse:
-    return _test_generation_tool.execute(request, parser=parser, llm_manager=llm_manager)
+def generate_tests(request: TestGenerationRequest, parser=None) -> TestGenerationResponse:
+    return _test_generation_tool.execute(request, parser=parser)
