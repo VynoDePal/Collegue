@@ -9,7 +9,6 @@ from ..clients import GitHubClient
 
 
 class RepoInfo(BaseModel):
-	"""Repository information."""
 	name: str
 	full_name: str
 	description: Optional[str] = None
@@ -24,10 +23,7 @@ class RepoInfo(BaseModel):
 
 
 class RepoCommands(GitHubClient):
-	"""Commands for repository operations."""
-
 	def list_repos(self, owner: Optional[str], limit: int = 30) -> List[RepoInfo]:
-		"""List repositories for a user or the authenticated user."""
 		if owner:
 			endpoint = f"/users/{owner}/repos"
 		else:
@@ -50,7 +46,6 @@ class RepoCommands(GitHubClient):
 		) for r in data[:limit]]
 
 	def get_repo(self, owner: str, repo: str) -> RepoInfo:
-		"""Get repository details."""
 		data = self._api_get(f"/repos/{owner}/{repo}")
 		return RepoInfo(
 			name=data['name'],
