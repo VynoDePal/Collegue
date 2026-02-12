@@ -82,7 +82,26 @@ class EnhancedPromptEngine(PromptEngine):
         category = f"tool/{tool_name.lower()}"
         templates = self.get_templates_by_category(category)
 
+        # Compat: si aucun template n'existe, on peut quand même utiliser
+        # des versions créées explicitement via version_manager (tests/unit).
         if not templates:
+            versions = self.version_manager.get_all_versions(tool_name)
+            if versions:
+                prompt_version = (
+                    self.version_manager.get_version(tool_name, version)
+                    if version else self._select_version_ab_testing(tool_name)
+                )
+                if prompt_version is None:
+                    prompt_version = versions[-1]
+                prompt = self._format_version_prompt(prompt_version, context)
+                if language:
+                    prompt = self.language_optimizer.optimize_prompt(
+                        prompt,
+                        language,
+                        context,
+                    )
+                return prompt, prompt_version.id
+
             default_template = self._get_default_template(tool_name)
             if default_template:
                 prompt = self.format_prompt(default_template.id, context)
@@ -107,7 +126,7 @@ class EnhancedPromptEngine(PromptEngine):
         if language:
             prompt = self.language_optimizer.optimize_prompt(prompt, language, context)
 
-        return prompt, prompt_version.version
+        return prompt, prompt_version.id
 
     def _select_version_ab_testing(self, template_id: str) -> Optional[PromptVersion]:
 
@@ -129,7 +148,7 @@ class EnhancedPromptEngine(PromptEngine):
         prompt = version.content
 
         for key, value in variables.items():
-            placeholder = f"{ {key}} "
+            placeholder = f"{{{key}}}"
             if placeholder in prompt:
                 prompt = prompt.replace(placeholder, str(value))
 
