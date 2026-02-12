@@ -9,7 +9,6 @@ from ..clients import GitHubClient
 
 
 class WorkflowRun(BaseModel):
-	"""Workflow run information."""
 	id: int
 	name: str
 	status: str
@@ -20,10 +19,7 @@ class WorkflowRun(BaseModel):
 
 
 class WorkflowCommands(GitHubClient):
-	"""Commands for workflow operations."""
-
 	def list_workflows(self, owner: str, repo: str, limit: int = 30) -> List[WorkflowRun]:
-		"""List workflow runs for a repository."""
 		data = self._api_get(f"/repos/{owner}/{repo}/actions/runs", {"per_page": limit})
 		runs = data.get('workflow_runs', [])
 

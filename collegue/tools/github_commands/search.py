@@ -9,7 +9,6 @@ from ..clients import GitHubClient
 
 
 class SearchResult(BaseModel):
-	"""Code search result."""
 	name: str
 	path: str
 	repository: str
@@ -18,8 +17,6 @@ class SearchResult(BaseModel):
 
 
 class SearchCommands(GitHubClient):
-	"""Commands for search operations."""
-
 	def search_code(
 		self,
 		query: str,
@@ -27,7 +24,6 @@ class SearchCommands(GitHubClient):
 		repo: Optional[str] = None,
 		limit: int = 30
 	) -> List[SearchResult]:
-		"""Search code on GitHub."""
 		q = query
 		if owner and repo:
 			q += f" repo:{owner}/{repo}"
