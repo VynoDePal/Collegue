@@ -4,7 +4,7 @@ Base Analyzer for Repo Consistency Check.
 Provides common functionality for language-specific analyzers.
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from ..base import ToolError
 
 
@@ -12,10 +12,7 @@ class AnalyzerError(ToolError):
 	"""Erreur spécifique à l'analyseur."""
 	pass
 
-
 class BaseAnalyzer(ABC):
-	"""Classe de base pour les analyseurs de cohérence."""
-
 	def __init__(self, logger=None):
 		self.logger = logger
 
