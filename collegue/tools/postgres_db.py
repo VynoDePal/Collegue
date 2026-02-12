@@ -8,6 +8,7 @@ import re
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .shared import validate_postgres_command
 from .clients import PostgresClient, APIError
 
 try:
@@ -54,11 +55,7 @@ class PostgresRequest(BaseModel):
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
-        valid = ['list_tables', 'describe_table', 'query', 'list_schemas',
-                 'table_stats', 'indexes', 'foreign_keys', 'sample_data']
-        if v not in valid:
-            raise ValueError(f"Commande invalide. Valides: {valid}")
-        return v
+        return validate_postgres_command(v)
 
     @field_validator('query')
     @classmethod

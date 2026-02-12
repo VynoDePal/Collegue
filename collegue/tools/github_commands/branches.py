@@ -5,7 +5,7 @@ Handles branch listing, creation, and commit operations.
 """
 from typing import Optional, List
 from pydantic import BaseModel
-from . import GitHubClient
+from ..clients import GitHubClient
 from ..base import ToolExecutionError
 
 

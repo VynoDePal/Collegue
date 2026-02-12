@@ -5,7 +5,7 @@ Handles issue listing, details, and creation.
 """
 from typing import Optional, List
 from pydantic import BaseModel
-from . import GitHubClient
+from ..clients import GitHubClient
 
 
 class IssueInfo(BaseModel):
