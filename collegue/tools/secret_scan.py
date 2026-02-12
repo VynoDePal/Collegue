@@ -18,7 +18,7 @@ import re
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import FileContent, aggregate_severities
+from ..core.shared import FileContent, aggregate_severities
 
 
 class SecretScanRequest(BaseModel):

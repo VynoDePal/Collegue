@@ -1,11 +1,10 @@
 """
 Documentation - Outil de génération automatique de documentation
 """
-import asyncio
 from typing import Optional, Dict, Any, List, Union, Type
 from pydantic import BaseModel, Field
 from .base import BaseTool, ToolError
-from .shared import run_async_from_sync
+from ..core.shared import run_async_from_sync
 
 
 # Documentation prompt building - extracted from llm_helpers
@@ -255,7 +254,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
     async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
         ctx = kwargs.get('ctx')
-        llm_manager = kwargs.get('llm_manager')
         parser = kwargs.get('parser')
 
         if ctx:
@@ -429,7 +427,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
         include_examples = request.include_examples or False
         focus_on = request.focus_on or "all"
 
-        # Build prompt parts
         prompt_parts = [
             f"Génère une documentation pour le code {language} suivant",
             f"",
@@ -438,7 +435,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             f""
         ]
 
-        # Add code block
         prompt_parts.extend([
             f"```{language}",
             request.code,
@@ -446,24 +442,20 @@ Style de documentation: {request.doc_style or 'standard'}."""
             f""
         ])
 
-        # Add elements if available
         if elements:
             prompt_parts.append("Éléments identifiés à documenter :")
             for element in elements[:10]:
                 prompt_parts.append(f"- {element['type']}: {element['name']} (ligne {element['line_number']})")
             prompt_parts.append("")
 
-        # Add focus instruction
         if focus_on != "all":
             prompt_parts.append(f"Concentre-toi sur les {focus_on}")
             prompt_parts.append("")
 
-        # Add examples instruction
         if include_examples:
             prompt_parts.append("Inclus des exemples d'utilisation pratiques pour chaque élément principal")
             prompt_parts.append("")
 
-        # Add language-specific instructions
         lang_instructions = LANGUAGE_INSTRUCTIONS.get(language.lower(), "")
         if lang_instructions:
             prompt_parts.append(f"Instructions {language}: {lang_instructions}")
@@ -625,6 +617,6 @@ Style de documentation: {request.doc_style or 'standard'}."""
             suggestions=suggestions
         )
 
-def generate_documentation(request: DocumentationRequest, parser=None, llm_manager=None) -> DocumentationResponse:
+def generate_documentation(request: DocumentationRequest, parser=None) -> DocumentationResponse:
     tool = DocumentationTool()
-    return tool.execute(request, parser=parser, llm_manager=llm_manager)
+    return tool.execute(request, parser=parser)

@@ -23,7 +23,14 @@ from typing import Optional, Dict, Any, List, Type, Set, Tuple
 from collections import defaultdict
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
-from .shared import ConsistencyIssue, FileInput, aggregate_severities, detect_language_from_extension, parse_llm_json_response, run_async_from_sync, validate_fast_deep
+from ..core.shared import (
+	ConsistencyIssue,
+	FileInput,
+	aggregate_severities,
+	detect_language_from_extension,
+	parse_llm_json_response,
+	validate_fast_deep,
+)
 from .analyzers.python import PythonAnalyzer
 from .analyzers.javascript import JavaScriptAnalyzer
 
@@ -440,12 +447,11 @@ class RepoConsistencyCheckTool(BaseTool):
         self,
         request: ConsistencyCheckRequest,
         issues: List[ConsistencyIssue],
-        llm_manager=None
+        ctx=None
     ) -> Tuple[Optional[List[LLMInsight]], float, str]:
         try:
-            manager = llm_manager or self.llm_manager
-            if not manager:
-                self.logger.warning("LLM manager non disponible pour analyse deep")
+            if ctx is None:
+                self.logger.warning("ctx non disponible pour analyse deep")
                 score, priority = self._calculate_refactoring_score(issues)
                 return None, score, priority
 
@@ -498,7 +504,12 @@ Le `refactoring_score` doit refléter l'urgence d'un refactoring:
 
 Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
-            response = await manager.async_generate(prompt)
+            result = await ctx.sample(
+                messages=prompt,
+                temperature=0.5,
+                max_tokens=2000,
+            )
+            response = result.text
 
             if not response:
                 score, priority = self._calculate_refactoring_score(issues)
@@ -550,7 +561,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         request: ConsistencyCheckRequest,
         issues: List[ConsistencyIssue],
         suggested_actions: List[SuggestedAction],
-        llm_manager=None,
         ctx=None
     ) -> Optional[Dict[str, Any]]:
         try:
@@ -588,11 +598,13 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             )
 
             refactoring_tool = RefactoringTool(app_state=self.app_state)
-            result = refactoring_tool.execute(
-                refactoring_request,
-                llm_manager=llm_manager,
-                ctx=ctx
-            )
+            if ctx is not None:
+                result = await refactoring_tool.execute_async(
+                    refactoring_request,
+                    ctx=ctx,
+                )
+            else:
+                result = refactoring_tool.execute(refactoring_request)
 
             self.logger.info(f"Auto-refactoring exécuté sur {params.get('file_path', 'fichier')}")
 
@@ -608,6 +620,78 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         except Exception as e:
             self.logger.error(f"Erreur auto-chain refactoring: {e}")
             return None
+
+    async def _execute_core_logic_async(
+        self,
+        request: ConsistencyCheckRequest,
+        **kwargs
+    ) -> ConsistencyCheckResponse:
+        ctx = kwargs.get('ctx')
+        response = await asyncio.to_thread(self._execute_core_logic, request)
+
+        if ctx is None:
+            return response
+
+        refactoring_score = response.refactoring_score
+        refactoring_priority = response.refactoring_priority
+        llm_insights = response.llm_insights
+        analysis_depth_used = response.analysis_depth_used
+        auto_refactoring_triggered = response.auto_refactoring_triggered
+        auto_refactoring_result = response.auto_refactoring_result
+
+        if request.analysis_depth == 'deep':
+            analysis_depth_used = 'deep'
+            try:
+                llm_insights, refactoring_score, refactoring_priority = await self._deep_analysis_with_llm(
+                    request,
+                    response.issues,
+                    ctx=ctx,
+                )
+            except Exception as e:
+                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
+
+        suggested_actions = self._generate_suggested_actions(
+            response.issues,
+            request.files,
+            refactoring_score,
+        )
+
+        if (
+            request.auto_chain
+            and refactoring_score >= request.refactoring_threshold
+            and suggested_actions
+        ):
+            try:
+                auto_refactoring_result = await self._execute_auto_chain_refactoring(
+                    request,
+                    response.issues,
+                    suggested_actions,
+                    ctx=ctx,
+                )
+                if auto_refactoring_result:
+                    auto_refactoring_triggered = True
+            except Exception as e:
+                self.logger.warning(f"Erreur auto-chain: {e}")
+
+        analysis_summary = response.analysis_summary
+        if analysis_depth_used == 'deep':
+            analysis_summary = analysis_summary.split(' 🤖')[0]
+            analysis_summary += f" 🤖 Score refactoring: {refactoring_score:.0%} ({refactoring_priority})."
+            if llm_insights:
+                analysis_summary += f" {len(llm_insights)} insight(s) IA."
+        if auto_refactoring_triggered and 'Refactoring auto-déclenché' not in analysis_summary:
+            analysis_summary += ' 🔧 Refactoring auto-déclenché.'
+
+        return response.model_copy(update={
+            'llm_insights': llm_insights,
+            'refactoring_score': refactoring_score,
+            'refactoring_priority': refactoring_priority,
+            'suggested_actions': suggested_actions,
+            'analysis_depth_used': analysis_depth_used,
+            'analysis_summary': analysis_summary,
+            'auto_refactoring_triggered': auto_refactoring_triggered,
+            'auto_refactoring_result': auto_refactoring_result,
+        })
 
     def _execute_core_logic(self, request: ConsistencyCheckRequest, **kwargs) -> ConsistencyCheckResponse:
         self.logger.info(f"Vérification de cohérence sur {len(request.files)} fichier(s)")
@@ -653,45 +737,17 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             'info': severity_counts['info'],
         }
 
-        llm_manager = kwargs.get('llm_manager') or self.llm_manager
         ctx = kwargs.get('ctx')
-
         llm_insights = None
-        analysis_depth_used = "fast"
-        refactoring_score = 0.0
-        refactoring_priority = "none"
-
-        if request.analysis_depth == "deep":
-            self.logger.info("Mode deep: enrichissement IA en cours...")
-            analysis_depth_used = "deep"
-
-            try:
-                coro = self._deep_analysis_with_llm(request, all_issues, llm_manager)
-                llm_insights, refactoring_score, refactoring_priority = run_async_from_sync(coro, timeout=30)
-            except Exception as e:
-                self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
-                refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
-        else:
-
-            refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
+        analysis_depth_used = "deep" if request.analysis_depth == "deep" else "fast"
+        refactoring_score, refactoring_priority = self._calculate_refactoring_score(all_issues)
 
         suggested_actions = self._generate_suggested_actions(all_issues, request.files, refactoring_score)
 
         auto_refactoring_triggered = False
         auto_refactoring_result = None
 
-        if request.auto_chain and refactoring_score >= request.refactoring_threshold and suggested_actions:
-            self.logger.info(f"Auto-chain: score {refactoring_score:.2f} >= seuil {request.refactoring_threshold}")
-            try:
-                coro = self._execute_auto_chain_refactoring(
-                    request, all_issues, suggested_actions, llm_manager, ctx
-                )
-                auto_refactoring_result = run_async_from_sync(coro, timeout=60)
-
-                if auto_refactoring_result:
-                    auto_refactoring_triggered = True
-            except Exception as e:
-                self.logger.warning(f"Erreur auto-chain: {e}")
+        # Auto-chain deep est géré dans _execute_core_logic_async (pour éviter ctx.sample en thread)
 
         if not all_issues:
             analysis_summary = f"✅ Aucune incohérence détectée dans {len(request.files)} fichier(s)."
@@ -701,11 +757,6 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 f"Haute({severity_counts['high']}), Moyenne({severity_counts['medium']}), "
                 f"Basse({severity_counts['low']}), Info({severity_counts['info']})."
             )
-
-        if analysis_depth_used == "deep":
-            analysis_summary += f" 🤖 Score refactoring: {refactoring_score:.0%} ({refactoring_priority})."
-            if llm_insights:
-                analysis_summary += f" {len(llm_insights)} insight(s) IA."
 
         if auto_refactoring_triggered:
             analysis_summary += " 🔧 Refactoring auto-déclenché."
