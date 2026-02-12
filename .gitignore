@@ -9,6 +9,9 @@
 .idea/**/dictionaries
 .idea/**/shelf
 
+# vscode
+.vscode/
+
 # AWS User-specific
 .idea/**/aws.xml
 
@@ -249,3 +252,4 @@ collegue/prompts/interface/
 # AI
 .ai/
 
+bin/
