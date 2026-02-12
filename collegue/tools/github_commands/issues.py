@@ -9,7 +9,6 @@ from ..clients import GitHubClient
 
 
 class IssueInfo(BaseModel):
-	"""Issue information."""
 	number: int
 	title: str
 	state: str
@@ -24,17 +23,14 @@ class IssueInfo(BaseModel):
 
 
 class IssueCommands(GitHubClient):
-	"""Commands for issue operations."""
 
 	def list_issues(self, owner: str, repo: str, state: str = 'open',
 					limit: int = 30) -> List[IssueInfo]:
-		"""List issues for a repository."""
 		data = self._api_get(
 			f"/repos/{owner}/{repo}/issues",
 			{"state": state, "per_page": limit, "sort": "updated", "direction": "desc"}
 		)
 
-		# Filter out pull requests (GitHub returns PRs as issues)
 		issues = [i for i in data if 'pull_request' not in i]
 
 		return [IssueInfo(
@@ -50,7 +46,6 @@ class IssueCommands(GitHubClient):
 		) for i in issues[:limit]]
 
 	def get_issue(self, owner: str, repo: str, issue_number: int) -> IssueInfo:
-		"""Get issue details."""
 		data = self._api_get(f"/repos/{owner}/{repo}/issues/{issue_number}")
 		return IssueInfo(
 			number=data['number'],
@@ -66,7 +61,6 @@ class IssueCommands(GitHubClient):
 
 	def create_issue(self, owner: str, repo: str, title: str,
 					 body: Optional[str] = None) -> IssueInfo:
-		"""Create a new issue."""
 		data = {
 			"title": title,
 			"body": body or ""
