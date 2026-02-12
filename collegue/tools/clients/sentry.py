@@ -4,17 +4,11 @@ Sentry API client for error tracking operations.
 Provides access to Sentry API for listing projects, issues, and releases.
 """
 import os
-from typing import Any, Dict, List, Optional
-
+from typing import Dict, Optional
 from .base import APIClient, APIResponse, APIError
 
 
 class SentryClient(APIClient):
-    """
-    Client for Sentry API operations.
-    
-    Supports both SaaS (sentry.io) and self-hosted Sentry instances.
-    """
 
     def __init__(
         self,
@@ -23,7 +17,6 @@ class SentryClient(APIClient):
         base_url: str = "https://sentry.io",
         **kwargs
     ):
-        # Get token from env if not provided
         auth_token = token or os.environ.get('SENTRY_AUTH_TOKEN')
         if not auth_token:
             raise APIError("Sentry token required. Provide token or set SENTRY_AUTH_TOKEN env var.")
@@ -37,11 +30,9 @@ class SentryClient(APIClient):
         )
 
     def _get_auth_header(self) -> Dict[str, str]:
-        """Sentry uses Bearer token auth."""
         return {"Authorization": f"Bearer {self.auth_token}"}
 
     def list_projects(self) -> APIResponse:
-        """List all projects for the organization."""
         if not self.organization:
             return APIResponse(
                 success=False,
@@ -57,14 +48,7 @@ class SentryClient(APIClient):
         query: Optional[str] = None,
         limit: int = 25
     ) -> APIResponse:
-        """
-        List issues for organization or specific project.
-        
-        Args:
-            project: Optional project slug to filter
-            query: Sentry search query
-            limit: Maximum results to return
-        """
+
         if not self.organization:
             return APIResponse(
                 success=False,
@@ -83,12 +67,10 @@ class SentryClient(APIClient):
         return self._get(endpoint, params=params)
 
     def get_issue(self, issue_id: str) -> APIResponse:
-        """Get details for a specific issue."""
         endpoint = f"issues/{issue_id}/"
         return self._get(endpoint)
 
     def get_issue_events(self, issue_id: str) -> APIResponse:
-        """Get events (stacktraces) for an issue."""
         endpoint = f"issues/{issue_id}/events/"
         return self._get(endpoint)
 
@@ -97,7 +79,6 @@ class SentryClient(APIClient):
         project: Optional[str] = None,
         limit: int = 25
     ) -> APIResponse:
-        """List releases for organization or project."""
         if not self.organization:
             return APIResponse(
                 success=False,
@@ -112,7 +93,6 @@ class SentryClient(APIClient):
         return self._get(endpoint, params={"limit": limit})
 
     def _get(self, endpoint: str, params: Optional[Dict] = None) -> APIResponse:
-        """Internal GET request helper."""
         try:
             import requests
             
@@ -139,12 +119,10 @@ class SentryClient(APIClient):
             )
 
     def get_issue_tags(self, issue_id: str) -> APIResponse:
-        """Get tag distribution for an issue."""
         endpoint = f"issues/{issue_id}/tags/"
         return self._get(endpoint)
 
     def get_project(self, project_slug: str) -> APIResponse:
-        """Get details for a specific project."""
         if not self.organization:
             return APIResponse(
                 success=False,
@@ -154,7 +132,6 @@ class SentryClient(APIClient):
         return self._get(endpoint)
 
     def list_repos(self) -> APIResponse:
-        """List repositories linked to the organization."""
         if not self.organization:
             return APIResponse(
                 success=False,
@@ -168,7 +145,6 @@ class SentryClient(APIClient):
         project: str,
         time_range: str = "24h"
     ) -> APIResponse:
-        """Get statistics for a project."""
         if not self.organization:
             return APIResponse(
                 success=False,

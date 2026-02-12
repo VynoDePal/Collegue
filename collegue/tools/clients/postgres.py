@@ -4,18 +4,13 @@ PostgreSQL client for database operations.
 Provides read-only access to PostgreSQL databases with safe query execution.
 """
 import os
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from .base import APIResponse, APIError
+from ...core.auth import resolve_postgres_url
 
 
 class PostgresClient:
-    """
-    Client for PostgreSQL database operations.
-    
-    Provides safe, read-only access for introspection and queries.
-    Uses psycopg2 or asyncpg if available.
-    """
 
     def __init__(
         self,
@@ -27,12 +22,14 @@ class PostgresClient:
         password: Optional[str] = None,
         schema: str = "public"
     ):
-        # Build connection string from parts if not provided
         if connection_string:
             self.connection_string = connection_string
         else:
-            # Get from env or build
-            conn_str = os.environ.get('POSTGRES_URL')
+            conn_str = resolve_postgres_url(
+                None,
+                'x-postgres-url',
+                'x-collegue-postgres-url',
+            )
             if conn_str:
                 self.connection_string = conn_str
             else:
@@ -44,7 +41,6 @@ class PostgresClient:
         self._connection = None
         self._driver = None
 
-        # Detect available driver
         try:
             import psycopg2
             self._driver = 'psycopg2'
@@ -63,7 +59,6 @@ class PostgresClient:
         username: Optional[str],
         password: Optional[str]
     ) -> str:
-        """Build connection string from components."""
         host = host or os.environ.get('POSTGRES_HOST', 'localhost')
         database = database or os.environ.get('POSTGRES_DB', 'postgres')
         username = username or os.environ.get('POSTGRES_USER', 'postgres')
@@ -74,7 +69,6 @@ class PostgresClient:
         return f"postgresql://{username}@{host}:{port}/{database}"
 
     def _get_connection(self):
-        """Get or create database connection."""
         if self._driver == 'psycopg2':
             import psycopg2
             return psycopg2.connect(self.connection_string)
@@ -82,7 +76,6 @@ class PostgresClient:
             raise APIError("No PostgreSQL driver available. Install psycopg2 or asyncpg.")
 
     def list_schemas(self) -> APIResponse:
-        """List all schemas in the database."""
         query = """
             SELECT schema_name 
             FROM information_schema.schemata 
@@ -93,7 +86,6 @@ class PostgresClient:
         return self._execute_query(query)
 
     def list_tables(self, schema_name: Optional[str] = None) -> APIResponse:
-        """List all tables in a schema."""
         schema = schema_name or self.schema
 
         query = """
@@ -110,7 +102,6 @@ class PostgresClient:
         table_name: str,
         schema_name: Optional[str] = None
     ) -> APIResponse:
-        """Get column information for a table."""
         schema = schema_name or self.schema
 
         query = """
@@ -127,7 +118,6 @@ class PostgresClient:
         return self._execute_query(query, (schema, table_name))
 
     def get_indexes(self, table_name: str, schema_name: Optional[str] = None) -> APIResponse:
-        """Get indexes for a table."""
         schema = schema_name or self.schema
 
         query = """
@@ -144,7 +134,6 @@ class PostgresClient:
         table_name: str,
         schema_name: Optional[str] = None
     ) -> APIResponse:
-        """Get foreign key constraints for a table."""
         schema = schema_name or self.schema
 
         query = """
@@ -164,7 +153,6 @@ class PostgresClient:
         return self._execute_query(query, (schema, table_name))
 
     def get_table_stats(self, table_name: str, schema_name: Optional[str] = None) -> APIResponse:
-        """Get row count and size stats for a table."""
         schema = schema_name or self.schema
 
         query = """
@@ -184,10 +172,8 @@ class PostgresClient:
         schema_name: Optional[str] = None,
         limit: int = 100
     ) -> APIResponse:
-        """Get sample rows from a table (safe query)."""
         schema = schema_name or self.schema
 
-        # Validate table name to prevent injection
         if not self._is_valid_identifier(table_name):
             return APIResponse(
                 success=False,
@@ -200,17 +186,10 @@ class PostgresClient:
                 error_message=f"Invalid schema name: {schema}"
             )
 
-        # Use parameterized LIMIT only
         query = f'SELECT * FROM "{schema}"."{table_name}" LIMIT %s'
         return self._execute_query(query, (limit,))
 
     def execute_query(self, query: str, limit: int = 1000) -> APIResponse:
-        """
-        Execute a read-only SELECT query.
-        
-        Only SELECT queries are allowed for safety.
-        """
-        # Safety check - only allow SELECT
         normalized = query.strip().upper()
         if not normalized.startswith('SELECT'):
             return APIResponse(
@@ -218,7 +197,6 @@ class PostgresClient:
                 error_message="Only SELECT queries are allowed for safety"
             )
 
-        # Apply limit if not present
         if 'LIMIT' not in normalized:
             query = query.rstrip(';') + f' LIMIT {limit}'
 
@@ -229,7 +207,6 @@ class PostgresClient:
         query: str,
         params: Optional[tuple] = None
     ) -> APIResponse:
-        """Execute a query and return results."""
         if self._driver is None:
             return APIResponse(
                 success=False,
@@ -264,7 +241,5 @@ class PostgresClient:
             )
 
     def _is_valid_identifier(self, name: str) -> bool:
-        """Check if a string is a valid SQL identifier."""
         import re
-        # Only allow alphanumeric and underscore
         return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name))
