@@ -39,10 +39,6 @@ _processed_issues: set = set()
 
 
 def _build_web_search_query(error_type: str, error_message: str, filepath: Optional[str] = None) -> str:
-    """
-    Construit une requête de recherche web optimisée pour trouver des solutions.
-    """
-
     clean_message = error_message[:100] if error_message else ""
     clean_message = clean_message.replace('\n', ' ').strip()
 
@@ -58,14 +54,6 @@ def _build_web_search_query(error_type: str, error_message: str, filepath: Optio
 
 
 def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tuple[Optional[str], float]:
-    """
-    Trouve le meilleur match fuzzy pour 'search' dans 'content'.
-    Utilise difflib.SequenceMatcher (stratégie Aider/RooCode).
-
-    Returns:
-        (best_match, score) où best_match est le texte exact trouvé dans content,
-        ou (None, 0) si aucun match au-dessus du threshold.
-    """
     search_lines = search.strip().split('\n')
     content_lines = content.split('\n')
     search_len = len(search_lines)
@@ -111,15 +99,6 @@ def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tupl
 
 
 def _get_config_value(key: str, header_names: List[str] = None) -> Optional[str]:
-    """
-    Récupère une valeur de configuration avec fallback:
-    1. Variables d'environnement (passées par l'IDE via mcp.json)
-    2. Headers HTTP MCP (si disponibles)
-
-    Args:
-        key: Nom de la variable d'environnement (ex: SENTRY_ORG)
-        header_names: Noms des headers HTTP à vérifier (ex: ['x-sentry-org'])
-    """
     value = os.environ.get(key)
     if value:
         return value
@@ -141,7 +120,6 @@ class AutoFixer:
         self.sentry = SentryMonitorTool()
         self.github = GitHubOpsTool()
         self.user_config = user_config
-        # Initialize LLM config directly instead of using ToolLLMManager
         self._llm_config = LLMConfig(
             model_name=settings.llm_model,
             api_key=settings.llm_api_key,
@@ -150,7 +128,6 @@ class AutoFixer:
         )
 
     def _get_sentry_org(self) -> Optional[str]:
-        """Récupère l'organisation Sentry depuis config, env ou headers."""
         if self.user_config:
             return self.user_config.sentry_org
         return _get_config_value(
@@ -159,19 +136,16 @@ class AutoFixer:
         )
 
     def _get_sentry_token(self) -> Optional[str]:
-        """Récupère le token Sentry depuis config ou env."""
         if self.user_config and self.user_config.sentry_token:
             return self.user_config.sentry_token
         return os.environ.get("SENTRY_AUTH_TOKEN")
 
     def _get_github_token(self) -> Optional[str]:
-        """Récupère le token GitHub depuis config ou env."""
         if self.user_config and self.user_config.github_token:
             return self.user_config.github_token
         return os.environ.get("GITHUB_TOKEN")
 
     def _get_github_owner(self) -> Optional[str]:
-        """Récupère le propriétaire GitHub depuis config, env ou headers."""
         if self.user_config and self.user_config.github_owner:
             return self.user_config.github_owner
         return _get_config_value(
@@ -180,13 +154,11 @@ class AutoFixer:
         )
 
     def _get_github_repo(self) -> Optional[str]:
-        """Récupère le nom du repo GitHub depuis config ou env."""
         if self.user_config and self.user_config.github_repo:
             return self.user_config.github_repo
         return os.environ.get("GITHUB_REPO")
 
     async def run_once(self):
-        """Exécute une passe de vérification et correction sur TOUS les projets."""
         org = self._get_sentry_org()
         token = self._get_sentry_token()
 
@@ -228,7 +200,6 @@ class AutoFixer:
             await self.scan_project(org, project, token)
 
     async def scan_project(self, org, project, token: Optional[str] = None):
-        """Scanne un projet spécifique."""
         logger.info(f"📂 Scan du projet: {project.slug} (id: {project.id})")
 
         try:
@@ -271,7 +242,6 @@ class AutoFixer:
             await self.attempt_fix(issue, repo_owner, repo_name, org, token)
 
     async def attempt_fix(self, issue, repo_owner, repo_name, org: str, sentry_token: Optional[str] = None):
-        """Tente de corriger une issue spécifique avec Context Pack et patchs minimaux."""
         global _processed_issues
         import ast
         import json
@@ -369,7 +339,6 @@ class AutoFixer:
             logger.info(f"🌐 Recherche web: {search_query[:80]}...")
 
             try:
-                # Use direct LLM call instead of ToolLLMManager
                 web_config = LLMConfig(
                     model_name=settings.llm_model,
                     api_key=settings.llm_api_key,
@@ -681,25 +650,6 @@ async def _watchdog_loop(interval_seconds: int = 300):
 
 
 def start_background_watchdog(interval_seconds: int = 300) -> Optional[asyncio.Task]:
-    """
-    Démarre le watchdog en tâche de fond.
-
-    Cette fonction permet d'intégrer le watchdog dans l'app principale
-    pour qu'il hérite des variables d'environnement passées par l'IDE via mcp.json.
-
-    Args:
-        interval_seconds: Intervalle entre les cycles (défaut: 5 minutes)
-
-    Returns:
-        La tâche asyncio créée, ou None si déjà en cours
-
-    Usage dans app.py:
-        from collegue.autonomous.watchdog import start_background_watchdog
-
-        @app.on_event("startup")
-        async def startup():
-            start_background_watchdog()
-    """
     global _watchdog_task
 
     if _watchdog_task is not None and not _watchdog_task.done():
@@ -717,7 +667,6 @@ def start_background_watchdog(interval_seconds: int = 300) -> Optional[asyncio.T
 
 
 def stop_background_watchdog():
-    """Arrête le watchdog en cours d'exécution."""
     global _watchdog_task
 
     if _watchdog_task is not None and not _watchdog_task.done():
@@ -727,7 +676,6 @@ def stop_background_watchdog():
 
 
 async def main():
-    """Point d'entrée pour le mode standalone."""
     await _watchdog_loop(interval_seconds=300)
 
 
