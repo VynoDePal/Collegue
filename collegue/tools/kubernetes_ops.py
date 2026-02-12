@@ -9,8 +9,8 @@ import json
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
-from .shared import validate_k8s_command
-from .clients import KubernetesClient, APIError
+from ..core.shared import validate_k8s_command
+from .clients import KubernetesClient
 from .transformers import (
 	transform_pods, transform_pod_detail,
 	transform_deployments, transform_deployment,

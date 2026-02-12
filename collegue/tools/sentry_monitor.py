@@ -8,8 +8,8 @@ import os
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
-from .shared import validate_sentry_command
-from .clients import SentryClient, APIError
+from ..core.shared import validate_sentry_command
+from .clients import SentryClient
 from .transformers import (
 	transform_projects,
 	transform_project,
@@ -21,7 +21,7 @@ from .transformers import (
 	transform_tags,
 	transform_project_stats,
 )
-from .auth import resolve_token, resolve_org, register_config_with_github
+from ..core.auth import resolve_token, resolve_org, register_config_with_github
 
 try:
     from fastmcp.server.dependencies import get_http_headers

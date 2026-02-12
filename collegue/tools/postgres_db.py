@@ -8,8 +8,8 @@ import re
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
-from .shared import validate_postgres_command
-from .clients import PostgresClient, APIError
+from ..core.shared import validate_postgres_command
+from .clients import PostgresClient
 
 try:
     import psycopg2
