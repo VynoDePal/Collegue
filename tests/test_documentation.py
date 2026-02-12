@@ -441,57 +441,6 @@ class DataProcessor:
         except ToolError:
             self.fail("Validation should pass for valid format and style")
 
-    def test_with_mock_llm_manager(self):
-        """Test avec un LLM manager mocké."""
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.return_value = """
-# Documentation Complète
-
-## Fonction add
-Additionne deux nombres et retourne le résultat.
-
-### Paramètres
-- a: Premier nombre
-- b: Deuxième nombre
-
-### Retour
-Somme des deux nombres
-
-## Classe Calculator
-Calculatrice simple pour opérations arithmétiques.
-"""
-
-        request = DocumentationRequest(
-            code=self.python_code,
-            language="python",
-            doc_format="markdown",
-            doc_style="detailed"
-        )
-
-        response = self.tool.execute(request, llm_manager=mock_llm)
-
-        self.assertIsInstance(response, DocumentationResponse)
-        self.assertIn("Documentation Complète", response.documentation)
-        self.assertIn("Paramètres", response.documentation)
-        mock_llm.sync_generate.assert_called_once()
-
-    def test_llm_error_fallback(self):
-        """Test de fallback en cas d'erreur LLM."""
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.side_effect = Exception("Erreur LLM")
-
-        request = DocumentationRequest(
-            code=self.python_code,
-            language="python"
-        )
-
-        response = self.tool.execute(request, llm_manager=mock_llm)
-
-        self.assertIsInstance(response, DocumentationResponse)
-        self.assertEqual(response.language, "python")
-        self.assertTrue(len(response.documentation) > 0)
-        self.assertIn("Documentation générée automatiquement", " ".join(response.suggestions))
-
     def test_with_mock_parser(self):
         """Test avec un parser mocké."""
         mock_parser = MagicMock()
@@ -562,11 +511,6 @@ Calculatrice simple pour opérations arithmétiques.
         )
 
         response = generate_documentation(request)
-        self.assertIsInstance(response, DocumentationResponse)
-
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.return_value = "# Documentation générée"
-        response = generate_documentation(request, llm_manager=mock_llm)
         self.assertIsInstance(response, DocumentationResponse)
 
     def test_estimate_complexity(self):

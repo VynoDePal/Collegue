@@ -84,6 +84,7 @@ class TestLLMOptimization(unittest.TestCase):
 
         self.assertIsNone(optimized_prompt)
 
+@unittest.skip("Endpoints FastAPI legacy supprimés (resources via FastMCP)")
 class TestLLMOptimizationEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI d'optimisation des prompts LLM."""
 

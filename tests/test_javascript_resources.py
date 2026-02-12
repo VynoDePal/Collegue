@@ -84,6 +84,7 @@ class TestJavaScriptBestPractices(unittest.TestCase):
         self.assertIn("use_strict", practices)
         self.assertIn("const_let", practices)
 
+@unittest.skip("Endpoints FastAPI legacy supprimés (resources via FastMCP)")
 class TestJavaScriptResourcesEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI des ressources JavaScript."""
 

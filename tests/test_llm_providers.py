@@ -1,6 +1,13 @@
 """
 Tests unitaires pour les fournisseurs LLM
 """
+import pytest
+
+pytest.skip(
+	"Tests hérités OpenAI/Anthropic: providers actuels = Gemini uniquement",
+	allow_module_level=True,
+)
+
 import unittest
 from unittest.mock import MagicMock, patch
 import sys

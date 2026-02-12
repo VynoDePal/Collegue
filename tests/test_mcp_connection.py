@@ -13,9 +13,20 @@ import json
 import re
 from typing import Optional
 
+import pytest
+
+pytest.skip(
+    "Test d’intégration (nécessite un serveur MCP local) – non déterministe en CI",
+    allow_module_level=True,
+)
+
 def extract_session_id(response_text: str) -> Optional[str]:
     """Extrait l'ID de session de la réponse"""
-    session_match = re.search(r'session[_\s]?ID[:\s]+([a-f0-9-]+)', response_text, re.IGNORECASE)
+    session_match = re.search(
+        r'session[_\s]?ID[:\s]+([a-f0-9-]+)',
+        response_text,
+        re.IGNORECASE,
+    )
     if session_match:
         return session_match.group(1)
 

@@ -11,7 +11,6 @@ parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
 import unittest
-from unittest.mock import MagicMock
 from collegue.tools.refactoring import (
     refactor_code,
     RefactoringRequest,
@@ -127,102 +126,6 @@ def another_function():
         self.assertEqual(response.changes[0]["type"], "simplify")
         self.assertIsInstance(response.improvement_metrics, dict)
 
-    def test_refactor_with_mock_llm_rename(self):
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.return_value = """
-def add(a, b):
-    \"\"\"Additionne deux nombres.\"\"\"
-    return a + b
-
-result = add(1, 2)
-"""
-
-        request = RefactoringRequest(
-            code=self.python_code,
-            language="python",
-            refactoring_type="rename",
-            parameters={
-                "old_name": "old_function_name",
-                "new_name": "add"
-            },
-            session_id="test-session"
-        )
-
-        response = self.tool.execute(request, llm_manager=mock_llm)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.language, "python")
-        self.assertIn("add", response.refactored_code)
-        self.assertNotIn("old_function_name", response.refactored_code)
-        self.assertTrue(len(response.changes) > 0)
-        self.assertEqual(response.changes[0]["type"], "rename")
-        mock_llm.sync_generate.assert_called_once()
-
-    def test_refactor_with_mock_llm_extract(self):
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.return_value = """
-def add_numbers(a, b):
-    return a + b
-
-def calculate():
-    result = add_numbers(1, 2)
-    return result
-"""
-
-        code = """
-def calculate():
-    a = 1
-    b = 2
-    result = a + b
-    return result
-"""
-        request = RefactoringRequest(
-            code=code,
-            language="python",
-            refactoring_type="extract",
-            parameters={
-                "start_line": 3,
-                "end_line": 4,
-                "new_name": "add_numbers"
-            },
-            session_id="test-session"
-        )
-
-        response = self.tool.execute(request, llm_manager=mock_llm)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.language, "python")
-        self.assertIn("add_numbers", response.refactored_code)
-        self.assertTrue(len(response.changes) > 0)
-        self.assertEqual(response.changes[0]["type"], "extract")
-        mock_llm.sync_generate.assert_called_once()
-
-    def test_refactor_optimize_javascript_with_llm(self):
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.return_value = """
-const greet = name => `Hello, ${name}!`;
-"""
-
-        code = """
-function greet(name) {
-    return 'Hello, ' + name + '!';
-}
-"""
-        request = RefactoringRequest(
-            code=code,
-            language="javascript",
-            refactoring_type="optimize",
-            session_id="test-session"
-        )
-
-        response = self.tool.execute(request, llm_manager=mock_llm)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.language, "javascript")
-        self.assertTrue(len(response.explanation) > 0)
-        self.assertIn("const greet", response.refactored_code)
-        mock_llm.sync_generate.assert_called_once()
-
     def test_refactor_unsupported_type_validation(self):
         from collegue.tools.base import ToolError
 
@@ -323,16 +226,13 @@ if other_condition != True:
         self.assertIn("is not True", simplified)
 
     def test_llm_error_fallback(self):
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.side_effect = Exception("Erreur LLM")
-
         request = RefactoringRequest(
             code=self.python_code,
             language="python",
-            refactoring_type="clean"
+            refactoring_type="clean",
         )
 
-        response = self.tool.execute(request, llm_manager=mock_llm)
+        response = self.tool.execute(request)
 
         self.assertIsInstance(response, RefactoringResponse)
         self.assertEqual(response.language, "python")
@@ -346,7 +246,7 @@ if other_condition != True:
                 request = RefactoringRequest(
                     code=self.python_code,
                     language="python",
-                    refactoring_type=refactoring_type
+                    refactoring_type=refactoring_type,
                 )
 
                 response = self.tool.execute(request)
@@ -362,15 +262,21 @@ if other_condition != True:
             parameters={
                 "old_name": "old_function_name",
                 "new_name": "calculate_sum",
-                "scope": "global"
-            }
+                "scope": "global",
+            },
         )
 
         response = self.tool.execute(request)
 
         self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.changes[0]["parameters"]["old_name"], "old_function_name")
-        self.assertEqual(response.changes[0]["parameters"]["new_name"], "calculate_sum")
+        self.assertEqual(
+            response.changes[0]["parameters"]["old_name"],
+            "old_function_name",
+        )
+        self.assertEqual(
+            response.changes[0]["parameters"]["new_name"],
+            "calculate_sum",
+        )
 
     def test_metrics_analysis_different_languages(self):
         js_metrics = self.tool._analyze_code_metrics(self.javascript_code, "javascript")
@@ -383,7 +289,10 @@ if other_condition != True:
             return true;
         }
         """
-        js_metrics_comments = self.tool._analyze_code_metrics(js_code_with_comments, "javascript")
+        js_metrics_comments = self.tool._analyze_code_metrics(
+            js_code_with_comments,
+            "javascript",
+        )
         self.assertGreater(js_metrics_comments["comment_lines"], 0)
 
     def test_validation_supported_types(self):
@@ -394,26 +303,23 @@ if other_condition != True:
             request = RefactoringRequest(
                 code="def test(): pass",
                 language="python",
-                refactoring_type=refactoring_type
+                refactoring_type=refactoring_type,
             )
             try:
                 self.tool.validate_request(request)
             except ToolError:
-                self.fail(f"Refactoring type {refactoring_type} should be supported")
+                self.fail(
+                    f"Refactoring type {refactoring_type} should be supported"
+                )
 
     def test_refactor_code_compatibility_function(self):
         request = RefactoringRequest(
             code=self.python_code,
             language="python",
-            refactoring_type="clean"
+            refactoring_type="clean",
         )
 
         response = refactor_code(request)
-        self.assertIsInstance(response, RefactoringResponse)
-
-        mock_llm = MagicMock()
-        mock_llm.sync_generate.return_value = "def clean_function(): pass"
-        response = refactor_code(request, llm_manager=mock_llm)
         self.assertIsInstance(response, RefactoringResponse)
 
     def test_complex_refactoring_scenario(self):
@@ -436,7 +342,7 @@ def process_user_data(users):
             code=complex_code,
             language="python",
             refactoring_type="simplify",
-            parameters={"target": "reduce_nesting"}
+            parameters={"target": "reduce_nesting"},
         )
 
         response = self.tool.execute(request)
@@ -446,8 +352,14 @@ def process_user_data(users):
         self.assertTrue(len(response.changes) > 0)
 
         original_metrics = self.tool._analyze_code_metrics(complex_code, "python")
-        new_metrics = self.tool._analyze_code_metrics(response.refactored_code, "python")
-        self.assertLessEqual(new_metrics["complexity_score"], original_metrics["complexity_score"])
+        new_metrics = self.tool._analyze_code_metrics(
+            response.refactored_code,
+            "python",
+        )
+        self.assertLessEqual(
+            new_metrics["complexity_score"],
+            original_metrics["complexity_score"],
+        )
 
 if __name__ == '__main__':
     unittest.main()

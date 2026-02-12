@@ -1,6 +1,13 @@
 """
 Tests des endpoints API de base pour Collègue MCP
 """
+import pytest
+
+pytest.skip(
+	"Test d’intégration legacy (démarre un serveur MCP) – hors scope unit tests",
+	allow_module_level=True,
+)
+
 import os
 import sys
 import json

@@ -78,6 +78,7 @@ class TestPythonBestPractices(unittest.TestCase):
         self.assertIn("pep8", practices)
         self.assertIn("docstrings", practices)
 
+@unittest.skip("Endpoints FastAPI legacy supprimés (resources via FastMCP)")
 class TestPythonResourcesEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI des ressources Python."""
 

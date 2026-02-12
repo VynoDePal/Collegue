@@ -1,6 +1,13 @@
 """
 Tests unitaires pour l'interface web du système de prompts personnalisés
 """
+import pytest
+
+pytest.skip(
+	"Interface web FastAPI des prompts supprimée (migration FastMCP)",
+	allow_module_level=True,
+)
+
 import unittest
 import json
 import tempfile
