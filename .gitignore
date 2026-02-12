@@ -253,3 +253,7 @@ collegue/prompts/interface/
 .ai/
 
 bin/
+package.json
+package-lock.json
+
+app.yaml
