@@ -8,6 +8,7 @@ import os
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .shared import validate_sentry_command
 from .clients import SentryClient, APIError
 from .transformers import (
 	transform_projects,
@@ -82,12 +83,7 @@ class SentryRequest(BaseModel):
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
-        valid = ['list_projects', 'list_issues', 'get_issue', 'issue_events',
-                 'project_stats', 'list_releases', 'issue_tags', 'parse_config',
-                 'get_project', 'list_repos']
-        if v not in valid:
-            raise ValueError(f"Commande invalide. Valides: {valid}")
-        return v
+        return validate_sentry_command(v)
 
 
 class ConfigInfo(BaseModel):

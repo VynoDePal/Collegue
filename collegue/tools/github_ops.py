@@ -8,6 +8,7 @@ import os
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .shared import validate_github_command
 from .github_commands import GitHubClient
 from .github_commands.repos import RepoCommands, RepoInfo
 from .github_commands.prs import PRCommands, PRInfo, FileChange, Comment
@@ -68,13 +69,7 @@ class GitHubRequest(BaseModel):
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
-        valid = ['list_repos', 'get_repo', 'get_file', 'list_prs', 'get_pr', 'create_pr',
-                 'list_issues', 'get_issue', 'create_issue', 'pr_files', 'pr_comments',
-                 'repo_branches', 'create_branch', 'update_file',
-                 'repo_commits', 'search_code', 'list_workflows', 'workflow_runs']
-        if v not in valid:
-            raise ValueError(f"Commande invalide. Valides: {valid}")
-        return v
+        return validate_github_command(v)
 
 class SearchResult(BaseModel):
     name: str

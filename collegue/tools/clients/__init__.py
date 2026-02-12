@@ -11,6 +11,7 @@ from .base import APIClient, APIResponse, APIError
 from .sentry import SentryClient
 from .kubernetes import KubernetesClient
 from .postgres import PostgresClient
+from .github import GitHubClient
 
 __all__ = [
     'APIClient',
@@ -19,4 +20,5 @@ __all__ = [
     'SentryClient',
     'KubernetesClient',
     'PostgresClient',
+    'GitHubClient',
 ]

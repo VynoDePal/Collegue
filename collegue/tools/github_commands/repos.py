@@ -5,7 +5,7 @@ Handles repository listing and details.
 """
 from typing import Optional, List
 from pydantic import BaseModel
-from . import GitHubClient
+from ..clients import GitHubClient
 
 
 class RepoInfo(BaseModel):

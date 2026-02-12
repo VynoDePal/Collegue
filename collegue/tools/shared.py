@@ -264,3 +264,37 @@ def validate_sentry_command(value: str) -> str:
         'list_projects', 'list_issues', 'get_issue',
         'issue_events', 'project_stats', 'list_releases'
     ], value)
+
+
+def validate_github_command(value: str) -> str:
+    """Valide une commande GitHub."""
+    return validate_in_list([
+        'list_repos', 'get_repo', 'get_file', 'list_prs', 'get_pr', 'create_pr',
+        'list_issues', 'get_issue', 'create_issue', 'pr_files', 'pr_comments',
+        'repo_branches', 'create_branch', 'update_file',
+        'repo_commits', 'search_code', 'list_workflows', 'workflow_runs'
+    ], value)
+
+
+def create_command_validator(valid_commands: List[str], field_name: str = 'command'):
+    """Crée un validateur Pydantic pour un champ commande.
+    
+    Usage:
+        class MyRequest(BaseModel):
+            command: str
+            
+            @field_validator('command')
+            @classmethod
+            def validate_command(cls, v: str) -> str:
+                return validate_in_list(['cmd1', 'cmd2'], v)
+    
+    Args:
+        valid_commands: Liste des commandes valides
+        field_name: Nom du champ à valider (défaut: 'command')
+    
+    Returns:
+        Fonction de validation compatible avec Pydantic field_validator
+    """
+    def validator(cls, v: str) -> str:
+        return validate_in_list(valid_commands, v)
+    return validator

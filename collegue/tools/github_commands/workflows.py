@@ -5,7 +5,7 @@ Handles GitHub Actions workflow runs.
 """
 from typing import Optional, List
 from pydantic import BaseModel
-from . import GitHubClient
+from ..clients import GitHubClient
 
 
 class WorkflowRun(BaseModel):

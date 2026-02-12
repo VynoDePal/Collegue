@@ -9,6 +9,7 @@ import json
 from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolExecutionError
+from .shared import validate_k8s_command
 from .clients import KubernetesClient, APIError
 from .transformers import (
 	transform_pods, transform_pod_detail,
@@ -60,12 +61,7 @@ class KubernetesRequest(BaseModel):
     @field_validator('command')
     @classmethod
     def validate_command(cls, v: str) -> str:
-        valid = ['list_pods', 'get_pod', 'pod_logs', 'list_deployments', 'get_deployment',
-                 'list_services', 'list_namespaces', 'list_events', 'describe_resource',
-                 'list_configmaps', 'list_secrets', 'list_nodes', 'get_node']
-        if v not in valid:
-            raise ValueError(f"Commande invalide. Valides: {valid}")
-        return v
+        return validate_k8s_command(v)
 
 class PodInfo(BaseModel):
     name: str

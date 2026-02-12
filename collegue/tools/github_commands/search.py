@@ -5,7 +5,7 @@ Handles code search on GitHub.
 """
 from typing import Optional, List
 from pydantic import BaseModel
-from . import GitHubClient
+from ..clients import GitHubClient
 
 
 class SearchResult(BaseModel):

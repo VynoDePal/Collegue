@@ -5,7 +5,7 @@ Handles file content operations (read/update).
 """
 import base64
 from typing import Optional, Dict, Any
-from . import GitHubClient
+from ..clients import GitHubClient
 from ..base import ToolExecutionError
 
 

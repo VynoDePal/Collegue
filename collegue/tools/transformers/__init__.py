@@ -24,9 +24,23 @@ from .sentry import (
 	transform_issue,
 	transform_events as transform_sentry_events,
 	transform_releases,
-	transform_repos,
+	transform_repos as transform_sentry_repos,
 	transform_tags,
 	transform_project_stats,
+)
+from .github import (
+	transform_repos,
+	transform_repo,
+	transform_prs,
+	transform_pr,
+	transform_pr_files,
+	transform_pr_comments,
+	transform_issues as transform_github_issues,
+	transform_issue as transform_github_issue,
+	transform_branches,
+	transform_branch,
+	transform_workflow_runs,
+	transform_search_results,
 )
 
 __all__ = [
@@ -50,7 +64,20 @@ __all__ = [
 	'transform_issue',
 	'transform_sentry_events',
 	'transform_releases',
-	'transform_repos',
+	'transform_sentry_repos',
 	'transform_tags',
 	'transform_project_stats',
+	# GitHub
+	'transform_repos',
+	'transform_repo',
+	'transform_prs',
+	'transform_pr',
+	'transform_pr_files',
+	'transform_pr_comments',
+	'transform_github_issues',
+	'transform_github_issue',
+	'transform_branches',
+	'transform_branch',
+	'transform_workflow_runs',
+	'transform_search_results',
 ]
