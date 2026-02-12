@@ -6,25 +6,10 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 
 class CodeParser:
-    """
-    Analyse le code source pour construire une représentation structurée.
-    Cette classe est responsable de l'analyse syntaxique du code dans différents langages.
-    """
-
     def __init__(self):
         self.supported_languages = ["python", "javascript", "typescript"]
 
     def parse(self, code: str, language: str = None) -> Dict[str, Any]:
-        """
-        Analyse un extrait de code et retourne sa structure.
-
-        Args:
-            code (str): Le code source à analyser
-            language (str, optional): Le langage du code. Si None, tente de le détecter.
-
-        Returns:
-            dict: La représentation structurée du code
-        """
         if language is None:
             language = self._detect_language(code)
 
@@ -39,16 +24,6 @@ class CodeParser:
             return self._parse_typescript(code)
 
     def _detect_language(self, code: str) -> str:
-        """
-        Tente de détecter le langage du code.
-
-        Args:
-            code (str): Le code source
-
-        Returns:
-            str: Le langage détecté ou "unknown"
-        """
-
         python_score = 0
         js_score = 0
         ts_score = 0
@@ -119,15 +94,6 @@ class CodeParser:
         return "unknown"
 
     def _parse_python(self, code: str) -> Dict[str, Any]:
-        """
-        Analyse du code Python en utilisant l'AST.
-
-        Args:
-            code (str): Le code source Python
-
-        Returns:
-            dict: La représentation structurée du code
-        """
         try:
             tree = ast.parse(code)
 
@@ -159,7 +125,6 @@ class CodeParser:
             }
 
     def _extract_python_imports(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les imports Python avec une méthode basique."""
         imports = []
         for i, line in enumerate(code.split("\n")):
             line = line.strip()
@@ -180,7 +145,6 @@ class CodeParser:
         return imports
 
     def _extract_python_functions(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les fonctions Python avec une méthode basique."""
         functions = []
         lines = code.split("\n")
         for i, line in enumerate(lines):
@@ -195,7 +159,6 @@ class CodeParser:
         return functions
 
     def _extract_python_classes(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les classes Python avec une méthode basique."""
         classes = []
         lines = code.split("\n")
         for i, line in enumerate(lines):
@@ -210,15 +173,6 @@ class CodeParser:
         return classes
 
     def _parse_javascript(self, code: str) -> Dict[str, Any]:
-        """
-        Analyse du code JavaScript en utilisant des expressions régulières.
-
-        Args:
-            code (str): Le code source JavaScript
-
-        Returns:
-            dict: La représentation structurée du code
-        """
         try:
             imports = self._extract_js_imports(code)
             functions = self._extract_js_functions(code)
@@ -247,7 +201,6 @@ class CodeParser:
             }
 
     def _extract_js_imports(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les imports JavaScript."""
         imports = []
         for i, line in enumerate(code.split("\n")):
             line = line.strip()
@@ -266,10 +219,8 @@ class CodeParser:
         return imports
 
     def _extract_js_functions(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les fonctions JavaScript avec une méthode améliorée."""
         functions = []
         lines = code.split("\n")
-
 
         function_patterns = [
 
@@ -282,7 +233,6 @@ class CodeParser:
 
         for i, line in enumerate(lines):
             line = line.strip()
-
 
             match = re.search(function_patterns[0], line)
             if match:
@@ -297,7 +247,6 @@ class CodeParser:
                 })
                 continue
 
-
             match = re.search(function_patterns[1], line)
             if match and not line.startswith("function") and not line.startswith("if") and not line.startswith("while"):
                 name = match.group(1)
@@ -310,7 +259,6 @@ class CodeParser:
                     "params": params
                 })
                 continue
-
 
             match = re.search(function_patterns[2], line)
             if match:
@@ -329,7 +277,6 @@ class CodeParser:
         return functions
 
     def _extract_js_classes(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les classes JavaScript avec une méthode améliorée."""
         classes = []
         lines = code.split("\n")
 
@@ -351,7 +298,6 @@ class CodeParser:
         return classes
 
     def _extract_js_variables(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les variables JavaScript."""
         variables = []
         lines = code.split("\n")
 
@@ -374,15 +320,6 @@ class CodeParser:
         return variables
 
     def _parse_typescript(self, code: str) -> Dict[str, Any]:
-        """
-        Analyse du code TypeScript en utilisant des expressions régulières.
-
-        Args:
-            code (str): Le code source TypeScript
-
-        Returns:
-            dict: La représentation structurée du code
-        """
         try:
             imports = self._extract_ts_imports(code)
             functions = self._extract_ts_functions(code)
@@ -417,7 +354,6 @@ class CodeParser:
             }
 
     def _extract_ts_imports(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les imports TypeScript (similaires à JavaScript)."""
         imports = []
         for i, line in enumerate(code.split("\n")):
             line = line.strip()
@@ -436,7 +372,6 @@ class CodeParser:
         return imports
 
     def _extract_ts_functions(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les fonctions TypeScript avec support des annotations de type."""
         functions = []
         lines = code.split("\n")
 
@@ -453,7 +388,6 @@ class CodeParser:
         for i, line in enumerate(lines):
             line = line.strip()
 
-
             match = re.search(function_patterns[0], line)
             if match:
                 name = match.group(1)
@@ -469,7 +403,6 @@ class CodeParser:
                 })
                 continue
 
-
             match = re.search(function_patterns[1], line)
             if match and not line.startswith("function") and not line.startswith("if") and not line.startswith("while"):
                 name = match.group(1)
@@ -484,7 +417,6 @@ class CodeParser:
                     "return_type": return_type
                 })
                 continue
-
 
             match = re.search(function_patterns[2], line)
             if match:
@@ -505,7 +437,6 @@ class CodeParser:
         return functions
 
     def _extract_ts_classes(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les classes TypeScript avec support des interfaces et generics."""
         classes = []
         lines = code.split("\n")
 
@@ -538,7 +469,6 @@ class CodeParser:
         return classes
 
     def _extract_ts_interfaces(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les interfaces TypeScript."""
         interfaces = []
         lines = code.split("\n")
 
@@ -568,7 +498,6 @@ class CodeParser:
         return interfaces
 
     def _extract_ts_types(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les définitions de types TypeScript."""
         types = []
         lines = code.split("\n")
 
@@ -597,7 +526,6 @@ class CodeParser:
         return types
 
     def _extract_ts_variables(self, code: str) -> List[Dict[str, Any]]:
-        """Extrait les variables TypeScript avec support des annotations de type."""
         variables = []
         lines = code.split("\n")
 
@@ -627,15 +555,6 @@ class CodeParser:
         return variables
 
     def _extract_python_imports_ast(self, tree: ast.AST) -> List[Dict[str, Any]]:
-        """
-        Extrait les imports Python à partir de l'AST.
-
-        Args:
-            tree (ast.AST): L'arbre syntaxique abstrait du code Python
-
-        Returns:
-            List[Dict[str, Any]]: Liste des imports avec leurs attributs
-        """
         imports = []
 
         for node in ast.walk(tree):
@@ -661,16 +580,6 @@ class CodeParser:
         return imports
 
     def _extract_python_functions_ast(self, tree: ast.AST, code: str) -> List[Dict[str, Any]]:
-        """
-        Extrait les fonctions Python à partir de l'AST.
-
-        Args:
-            tree (ast.AST): L'arbre syntaxique abstrait du code Python
-            code (str): Le code source Python
-
-        Returns:
-            List[Dict[str, Any]]: Liste des fonctions avec leurs attributs
-        """
         functions = []
 
         for node in ast.walk(tree):
@@ -728,16 +637,6 @@ class CodeParser:
         return functions
 
     def _extract_python_classes_ast(self, tree: ast.AST, code: str) -> List[Dict[str, Any]]:
-        """
-        Extrait les classes Python à partir de l'AST.
-
-        Args:
-            tree (ast.AST): L'arbre syntaxique abstrait du code Python
-            code (str): Le code source Python
-
-        Returns:
-            List[Dict[str, Any]]: Liste des classes avec leurs attributs
-        """
         classes = []
 
         for node in ast.walk(tree):
@@ -807,7 +706,6 @@ class CodeParser:
                                     "line": child.lineno
                                 })
 
-
                 docstring = ast.get_docstring(node)
 
                 classes.append({
@@ -822,16 +720,6 @@ class CodeParser:
         return classes
 
     def _extract_python_variables_ast(self, tree: ast.AST, code: str) -> List[Dict[str, Any]]:
-        """
-        Extrait les variables Python à partir de l'AST.
-
-        Args:
-            tree (ast.AST): L'arbre syntaxique abstrait du code Python
-            code (str): Le code source Python
-
-        Returns:
-            List[Dict[str, Any]]: Liste des variables avec leurs attributs
-        """
         variables = []
 
         for node in ast.walk(tree):

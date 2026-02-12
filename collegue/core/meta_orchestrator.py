@@ -25,10 +25,7 @@ class OrchestratorResponse(BaseModel):
 
 
 def register_meta_orchestrator(app: FastMCP):
-    """
-    Enregistre le meta-orchestrator qui utilise sampling with tools
-    """
-    
+
     @app.tool(
         name="smart_orchestrator",
         description="Orchestrateur intelligent qui choisit et exécute automatiquement les tools appropriés",
@@ -40,8 +37,7 @@ def register_meta_orchestrator(app: FastMCP):
         ctx: Context
     ) -> OrchestratorResponse:
         """
-        Orchestrateur intelligent utilisant FastMCP sampling with tools.
-        
+        Orchestrateur intelligent utilisant FastMCP sampling with tools.        
         Le LLM choisit automatiquement les tools appropriés et les exécute
         en fonction de la requête utilisateur.
         """
@@ -51,8 +47,6 @@ def register_meta_orchestrator(app: FastMCP):
         await ctx.info(f"Analyse de la requête: {request.query[:100]}...")
         
         try:
-            # Utiliser ctx.sample() avec tools pour laisser le LLM choisir
-            # Les tools disponibles seront automatiquement découverts par FastMCP
             result = await ctx.sample(
                 messages=[
                     f"Tu es un assistant de développement intelligent.",
@@ -77,7 +71,6 @@ Sois concis mais complet. Focus sur la résolution du problème de l'utilisateur
             
             execution_time = time.time() - start_time
             
-            # Extraire les tools utilisés depuis l'historique si disponible
             tools_used = []
             if hasattr(result, 'history') and result.history:
                 for msg in result.history:
@@ -106,10 +99,5 @@ Sois concis mais complet. Focus sur la résolution du problème de l'utilisateur
                 confidence=0.1
             )
 
-
 def remove_orchestrator_from_core():
-    """
-    Supprime l'orchestrateur personnalisé du core
-    """
-    # Cette fonction sera appelée pour nettoyer l'ancien système
     pass
