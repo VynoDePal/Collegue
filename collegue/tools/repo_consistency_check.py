@@ -33,6 +33,7 @@ from ..core.shared import (
 )
 from .analyzers.python import PythonAnalyzer
 from .analyzers.javascript import JavaScriptAnalyzer
+from .analyzers.php import PHPAnalyzer
 
 
 class ConsistencyCheckRequest(BaseModel):
@@ -44,7 +45,7 @@ class ConsistencyCheckRequest(BaseModel):
     )
     language: str = Field(
         "auto",
-        description="Langage principal: 'python', 'typescript', 'javascript', 'auto'"
+        description="Langage principal: 'python', 'typescript', 'javascript', 'php', 'auto'"
     )
     checks: Optional[List[str]] = Field(
         None,
@@ -163,7 +164,7 @@ class RepoConsistencyCheckTool(BaseTool):
     tags = {"analysis", "quality"}
     request_model = ConsistencyCheckRequest
     response_model = ConsistencyCheckResponse
-    supported_languages = ["python", "typescript", "javascript", "auto"]
+    supported_languages = ["python", "typescript", "javascript", "php", "auto"]
     long_running = False
 
     ALL_CHECKS = ['unused_imports', 'unused_vars', 'dead_code', 'duplication',
@@ -207,10 +208,11 @@ class RepoConsistencyCheckTool(BaseTool):
         super().__init__(config, app_state)
         self._python_analyzer = PythonAnalyzer(logger=self.logger)
         self._js_analyzer = JavaScriptAnalyzer(logger=self.logger)
+        self._php_analyzer = PHPAnalyzer(logger=self.logger)
 
     def get_capabilities(self) -> List[str]:
         return [
-            "Détection d'imports non utilisés (Python, JS/TS)",
+            "Détection d'imports non utilisés (Python, JS/TS, PHP)",
             "Détection de variables inutilisées",
             "Détection de code mort (fonctions non appelées)",
             "Détection de duplication de code",
@@ -300,8 +302,15 @@ class RepoConsistencyCheckTool(BaseTool):
             'exports', 'process', 'Buffer', '__dirname', '__filename', 'global', 'this',
         }
 
+        php_globals = {
+            'echo', 'print', 'isset', 'empty', 'count', 'strlen', 'array', 'null', 'true', 'false',
+            '$_GET', '$_POST', '$_SESSION', '$_SERVER', '$_FILES', '$_COOKIE', '$_ENV', '$this',
+            'Exception', 'stdClass', 'DateTime', 'json_encode', 'json_decode', 'var_dump', 'die', 'exit'
+        }
+
         defined_symbols.update(python_builtins)
         defined_symbols.update(js_globals)
+        defined_symbols.update(php_globals)
 
         for file in files:
             lang = file.language or self._detect_language(file.path)
@@ -327,7 +336,7 @@ class RepoConsistencyCheckTool(BaseTool):
                 except SyntaxError:
                     pass
 
-            elif lang in ('typescript', 'javascript'):
+            elif lang in ('typescript', 'javascript', 'php'):
 
                 patterns = [
                     r"(?:function|class)\s+(\w+)",
@@ -335,9 +344,23 @@ class RepoConsistencyCheckTool(BaseTool):
                     r"import\s+(?:\{[^}]*\}|\*\s+as\s+)?(\w+)",
                     r"export\s+(?:default\s+)?(?:function|class|const|let|var)\s+(\w+)",
                 ]
+                
+                if lang == 'php':
+                    patterns = [
+                        r"(?:function|class|trait|interface)\s+(\w+)",
+                        r"(\$[a-zA-Z0-9_]+)\s*=",
+                        r"use\s+(?:[a-zA-Z0-9_\\]+\\)*(\w+)(?:\s+as\s+(\w+))?;",
+                    ]
+                
                 for pattern in patterns:
                     matches = re.findall(pattern, file.content)
-                    defined_symbols.update(matches)
+                    # Handle tuples from groups
+                    for m in matches:
+                        if isinstance(m, tuple):
+                            for g in m:
+                                if g: defined_symbols.add(g)
+                        else:
+                            defined_symbols.add(m)
 
         for file in files:
             lang = file.language or self._detect_language(file.path)
@@ -718,6 +741,14 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                     all_issues.extend(self._js_analyzer.analyze_unused_imports(file.content, file.path))
                 if 'unused_vars' in checks:
                     all_issues.extend(self._js_analyzer.analyze_unused_vars(file.content, file.path))
+
+            elif lang == 'php':
+                if 'unused_imports' in checks:
+                    all_issues.extend(self._php_analyzer.analyze_unused_imports(file.content, file.path))
+                if 'unused_vars' in checks:
+                    all_issues.extend(self._php_analyzer.analyze_unused_vars(file.content, file.path))
+                if 'dead_code' in checks:
+                    all_issues.extend(self._php_analyzer.analyze_dead_code(file.content, file.path))
 
         if 'duplication' in checks and len(request.files) > 1:
             all_issues.extend(self._analyze_duplication(request.files))

@@ -56,8 +56,8 @@ class DependencyGuardRequest(BaseModel):
         v = v.strip().lower()
         if v in ['typescript', 'javascript', 'js', 'ts']:
             return 'javascript'
-        if v not in ['python', 'javascript']:
-            raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript")
+        if v not in ['python', 'javascript', 'php']:
+            raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript, php")
         return v
 
 class DependencyIssue(BaseModel):
@@ -96,6 +96,11 @@ class DependencyGuardTool(BaseTool):
             'event-stream',
             'flatmap-stream',
             'eslint-scope',
+        ],
+        'php': [
+            'symfont/process',
+            'guzzlehttp/guzzle-http',
+            'illuminate/support-helpers',
         ]
     }
 
@@ -112,6 +117,13 @@ class DependencyGuardTool(BaseTool):
             'moment': 'dayjs ou date-fns',
             'underscore': 'lodash',
             'bower': 'npm ou yarn',
+        },
+        'php': {
+            'mcrypt': 'openssl',
+            'mysql': 'mysqli ou pdo',
+            'swiftmailer/swiftmailer': 'symfony/mailer',
+            'fzaninotto/faker': 'fakerphp/faker',
+            'phpunit/phpunit-mock-objects': 'phpunit (built-in)',
         }
     }
 
@@ -120,14 +132,14 @@ class DependencyGuardTool(BaseTool):
     tags = {"security", "analysis"}
     request_model = DependencyGuardRequest
     response_model = DependencyGuardResponse
-    supported_languages = ["python", "typescript", "javascript"]
+    supported_languages = ["python", "typescript", "javascript", "php"]
     long_running = True
 
     def get_usage_description(self) -> str:
         return (
             "Outil de validation des dépendances qui vérifie l'existence des packages, "
             "les versions, les vulnérabilités connues et les risques supply-chain. "
-            "Supporte Python (requirements.txt, pyproject.toml) et JavaScript/TypeScript (package.json)."
+            "Supporte Python, JavaScript/TypeScript et PHP (composer.json)."
         )
 
     def get_examples(self) -> List[Dict[str, Any]]:
@@ -264,6 +276,40 @@ class DependencyGuardTool(BaseTool):
 
         return dependencies
 
+    def _parse_composer_json(self, content: str) -> List[Dict[str, str]]:
+        dependencies = []
+        try:
+            data = json.loads(content)
+            all_deps = {
+                **data.get('require', {}),
+                **data.get('require-dev', {})
+            }
+            # Exclure les extensions PHP ('ext-*') et 'php'
+            for name, version in all_deps.items():
+                if name == 'php' or name.startswith('ext-') or name.startswith('lib-'):
+                    continue
+                dependencies.append({'name': name, 'version': version})
+        except json.JSONDecodeError as e:
+            raise ToolValidationError(f"Erreur de parsing composer.json: {e}")
+        return dependencies
+
+    def _parse_composer_lock(self, content: str) -> List[Dict[str, str]]:
+        dependencies = []
+        try:
+            data = json.loads(content)
+            
+            packages = data.get('packages', [])
+            packages_dev = data.get('packages-dev', [])
+            
+            for pkg in packages + packages_dev:
+                dependencies.append({
+                    'name': pkg.get('name'),
+                    'version': pkg.get('version')
+                })
+        except json.JSONDecodeError as e:
+            raise ToolValidationError(f"Erreur de parsing composer.lock: {e}")
+        return dependencies
+
     def _check_pypi_existence(self, package_name: str) -> Dict[str, Any]:
         try:
             result = subprocess.run(
@@ -301,6 +347,31 @@ class DependencyGuardTool(BaseTool):
                 return {'exists': False, 'latest_version': None}
         except subprocess.TimeoutExpired:
             return {'exists': None, 'latest_version': None, 'error': 'timeout'}
+        except Exception as e:
+            return {'exists': None, 'latest_version': None, 'error': str(e)}
+
+    def _check_packagist_existence(self, package_name: str) -> Dict[str, Any]:
+        try:
+            # Utilisation de l'API Packagist publique
+            url = f"https://packagist.org/packages/{package_name}.json"
+            req = urllib.request.Request(url)
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    package_data = data.get('package', {})
+                    versions = list(package_data.get('versions', {}).keys())
+                    
+                    # Trouver la dernière version stable (simplifié)
+                    latest = next((v for v in versions if 'dev' not in v), versions[0] if versions else None)
+                    
+                    return {'exists': True, 'latest_version': latest}
+                return {'exists': False, 'latest_version': None}
+                
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return {'exists': False, 'latest_version': None}
+            return {'exists': None, 'latest_version': None, 'error': f"HTTP {e.code}"}
         except Exception as e:
             return {'exists': None, 'latest_version': None, 'error': str(e)}
 
@@ -580,6 +651,13 @@ class DependencyGuardTool(BaseTool):
 
                 if 'dependencies' in data or 'devDependencies' in data:
                     return 'package.json'
+                
+                if 'require' in data and 'name' in data: # Heuristique pour composer.json
+                    return 'composer.json'
+                
+                if 'packages' in data and 'packages-dev' in data and '_readme' in data: # composer.lock
+                    return 'composer.lock'
+                    
             except json.JSONDecodeError:
                 pass
 
@@ -614,6 +692,10 @@ class DependencyGuardTool(BaseTool):
                         match = re.match(r'^([a-zA-Z0-9_-]+)', line)
                         if match:
                             deps.append({'name': match.group(1), 'version': '*'})
+        elif content_type == 'composer.json':
+            deps = self._parse_composer_json(request.content)
+        elif content_type == 'composer.lock':
+            deps = self._parse_composer_lock(request.content)
         else:
             raise ToolValidationError(f"Type de fichier '{content_type}' non supporté")
 
@@ -668,6 +750,8 @@ class DependencyGuardTool(BaseTool):
             if request.check_existence:
                 if request.language == 'python':
                     check = self._check_pypi_existence(name)
+                elif request.language == 'php':
+                    check = self._check_packagist_existence(name)
                 else:
                     check = self._check_npm_existence(name)
 
@@ -682,11 +766,19 @@ class DependencyGuardTool(BaseTool):
                     ))
 
         if request.check_vulnerabilities:
-            ecosystem = 'PyPI' if request.language == 'python' else 'npm'
+            ecosystem = 'PyPI'
+            if request.language == 'javascript':
+                ecosystem = 'npm'
+            elif request.language == 'php':
+                ecosystem = 'Packagist'
 
             all_deps = deps.copy()
             if content_type == 'package-lock.json' and request.language != 'python':
                 all_deps = self._extract_all_packages_from_lock(request.content)
+            
+            # Pour composer.lock, on a déjà toutes les deps (prod + dev)
+            if content_type == 'composer.lock':
+                all_deps = deps
 
             vulns = self._check_osv_vulnerabilities(all_deps, ecosystem)
 

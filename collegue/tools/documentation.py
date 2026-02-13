@@ -31,7 +31,8 @@ LANGUAGE_INSTRUCTIONS = {
     "java": "Utilise Javadoc format avec @param, @return, @throws",
     "c#": "Utilise XML documentation format avec <summary>, <param>, <returns>",
     "go": "Utilise les conventions Go avec commentaires au-dessus des déclarations",
-    "rust": "Utilise les doc comments avec /// et inclus les exemples avec ```"
+    "rust": "Utilise les doc comments avec /// et inclus les exemples avec ```",
+    "php": "Utilise le format PHPDoc (PSR-5/PSR-19) avec @param, @return, @throws et types explicites"
 }
 
 
@@ -407,6 +408,45 @@ Style de documentation: {request.doc_style or 'standard'}."""
                         "complexity": "medium"
                     })
 
+        elif language.lower() == 'php':
+            for i, line in enumerate(lines):
+                line_stripped = line.strip()
+                
+                # Functions and methods
+                if 'function ' in line_stripped:
+                    func_name = "anonymous"
+                    if 'function ' in line_stripped and '(' in line_stripped:
+                        parts = line_stripped.split('function ')[1].split('(')
+                        if parts[0].strip():
+                            func_name = parts[0].strip()
+                            
+                    elements.append({
+                        "type": "function",
+                        "name": func_name,
+                        "description": "",
+                        "signature": line_stripped,
+                        "line_number": str(i + 1),
+                        "complexity": "medium"
+                    })
+                
+                # Classes, Interfaces, Traits
+                elif line_stripped.startswith('class ') or line_stripped.startswith('abstract class ') or line_stripped.startswith('interface ') or line_stripped.startswith('trait '):
+                    parts = line_stripped.split()
+                    name_idx = 1
+                    if parts[0] == 'abstract': name_idx = 2
+                    
+                    if len(parts) > name_idx:
+                        name = parts[name_idx]
+                        
+                        elements.append({
+                            "type": "class",
+                            "name": name,
+                            "description": "",
+                            "signature": line_stripped,
+                            "line_number": str(i + 1),
+                            "complexity": "medium"
+                        })
+
         return elements
 
     def _estimate_complexity(self, element: Dict[str, Any]) -> str:
@@ -470,7 +510,8 @@ Style de documentation: {request.doc_style or 'standard'}."""
             "java": "Utilise Javadoc format avec @param, @return, @throws",
             "c#": "Utilise XML documentation format avec <summary>, <param>, <returns>",
             "go": "Utilise les conventions Go avec commentaires au-dessus des déclarations",
-            "rust": "Utilise les doc comments avec /// et inclus les exemples avec ```"
+            "rust": "Utilise les doc comments avec /// et inclus les exemples avec ```",
+            "php": "Utilise le format PHPDoc (PSR-5) avec @param, @return et types scalaires/objets"
         }
         return instructions.get(language.lower(), "")
 
@@ -492,7 +533,7 @@ Style de documentation: {request.doc_style or 'standard'}."""
             formatted_lines.extend(lines)
             formatted_lines.append('"""')
             return '\n'.join(formatted_lines)
-        elif language.lower() in ["javascript", "typescript"]:
+        elif language.lower() in ["javascript", "typescript", "java", "php", "c#"]:
 
             lines = docs.split('\n')
             formatted_lines = ['/**']
