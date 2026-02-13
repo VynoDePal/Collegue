@@ -26,6 +26,11 @@ WORKDIR /app
 # Création utilisateur non-root
 RUN groupadd -r collegue && useradd -r -g collegue collegue
 
+# Installation de curl pour le healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copie des dépendances depuis le builder
 COPY --from=builder /root/.local /home/collegue/.local
 
