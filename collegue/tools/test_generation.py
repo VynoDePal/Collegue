@@ -94,7 +94,8 @@ class TestGenerationTool(BaseTool):
     tags = {"generation", "testing"}
     request_model = TestGenerationRequest
     response_model = TestGenerationResponse
-    supported_languages = ["python", "javascript", "typescript", "java", "c#"]
+    # Supported languages updated for PHP
+    supported_languages = ["python", "javascript", "typescript", "java", "c#", "php"]
     long_running = True
 
     def get_supported_test_frameworks(self) -> Dict[str, List[str]]:
