@@ -340,6 +340,114 @@ def generate_typescript_mocha_tests(code: str, functions: List[Dict[str, Any]],
     return "\n".join(lines)
 
 
+def generate_phpunit_tests(code: str, functions: List[Dict[str, Any]],
+                         classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+    """Generate PHPUnit tests template."""
+    lines = [
+        "<?php",
+        "",
+        "namespace Tests\\Unit;",
+        "",
+        "use PHPUnit\\Framework\\TestCase;",
+        "use Mockery;",
+        "",
+        "class ModuleTest extends TestCase",
+        "{",
+    ]
+
+    if include_mocks:
+        lines.extend([
+            "    protected function setUp(): void",
+            "    {",
+            "        parent::setUp();",
+            "        // Set up mocks",
+            "    }",
+            "",
+            "    protected function tearDown(): void",
+            "    {",
+            "        Mockery::close();",
+            "        parent::tearDown();",
+            "    }",
+            "",
+        ])
+
+    # Add test cases for functions (wrapped in a class usually in PHPUnit)
+    for func in functions:
+        func_name = func.get("name", "unknown")
+        test_name = f"test_{func_name}".replace(" ", "_")
+        lines.extend([
+            f"    /** @test */",
+            f"    public function {test_name}()",
+            "    {",
+            "        // TODO: Implement test",
+            "        $this->assertTrue(true);",
+            "    }",
+            "",
+        ])
+
+    # Add test cases for classes
+    for cls in classes:
+        class_name = cls.get("name", "Unknown")
+        lines.extend([
+            f"    /** @test */",
+            f"    public function {class_name.lower()}_initialization()",
+            "    {",
+            "        // TODO: Implement test",
+            "        $this->assertTrue(true);",
+            "    }",
+            "",
+        ])
+
+    lines.extend([
+        "}",
+    ])
+
+    return "\n".join(lines)
+
+
+def generate_pest_tests(code: str, functions: List[Dict[str, Any]],
+                      classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+    """Generate Pest tests template."""
+    lines = [
+        "<?php",
+        "",
+        "use function Pest\\Laravel\\get;",
+        "",
+    ]
+
+    if include_mocks:
+        lines.extend([
+            "beforeEach(function () {",
+            "    // Set up mocks",
+            "});",
+            "",
+        ])
+
+    # Add test cases for functions
+    for func in functions:
+        func_name = func.get("name", "unknown")
+        lines.extend([
+            f"it('{func_name} works correctly', function () {{",
+            "    // TODO: Implement test",
+            "    expect(true)->toBeTrue();",
+            "});",
+            "",
+        ])
+
+    # Add test cases for classes
+    for cls in classes:
+        class_name = cls.get("name", "Unknown")
+        lines.extend([
+            f"it('{class_name} initializes correctly', function () {{",
+            "    // TODO: Implement test",
+            "    expect(true)->toBeTrue();",
+            "});",
+            "",
+        ])
+
+    return "\n".join(lines)
+
+
 def generate_generic_tests(code: str, language: str, framework: str) -> str:
     """Generate generic tests for unsupported language/framework combinations."""
     return f"""# Tests générés pour {language} avec {framework}

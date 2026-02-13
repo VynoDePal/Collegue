@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     CACHE_ENABLED: bool = True
     CACHE_TTL: int = 3600
     
-    SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript"]
+    SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
     
     OAUTH_ENABLED: bool = False
     OAUTH_JWKS_URI: Optional[str] = None

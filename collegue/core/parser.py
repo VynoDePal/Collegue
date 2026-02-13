@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 
 class CodeParser:
     def __init__(self):
-        self.supported_languages = ["python", "javascript", "typescript"]
+        self.supported_languages = ["python", "javascript", "typescript", "php"]
 
     def parse(self, code: str, language: str = None) -> Dict[str, Any]:
         if language is None:
@@ -22,13 +22,30 @@ class CodeParser:
             return self._parse_javascript(code)
         elif language == "typescript":
             return self._parse_typescript(code)
+        elif language == "php":
+            return self._parse_php(code)
 
     def _detect_language(self, code: str) -> str:
         python_score = 0
         js_score = 0
         ts_score = 0
+        php_score = 0
 
-
+        # PHP detection
+        if "<?php" in code:
+            php_score += 10
+        if "$" in code and ";" in code:
+            php_score += 2
+        if "namespace " in code and ";" in code:
+            php_score += 3
+        if "use " in code and "\\" in code and ";" in code:
+            php_score += 3
+        if "public function " in code or "private function " in code:
+            php_score += 3
+        if "->" in code or "::" in code:
+            php_score += 2
+        
+        # ... existing python detection ...
         if "def " in code:
             python_score += 2
         if "class " in code and ":" in code:
@@ -40,7 +57,7 @@ class CodeParser:
         if "self." in code:
             python_score += 1
 
-
+        # ... existing js detection ...
         if "function " in code:
             js_score += 2
         if "const " in code or "let " in code or "var " in code:
@@ -58,7 +75,7 @@ class CodeParser:
         if "document." in code:
             js_score += 1
 
-
+        # ... existing ts detection ...
         if "interface " in code:
             ts_score += 3
         if "type " in code and "=" in code and "<" in code and ">" in code:
@@ -74,15 +91,18 @@ class CodeParser:
         if "enum " in code:
             ts_score += 2
 
-
         ts_score += js_score // 2
 
-        if python_score > js_score and python_score > ts_score:
-            return "python"
-        elif ts_score > js_score and ts_score > python_score:
-            return "typescript"
-        elif js_score > python_score and js_score >= ts_score:
-            return "javascript"
+        scores = {
+            "python": python_score,
+            "javascript": js_score,
+            "typescript": ts_score,
+            "php": php_score
+        }
+        
+        max_lang = max(scores, key=scores.get)
+        if scores[max_lang] > 0:
+            return max_lang
 
         if ".py" in code.lower():
             return "python"
@@ -90,6 +110,8 @@ class CodeParser:
             return "typescript"
         elif ".js" in code.lower() or ".jsx" in code.lower():
             return "javascript"
+        elif ".php" in code.lower():
+            return "php"
 
         return "unknown"
 
@@ -171,6 +193,181 @@ class CodeParser:
                     "signature": line
                 })
         return classes
+
+    def _parse_php(self, code: str) -> Dict[str, Any]:
+        try:
+            imports = self._extract_php_imports(code)
+            functions = self._extract_php_functions(code)
+            classes = self._extract_php_classes(code)
+            variables = self._extract_php_variables(code)
+
+            return {
+                "language": "php",
+                "imports": imports,
+                "functions": functions,
+                "classes": classes,
+                "variables": variables,
+                "raw": code,
+                "syntax_valid": True
+            }
+        except Exception as e:
+            return {
+                "language": "php",
+                "imports": [],
+                "functions": [],
+                "classes": [],
+                "variables": [],
+                "raw": code,
+                "syntax_valid": False,
+                "error": f"Erreur lors de l'analyse du code PHP: {str(e)}"
+            }
+
+    def _extract_php_imports(self, code: str) -> List[Dict[str, Any]]:
+        imports = []
+        lines = code.split("\n")
+        
+        # Pattern pour les imports PHP: use Namespace\Class; ou use Namespace\Class as Alias;
+        import_pattern = r"^use\s+([a-zA-Z0-9_\\]+)(?:\s+as\s+([a-zA-Z0-9_]+))?\s*;"
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            match = re.search(import_pattern, line)
+            if match:
+                name = match.group(1)
+                alias = match.group(2)
+                imports.append({
+                    "type": "use",
+                    "name": name,
+                    "alias": alias,
+                    "line": i + 1,
+                    "statement": line
+                })
+        return imports
+
+    def _extract_php_functions(self, code: str) -> List[Dict[str, Any]]:
+        functions = []
+        lines = code.split("\n")
+        
+        # Pattern pour les fonctions: function name(...) {
+        # Pattern pour les méthodes: visibility function name(...) {
+        function_pattern = r"(?:(public|protected|private|static)\s+)*function\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)(?:\s*:\s*([a-zA-Z0-9_\\\?]+))?\s*\{?"
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            match = re.search(function_pattern, line)
+            if match:
+                visibility = match.group(1)
+                name = match.group(2)
+                params = match.group(3).strip()
+                return_type = match.group(4)
+                
+                func_info = {
+                    "name": name,
+                    "line": i + 1,
+                    "signature": line,
+                    "params": params,
+                    "return_type": return_type if return_type else "mixed"
+                }
+                
+                if visibility:
+                    func_info["type"] = "method"
+                    func_info["visibility"] = visibility
+                else:
+                    func_info["type"] = "function"
+                    
+                functions.append(func_info)
+        return functions
+
+    def _extract_php_classes(self, code: str) -> List[Dict[str, Any]]:
+        classes = []
+        lines = code.split("\n")
+        
+        # Pattern: class Name extends Parent implements Interface {
+        class_pattern = r"(?:abstract\s+|final\s+)?class\s+([a-zA-Z0-9_]+)(?:\s+extends\s+([a-zA-Z0-9_\\]+))?(?:\s+implements\s+([a-zA-Z0-9_\\,\s]+))?\s*\{?"
+        interface_pattern = r"interface\s+([a-zA-Z0-9_]+)(?:\s+extends\s+([a-zA-Z0-9_\\,\s]+))?\s*\{?"
+        trait_pattern = r"trait\s+([a-zA-Z0-9_]+)\s*\{?"
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            
+            # Class detection
+            match = re.search(class_pattern, line)
+            if match:
+                name = match.group(1)
+                parent = match.group(2)
+                interfaces = match.group(3)
+                
+                class_info = {
+                    "type": "class",
+                    "name": name,
+                    "line": i + 1,
+                    "signature": line
+                }
+                if parent:
+                    class_info["extends"] = parent
+                if interfaces:
+                    class_info["implements"] = [i.strip() for i in interfaces.split(",")]
+                
+                classes.append(class_info)
+                continue
+                
+            # Interface detection
+            match = re.search(interface_pattern, line)
+            if match:
+                name = match.group(1)
+                parents = match.group(2)
+                
+                interface_info = {
+                    "type": "interface",
+                    "name": name,
+                    "line": i + 1,
+                    "signature": line
+                }
+                if parents:
+                    interface_info["extends"] = [p.strip() for p in parents.split(",")]
+                
+                classes.append(interface_info)
+                continue
+                
+            # Trait detection
+            match = re.search(trait_pattern, line)
+            if match:
+                name = match.group(1)
+                classes.append({
+                    "type": "trait",
+                    "name": name,
+                    "line": i + 1,
+                    "signature": line
+                })
+                
+        return classes
+
+    def _extract_php_variables(self, code: str) -> List[Dict[str, Any]]:
+        variables = []
+        lines = code.split("\n")
+        
+        # Pattern: $name = value;
+        # Exclut les variables dans les paramètres de fonction ou les boucles si pas d'assignation directe
+        var_pattern = r"(\$[a-zA-Z0-9_]+)\s*=\s*(.+?);"
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            # Ignorer les lignes de commentaires
+            if line.startswith("//") or line.startswith("#") or line.startswith("*"):
+                continue
+                
+            match = re.search(var_pattern, line)
+            if match:
+                name = match.group(1)
+                value = match.group(2).strip()
+                
+                variables.append({
+                    "name": name,
+                    "line": i + 1,
+                    "value": value
+                })
+                
+        return variables
 
     def _parse_javascript(self, code: str) -> Dict[str, Any]:
         try:

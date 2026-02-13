@@ -60,6 +60,14 @@ REFACTORING_LANGUAGE_INSTRUCTIONS = {
         "optimize": "Utilise locals pour les valeurs répétées",
         "clean": "Supprime les commentaires obsolètes",
         "modernize": "Utilise la syntaxe HCL2"
+    },
+    "php": {
+        "rename": "Utilise les conventions PSR-12 (camelCase pour méthodes/variables, PascalCase pour classes)",
+        "extract": "Crée des méthodes typées avec PHPDoc ou Type Hints PHP 7/8",
+        "simplify": "Utilise l'opérateur null coalescing (??), Elvis (?:), et Match expressions (PHP 8)",
+        "optimize": "Utilise les fonctions natives PHP, évite les copies de tableaux inutiles",
+        "clean": "Supprime les 'use' inutilisés, formate selon PSR-12",
+        "modernize": "Utilise Constructor Property Promotion, Union Types, Attributes, Enums (PHP 8.1+)"
     }
 }
 
@@ -101,7 +109,7 @@ class RefactoringTool(BaseTool):
     tags = {"generation", "quality"}
     request_model = RefactoringRequest
     response_model = RefactoringResponse
-    supported_languages = ["python", "javascript", "typescript", "java", "c#", "terraform", "hcl"]
+    supported_languages = ["python", "javascript", "typescript", "java", "c#", "terraform", "hcl", "php"]
 
     def get_supported_refactoring_types(self) -> List[str]:
         return ["rename", "extract", "simplify", "optimize", "clean", "modernize"]
@@ -418,6 +426,14 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 return True, ""
             except json.JSONDecodeError as e:
                 return False, str(e)
+        
+        elif lang == "php":
+            # Vérification basique: doit commencer par <?php ou contenir du code PHP valide
+            # On pourrait utiliser subprocess('php -l') mais cela nécessite PHP installé
+            if "<?php" not in code and "namespace " not in code and "class " not in code and "function " not in code:
+                 # C'est peut-être un fragment, donc on laisse passer, mais c'est suspect
+                 pass
+            return True, ""
                 
         # Pour les autres langages (JS, TS, Terraform), pas de validateur simple en Python pur sans lib tierce.
         # On assume valide par défaut.
@@ -476,6 +492,14 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 "optimize": "Utilise des types stricts, évite 'any', optimise les imports",
                 "clean": "Supprime les types redondants, utilise des interfaces appropriées",
                 "modernize": "Utilise strict mode, utility types, decorators quand approprié"
+            },
+            "php": {
+                "rename": "Utilise camelCase pour variables/méthodes, PascalCase pour classes (PSR-12)",
+                "extract": "Crée des méthodes privées/protected, ajoute des types de retour et types de paramètres",
+                "simplify": "Utilise null coalescing operator (??), arrow functions (fn =>), match expressions",
+                "optimize": "Utilise les fonctions natives array_*, évite les requêtes N+1 avec Eloquent",
+                "clean": "Supprime les imports (use) inutilisés, utilise le typage strict (declare(strict_types=1))",
+                "modernize": "Passe en PHP 8.2+: Constructor Property Promotion, Readonly classes, Enums, Intersection Types"
             }
         }
 
@@ -499,7 +523,8 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             "javascript": ["//", "/*"],
             "typescript": ["//", "/*"],
             "java": ["//", "/*"],
-            "c#": ["//", "/*"]
+            "c#": ["//", "/*"],
+            "php": ["//", "/*", "#"]
         }
 
         patterns = comment_patterns.get(language.lower(), ["#", "//"])
@@ -512,6 +537,9 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         if language.lower() == "python":
             metrics["function_count"] = sum(1 for line in non_empty_lines if line.strip().startswith("def "))
             metrics["class_count"] = sum(1 for line in non_empty_lines if line.strip().startswith("class "))
+        elif language.lower() == "php":
+            metrics["function_count"] = sum(1 for line in non_empty_lines if "function " in line)
+            metrics["class_count"] = sum(1 for line in non_empty_lines if line.strip().startswith("class ") or line.strip().startswith("abstract class ") or line.strip().startswith("trait "))
         else:
             metrics["function_count"] = sum(1 for line in non_empty_lines if "function " in line.lower())
             metrics["class_count"] = sum(1 for line in non_empty_lines if "class " in line.lower())

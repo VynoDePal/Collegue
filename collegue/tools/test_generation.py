@@ -263,6 +263,11 @@ class TestGenerationTool(BaseTool):
                 test_prefix = ""
                 source_filename = f"module_under_test{source_ext}"
                 test_filename = f"module_under_test.test{source_ext}"
+            elif language == "php":
+                source_ext = ".php"
+                test_prefix = ""
+                source_filename = "ModuleUnderTest.php"
+                test_filename = "ModuleUnderTestTest.php"
             else:
                 return TestValidationResult(
                     validated=False,
@@ -646,6 +651,43 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
             return self._generate_mocha_tests(code, functions, classes, include_mocks)
         else:
             return self._generate_jest_tests(code, functions, classes, include_mocks)
+
+    def _generate_php_tests(self, code: str, test_framework: str, parsed_elements: List[Dict[str, Any]], include_mocks: bool) -> str:
+        functions = []
+        classes = []
+        
+        if parsed_elements:
+            for element in parsed_elements:
+                if element.get("type") == "function" or element.get("type") == "method":
+                    functions.append(element)
+                elif element.get("type") == "class":
+                    classes.append(element)
+        else:
+            # Fallback regex simple
+            lines = code.split("\n")
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if "function " in line:
+                    parts = line.split("function ")[1].split("(")
+                    if parts[0].strip():
+                        functions.append({
+                            "type": "function",
+                            "name": parts[0].strip(),
+                            "line": i + 1
+                        })
+                elif line.startswith("class "):
+                    parts = line.split("class ")[1].split(" ")
+                    if parts[0].strip():
+                        classes.append({
+                            "type": "class",
+                            "name": parts[0].strip(),
+                            "line": i + 1
+                        })
+                        
+        if test_framework == "pest":
+            return _test_templates.generate_pest_tests(code, functions, classes, include_mocks)
+        else:
+            return _test_templates.generate_phpunit_tests(code, functions, classes, include_mocks)
 
     def _generate_typescript_tests(self, code: str, test_framework: str, parsed_elements: List[Dict[str, Any]], include_mocks: bool) -> str:
         functions = []
