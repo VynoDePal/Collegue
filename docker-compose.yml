@@ -5,8 +5,6 @@ services:
       dockerfile: docker/collegue/Dockerfile
     image: collegue-app:latest
     restart: always
-    networks:
-      - collegue-net
     environment:
       PYTHONUNBUFFERED: 1
       PORT: 4121
@@ -47,8 +45,6 @@ services:
       - .env
     ports:
       - "4123:8080"
-    networks:
-      - collegue-net
 
   kc-provisioner:
     build:
@@ -65,8 +61,6 @@ services:
       PROVISION_CLIENT_ID: ${PROVISION_CLIENT_ID:-windsurf-client}
       REQUIRED_SCOPE: ${OAUTH_REQUIRED_SCOPES:-mcp.read}
       WAIT_FOR_CLIENT_SECONDS: ${WAIT_FOR_CLIENT_SECONDS:-600}
-    networks:
-      - collegue-net
     restart: "no"
 
   nginx:
@@ -78,8 +72,6 @@ services:
       - "8088:80"
     volumes:
       - nginx_logs:/var/log/nginx
-    networks:
-      - collegue-net
     depends_on:
       collegue-app:
         condition: service_healthy
@@ -88,11 +80,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-
-networks:
-  collegue-net:
-    driver: bridge
 
 volumes:
   nginx_logs:
