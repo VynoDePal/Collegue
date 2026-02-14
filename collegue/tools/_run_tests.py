@@ -1,8 +1,8 @@
 """
 Run Tests - Outil d'exécution de tests unitaires avec résultats structurés
 
-Cet outil permet d'exécuter des tests unitaires pour Python (pytest, unittest)
-et TypeScript/JavaScript (jest, mocha) et de retourner des résultats structurés.
+Cet outil permet d'exécuter des tests unitaires pour Python (pytest, unittest),
+TypeScript/JavaScript (jest, mocha, vitest) et PHP (phpunit, pest) et de retourner des résultats structurés.
 
 Problème résolu: Le code généré par IA n'est souvent pas testé, créant des régressions.
 Valeur: Permet de valider immédiatement le code généré sans quitter le workflow.
@@ -36,11 +36,11 @@ class RunTestsRequest(BaseModel):
     )
     language: str = Field(
         ...,
-        description="Langage: python ou typescript"
+        description="Langage: python, typescript, javascript ou php"
     )
     framework: Optional[str] = Field(
         None,
-        description="Framework de test: pytest, unittest, jest, mocha (auto-détecté si non spécifié)"
+        description="Framework de test: pytest, unittest, jest, mocha, vitest, phpunit, pest (auto-détecté si non spécifié)"
     )
     working_dir: Optional[str] = Field(
         None,
@@ -65,8 +65,8 @@ class RunTestsRequest(BaseModel):
     def validate_language(cls, v):
         """Valide le langage."""
         v = v.strip().lower()
-        if v not in ['python', 'typescript', 'javascript']:
-            raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript")
+        if v not in ['python', 'typescript', 'javascript', 'php']:
+            raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript, php")
         return v
 
     @field_validator('framework')
@@ -75,7 +75,7 @@ class RunTestsRequest(BaseModel):
         if v is None:
             return v
         v = v.strip().lower()
-        valid_frameworks = ['pytest', 'unittest', 'jest', 'mocha', 'vitest']
+        valid_frameworks = ['pytest', 'unittest', 'jest', 'mocha', 'vitest', 'phpunit', 'pest', 'codeception', 'behat', 'phpspec', 'kahlan', 'atoum', 'peridot', 'simpletest', 'testify']
         if v not in valid_frameworks:
             raise ValueError(f"Framework '{v}' non supporté. Utilisez: {', '.join(valid_frameworks)}")
         return v
@@ -132,18 +132,29 @@ class RunTestsTool(BaseTool):
 
 
     FRAMEWORK_COMMANDS = {
-        'pytest': ['pytest', '--tb=short', '-v', '--json-report', '--json-report-file=-'],
+        'pytest': ['python', '-m', 'pytest', '--json-report', '--json-report-file=/tmp/test_results.json', '-v'],
         'unittest': ['python', '-m', 'unittest', 'discover', '-v'],
         'jest': ['npx', 'jest', '--json', '--testLocationInResults'],
         'mocha': ['npx', 'mocha', '--reporter', 'json'],
-        'vitest': ['npx', 'vitest', 'run', '--reporter=json']
+        'vitest': ['npx', 'vitest', 'run', '--reporter=json'],
+        'phpunit': ['./vendor/bin/phpunit', '--log-junit', '/tmp/phpunit_results.xml', '--coverage-text'],
+        'pest': ['./vendor/bin/pest', '--log-junit=/tmp/pest_results.xml', '--coverage'],
+        'codeception': ['php', 'vendor/bin/codecept', 'run', '--xml'],
+        'behat': ['vendor/bin/behat', '--format', 'junit', '--out', '/tmp/behat_results'],
+        'phpspec': ['vendor/bin/phpspec', 'run', '--format=junit'],
+        'kahlan': ['vendor/bin/kahlan', '--reporter=junit', '--coverage=3'],
+        'atoum': ['vendor/bin/atoum', '--use-light-report', '--max-children-number=1'],
+        'peridot': ['vendor/bin/peridot', '--reporter=json'],
+        'simpletest': ['php', 'vendor/simpletest/test.php'],
+        'testify': ['php', 'vendor/bin/testify']
     }
 
 
     LANGUAGE_FRAMEWORKS = {
         'python': ['pytest', 'unittest'],
         'typescript': ['jest', 'mocha', 'vitest'],
-        'javascript': ['jest', 'mocha', 'vitest']
+        'javascript': ['jest', 'mocha', 'vitest'],
+        'php': ['phpunit', 'pest', 'codeception', 'behat', 'phpspec', 'kahlan', 'atoum', 'peridot', 'simpletest', 'testify']
     }
 
     tool_name = "run_tests"
@@ -151,13 +162,13 @@ class RunTestsTool(BaseTool):
     tags = {"testing"}
     request_model = RunTestsRequest
     response_model = RunTestsResponse
-    supported_languages = ["python", "typescript", "javascript"]
+    supported_languages = ["python", "typescript", "javascript", "php"]
     long_running = True
 
     def get_usage_description(self) -> str:
         return (
-            "Outil d'exécution de tests unitaires qui supporte Python (pytest, unittest) "
-            "et TypeScript/JavaScript (jest, mocha, vitest). Retourne des résultats structurés "
+            "Outil d'exécution de tests unitaires qui supporte Python (pytest, unittest), "
+            "TypeScript/JavaScript (jest, mocha, vitest) et PHP (phpunit, pest). Retourne des résultats structurés "
             "avec le statut de chaque test, les messages d'erreur et les métriques de couverture."
         )
 
@@ -187,6 +198,46 @@ class RunTestsTool(BaseTool):
                 }
             },
             {
+                "title": "Exécuter les tests Pest pour PHP",
+                "request": {
+                    "target": "tests/Feature/",
+                    "language": "php",
+                    "framework": "pest"
+                }
+            },
+            {
+                "title": "Exécuter les tests PHPUnit pour PHP",
+                "request": {
+                    "target": "tests/Unit/",
+                    "language": "php",
+                    "framework": "phpunit"
+                }
+            },
+            {
+                "title": "Exécuter les tests Codeception pour PHP",
+                "request": {
+                    "target": "tests/",
+                    "language": "php",
+                    "framework": "codeception"
+                }
+            },
+            {
+                "title": "Exécuter les tests Behat BDD pour PHP",
+                "request": {
+                    "target": "features/",
+                    "language": "php",
+                    "framework": "behat"
+                }
+            },
+            {
+                "title": "Exécuter les tests PHPSpec pour PHP",
+                "request": {
+                    "target": "spec/",
+                    "language": "php",
+                    "framework": "phpspec"
+                }
+            },
+            {
                 "title": "Filtrer les tests par pattern",
                 "request": {
                     "target": "tests/",
@@ -200,6 +251,7 @@ class RunTestsTool(BaseTool):
         return [
             "Exécution de tests Python avec pytest ou unittest",
             "Exécution de tests TypeScript/JavaScript avec jest, mocha ou vitest",
+            "Exécution de tests PHP avec 10 frameworks (PHPUnit, Pest, Codeception, Behat, PHPSpec, Kahlan, Atoum, Peridot, SimpleTest, Testify)",
             "Détection automatique du framework de test",
             "Résultats structurés avec statut par test",
             "Timeout configurable pour éviter les blocages",
@@ -224,6 +276,65 @@ class RunTestsTool(BaseTool):
 
 
             return 'pytest'
+        
+        elif language == 'php':
+            # Détecter automatiquement le framework PHP le plus approprié
+            composer_json = os.path.join(working_dir, 'composer.json')
+            phpunit_xml = os.path.join(working_dir, 'phpunit.xml')
+            pest_php = os.path.join(working_dir, 'pest.php')
+            behat_yml = os.path.join(working_dir, 'behat.yml')
+            phpspec_yml = os.path.join(working_dir, 'phpspec.yml')
+            kahlan_config = os.path.join(working_dir, 'kahlan-config.php')
+            atoum_config = os.path.join(working_dir, 'atoum.php')
+            
+            # Vérifier les fichiers de configuration spécifiques
+            if os.path.exists(pest_php):
+                return 'pest'
+            elif os.path.exists(behat_yml):
+                return 'behat'
+            elif os.path.exists(phpspec_yml):
+                return 'phpspec'
+            elif os.path.exists(kahlan_config):
+                return 'kahlan'
+            elif os.path.exists(atoum_config):
+                return 'atoum'
+            elif os.path.exists(phpunit_xml):
+                return 'phpunit'
+            
+            # Vérifier les dépendances dans composer.json
+            if os.path.exists(composer_json):
+                with open(composer_json, 'r') as f:
+                    try:
+                        composer = json.load(f)
+                        dev_deps = composer.get('require-dev', {})
+                        deps = {**composer.get('require', {}), **dev_deps}
+                        
+                        # Priorité par ordre de popularité/détection
+                        if 'pestphp/pest' in deps:
+                            return 'pest'
+                        elif 'codeception/codeception' in deps:
+                            return 'codeception'
+                        elif 'behat/behat' in deps:
+                            return 'behat'
+                        elif 'phpspec/phpspec' in deps:
+                            return 'phpspec'
+                        elif 'kahlan/kahlan' in deps:
+                            return 'kahlan'
+                        elif 'atoum/atoum' in deps:
+                            return 'atoum'
+                        elif 'peridot-php/peridot' in deps:
+                            return 'peridot'
+                        elif 'phpunit/phpunit' in deps:
+                            return 'phpunit'
+                        elif 'simpletest/simpletest' in deps:
+                            return 'simpletest'
+                        elif 'marcofiset/testify' in deps or 'sinevia/php-library-testify' in deps:
+                            return 'testify'
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Par défaut, essayer PHPUnit (le plus courant)
+            return 'phpunit'
 
         else:
             package_json = os.path.join(working_dir, 'package.json')
@@ -274,6 +385,56 @@ class RunTestsTool(BaseTool):
                 base_cmd.append(request.target)
                 if request.pattern:
                     base_cmd.extend(['--grep', request.pattern])
+            elif framework == 'phpunit':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--filter', request.pattern])
+            elif framework == 'pest':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--filter', request.pattern])
+            elif framework == 'codeception':
+                if request.target:
+                    base_cmd.extend(['run', request.target])
+                if request.pattern:
+                    base_cmd.extend(['--filter', request.pattern])
+            elif framework == 'behat':
+                if request.target:
+                    base_cmd.extend([request.target])
+                if request.pattern:
+                    base_cmd.extend(['--name', request.pattern])
+            elif framework == 'phpspec':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--filter', request.pattern])
+            elif framework == 'kahlan':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--pattern', request.pattern])
+            elif framework == 'atoum':
+                if request.target:
+                    base_cmd.extend(['-f', request.target])
+                if request.pattern:
+                    base_cmd.extend(['--filter', request.pattern])
+            elif framework == 'peridot':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--grep', request.pattern])
+            elif framework == 'simpletest':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--testcase', request.pattern])
+            elif framework == 'testify':
+                if request.target:
+                    base_cmd.append(request.target)
+                if request.pattern:
+                    base_cmd.extend(['--filter', request.pattern])
 
         return base_cmd
 
@@ -404,6 +565,262 @@ class RunTestsTool(BaseTool):
 
         return results
 
+    def _parse_phpunit_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Parse la sortie de PHPUnit (format XML ou texte)."""
+        results = {
+            'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
+            'duration': 0.0, 'results': []
+        }
+
+        combined = stdout + stderr
+
+        # Parser la sortie texte standard de PHPUnit
+        total_match = re.search(r'Tests: (\d+),', combined)
+        if total_match:
+            results['total'] = int(total_match.group(1))
+
+        # Extraire les statistiques
+        assertions_match = re.search(r'Assertions: (\d+),', combined)
+        errors_match = re.search(r'Errors: (\d+),', combined)
+        failures_match = re.search(r'Failures: (\d+),', combined)
+        skipped_match = re.search(r'Skipped: (\d+),', combined)
+        
+        results['errors'] = int(errors_match.group(1)) if errors_match else 0
+        results['failed'] = int(failures_match.group(1)) if failures_match else 0
+        results['skipped'] = int(skipped_match.group(1)) if skipped_match else 0
+        results['passed'] = results['total'] - results['failed'] - results['errors'] - results['skipped']
+
+        # Extraire la durée
+        time_match = re.search(r'Time: ([\d.]+) seconds?', combined)
+        if time_match:
+            results['duration'] = float(time_match.group(1))
+
+        # Parser les tests individuels
+        test_pattern = re.compile(r'^(\d+)\) ([^\\n]+)\\s+(.+)$', re.MULTILINE)
+        for match in test_pattern.finditer(combined):
+            test_name = match.group(2)
+            status_line = match.group(3)
+            
+            status = 'unknown'
+            message = None
+            
+            if 'OK' in status_line:
+                status = 'passed'
+            elif 'FAIL' in status_line or 'FAILED' in status_line:
+                status = 'failed'
+                message = status_line
+            elif 'ERROR' in status_line:
+                status = 'error'
+                message = status_line
+            elif 'SKIPPED' in status_line:
+                status = 'skipped'
+                message = status_line
+
+            results['results'].append({
+                'name': test_name,
+                'status': status,
+                'duration': 0.0,
+                'message': message
+            })
+
+        return results
+
+    def _parse_pest_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Parse la sortie de Pest (format similaire à PHPUnit)."""
+        results = {
+            'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
+            'duration': 0.0, 'results': []
+        }
+
+        combined = stdout + stderr
+
+        # Parser les résultats de Pest
+        total_match = re.search(r'\\s+Tests:\\s+(\\d+)', combined)
+        if total_match:
+            results['total'] = int(total_match.group(1))
+
+        # Extraire les statistiques
+        passed_match = re.search(r'\\s+✓ Passed:\\s+(\\d+)', combined)
+        failed_match = re.search(r'\\s+✗ Failed:\\s+(\\d+)', combined)
+        skipped_match = re.search(r'\\s+- Skipped:\\s+(\\d+)', combined)
+        
+        results['passed'] = int(passed_match.group(1)) if passed_match else 0
+        results['failed'] = int(failed_match.group(1)) if failed_match else 0
+        results['skipped'] = int(skipped_match.group(1)) if skipped_match else 0
+        results['errors'] = results['failed']  # Pest ne distingue pas erreur/échec
+
+        # Extraire la durée
+        time_match = re.search(r'Time:\\s+([\\d.]+)s', combined)
+        if time_match:
+            results['duration'] = float(time_match.group(1))
+
+        # Parser les tests individuels (format Pest)
+        test_pattern = re.compile(r'^\\s+[✓✗-]\\s+(.+)$', re.MULTILINE)
+        for match in test_pattern.finditer(combined):
+            test_name = match.group(1)
+            line_start = match.start()
+            
+            # Chercher la ligne complète pour déterminer le statut
+            full_line = combined[line_start:combined.find('\\n', line_start)]
+            
+            status = 'unknown'
+            if '✓' in full_line:
+                status = 'passed'
+            elif '✗' in full_line:
+                status = 'failed'
+            elif '-' in full_line:
+                status = 'skipped'
+
+            results['results'].append({
+                'name': test_name.strip(),
+                'status': status,
+                'duration': 0.0,
+                'message': None
+            })
+
+        return results
+
+    def _parse_codeception_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Parse la sortie de Codeception."""
+        results = {
+            'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
+            'duration': 0.0, 'results': []
+        }
+
+        combined = stdout + stderr
+
+        # Parser les résultats Codeception
+        total_match = re.search(r'Tests:\\s+(\\d+),', combined)
+        if total_match:
+            results['total'] = int(total_match.group(1))
+
+        success_match = re.search(r'Successes:\\s+(\\d+)', combined)
+        failed_match = re.search(r'Failed:\\s+(\\d+)', combined)
+        
+        results['passed'] = int(success_match.group(1)) if success_match else 0
+        results['failed'] = int(failed_match.group(1)) if failed_match else 0
+        results['errors'] = results['failed']  # Codeception ne distingue pas erreur/échec
+
+        # Extraire la durée
+        time_match = re.search(r'Time:\\s+([\\d.]+)s', combined)
+        if time_match:
+            results['duration'] = float(time_match.group(1))
+
+        return results
+
+    def _parse_behat_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Parse la sortie de Behat."""
+        results = {
+            'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
+            'duration': 0.0, 'results': []
+        }
+
+        combined = stdout + stderr
+
+        # Parser les résultats Behat (format JUnit-like)
+        scenario_pattern = re.compile(r'(\\d+) scenarios? \\((\\d+) passed, (\\d+) failed, (\\d+) skipped\\)')
+        match = scenario_pattern.search(combined)
+        if match:
+            results['total'] = int(match.group(1))
+            results['passed'] = int(match.group(2))
+            results['failed'] = int(match.group(3))
+            results['skipped'] = int(match.group(4))
+
+        # Extraire la durée
+        time_match = re.search(r'([\\d.]+)s', combined)
+        if time_match:
+            results['duration'] = float(time_match.group(1))
+
+        return results
+
+    def _parse_phpspec_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Parse la sortie de PHPSpec."""
+        results = {
+            'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
+            'duration': 0.0, 'results': []
+        }
+
+        combined = stdout + stderr
+
+        # Parser les résultats PHPSpec
+        examples_pattern = re.compile(r'(\\d+) examples?')
+        match = examples_pattern.search(combined)
+        if match:
+            results['total'] = int(match.group(1))
+
+        # Compter les statuts
+        results['passed'] = len(re.findall(r'✓', combined))
+        results['failed'] = len(re.findall(r'✗', combined))
+
+        # Extraire la durée
+        time_match = re.search(r'([\\d.]+) seconds?', combined)
+        if time_match:
+            results['duration'] = float(time_match.group(1))
+
+        return results
+
+    def _parse_generic_php_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Parser générique pour les frameworks PHP moins courants."""
+        results = {
+            'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0,
+            'duration': 0.0, 'results': []
+        }
+
+        combined = stdout + stderr
+
+        # Tentatives de parsing génériques
+        total_patterns = [
+            r'Tests?:\\s+(\\d+)',
+            r'(\\d+) tests?',
+            r'Examples?:\\s+(\\d+)'
+        ]
+        
+        for pattern in total_patterns:
+            match = re.search(pattern, combined)
+            if match:
+                results['total'] = int(match.group(1))
+                break
+
+        # Compter les succès/échecs
+        passed_patterns = [
+            r'Passed:\\s+(\\d+)',
+            r'Success:\\s+(\\d+)',
+            r'✓\\s+(\\d+)'
+        ]
+        
+        for pattern in passed_patterns:
+            match = re.search(pattern, combined)
+            if match:
+                results['passed'] = int(match.group(1))
+                break
+
+        failed_patterns = [
+            r'Failed:\\s+(\\d+)',
+            r'Errors?:\\s+(\\d+)',
+            r'✗\\s+(\\d+)'
+        ]
+        
+        for pattern in failed_patterns:
+            match = re.search(pattern, combined)
+            if match:
+                results['failed'] = int(match.group(1))
+                break
+
+        # Extraire la durée
+        time_patterns = [
+            r'Time:\\s+([\\d.]+)s',
+            r'Duration:\\s+([\\d.]+)',
+            r'([\\d.]+) seconds?'
+        ]
+        
+        for pattern in time_patterns:
+            match = re.search(pattern, combined)
+            if match:
+                results['duration'] = float(match.group(1))
+                break
+
+        return results
+
     def _execute_core_logic(self, request: RunTestsRequest, **kwargs) -> RunTestsResponse:
         """Exécute les tests et retourne les résultats structurés."""
         temp_dir = None
@@ -418,6 +835,9 @@ class RunTestsTool(BaseTool):
                 if request.language == 'python':
                     test_filename = "test_module.py"
                     source_filename = "module_under_test.py"
+                elif request.language == 'php':
+                    test_filename = "ModuleUnderTestTest.php"
+                    source_filename = "ModuleUnderTest.php"
                 else:
                     ext = ".ts" if request.language == "typescript" else ".js"
                     test_filename = f"module.test{ext}"
@@ -496,6 +916,18 @@ class RunTestsTool(BaseTool):
                 parsed = self._parse_jest_output(stdout, stderr)
             elif framework in ['unittest', 'mocha']:
                 parsed = self._parse_unittest_output(stdout, stderr)
+            elif framework == 'phpunit':
+                parsed = self._parse_phpunit_output(stdout, stderr)
+            elif framework == 'pest':
+                parsed = self._parse_pest_output(stdout, stderr)
+            elif framework == 'codeception':
+                parsed = self._parse_codeception_output(stdout, stderr)
+            elif framework == 'behat':
+                parsed = self._parse_behat_output(stdout, stderr)
+            elif framework == 'phpspec':
+                parsed = self._parse_phpspec_output(stdout, stderr)
+            elif framework in ['kahlan', 'atoum', 'peridot', 'simpletest', 'testify']:
+                parsed = self._parse_generic_php_output(stdout, stderr)
             else:
                 parsed = {'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'errors': 0, 'duration': 0.0, 'results': []}
 
