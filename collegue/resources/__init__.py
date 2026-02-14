@@ -25,6 +25,9 @@ def register_resources(app):
         from .typescript import register as register_typescript
         register_typescript(app, _compat)
         
+        from .php import register as register_php
+        register_php(app, _compat)
+        
         from .llm import register as register_llm
         register_llm(app, _compat)
         

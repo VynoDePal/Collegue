@@ -94,7 +94,6 @@ class TestGenerationTool(BaseTool):
     tags = {"generation", "testing"}
     request_model = TestGenerationRequest
     response_model = TestGenerationResponse
-    # Supported languages updated for PHP
     supported_languages = ["python", "javascript", "typescript", "java", "c#", "php"]
     long_running = True
 
@@ -104,7 +103,8 @@ class TestGenerationTool(BaseTool):
             "javascript": ["jest", "mocha", "jasmine", "vitest"],
             "typescript": ["jest", "mocha", "jasmine", "vitest"],
             "java": ["junit", "testng", "spock"],
-            "c#": ["nunit", "xunit", "mstest"]
+            "c#": ["nunit", "xunit", "mstest"],
+            "php": ["phpunit", "pest", "codeception", "behat", "phpspec", "kahlan"]
         }
 
     def get_usage_description(self) -> str:
@@ -185,6 +185,30 @@ class TestGenerationTool(BaseTool):
                     "coverage_target": 1.0
                 },
                 "expected_response": "Tests pytest exhaustifs couvrant tous les cas et branches"
+            },
+            {
+                "title": "Tests PHP avec PHPUnit",
+                "description": "Générer des tests PHPUnit pour un service PHP",
+                "request": {
+                    "code": "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Service;\n\nclass CartService\n{\n    private array $items = [];\n\n    public function addItem(string $productId, int $quantity, float $price): void\n    {\n        if ($quantity <= 0) {\n            throw new \\InvalidArgumentException('Quantity must be positive');\n        }\n        if ($price < 0) {\n            throw new \\InvalidArgumentException('Price cannot be negative');\n        }\n        $this->items[$productId] = [\n            'quantity' => $quantity,\n            'price' => $price,\n        ];\n    }\n\n    public function getTotal(): float\n    {\n        return array_reduce(\n            $this->items,\n            fn(float $carry, array $item) => $carry + ($item['price'] * $item['quantity']),\n            0.0\n        );\n    }\n\n    public function removeItem(string $productId): void\n    {\n        if (!isset($this->items[$productId])) {\n            throw new \\RuntimeException(\"Product {$productId} not in cart\");\n        }\n        unset($this->items[$productId]);\n    }\n\n    public function isEmpty(): bool\n    {\n        return empty($this->items);\n    }\n}",
+                    "language": "php",
+                    "test_framework": "phpunit",
+                    "include_mocks": False,
+                    "coverage_target": 0.95
+                },
+                "expected_response": "Tests PHPUnit complets avec cas normaux, exceptions et cas limites"
+            },
+            {
+                "title": "Tests PHP avec Pest",
+                "description": "Générer des tests Pest pour un service PHP avec syntaxe moderne",
+                "request": {
+                    "code": "<?php\n\ndeclare(strict_types=1);\n\nnamespace App\\Service;\n\nuse App\\Repository\\UserRepository;\n\nclass AuthService\n{\n    public function __construct(\n        private readonly UserRepository $repository\n    ) {}\n\n    public function authenticate(string $email, string $password): ?array\n    {\n        $user = $this->repository->findByEmail($email);\n        if ($user === null) {\n            return null;\n        }\n        if (!password_verify($password, $user['password_hash'])) {\n            return null;\n        }\n        return ['id' => $user['id'], 'email' => $user['email'], 'role' => $user['role']];\n    }\n}",
+                    "language": "php",
+                    "test_framework": "pest",
+                    "include_mocks": True,
+                    "coverage_target": 0.9
+                },
+                "expected_response": "Tests Pest avec mocks pour UserRepository et syntaxe expressive"
             }
         ]
 
