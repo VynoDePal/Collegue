@@ -829,7 +829,6 @@ class RunTestsTool(BaseTool):
 
             if request.test_content:
                 temp_dir = tempfile.mkdtemp(prefix="collegue_run_tests_")
-                working_dir = temp_dir
 
 
                 if request.language == 'python':
@@ -843,26 +842,43 @@ class RunTestsTool(BaseTool):
                     test_filename = f"module.test{ext}"
                     source_filename = f"module_under_test{ext}"
 
+                # Pour PHP, on doit exécuter depuis le working_dir du projet
+                # car les frameworks PHP ont besoin de vendor/ et autoload
+                if request.language == 'php' and request.working_dir and os.path.isdir(request.working_dir):
+                    working_dir = request.working_dir
+                    # Écrire le test dans le temp_dir et passer le chemin absolu
+                    test_path = os.path.join(temp_dir, test_filename)
+                    with open(test_path, 'w', encoding='utf-8') as f:
+                        f.write(request.test_content)
+                    self.logger.info(f"Tests PHP écrits dans: {test_path}")
 
-                if request.source_content:
-                    source_path = os.path.join(temp_dir, source_filename)
-                    with open(source_path, 'w', encoding='utf-8') as f:
-                        f.write(request.source_content)
-                    self.logger.info(f"Code source écrit dans: {source_path}")
+                    if request.source_content:
+                        source_path = os.path.join(temp_dir, source_filename)
+                        with open(source_path, 'w', encoding='utf-8') as f:
+                            f.write(request.source_content)
+                        self.logger.info(f"Code source PHP écrit dans: {source_path}")
 
+                    # Le target est le chemin absolu du fichier test
+                    request_target = test_path
+                else:
+                    working_dir = temp_dir
 
-                test_code = request.test_content
-                if request.language == 'python':
-                    test_code = f"import sys\nsys.path.insert(0, '{temp_dir}')\n" + test_code
+                    if request.source_content:
+                        source_path = os.path.join(temp_dir, source_filename)
+                        with open(source_path, 'w', encoding='utf-8') as f:
+                            f.write(request.source_content)
+                        self.logger.info(f"Code source écrit dans: {source_path}")
 
+                    test_code = request.test_content
+                    if request.language == 'python':
+                        test_code = f"import sys\nsys.path.insert(0, '{temp_dir}')\n" + test_code
 
-                test_path = os.path.join(temp_dir, test_filename)
-                with open(test_path, 'w', encoding='utf-8') as f:
-                    f.write(test_code)
-                self.logger.info(f"Tests écrits dans: {test_path}")
+                    test_path = os.path.join(temp_dir, test_filename)
+                    with open(test_path, 'w', encoding='utf-8') as f:
+                        f.write(test_code)
+                    self.logger.info(f"Tests écrits dans: {test_path}")
 
-
-                request_target = test_filename
+                    request_target = test_filename
             else:
                 working_dir = request.working_dir or os.getcwd()
                 request_target = request.target
