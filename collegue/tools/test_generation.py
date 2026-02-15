@@ -4,6 +4,7 @@ Test Generation - Outil de génération automatique de tests unitaires
 Intègre optionnellement run_tests pour valider les tests générés.
 """
 import asyncio
+import subprocess
 import tempfile
 import shutil
 from typing import Optional, Dict, Any, List, Type
@@ -266,6 +267,65 @@ class TestGenerationTool(BaseTool):
     def get_required_config_keys(self) -> List[str]:
         return []
 
+    def _validate_php_syntax(self, test_code: str) -> TestValidationResult:
+        """Valide la syntaxe PHP avec php -l (lint) quand vendor/ n'est pas disponible."""
+        temp_dir = None
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="collegue_php_lint_")
+            test_path = os.path.join(temp_dir, "TestLint.php")
+            with open(test_path, 'w', encoding='utf-8') as f:
+                f.write(test_code)
+
+            result = subprocess.run(
+                ['php', '-l', test_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0:
+                return TestValidationResult(
+                    validated=True,
+                    success=True,
+                    total=1,
+                    passed=1,
+                    failed=0,
+                    errors=0,
+                    duration=0.0,
+                    error_message=None
+                )
+            else:
+                error_msg = result.stdout + result.stderr
+                return TestValidationResult(
+                    validated=True,
+                    success=False,
+                    total=1,
+                    passed=0,
+                    failed=1,
+                    errors=1,
+                    duration=0.0,
+                    error_message=f"Erreur de syntaxe PHP: {error_msg.strip()}"
+                )
+
+        except FileNotFoundError:
+            return TestValidationResult(
+                validated=False,
+                success=False,
+                error_message="PHP non installé. Impossible de valider la syntaxe."
+            )
+        except Exception as e:
+            return TestValidationResult(
+                validated=False,
+                success=False,
+                error_message=f"Erreur lint PHP: {str(e)}"
+            )
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+
     def _validate_generated_tests(
         self, 
         test_code: str, 
@@ -299,6 +359,52 @@ class TestGenerationTool(BaseTool):
                     success=False,
                     error_message=f"Validation non supportée pour le langage: {language}"
                 )
+            
+            # Pour PHP, déterminer le bon working_dir
+            # Les frameworks PHP nécessitent vendor/ (autoload, binaires)
+            if language == "php":
+                php_project_dir = working_dir if working_dir and os.path.isdir(working_dir) else None
+                
+                # Vérifier que vendor/bin/<framework> existe
+                if php_project_dir:
+                    framework_bin = os.path.join(php_project_dir, 'vendor', 'bin', framework)
+                    if not os.path.exists(framework_bin):
+                        php_project_dir = None
+                
+                if php_project_dir:
+                    # Exécuter depuis le projet PHP réel
+                    self.logger.info(f"Validation PHP avec {framework} depuis: {php_project_dir}")
+                    
+                    test_path = os.path.join(temp_dir, test_filename)
+                    with open(test_path, 'w', encoding='utf-8') as f:
+                        f.write(test_code)
+                    
+                    run_tests_tool = RunTestsTool()
+                    run_request = RunTestsRequest(
+                        target=test_path,
+                        language=language,
+                        framework=framework,
+                        working_dir=php_project_dir,
+                        timeout=60,
+                        verbose=False
+                    )
+                    
+                    run_response = run_tests_tool._execute_core_logic(run_request)
+                    
+                    return TestValidationResult(
+                        validated=True,
+                        success=run_response.success,
+                        total=run_response.total,
+                        passed=run_response.passed,
+                        failed=run_response.failed,
+                        errors=run_response.errors,
+                        duration=run_response.duration,
+                        error_message=run_response.stderr if not run_response.success else None
+                    )
+                else:
+                    # Fallback: validation syntaxique PHP (php -l)
+                    self.logger.info("vendor/ non disponible, fallback vers validation syntaxique PHP (php -l)")
+                    return self._validate_php_syntax(test_code)
             
             source_path = os.path.join(temp_dir, source_filename)
             with open(source_path, 'w', encoding='utf-8') as f:
