@@ -284,68 +284,6 @@ class TestToolsIntegration(unittest.TestCase):
         print("✅ Tous les outils héritent de BaseTool")
 
 
-class TestTestGenerationValidation(unittest.TestCase):
-    """Tests pour l'intégration test_generation + run_tests."""
-
-    def test_validation_request_fields(self):
-        from collegue.tools.test_generation import TestGenerationRequest, TestValidationResult
-
-        request = TestGenerationRequest(
-            code="def add(a, b): return a + b",
-            language="python",
-            validate_tests=True,
-            working_dir="/tmp"
-        )
-
-        self.assertTrue(request.validate_tests)
-        self.assertEqual(request.working_dir, "/tmp")
-        print("✅ Champs validate_tests et working_dir présents")
-
-    def test_validation_result_model(self):
-        from collegue.tools.test_generation import TestValidationResult
-
-        result = TestValidationResult(
-            validated=True,
-            success=True,
-            total=5,
-            passed=5,
-            failed=0,
-            errors=0,
-            duration=1.5
-        )
-
-        self.assertTrue(result.validated)
-        self.assertTrue(result.success)
-        self.assertEqual(result.total, 5)
-        print("✅ Modèle TestValidationResult valide")
-
-    def test_response_includes_validation(self):
-        from collegue.tools.test_generation import TestGenerationResponse, TestValidationResult
-
-        validation = TestValidationResult(
-            validated=True,
-            success=True,
-            total=3,
-            passed=3,
-            failed=0,
-            errors=0,
-            duration=0.5
-        )
-
-        response = TestGenerationResponse(
-            test_code="def test_add(): assert add(1, 2) == 3",
-            language="python",
-            framework="pytest",
-            estimated_coverage=0.8,
-            tested_elements=[{"type": "function", "name": "add"}],
-            validation_result=validation
-        )
-
-        self.assertIsNotNone(response.validation_result)
-        self.assertTrue(response.validation_result.success)
-        print("✅ TestGenerationResponse inclut validation_result")
-
-
 if __name__ == '__main__':
     print("=" * 60)
     print("Tests des outils de Qualité et Sécurité (T14)")

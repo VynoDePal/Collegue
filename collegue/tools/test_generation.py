@@ -1,19 +1,12 @@
 """
 Test Generation - Outil de génération automatique de tests unitaires
-
-Intègre optionnellement run_tests pour valider les tests générés.
 """
 import asyncio
-import subprocess
-import tempfile
-import shutil
 from typing import Optional, Dict, Any, List, Type
 from pydantic import BaseModel, Field, validator, field_validator
-import os
 import pathlib
 from .base import BaseTool, ToolError, ToolValidationError, ToolExecutionError
 from ..core.shared import run_async_from_sync
-from ._run_tests import RunTestsTool, RunTestsRequest
 from .utils import test_generators_adapter as _test_templates
 
 
@@ -27,8 +20,6 @@ class TestGenerationRequest(BaseModel):
     output_dir: Optional[str] = Field(None, description="Répertoire de sortie pour les tests générés")
     include_mocks: Optional[bool] = Field(False, description="Inclure des mocks dans les tests")
     coverage_target: Optional[float] = Field(0.8, description="Couverture de code cible (0.0-1.0)", ge=0.0, le=1.0)
-    validate_tests: Optional[bool] = Field(False, description="Valider les tests générés en les exécutant avec run_tests")
-    working_dir: Optional[str] = Field(None, description="Répertoire de travail pour la validation (défaut: répertoire temporaire)")
 
     @field_validator('language')
     def validate_language_field(cls, v):
@@ -43,18 +34,6 @@ class TestGenerationRequest(BaseModel):
         return v
 
 
-class TestValidationResult(BaseModel):
-    __test__ = False
-    validated: bool = Field(..., description="True si les tests ont été validés")
-    success: bool = Field(..., description="True si tous les tests passent")
-    total: int = Field(0, description="Nombre total de tests")
-    passed: int = Field(0, description="Nombre de tests passés")
-    failed: int = Field(0, description="Nombre de tests échoués")
-    errors: int = Field(0, description="Nombre d'erreurs")
-    error_message: Optional[str] = Field(None, description="Message d'erreur si la validation a échoué")
-    duration: float = Field(0.0, description="Durée d'exécution en secondes")
-
-
 class TestGenerationResponse(BaseModel):
     __test__ = False
     test_code: str = Field(..., description="Code de test généré")
@@ -63,7 +42,6 @@ class TestGenerationResponse(BaseModel):
     test_file_path: Optional[str] = Field(None, description="Chemin du fichier de test généré")
     estimated_coverage: float = Field(..., description="Estimation de la couverture de code")
     tested_elements: List[Dict[str, str]] = Field(..., description="Éléments testés (fonctions, classes, etc.)")
-    validation_result: Optional[TestValidationResult] = Field(None, description="Résultat de validation si validate_tests=True")
 
 
 class LLMTestGenerationResult(BaseModel):
@@ -267,201 +245,6 @@ class TestGenerationTool(BaseTool):
     def get_required_config_keys(self) -> List[str]:
         return []
 
-    def _validate_php_syntax(self, test_code: str) -> TestValidationResult:
-        """Valide la syntaxe PHP avec php -l (lint) quand vendor/ n'est pas disponible."""
-        temp_dir = None
-        try:
-            temp_dir = tempfile.mkdtemp(prefix="collegue_php_lint_")
-            test_path = os.path.join(temp_dir, "TestLint.php")
-            with open(test_path, 'w', encoding='utf-8') as f:
-                f.write(test_code)
-
-            result = subprocess.run(
-                ['php', '-l', test_path],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            if result.returncode == 0:
-                return TestValidationResult(
-                    validated=True,
-                    success=True,
-                    total=1,
-                    passed=1,
-                    failed=0,
-                    errors=0,
-                    duration=0.0,
-                    error_message=None
-                )
-            else:
-                error_msg = result.stdout + result.stderr
-                return TestValidationResult(
-                    validated=True,
-                    success=False,
-                    total=1,
-                    passed=0,
-                    failed=1,
-                    errors=1,
-                    duration=0.0,
-                    error_message=f"Erreur de syntaxe PHP: {error_msg.strip()}"
-                )
-
-        except FileNotFoundError:
-            return TestValidationResult(
-                validated=False,
-                success=False,
-                error_message="PHP non installé. Impossible de valider la syntaxe."
-            )
-        except Exception as e:
-            return TestValidationResult(
-                validated=False,
-                success=False,
-                error_message=f"Erreur lint PHP: {str(e)}"
-            )
-        finally:
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception:
-                    pass
-
-    def _validate_generated_tests(
-        self, 
-        test_code: str, 
-        language: str, 
-        framework: str,
-        source_code: str,
-        working_dir: Optional[str] = None
-    ) -> TestValidationResult:
-        temp_dir = None
-        try:
-            temp_dir = tempfile.mkdtemp(prefix="collegue_test_validation_")
-            
-            if language == "python":
-                source_ext = ".py"
-                test_prefix = "test_"
-                source_filename = "module_under_test.py"
-                test_filename = "test_module_under_test.py"
-            elif language in ["javascript", "typescript"]:
-                source_ext = ".ts" if language == "typescript" else ".js"
-                test_prefix = ""
-                source_filename = f"module_under_test{source_ext}"
-                test_filename = f"module_under_test.test{source_ext}"
-            elif language == "php":
-                source_ext = ".php"
-                test_prefix = ""
-                source_filename = "ModuleUnderTest.php"
-                test_filename = "ModuleUnderTestTest.php"
-            else:
-                return TestValidationResult(
-                    validated=False,
-                    success=False,
-                    error_message=f"Validation non supportée pour le langage: {language}"
-                )
-            
-            # Pour PHP, déterminer le bon working_dir
-            # Les frameworks PHP nécessitent vendor/ (autoload, binaires)
-            if language == "php":
-                php_project_dir = working_dir if working_dir and os.path.isdir(working_dir) else None
-                
-                # Vérifier que vendor/bin/<framework> existe
-                if php_project_dir:
-                    framework_bin = os.path.join(php_project_dir, 'vendor', 'bin', framework)
-                    if not os.path.exists(framework_bin):
-                        php_project_dir = None
-                
-                if php_project_dir:
-                    # Exécuter depuis le projet PHP réel
-                    self.logger.info(f"Validation PHP avec {framework} depuis: {php_project_dir}")
-                    
-                    test_path = os.path.join(temp_dir, test_filename)
-                    with open(test_path, 'w', encoding='utf-8') as f:
-                        f.write(test_code)
-                    
-                    run_tests_tool = RunTestsTool()
-                    run_request = RunTestsRequest(
-                        target=test_path,
-                        language=language,
-                        framework=framework,
-                        working_dir=php_project_dir,
-                        timeout=60,
-                        verbose=False
-                    )
-                    
-                    run_response = run_tests_tool._execute_core_logic(run_request)
-                    
-                    return TestValidationResult(
-                        validated=True,
-                        success=run_response.success,
-                        total=run_response.total,
-                        passed=run_response.passed,
-                        failed=run_response.failed,
-                        errors=run_response.errors,
-                        duration=run_response.duration,
-                        error_message=run_response.stderr if not run_response.success else None
-                    )
-                else:
-                    # Fallback: validation syntaxique PHP (php -l)
-                    self.logger.info("vendor/ non disponible, fallback vers validation syntaxique PHP (php -l)")
-                    return self._validate_php_syntax(test_code)
-            
-            source_path = os.path.join(temp_dir, source_filename)
-            with open(source_path, 'w', encoding='utf-8') as f:
-                f.write(source_code)
-            
-            test_path = os.path.join(temp_dir, test_filename)
-            
-            adapted_test_code = test_code
-            if language == "python":
-                adapted_test_code = f"import sys\nsys.path.insert(0, '{temp_dir}')\n" + test_code
-                adapted_test_code = adapted_test_code.replace(
-                    "from module_test import", 
-                    "from module_under_test import"
-                )
-            
-            with open(test_path, 'w', encoding='utf-8') as f:
-                f.write(adapted_test_code)
-            
-            self.logger.info(f"Tests écrits dans: {test_path}")
-            
-            run_tests_tool = RunTestsTool()
-            run_request = RunTestsRequest(
-                target=test_filename,
-                language=language,
-                framework=framework,
-                working_dir=temp_dir,
-                timeout=60,
-                verbose=False
-            )
-            
-            run_response = run_tests_tool._execute_core_logic(run_request)
-            
-            return TestValidationResult(
-                validated=True,
-                success=run_response.success,
-                total=run_response.total,
-                passed=run_response.passed,
-                failed=run_response.failed,
-                errors=run_response.errors,
-                duration=run_response.duration,
-                error_message=run_response.stderr if not run_response.success else None
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Erreur lors de la validation des tests: {e}")
-            return TestValidationResult(
-                validated=False,
-                success=False,
-                error_message=str(e)
-            )
-        finally:
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                except Exception as e:
-                    self.logger.warning(f"Impossible de supprimer le répertoire temporaire: {e}")
-
     def _execute_core_logic(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
         ctx = kwargs.get('ctx')
         parser = kwargs.get('parser')
@@ -493,17 +276,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                         request.file_path, request.output_dir, framework
                     )
 
-                validation_result = None
-                if request.validate_tests:
-                    self.logger.info("Validation des tests générés avec run_tests...")
-                    validation_result = self._validate_generated_tests(
-                        test_code=generated_tests,
-                        language=request.language,
-                        framework=framework,
-                        source_code=request.code,
-                        working_dir=request.working_dir
-                    )
-                
                 return TestGenerationResponse(
                     test_code=generated_tests,
                     language=request.language,
@@ -511,7 +283,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                     test_file_path=test_file_path,
                     estimated_coverage=estimated_coverage,
                     tested_elements=tested_elements,
-                    validation_result=validation_result
                 )
             except Exception as e:
                 self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
@@ -569,18 +340,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                                 request.file_path, request.output_dir, framework
                             )
                         
-                        validation_result = None
-                        if request.validate_tests:
-                            if ctx:
-                                await ctx.info("Validation des tests générés...")
-                            validation_result = self._validate_generated_tests(
-                                test_code=generated_tests,
-                                language=request.language,
-                                framework=framework,
-                                source_code=request.code,
-                                working_dir=request.working_dir
-                            )
-                        
                         return TestGenerationResponse(
                             test_code=generated_tests,
                             language=request.language,
@@ -588,7 +347,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                             test_file_path=test_file_path,
                             estimated_coverage=result_data.coverage_estimate,
                             tested_elements=tested_elements,
-                            validation_result=validation_result
                         )
                 except Exception as e:
                     self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
@@ -615,18 +373,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                     request.file_path, request.output_dir, framework
                 )
             
-            validation_result = None
-            if request.validate_tests:
-                if ctx:
-                    await ctx.info("Validation des tests générés...")
-                validation_result = self._validate_generated_tests(
-                    test_code=generated_tests,
-                    language=request.language,
-                    framework=framework,
-                    source_code=request.code,
-                    working_dir=request.working_dir
-                )
-            
             return TestGenerationResponse(
                 test_code=generated_tests,
                 language=request.language,
@@ -634,7 +380,6 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
                 test_file_path=test_file_path,
                 estimated_coverage=estimated_coverage,
                 tested_elements=tested_elements,
-                validation_result=validation_result
             )
             
         except Exception as e:
