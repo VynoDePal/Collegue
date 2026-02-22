@@ -89,11 +89,14 @@ class PostgresClient:
         schema = schema_name or self.schema
 
         query = """
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = %s 
-            AND table_type = 'BASE TABLE'
-            ORDER BY table_name
+            SELECT
+                t.table_name,
+                (SELECT reltuples::bigint FROM pg_class WHERE oid = (quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))::regclass) as row_count,
+                pg_size_pretty(pg_total_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.table_name))) as total_size
+            FROM information_schema.tables t
+            WHERE t.table_schema = %s 
+            AND t.table_type IN ('BASE TABLE', 'VIEW')
+            ORDER BY t.table_name
         """
         return self._execute_query(query, (schema,))
 
@@ -105,17 +108,36 @@ class PostgresClient:
         schema = schema_name or self.schema
 
         query = """
-            SELECT 
-                column_name,
-                data_type,
-                is_nullable,
-                column_default,
-                character_maximum_length
-            FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s
-            ORDER BY ordinal_position
+            SELECT
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                c.column_default,
+                CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_pk,
+                CASE WHEN fk.column_name IS NOT NULL THEN true ELSE false END as is_fk,
+                fk.foreign_table_schema || '.' || fk.foreign_table_name || '(' || fk.foreign_column_name || ')' as references
+            FROM information_schema.columns c
+            LEFT JOIN (
+                SELECT ku.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage ku ON tc.constraint_name = ku.constraint_name
+                WHERE tc.table_schema = %s AND tc.table_name = %s AND tc.constraint_type = 'PRIMARY KEY'
+            ) pk ON c.column_name = pk.column_name
+            LEFT JOIN (
+                SELECT
+                    kcu.column_name,
+                    ccu.table_schema as foreign_table_schema,
+                    ccu.table_name as foreign_table_name,
+                    ccu.column_name as foreign_column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+                WHERE tc.table_schema = %s AND tc.table_name = %s AND tc.constraint_type = 'FOREIGN KEY'
+            ) fk ON c.column_name = fk.column_name
+            WHERE c.table_schema = %s AND c.table_name = %s
+            ORDER BY c.ordinal_position
         """
-        return self._execute_query(query, (schema, table_name))
+        return self._execute_query(query, (schema, table_name, schema, table_name, schema, table_name))
 
     def get_indexes(self, table_name: str, schema_name: Optional[str] = None) -> APIResponse:
         schema = schema_name or self.schema
@@ -156,13 +178,20 @@ class PostgresClient:
         schema = schema_name or self.schema
 
         query = """
-            SELECT 
-                relname AS table_name,
-                n_live_tup AS row_count,
-                pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size
-            FROM pg_stat_user_tables st
-            JOIN pg_class c ON c.relname = st.relname
-            WHERE st.schemaname = %s AND st.relname = %s
+            SELECT
+                pg_size_pretty(pg_total_relation_size(c.oid)) as total_size,
+                pg_size_pretty(pg_table_size(c.oid)) as table_size,
+                pg_size_pretty(pg_indexes_size(c.oid)) as indexes_size,
+                s.n_live_tup as live_rows,
+                s.n_dead_tup as dead_rows,
+                s.last_vacuum,
+                s.last_autovacuum,
+                s.last_analyze,
+                s.last_autoanalyze
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+            WHERE n.nspname = %s AND c.relname = %s
         """
         return self._execute_query(query, (schema, table_name))
 
