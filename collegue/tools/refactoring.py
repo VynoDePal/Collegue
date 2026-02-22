@@ -239,7 +239,7 @@ class RefactoringTool(BaseTool):
 
         if ctx:
             try:
-                prompt = self._build_refactoring_prompt(request)
+                prompt = run_async_from_sync(self.prepare_prompt(request, f"refactoring_{request.refactoring_type}"))
                 system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.
 Réponds UNIQUEMENT avec le code refactoré, sans explications."""
@@ -283,7 +283,7 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
         original_metrics = self._analyze_code_metrics(request.code, request.language)
 
-        prompt = self._build_refactoring_prompt(request)
+        prompt = await self.prepare_prompt(request, f"refactoring_{request.refactoring_type}")
         system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'."""
 
@@ -439,7 +439,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
         # On assume valide par défaut.
         return True, ""
 
-    def _build_refactoring_prompt(self, request) -> str:
+    def _build_prompt(self, request) -> str:
         language = request.language
         refactoring_type = request.refactoring_type
         code = request.code

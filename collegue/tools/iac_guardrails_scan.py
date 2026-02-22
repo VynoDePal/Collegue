@@ -559,6 +559,44 @@ class IacGuardrailsScanTool(BaseTool):
 
         return actions[:5]
 
+    def _build_prompt(self, request) -> str:
+        # Fallback for deep analysis
+        findings_json = json.dumps([f.model_dump() for f in getattr(request, '_temp_findings', [])], indent=2)
+        return f"""Tu es un expert en sécurité Infrastructure as Code (DevSecOps).
+Je vais te fournir les résultats bruts d'un scan de sécurité IaC (Terraform, Kubernetes, Dockerfile).
+
+### PROBLÈMES DÉTECTÉS
+{findings_json}
+
+### TÂCHE
+1. Analyse ces problèmes de sécurité.
+2. Identifie les risques métier, les impacts sur la conformité (CIS, SOC2, etc.).
+3. Calcule un score de sécurité (0.0 à 1.0) basé sur la sévérité et la densité des problèmes.
+
+### FORMAT DE RÉPONSE (JSON STRICT)
+{{
+    "insights": [
+        {{
+            "category": "vulnerability|misconfiguration|compliance|best_practice",
+            "insight": "Explication claire du risque et de son impact réel",
+            "risk_level": "low|medium|high|critical",
+            "affected_resources": ["res1", "res2"],
+            "compliance_frameworks": ["CIS AWS 1.2", "SOC2 CC6.1"]
+        }}
+    ],
+    "security_score": 0.8,
+    "compliance_score": 0.9,
+    "risk_level": "low|medium|high|critical"
+}}
+
+RÈGLES IMPORTANTES:
+- Sois précis et synthétique dans tes insights.
+- Ne répète pas simplement les findings, analyse leur impact combiné.
+- `security_score`: 1.0 = sécurisé, 0.0 = critique
+- `compliance_score`: 1.0 = conforme, 0.0 = non conforme
+
+Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+
     async def _deep_analysis_with_llm(
         self,
         request: IacGuardrailsRequest,
@@ -758,6 +796,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         if request.analysis_depth == 'deep':
             analysis_depth_used = 'deep'
             try:
+                request._temp_findings = response.findings
                 llm_insights, security_score, compliance_score, risk_level = await self._deep_analysis_with_llm(
                     request,
                     response.findings,
