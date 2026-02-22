@@ -70,9 +70,9 @@ class SentryClient(APIClient):
         endpoint = f"issues/{issue_id}/"
         return self._get(endpoint)
 
-    def get_issue_events(self, issue_id: str) -> APIResponse:
+    def get_issue_events(self, issue_id: str, limit: int = 100) -> APIResponse:
         endpoint = f"issues/{issue_id}/events/"
-        return self._get(endpoint)
+        return self._get(endpoint, params={"limit": limit, "full": "true"})
 
     def list_releases(
         self,
@@ -150,8 +150,13 @@ class SentryClient(APIClient):
                 success=False,
                 error_message="Organization slug required"
             )
+            
+        stat_periods = {
+            '1h': '1h', '24h': '1d', '7d': '1d', '14d': '1d', '30d': '1d'
+        }
+        resolution = stat_periods.get(time_range, '1d')
 
         endpoint = f"projects/{self.organization}/{project}/stats/"
-        params = {"stat": "received", "resolution": time_range}
+        params = {"stat": "received", "resolution": resolution}
 
         return self._get(endpoint, params=params)
