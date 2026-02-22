@@ -485,6 +485,50 @@ class ImpactAnalysisTool(BaseTool):
 
         return followups
 
+    def _build_prompt(self, request) -> str:
+        static_results = getattr(request, '_temp_static_results', {})
+        files_summary = []
+        for f in request.files[:5]:
+            files_summary.append(f"{f.path} ({len(f.content.splitlines())} lignes)")
+            
+        prompt = f"""Tu es un Architecte Logiciel Senior.
+Un développeur propose le changement suivant: "{request.change_intent}"
+
+### CONTEXTE
+Fichiers impliqués:
+{chr(10).join(files_summary)}
+
+Diff (si fourni):
+{request.diff or "Non fourni"}
+
+Résultats de l'analyse statique (heuristiques):
+{json.dumps(static_results, indent=2)}
+
+### TÂCHE
+Réalise une analyse d'impact sémantique et business de ce changement.
+Identifie les conséquences non évidentes, les risques d'architecture, et propose des améliorations.
+
+### FORMAT DE RÉPONSE (JSON STRICT)
+{{
+    "semantic_summary": "Résumé sémantique du changement (2-3 phrases)",
+    "insights": [
+        {{
+            "category": "semantic|architectural|business|suggestion",
+            "insight": "Explication détaillée de l'insight",
+            "confidence": "low|medium|high"
+        }}
+    ]
+}}
+
+Catégories:
+- **semantic**: Impact sur la logique métier, effets de bord cachés
+- **architectural**: Impact sur l'architecture (couplage, cohésion, patterns)
+- **business**: Risques business (UX, données utilisateur, régressions fonctionnelles)
+- **suggestion**: Recommandations d'amélioration ou alternatives
+
+Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+        return prompt
+
     async def _deep_analysis_with_llm(
         self,
         request: ImpactAnalysisRequest,
@@ -492,57 +536,8 @@ class ImpactAnalysisTool(BaseTool):
         ctx=None
     ) -> Tuple[Optional[List[LLMInsight]], Optional[str]]:
         try:
-            if ctx is None:
-                self.logger.warning("ctx non disponible pour analyse deep")
-                return None, None
-
-            files_summary = []
-            for f in request.files[:5]:
-                preview = f.content[:500] + "..." if len(f.content) > 500 else f.content
-                files_summary.append(f"## {f.path}\n```\n{preview}\n```")
-
-            static_risks = [f"- {r['category']}: {r['note']}" for r in static_results.get('risks', [])]
-            static_impacts = [f"- {i['path']}: {i['reason']}" for i in static_results.get('impacted_files', [])]
-
-            prompt = f"""Analyse l'impact du changement suivant sur la codebase.
-
-## Changement prévu
-{request.change_intent}
-
-{f"## Diff" + chr(10) + request.diff[:1000] if request.diff else ""}
-
-## Fichiers concernés
-{chr(10).join(files_summary)}
-
-## Analyse statique (heuristiques)
-### Fichiers impactés détectés:
-{chr(10).join(static_impacts[:10]) if static_impacts else "Aucun détecté"}
-
-### Risques détectés:
-{chr(10).join(static_risks[:10]) if static_risks else "Aucun détecté"}
-
----
-
-Fournis une analyse enrichie au format JSON strict:
-{
-  "semantic_summary": "Résumé concis de ce que fait réellement ce changement et son impact global",
-  "insights": [
-    {
-      "category": "semantic|architectural|business|suggestion",
-      "insight": "L'insight détaillé",
-      "confidence": "low|medium|high"
-    }
-  ]
-}
-
-Catégories d'insights:
-- **semantic**: Compréhension du sens réel du changement (au-delà de la syntaxe)
-- **architectural**: Impact sur l'architecture (couplage, cohésion, patterns)
-- **business**: Risques business (UX, données utilisateur, régressions fonctionnelles)
-- **suggestion**: Recommandations d'amélioration ou alternatives
-
-Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
-
+            request._temp_static_results = static_results
+            prompt = await self.prepare_prompt(request, "impact_analysis_deep")
             result = await ctx.sample(
                 messages=prompt,
                 temperature=0.5,
