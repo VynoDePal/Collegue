@@ -5,6 +5,8 @@ services:
       dockerfile: docker/collegue/Dockerfile
     image: collegue-app:latest
     restart: always
+    networks:
+      - collegue-network
     environment:
       PYTHONUNBUFFERED: 1
       PORT: 4121
@@ -36,6 +38,8 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.3.2
     command: start-dev
+    networks:
+      - collegue-network
     environment:
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
@@ -70,6 +74,8 @@ services:
       context: .
       dockerfile: docker/nginx/Dockerfile
     restart: always
+    networks:
+      - collegue-network
     ports:
       - "8088:80"
     volumes:
@@ -82,6 +88,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  collegue-network:
+    driver: bridge
 
 volumes:
   nginx_logs:
