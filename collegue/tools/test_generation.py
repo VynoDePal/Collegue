@@ -254,7 +254,12 @@ class TestGenerationTool(BaseTool):
         if ctx:
             try:
                 framework = request.test_framework or self._get_default_test_framework(request.language)
-                prompt = self._build_test_generation_prompt(request)
+                
+                # Context for prompt engine
+                request._temp_framework = framework
+                
+                prompt = run_async_from_sync(self.prepare_prompt(request, "test_generation"))
+                
                 system_prompt = f"""Tu es un expert en tests unitaires {request.language} avec {framework}.
 Génère des tests complets, bien structurés et couvrant les cas limites."""
 
@@ -300,9 +305,12 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
         
         self.validate_language(request.language)
         
-        framework = request.test_framework or self._get_default_test_framework(request.language)
+        # Framework calculation moved to start of method or passed via request
         
-        prompt = self._build_test_generation_prompt(request)
+        framework = request.test_framework or self._get_default_test_framework(request.language)
+        request._temp_framework = framework
+        prompt = await self.prepare_prompt(request, "test_generation")
+        
         system_prompt = f"""Tu es un expert en tests unitaires {request.language} avec {framework}.
 Génère des tests complets, bien structurés et couvrant les cas limites."""
         
@@ -386,8 +394,9 @@ Génère des tests complets, bien structurés et couvrant les cas limites."""
             self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")
             return self._generate_fallback_tests(request, parser)
 
-    def _build_test_generation_prompt(self, request: TestGenerationRequest) -> str:
-        framework = request.test_framework or self._get_default_test_framework(request.language)
+    def _build_prompt(self, request) -> str:
+        framework = getattr(request, '_temp_framework', None) or request.test_framework or self._get_default_test_framework(request.language)
+        # Framework calculation moved to start of method or passed via request
 
         prompt_parts = [
             f"Génère des tests unitaires complets pour le code {request.language} suivant :",
