@@ -10,6 +10,18 @@ except ImportError:
     FastMCP = Any
     Context = Any
 
+# Cache global pour les outils découverts
+_TOOLS_CACHE = None
+
+class OrchestratorStep(BaseModel):
+    tool: str = Field(..., description="Nom de l'outil à exécuter")
+    reason: str = Field(..., description="Raison de l'utilisation de cet outil")
+    params: Dict[str, Any] = Field(..., description="Paramètres d'appel de l'outil")
+
+class OrchestratorPlan(BaseModel):
+    steps: List[OrchestratorStep] = Field(..., description="Liste séquentielle des étapes à exécuter")
+
+
 
 class OrchestratorRequest(BaseModel):
     query: str = Field(..., description="Requête utilisateur à traiter")
@@ -44,227 +56,155 @@ def register_meta_orchestrator(app: FastMCP):
         import json
         import importlib
         import inspect
-        import re
         import pkgutil
         import collegue.tools
-        
-        # Lazy import pour éviter les cycles
         from collegue.tools.base import BaseTool
 
+        global _TOOLS_CACHE
         start_time = time.time()
-        await ctx.info(f"Démarrage orchestration (mode v3 robust): {request.query[:100]}...")
+        await ctx.info(f"Démarrage orchestration (mode v4 robust): {request.query[:100]}...")
 
-        # 1. Découverte des tools disponibles
-        available_tools = {}
-        try:
-            for _, name, _ in pkgutil.iter_modules(collegue.tools.__path__):
-                if name.startswith('_') or name == 'base':
-                    continue
-                try:
-                    module = importlib.import_module(f'collegue.tools.{name}')
-                    for obj_name, obj in inspect.getmembers(module):
-                        if (inspect.isclass(obj) and issubclass(obj, BaseTool) and 
-                            obj != BaseTool and obj.__module__ == module.__name__):
-                            try:
-                                instance = obj({})
-                                if instance.get_name() == "smart_orchestrator": continue
-                                
-                                # Extraction du schéma pour le prompt
-                                schema = instance.get_request_model().model_json_schema()
-                                props = schema.get("properties", {})
-                                required = schema.get("required", [])
-                                
-                                # Construction d'une description riche des arguments
-                                args_desc = []
-                                for prop_name, prop_info in props.items():
-                                    req_mark = "(REQUIS)" if prop_name in required else "(optionnel)"
-                                    prop_type = prop_info.get("type", "any")
-                                    prop_desc = prop_info.get("description", "")
-                                    args_desc.append(f"    - {prop_name} ({prop_type}): {prop_desc} {req_mark}")
-                                
-                                formatted_args = "\n".join(args_desc)
-                                
-                                available_tools[instance.get_name()] = {
-                                    "class": obj,
-                                    "description": instance.get_description(),
-                                    "schema": schema,
-                                    "prompt_desc": f"{instance.get_name()}: {instance.get_description()}\n  Arguments:\n{formatted_args}"
-                                }
-                            except Exception as e:
-                                await ctx.warning(f"Impossible d'inspecter {obj_name}: {e}")
-                except Exception as e:
-                    pass
-        except Exception as e:
-            await ctx.error(f"Erreur découverte tools: {e}")
+        # 1. Découverte des tools (avec Cache)
+        if _TOOLS_CACHE is None:
+            _TOOLS_CACHE = {}
+            try:
+                for _, name, _ in pkgutil.iter_modules(collegue.tools.__path__):
+                    if name.startswith('_') or name == 'base':
+                        continue
+                    try:
+                        module = importlib.import_module(f'collegue.tools.{name}')
+                        for _, obj in inspect.getmembers(module):
+                            if (inspect.isclass(obj) and issubclass(obj, BaseTool) and 
+                                obj != BaseTool and obj.__module__ == module.__name__):
+                                try:
+                                    # Instantiation temporaire pour métadonnées
+                                    temp_instance = obj({})
+                                    tool_name = temp_instance.get_name()
+                                    if tool_name == "smart_orchestrator": continue
+                                    
+                                    schema = temp_instance.get_request_model().model_json_schema()
+                                    props = schema.get("properties", {})
+                                    required = schema.get("required", [])
+                                    
+                                    args_desc = []
+                                    for prop_name, prop_info in props.items():
+                                        req_mark = "(REQUIS)" if prop_name in required else "(optionnel)"
+                                        prop_type = prop_info.get("type", "any")
+                                        prop_desc = prop_info.get("description", "")
+                                        args_desc.append(f"    - {prop_name} ({prop_type}): {prop_desc} {req_mark}")
+                                    
+                                    formatted_args = "\\n".join(args_desc)
+                                    
+                                    _TOOLS_CACHE[tool_name] = {
+                                        "class": obj,
+                                        "description": temp_instance.get_description(),
+                                        "prompt_desc": f"{tool_name}: {temp_instance.get_description()}\\n  Arguments:\\n{formatted_args}",
+                                        "schema": schema
+                                    }
+                                except Exception as e:
+                                    await ctx.warning(f"Skip {name}: {e}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                await ctx.error(f"Erreur discovery: {e}")
 
-        tools_desc = "\n".join([info['prompt_desc'] for name, info in available_tools.items()])
+        available_tools = _TOOLS_CACHE
+        tools_desc = "\\n".join([info['prompt_desc'] for name, info in available_tools.items()])
         
-        # 2. Étape PLANIFICATION
+        # 2. Étape PLANIFICATION (avec Structured Output)
         await ctx.info("Phase 1: Planification...")
         
+        # Récupération du prompt engine depuis le contexte
+        lc = ctx.lifespan_context or {}
+        prompt_engine = lc.get('prompt_engine')
+        
+        # Construction du prompt
         context_str = json.dumps(request.context, default=str) if request.context else "Aucun"
         
-        plan_prompt = (
-            f"""Tu es un architecte logiciel expert.
-Requête utilisateur: "{request.query}"
+        system_prompt = "Tu es un architecte logiciel expert chargé de planifier l'exécution d'une tâche complexe."
+        
+        user_prompt = f"""Requête utilisateur: "{request.query}"
 
-Contexte (fichiers/code):
-""" + context_str + f"""
+Contexte:
+{context_str}
 
-Outils disponibles et leurs signatures (RESPECTE SCRUPULEUSEMENT LES ARGUMENTS):
+Outils disponibles:
 {tools_desc}
 
-RÈGLES IMPORTANTES :
-1. Tu es dans un environnement Docker ISOLÉ.
-2. N'utilise PAS de chemins de fichiers absolus (sauf /tmp/...).
-3. Utilise le CONTENU fourni dans le contexte pour remplir les paramètres 'content' (et non 'code').
-
-EXEMPLE DE PLAN :
-{{
-  "steps": [
-    {{
-      "tool": "secret_scan",
-      "reason": "Analyse de sécurité requise",
-      "params": {{ "content": "..." }} 
-    }}
-  ]
-}}
-
-TÂCHE :
-Génère un plan d'exécution JSON valide pour répondre à la demande.
-Retourne UNIQUEMENT le JSON brut.
+RÈGLES :
+1. Utilise le CONTENU du contexte pour les paramètres 'content' si nécessaire.
+2. Ne propose que des étapes réalisables avec les outils listés.
+3. Sois efficace et direct.
 """
-        )
         
+        if prompt_engine:
+             # TODO: Utiliser prompt_engine pour récupérer un template optimisé si disponible
+             pass
+
         steps = []
         try:
-            # On demande un format texte simple qu'on parsera nous-mêmes
+            # Utilisation de structured output natif
             plan_result = await ctx.sample(
-                messages=[plan_prompt],
-                temperature=0.1, # Très déterministe
+                messages=[user_prompt],
+                system_prompt=system_prompt,
+                result_type=OrchestratorPlan,
+                temperature=0.2,
                 max_tokens=2000
             )
             
-            raw_text = plan_result.text.strip()
-            
-            # Nettoyage et extraction JSON bourrin
-            # 1. Enlever les blocs de code
-            clean_text = re.sub(r"```.*?```", "", raw_text, flags=re.DOTALL) # Si le json est dedans, ça l'enlève... attention
-            
-            # Mieux: Chercher le premier { et le dernier }
-            match = re.search(r"(\{.*\})", raw_text, re.DOTALL)
-            if match:
-                json_candidate = match.group(1)
+            if isinstance(plan_result.result, OrchestratorPlan):
+                steps = plan_result.result.steps
+                await ctx.info(f"Plan généré: {len(steps)} étapes")
             else:
-                # Fallback: peut-être que le JSON est dans un bloc markdown qu'on a raté
-                match_md = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, re.DOTALL)
-                if match_md:
-                    json_candidate = match_md.group(1)
-                else:
-                    json_candidate = raw_text
-
-            # Nettoyage fin
-            json_candidate = re.sub(r",\s*([\]}])", r"\1", json_candidate) # Trailing commas
-            
-            try:
-                plan = json.loads(json_candidate)
-                steps = plan.get("steps", [])
-                await ctx.info(f"Plan généré valide: {len(steps)} étapes")
-            except json.JSONDecodeError as e:
-                await ctx.error(f"Echec parsing JSON: {e}")
-                await ctx.info(f"Texte reçu: {raw_text[:200]}...")
-                # Dernier recours: si le JSON est tronqué, on essaie de fermer les accolades
-                if "steps" in json_candidate:
-                     # On essaie de récupérer au moins la première étape manuellement avec regex
-                     step_matches = re.finditer(r'\{\s*"tool":\s*"([^"]+)",\s*"reason":\s*"([^"]+)",\s*"params":\s*(\{.*?\})\s*\}', json_candidate, re.DOTALL)
-                     for m in step_matches:
-                         try:
-                             steps.append({
-                                 "tool": m.group(1),
-                                 "reason": m.group(2),
-                                 "params": json.loads(m.group(3))
-                             })
-                         except: pass
-                     if steps:
-                         await ctx.info(f"Récupération regex réussie: {len(steps)} étapes")
+                # Fallback texte si le modèle ne supporte pas structured output
+                await ctx.warning("Structured output non supporté, fallback parsing manuel")
+                # ... (code parsing simplifié si besoin, mais on suppose un modèle capable ici)
+                raise ValueError("Le modèle n'a pas retourné un plan structuré")
 
         except Exception as e:
-            await ctx.error(f"Erreur fatale planification: {e}")
+            await ctx.error(f"Echec planification: {e}")
             return OrchestratorResponse(
                 result=f"Erreur de planification: {e}",
                 tools_used=[],
                 execution_time=time.time() - start_time,
-                confidence=0.1
-            )
-
-        if not steps and "steps" not in raw_text:
-             return OrchestratorResponse(
-                result=f"Impossible de générer un plan. Réponse du modèle: {raw_text}",
-                tools_used=[],
-                execution_time=time.time() - start_time,
-                confidence=0.1
+                confidence=0.0
             )
 
         # 3. Étape EXÉCUTION
         execution_results = []
         tools_used_list = []
         
-        lc = ctx.lifespan_context or {}
         tool_kwargs = {
             "parser": lc.get('parser'),
             "context_manager": lc.get('context_manager'),
+            "prompt_engine": prompt_engine, # Injection critique !
             "ctx": ctx,
         }
 
-        # Mapping des alias de paramètres pour la robustesse
-        PARAM_ALIASES = {
-            "content": ["code", "text", "source", "body"],
-            "file_path": ["filepath", "file", "path", "filename"],
-        }
-
         for i, step in enumerate(steps):
-            tool_name = step.get("tool")
-            params = step.get("params", {})
-            reason = step.get("reason", "")
+            tool_name = step.tool
+            params = step.params
             
             if tool_name not in available_tools:
-                msg = f"Étape {i+1}: Tool '{tool_name}' inconnu, ignoré."
-                await ctx.warning(msg)
+                msg = f"Étape {i+1}: Tool '{tool_name}' inconnu."
                 execution_results.append(msg)
                 continue
 
-            await ctx.info(f"Étape {i+1}/{len(steps)}: {tool_name}")
+            await ctx.info(f"Étape {i+1}: {tool_name} ({step.reason})")
             
             try:
                 tool_class = available_tools[tool_name]["class"]
-                tool_instance = tool_class({})
+                tool_instance = tool_class({}) # Nouvelle instance propre
                 req_model = tool_instance.get_request_model()
                 
-                # Correction automatique des paramètres via alias
-                schema = available_tools[tool_name]["schema"]
-                required_props = schema.get("required", [])
-                
-                for req_prop in required_props:
-                    if req_prop not in params and req_prop in PARAM_ALIASES:
-                        # On cherche si un alias est présent
-                        for alias in PARAM_ALIASES[req_prop]:
-                            if alias in params:
-                                await ctx.warning(f"Auto-fix param: '{alias}' -> '{req_prop}' pour {tool_name}")
-                                params[req_prop] = params.pop(alias)
-                                break
-
-                # Validation et exécution
+                # Validation Pydantic
                 req_obj = req_model(**params)
+                
+                # Exécution avec injection correcte des dépendances
                 result = await tool_instance.execute_async(req_obj, **tool_kwargs)
                 
-                # Sérialisation
                 res_dict = result.dict() if hasattr(result, 'dict') else str(result)
-                
-                execution_results.append({
-                    "step": i+1,
-                    "tool": tool_name,
-                    "result": res_dict
-                })
+                execution_results.append({"step": i+1, "tool": tool_name, "result": res_dict})
                 tools_used_list.append(tool_name)
                 
             except Exception as e:
@@ -275,37 +215,28 @@ Retourne UNIQUEMENT le JSON brut.
         # 4. Étape SYNTHÈSE
         await ctx.info("Phase 3: Synthèse...")
         
-        synth_prompt = (
-            f"""Tu es un expert technique.
-Requête originale: "{request.query}"
+        synth_prompt = f"""Requête: "{request.query}"
 
-Résultats de l'exécution:
+Résultats d'exécution:
 {json.dumps(execution_results, indent=2, default=str)}
 
-Synthétise une réponse complète pour l'utilisateur.
-"""
-        )
+Synthétise une réponse finale pour l'utilisateur."""
+        
         try:
-            final_result = await ctx.sample(
+            final = await ctx.sample(
                 messages=[synth_prompt],
-                temperature=0.5,
-                max_tokens=2000
+                temperature=0.5
             )
-            
             return OrchestratorResponse(
-                result=final_result.text,
+                result=final.text,
                 tools_used=list(set(tools_used_list)),
                 execution_time=time.time() - start_time,
-                confidence=0.9 if execution_results else 0.5
+                confidence=1.0
             )
-            
         except Exception as e:
              return OrchestratorResponse(
-                result=f"Erreur synthèse: {e}. Résultats bruts: {execution_results}",
+                result=f"Erreur synthèse: {e}",
                 tools_used=tools_used_list,
                 execution_time=time.time() - start_time,
-                confidence=0.3
+                confidence=0.5
             )
-
-    def remove_orchestrator_from_core():
-        pass
