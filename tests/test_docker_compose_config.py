@@ -24,7 +24,7 @@ class TestDockerComposeConfig:
         assert 'collegue-app' in compose_file['services']
     
     def test_healthcheck_port_is_correct(self, compose_file):
-        """Test que le healthcheck pointe sur le bon port (4121, pas 4122)."""
+        """Test que le healthcheck pointe sur le bon port (4122 pour health_server)."""
         collegue_app = compose_file['services']['collegue-app']
         healthcheck = collegue_app.get('healthcheck', {})
         test_command = healthcheck.get('test', [])
@@ -40,8 +40,8 @@ class TestDockerComposeConfig:
                 break
         
         assert healthcheck_url is not None, "Healthcheck URL not found in test command"
-        assert ':4121/' in healthcheck_url, f"Healthcheck should use port 4121, found: {healthcheck_url}"
-        assert ':4122/' not in healthcheck_url, f"Healthcheck should NOT use port 4122, found: {healthcheck_url}"
+        # Le health_server écoute sur 4122 (voir entrypoint.sh et health_server.py)
+        assert ':4122/' in healthcheck_url, f"Healthcheck should use port 4122, found: {healthcheck_url}"
     
     def test_kc_provisioner_is_disabled(self, compose_file):
         """Test que le service kc-provisioner est désactivé/commenté."""
@@ -92,7 +92,7 @@ class TestDockerComposeHealthcheckIntegration:
     """Tests d'intégration pour le healthcheck."""
     
     def test_healthcheck_matches_app_port(self):
-        """Test que le port du healthcheck correspond au port exposé par l'app."""
+        """Test que le port du healthcheck correspond au health_server (port 4122)."""
         compose_path = os.path.join(os.path.dirname(__file__), '..', 'docker-compose.yml')
         
         with open(compose_path, 'r') as f:
@@ -105,9 +105,9 @@ class TestDockerComposeHealthcheckIntegration:
         
         healthcheck_port = int(healthcheck_match.group(1))
         
-        # Vérifier que le port est 4121
-        assert healthcheck_port == 4121, \
-            f"Healthcheck port {healthcheck_port} should be 4121"
+        # Le healthcheck doit être sur 4122 (health_server), pas 4121 (MCP server)
+        assert healthcheck_port == 4122, \
+            f"Healthcheck port {healthcheck_port} should be 4122 (health_server)"
 
 
 if __name__ == "__main__":
