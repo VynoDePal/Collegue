@@ -466,31 +466,20 @@ class RepoConsistencyCheckTool(BaseTool):
 
         return actions[:5]
 
-    async def _deep_analysis_with_llm(
-        self,
-        request: ConsistencyCheckRequest,
-        issues: List[ConsistencyIssue],
-        ctx=None
-    ) -> Tuple[Optional[List[LLMInsight]], float, str]:
-        try:
-            if ctx is None:
-                self.logger.warning("ctx non disponible pour analyse deep")
-                score, priority = self._calculate_refactoring_score(issues)
-                return None, score, priority
+    def _build_prompt(self, request) -> str:
+        issues = getattr(request, '_temp_issues', [])
+        files_summary = []
+        for f in request.files[:5]:
+            preview = f.content[:400] + "..." if len(f.content) > 400 else f.content
+            files_summary.append(f"### {f.path}\n```\n{preview}\n```")
 
+        issues_summary = []
+        for issue in issues[:15]:
+            issues_summary.append(
+                f"- [{issue.severity.upper()}] {issue.kind} @ {issue.path}:{issue.line or '?'}: {issue.message}"
+            )
 
-            files_summary = []
-            for f in request.files[:5]:
-                preview = f.content[:400] + "..." if len(f.content) > 400 else f.content
-                files_summary.append(f"### {f.path}\n```\n{preview}\n```")
-
-            issues_summary = []
-            for issue in issues[:15]:
-                issues_summary.append(
-                    f"- [{issue.severity.upper()}] {issue.kind} @ {issue.path}:{issue.line or '?'}: {issue.message}"
-                )
-
-            prompt = f"""Analyse les incohérences détectées dans ce code et fournis des insights.
+        prompt = f"""Analyse les incohérences détectées dans ce code et fournis des insights.
 
 ## Fichiers analysés
 {chr(10).join(files_summary)}
@@ -501,17 +490,17 @@ class RepoConsistencyCheckTool(BaseTool):
 ---
 
 Fournis une analyse enrichie au format JSON strict:
-{
+{{
   "refactoring_score": 0.0-1.0,
   "insights": [
-    {
+    {{
       "category": "pattern|architecture|debt|suggestion",
       "insight": "Description détaillée",
       "confidence": "low|medium|high",
       "affected_files": ["file1.py", "file2.ts"]
-    }
+    }}
   ]
-}
+}}
 
 Catégories d'insights:
 - **pattern**: Anti-patterns détectés (god class, spaghetti code, etc.)
@@ -526,7 +515,22 @@ Le `refactoring_score` doit refléter l'urgence d'un refactoring:
 - 0.8-1.0: Refactoring critique, dette technique élevée
 
 Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
+        return prompt
 
+    async def _deep_analysis_with_llm(
+        self,
+        request: ConsistencyCheckRequest,
+        issues: List[ConsistencyIssue],
+        ctx=None
+    ) -> Tuple[Optional[List[LLMInsight]], float, str]:
+        try:
+            if ctx is None:
+                self.logger.warning("ctx non disponible pour analyse deep")
+                score, priority = self._calculate_refactoring_score(issues)
+                return None, score, priority
+
+            request._temp_issues = issues
+            prompt = await self.prepare_prompt(request, "repo_consistency_check_deep")
             result = await ctx.sample(
                 messages=prompt,
                 temperature=0.5,
