@@ -23,12 +23,21 @@ class TestDockerComposeConfig:
         assert 'services' in compose_file
         assert 'collegue-app' in compose_file['services']
     
-    def test_network_is_defined(self, compose_file):
-        """Test que le réseau collegue-network est défini."""
-        assert 'networks' in compose_file, "Networks section not found"
-        assert 'collegue-network' in compose_file['networks'], "collegue-network not defined"
-        network = compose_file['networks']['collegue-network']
-        assert network.get('driver') == 'bridge', "Network should use bridge driver"
+    def test_no_custom_network_defined(self, compose_file):
+        """Test qu'aucun réseau custom n'est défini (utilise le réseau par défaut de Coolify)."""
+        # Pas de networks section, ou si elle existe, pas de collegue-network
+        # car Coolify gère son propre réseau et Caddy utilise {{upstreams}}
+        if 'networks' in compose_file:
+            assert 'collegue-network' not in compose_file.get('networks', {}), \
+                "collegue-network should not be defined - let Coolify manage the network"
+    
+    def test_services_use_default_network(self, compose_file):
+        """Test que les services n'ont pas de réseau explicite (utilisent le réseau par défaut)."""
+        for service_name in ['collegue-app', 'nginx', 'keycloak']:
+            service = compose_file['services'].get(service_name, {})
+            # Les services ne doivent pas avoir de networks explicitement défini
+            assert 'networks' not in service, \
+                f"{service_name} should not have explicit networks - use Coolify's default network"
     
     def test_healthcheck_port_is_correct(self, compose_file):
         """Test que le healthcheck pointe sur le bon port (4122 pour health_server)."""
@@ -80,18 +89,6 @@ class TestDockerComposeConfig:
             condition = depends_on.get('collegue-app', {}).get('condition', '')
             assert condition == 'service_healthy', \
                 f"nginx should wait for collegue-app to be healthy, got: {condition}"
-    
-    def test_collegue_app_uses_network(self, compose_file):
-        """Test que collegue-app utilise le réseau collegue-network."""
-        collegue_app = compose_file['services']['collegue-app']
-        networks = collegue_app.get('networks', [])
-        assert 'collegue-network' in networks, "collegue-app should use collegue-network"
-    
-    def test_nginx_uses_network(self, compose_file):
-        """Test que nginx utilise le réseau collegue-network."""
-        nginx = compose_file['services'].get('nginx', {})
-        networks = nginx.get('networks', [])
-        assert 'collegue-network' in networks, "nginx should use collegue-network"
     
     def test_collegue_app_environment_variables(self, compose_file):
         """Test que les variables d'environnement essentielles sont présentes."""
