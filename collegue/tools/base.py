@@ -175,7 +175,12 @@ class BaseTool(ABC):
         ctx = kwargs.get('ctx')
 
         if not self.prompt_engine and kwargs.get('prompt_engine'):
-            self.prompt_engine = kwargs.get('prompt_engine')
+            prompt_engine = kwargs.get('prompt_engine')
+            # Support pour le LazyPromptEngine - attendre l'initialisation si nécessaire
+            if hasattr(prompt_engine, 'get_engine'):
+                self.prompt_engine = await prompt_engine.get_engine(timeout=25.0)
+            else:
+                self.prompt_engine = prompt_engine
         if not getattr(self, 'parser', None) and kwargs.get('parser'):
             self.parser = kwargs.get('parser')
         if not self.context_manager and kwargs.get('context_manager'):
