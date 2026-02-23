@@ -5,6 +5,10 @@ services:
       dockerfile: docker/collegue/Dockerfile
     image: collegue-app:latest
     restart: always
+    # Exposer directement le port MCP pour contourner Traefik (version incompatible)
+    ports:
+      - "4121:4121"
+      - "4122:4122"
     environment:
       PYTHONUNBUFFERED: 1
       PORT: 4121

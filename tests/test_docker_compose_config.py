@@ -90,6 +90,24 @@ class TestDockerComposeConfig:
             assert condition == 'service_healthy', \
                 f"nginx should wait for collegue-app to be healthy, got: {condition}"
     
+    def test_collegue_app_ports_exposed(self, compose_file):
+        """Test que les ports MCP sont exposés directement (contournement Traefik)."""
+        collegue_app = compose_file['services']['collegue-app']
+        ports = collegue_app.get('ports', [])
+        
+        # Vérifier que les ports sont exposés
+        port_mappings = []
+        for port in ports:
+            if isinstance(port, str):
+                port_mappings.append(port)
+            elif isinstance(port, dict):
+                port_mappings.append(f"{port.get('published')}:{port.get('target')}")
+        
+        # Port 4121 (MCP) doit être exposé
+        assert any('4121' in p for p in port_mappings), "MCP port 4121 should be exposed"
+        # Port 4122 (health) doit être exposé  
+        assert any('4122' in p for p in port_mappings), "Health port 4122 should be exposed"
+    
     def test_collegue_app_environment_variables(self, compose_file):
         """Test que les variables d'environnement essentielles sont présentes."""
         collegue_app = compose_file['services']['collegue-app']
