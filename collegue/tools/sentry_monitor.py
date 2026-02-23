@@ -256,289 +256,11 @@ class SentryMonitorTool(BaseTool):
 
         return info
 
-    def _get_base_url(self, sentry_url: Optional[str] = None) -> str:
-        """Retourne l'URL de base de l'API Sentry."""
-        url = sentry_url or os.environ.get('SENTRY_URL') or self._get_url_from_http_headers() or 'https://sentry.io'
-        return f"{url.rstrip('/')}/api/0"
-
-    def _get_headers(self, token: Optional[str] = None) -> Dict[str, str]:
-        """Construit les headers pour l'API Sentry."""
-        sentry_token = token or os.environ.get('SENTRY_AUTH_TOKEN') or self._get_token_from_http_headers()
-
-        if not sentry_token:
-            raise ToolExecutionError(
-                "Token Sentry requis. Fournissez request.token, ou définissez SENTRY_AUTH_TOKEN côté serveur, "
-                "ou envoyez un header X-Sentry-Token via mcp-remote."
-            )
-
-        return {
-            "Authorization": f"Bearer {sentry_token}",
-            "Content-Type": "application/json"
-        }
-
-    def _api_get(self, endpoint: str, token: Optional[str] = None,
-                 sentry_url: Optional[str] = None, params: Optional[Dict] = None) -> Any:
-        """Effectue une requête GET à l'API Sentry."""
-        if not HAS_REQUESTS:
-            raise ToolExecutionError("requests non installé. Installez avec: pip install requests")
-
-        base_url = self._get_base_url(sentry_url)
-        url = f"{base_url}{endpoint}"
-        headers = self._get_headers(token)
-
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-
-            if response.status_code == 404:
-                raise ToolExecutionError(f"Ressource introuvable: {endpoint}")
-            elif response.status_code == 401:
-                raise ToolExecutionError("Token Sentry invalide ou expiré")
-            elif response.status_code == 403:
-                raise ToolExecutionError("Accès refusé. Vérifiez les permissions du token.")
-            elif response.status_code >= 400:
-                raise ToolExecutionError(f"Erreur API Sentry {response.status_code}: {response.text[:200]}")
-
-            return response.json()
-        except requests.RequestException as e:
-            raise ToolExecutionError(f"Erreur réseau Sentry: {e}")
-
-    def _get_project(self, org: str, project_slug: str, token: Optional[str], sentry_url: Optional[str]) -> ProjectInfo:
-        """Récupère les détails d'un projet."""
-        data = self._api_get(f"/projects/{org}/{project_slug}/", token, sentry_url)
-
-        return ProjectInfo(
-            id=data['id'],
-            slug=data['slug'],
-            name=data['name'],
-            platform=data.get('platform'),
-            status=data.get('status', 'active'),
-            options=data.get('options', {}),
-            organization=data.get('organization', {})
-        )
-
-    def _list_projects(self, org: str, token: Optional[str], sentry_url: Optional[str]) -> List[ProjectInfo]:
-        """Liste les projets d'une organisation."""
-        data = self._api_get(f"/organizations/{org}/projects/", token, sentry_url)
-
-        return [ProjectInfo(
-            id=p['id'],
-            slug=p['slug'],
-            name=p['name'],
-            platform=p.get('platform'),
-            status=p.get('status', 'active'),
-            organization=p.get('organization', {})
-        ) for p in data]
-
-    def _list_issues(self, org: str, project: Optional[str], query: Optional[str],
-                     token: Optional[str], sentry_url: Optional[str], limit: int) -> List[IssueInfo]:
-        """Liste les issues d'un projet."""
-        params = {"limit": limit}
-
-        if project:
-            params["project"] = project
-        if query:
-            params["query"] = query
-        else:
-            params["query"] = "is:unresolved"
-
-        data = self._api_get(f"/organizations/{org}/issues/", token, sentry_url, params)
-
-        return [IssueInfo(
-            id=i['id'],
-            short_id=i['shortId'],
-            title=i['title'],
-            culprit=i.get('culprit'),
-            level=i.get('level', 'error'),
-            status=i.get('status', 'unresolved'),
-            count=i.get('count', 0),
-            user_count=i.get('userCount', 0),
-            first_seen=i['firstSeen'],
-            last_seen=i['lastSeen'],
-            permalink=i['permalink'],
-            is_unhandled=i.get('isUnhandled', False),
-            type=i.get('type', 'error')
-        ) for i in data[:limit]]
-
-    def _get_issue(self, issue_id: str, token: Optional[str], sentry_url: Optional[str],
-                    org: Optional[str] = None) -> IssueInfo:
-        """Récupère les détails d'une issue."""
-
-        if org:
-            endpoint = f"/organizations/{org}/issues/{issue_id}/"
-        else:
-            endpoint = f"/issues/{issue_id}/"
-        data = self._api_get(endpoint, token, sentry_url)
-
-        return IssueInfo(
-            id=data['id'],
-            short_id=data['shortId'],
-            title=data['title'],
-            culprit=data.get('culprit'),
-            level=data.get('level', 'error'),
-            status=data.get('status', 'unresolved'),
-            count=data.get('count', 0),
-            user_count=data.get('userCount', 0),
-            first_seen=data['firstSeen'],
-            last_seen=data['lastSeen'],
-            permalink=data['permalink'],
-            is_unhandled=data.get('isUnhandled', False),
-            type=data.get('type', 'error')
-        )
-
-    def _get_issue_events(self, issue_id: str, token: Optional[str],
-                          sentry_url: Optional[str], limit: int,
-                          org: Optional[str] = None) -> List[EventInfo]:
-        """Récupère les événements/stacktraces d'une issue."""
-
-        if org:
-            endpoint = f"/organizations/{org}/issues/{issue_id}/events/"
-        else:
-            endpoint = f"/issues/{issue_id}/events/"
-        data = self._api_get(endpoint, token, sentry_url, {"limit": limit, "full": "true"})
-
-        events = []
-        for e in data[:limit]:
-
-            stacktrace = None
-            entries = e.get('entries', [])
-            for entry in entries:
-                if entry.get('type') == 'exception':
-                    exc_data = entry.get('data', {})
-                    values = exc_data.get('values', [])
-                    if values:
-                        frames = values[0].get('stacktrace', {}).get('frames', [])
-                        if frames:
-
-                            st_lines = []
-                            for frame in frames[-10:]:
-                                filename = frame.get('filename', '?')
-                                lineno = frame.get('lineNo', '?')
-                                func = frame.get('function', '?')
-                                context = frame.get('context', [])
-                                st_lines.append(f"  File \"{filename}\", line {lineno}, in {func}")
-                                if context:
-                                    for ctx in context[-3:]:
-                                        if isinstance(ctx, list) and len(ctx) >= 2:
-                                            st_lines.append(f"    {ctx[1]}")
-                            stacktrace = "\n".join(st_lines)
-                    break
-
-
-            tags = {}
-            for tag in e.get('tags', []):
-                if isinstance(tag, dict):
-                    tags[tag.get('key', '')] = tag.get('value', '')
-
-
-            user_ctx = e.get('user')
-            if user_ctx:
-                user_ctx = {
-                    'id': user_ctx.get('id'),
-                    'email': user_ctx.get('email'),
-                    'username': user_ctx.get('username'),
-                    'ip_address': user_ctx.get('ip_address')
-                }
-
-
-            request_ctx = None
-            for entry in entries:
-                if entry.get('type') == 'request':
-                    req_data = entry.get('data', {})
-                    request_ctx = {
-                        'url': req_data.get('url'),
-                        'method': req_data.get('method'),
-                        'headers': dict(list(req_data.get('headers', []))[:5]) if req_data.get('headers') else None
-                    }
-                    break
-
-            events.append(EventInfo(
-                event_id=e['eventID'],
-                title=e.get('title', ''),
-                message=e.get('message'),
-                platform=e.get('platform'),
-                timestamp=e.get('dateCreated', ''),
-                tags=tags,
-                context=e.get('context', {}),
-                stacktrace=stacktrace,
-                user=user_ctx,
-                request=request_ctx
-            ))
-
-        return events
-
-    def _get_issue_tags(self, issue_id: str, token: Optional[str], sentry_url: Optional[str],
-                         org: Optional[str] = None) -> List[TagDistribution]:
-        """Récupère la distribution des tags d'une issue."""
-        if org:
-            endpoint = f"/organizations/{org}/issues/{issue_id}/tags/"
-        else:
-            endpoint = f"/issues/{issue_id}/tags/"
-        data = self._api_get(endpoint, token, sentry_url)
-
-        return [TagDistribution(
-            key=t['key'],
-            name=t.get('name', t['key']),
-            values=t.get('topValues', [])[:10]
-        ) for t in data]
-
-    def _get_project_stats(self, org: str, project: str, time_range: str,
-                           token: Optional[str], sentry_url: Optional[str]) -> ProjectStats:
-        """Récupère les statistiques d'un projet."""
-
-        stat_periods = {
-            '1h': '1h', '24h': '24h', '7d': '7d', '14d': '14d', '30d': '30d'
-        }
-        period = stat_periods.get(time_range, '24h')
-
-
-        stats_data = self._api_get(
-            f"/projects/{org}/{project}/stats/",
-            token, sentry_url,
-            {"stat": "received", "resolution": "1d"}
-        )
-
-
-        total_events = sum(point[1] for point in stats_data) if stats_data else 0
-
-
-        issues_data = self._api_get(
-            f"/organizations/{org}/issues/",
-            token, sentry_url,
-            {"project": project, "query": "is:unresolved", "limit": 1}
-        )
-
-        return ProjectStats(
-            project=project,
-            total_events=total_events,
-            unresolved_issues=len(issues_data) if issues_data else 0,
-            events_24h=stats_data[-1][1] if stats_data else 0
-        )
-
-    def _list_releases(self, org: str, project: Optional[str],
-                       token: Optional[str], sentry_url: Optional[str], limit: int) -> List[ReleaseInfo]:
-        """Liste les releases."""
-        endpoint = f"/organizations/{org}/releases/"
-        params = {"per_page": limit}
-        if project:
-            params["project"] = project
-
-        data = self._api_get(endpoint, token, sentry_url, params)
-
-        return [ReleaseInfo(
-            version=r['version'],
-            short_version=r.get('shortVersion', r['version'][:20]),
-            date_created=r['dateCreated'],
-            first_event=r.get('firstEvent'),
-            last_event=r.get('lastEvent'),
-            new_groups=r.get('newGroups', 0),
-            url=r.get('url')
-        ) for r in data[:limit]]
-
-    def _get_sentry_client(self, request: SentryRequest) -> SentryClient:
-        """Create and configure SentryClient from request."""
+    def _get_sentry_client(self, request: SentryRequest, token: Optional[str] = None, org: Optional[str] = None) -> SentryClient:
+        """Create and configure SentryClient with resolved credentials."""
         return SentryClient(
-            token=request.token,
-            organization=request.organization,
+            token=token or request.token,
+            organization=org or request.organization,
             base_url=request.sentry_url or "https://sentry.io"
         )
 
@@ -583,7 +305,7 @@ class SentryMonitorTool(BaseTool):
             )
 
         if request.command == 'list_projects':
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_projects()
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to list projects")
@@ -597,7 +319,7 @@ class SentryMonitorTool(BaseTool):
             )
 
         elif request.command == 'list_repos':
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_repos()
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to list repos")
@@ -613,7 +335,7 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'get_project':
             if not request.project:
                 raise ToolExecutionError("project requis pour get_project")
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_project(request.project)
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to get project")
@@ -627,7 +349,7 @@ class SentryMonitorTool(BaseTool):
             )
 
         elif request.command == 'list_issues':
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_issues(
                 project=request.project,
                 query=request.query or "is:unresolved",
@@ -647,7 +369,7 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'get_issue':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour get_issue")
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue(request.issue_id)
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to get issue")
@@ -663,8 +385,8 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'issue_events':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_events")
-            client = self._get_sentry_client(request)
-            response = client.get_issue_events(request.issue_id)
+            client = self._get_sentry_client(request, token=token, org=org)
+            response = client.get_issue_events(request.issue_id, limit=request.limit)
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to get issue events")
             events_data = response.data or []
@@ -680,7 +402,7 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'issue_tags':
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_tags")
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue_tags(request.issue_id)
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to get issue tags")
@@ -696,7 +418,7 @@ class SentryMonitorTool(BaseTool):
         elif request.command == 'project_stats':
             if not request.project:
                 raise ToolExecutionError("project requis pour project_stats")
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_project_stats(request.project, request.time_range)
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to get project stats")
@@ -713,7 +435,7 @@ class SentryMonitorTool(BaseTool):
             )
 
         elif request.command == 'list_releases':
-            client = self._get_sentry_client(request)
+            client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_releases(project=request.project, limit=request.limit)
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to list releases")

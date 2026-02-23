@@ -218,7 +218,9 @@ class DocumentationTool(BaseTool):
 
         if ctx:
             try:
-                prompt = self._build_documentation_prompt(request, code_elements)
+                request._temp_elements = code_elements
+                prompt = run_async_from_sync(self.prepare_prompt(request, "code_documentation"))
+                
                 system_prompt = f"""Tu es un expert en documentation de code {request.language}.
 Génère une documentation claire, complète et bien structurée au format {request.doc_format or 'markdown'}.
 Style de documentation: {request.doc_style or 'standard'}."""
@@ -262,7 +264,9 @@ Style de documentation: {request.doc_style or 'standard'}."""
 
         code_elements = self._analyze_code_elements(request.code, request.language, parser)
 
-        prompt = self._build_documentation_prompt(request, code_elements)
+        request._temp_elements = code_elements
+        prompt = await self.prepare_prompt(request, "code_documentation")
+        
         system_prompt = f"""Tu es un expert en documentation de code {request.language}.
 Génère une documentation claire, complète et bien structurée au format {request.doc_format or 'markdown'}.
 Style de documentation: {request.doc_style or 'standard'}."""
@@ -459,7 +463,8 @@ Style de documentation: {request.doc_style or 'standard'}."""
         else:
             return "high"
 
-    def _build_documentation_prompt(self, request, elements: List[Dict[str, str]]) -> str:
+    def _build_prompt(self, request) -> str:
+        elements = getattr(request, '_temp_elements', [])
         """Build documentation prompt."""
         language = request.language
         style = request.doc_style or "standard"

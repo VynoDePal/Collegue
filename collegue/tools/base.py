@@ -173,6 +173,14 @@ class BaseTool(ABC):
 
     async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
         ctx = kwargs.get('ctx')
+
+        if not self.prompt_engine and kwargs.get('prompt_engine'):
+            self.prompt_engine = kwargs.get('prompt_engine')
+        if not getattr(self, 'parser', None) and kwargs.get('parser'):
+            self.parser = kwargs.get('parser')
+        if not self.context_manager and kwargs.get('context_manager'):
+            self.context_manager = kwargs.get('context_manager')
+
         total_steps = 3
 
         if ctx:

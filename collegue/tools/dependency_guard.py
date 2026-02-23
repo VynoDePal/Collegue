@@ -19,6 +19,8 @@ import json
 import subprocess
 import urllib.request
 import urllib.error
+import urllib.parse
+import concurrent.futures
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field, field_validator
 from .base import BaseTool, ToolValidationError
@@ -312,41 +314,36 @@ class DependencyGuardTool(BaseTool):
 
     def _check_pypi_existence(self, package_name: str) -> Dict[str, Any]:
         try:
-            result = subprocess.run(
-                ['pip', 'index', 'versions', package_name],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            if result.returncode == 0:
-
-                match = re.search(r'Available versions: ([^\s,]+)', result.stdout)
-                latest = match.group(1) if match else None
-                return {'exists': True, 'latest_version': latest}
-            else:
+            url = f"https://pypi.org/pypi/{package_name}/json"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    return {'exists': True, 'latest_version': data.get('info', {}).get('version')}
+            return {'exists': False, 'latest_version': None}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
                 return {'exists': False, 'latest_version': None}
-        except subprocess.TimeoutExpired:
-            return {'exists': None, 'latest_version': None, 'error': 'timeout'}
+            return {'exists': None, 'latest_version': None, 'error': str(e)}
         except Exception as e:
             return {'exists': None, 'latest_version': None, 'error': str(e)}
 
     def _check_npm_existence(self, package_name: str) -> Dict[str, Any]:
         try:
-            result = subprocess.run(
-                ['npm', 'view', package_name, 'version'],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            if result.returncode == 0:
-                latest = result.stdout.strip()
-                return {'exists': True, 'latest_version': latest}
-            else:
+            # Handle scoped packages encoding
+            safe_name = urllib.parse.quote(package_name, safe='@')
+            url = f"https://registry.npmjs.org/{safe_name}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    latest = data.get('dist-tags', {}).get('latest')
+                    return {'exists': True, 'latest_version': latest}
+            return {'exists': False, 'latest_version': None}
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
                 return {'exists': False, 'latest_version': None}
-        except subprocess.TimeoutExpired:
-            return {'exists': None, 'latest_version': None, 'error': 'timeout'}
+            return {'exists': None, 'latest_version': None, 'error': str(e)}
         except Exception as e:
             return {'exists': None, 'latest_version': None, 'error': str(e)}
 
@@ -428,22 +425,27 @@ class DependencyGuardTool(BaseTool):
         self.logger.info(f"Vérification OSV batch pour {len(queries)} packages ({ecosystem})...")
 
         try:
-            batch_data = {"queries": queries}
-            req = urllib.request.Request(
-                OSV_BATCH_URL,
-                data=json.dumps(batch_data).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-
-            with urllib.request.urlopen(req, timeout=60) as response:
-                result = json.loads(response.read().decode('utf-8'))
-
             vuln_to_packages = {}
+            CHUNK_SIZE = 1000
+            
+            for chunk_start in range(0, len(queries), CHUNK_SIZE):
+                chunk_queries = queries[chunk_start:chunk_start + CHUNK_SIZE]
+                batch_data = {"queries": chunk_queries}
+                
+                req = urllib.request.Request(
+                    OSV_BATCH_URL,
+                    data=json.dumps(batch_data).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'}
+                )
 
-            for idx, result_item in enumerate(result.get('results', [])):
-                if idx not in dep_map:
-                    continue
-                pkg_info = dep_map[idx]
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    result = json.loads(response.read().decode('utf-8'))
+
+                for chunk_idx, result_item in enumerate(result.get('results', [])):
+                    global_idx = chunk_start + chunk_idx
+                    if global_idx not in dep_map:
+                        continue
+                    pkg_info = dep_map[global_idx]
 
                 for vuln in result_item.get('vulns', []):
                     vuln_id = vuln.get('id', '')
@@ -700,12 +702,13 @@ class DependencyGuardTool(BaseTool):
             raise ToolValidationError(f"Type de fichier '{content_type}' non supporté")
 
 
-        for dep in deps:
+        def check_dep(dep):
+            local_issues = []
             name = dep['name']
             version = dep['version']
 
             if request.blocklist and name.lower() in [b.lower() for b in request.blocklist]:
-                issues.append(DependencyIssue(
+                local_issues.append(DependencyIssue(
                     package=name,
                     version=version,
                     issue_type='blocked',
@@ -715,7 +718,7 @@ class DependencyGuardTool(BaseTool):
                 ))
 
             if request.allowlist and name.lower() not in [a.lower() for a in request.allowlist]:
-                issues.append(DependencyIssue(
+                local_issues.append(DependencyIssue(
                     package=name,
                     version=version,
                     issue_type='not_allowed',
@@ -726,7 +729,7 @@ class DependencyGuardTool(BaseTool):
 
             malicious = self.KNOWN_MALICIOUS_PACKAGES.get(request.language, [])
             if name.lower() in [m.lower() for m in malicious]:
-                issues.append(DependencyIssue(
+                local_issues.append(DependencyIssue(
                     package=name,
                     version=version,
                     issue_type='malicious',
@@ -738,7 +741,7 @@ class DependencyGuardTool(BaseTool):
             deprecated = self.DEPRECATED_PACKAGES.get(request.language, {})
             if name.lower() in [d.lower() for d in deprecated.keys()]:
                 replacement = deprecated.get(name, 'une alternative')
-                issues.append(DependencyIssue(
+                local_issues.append(DependencyIssue(
                     package=name,
                     version=version,
                     issue_type='deprecated',
@@ -756,7 +759,7 @@ class DependencyGuardTool(BaseTool):
                     check = self._check_npm_existence(name)
 
                 if check.get('exists') is False:
-                    issues.append(DependencyIssue(
+                    local_issues.append(DependencyIssue(
                         package=name,
                         version=version,
                         issue_type='not_found',
@@ -764,6 +767,13 @@ class DependencyGuardTool(BaseTool):
                         message=f"Package '{name}' n'existe pas sur le registre officiel",
                         recommendation="Vérifiez l'orthographe. Ce package pourrait être une hallucination IA ou un typosquat."
                     ))
+            return local_issues
+
+        # Run checks in parallel to avoid timing out on large dependency lists
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(check_dep, deps))
+            for res in results:
+                issues.extend(res)
 
         if request.check_vulnerabilities:
             ecosystem = 'PyPI'

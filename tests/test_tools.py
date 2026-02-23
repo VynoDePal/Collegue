@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
+sys.path.insert(0, '/root/.openclaw/workspace/Collegue')
 from collegue.tools.dependency_guard import DependencyGuardTool, DependencyGuardRequest
 from collegue.tools.repo_consistency_check import RepoConsistencyCheckTool, ConsistencyCheckRequest, FileInput as ConsistencyFileInput
 from collegue.tools.secret_scan import SecretScanTool, SecretScanRequest, FileContent
@@ -9,7 +9,7 @@ print("=" * 80)
 print("TEST 1: DEPENDENCY GUARD (avec cache OSV)")
 print("=" * 80)
 dep_tool = DependencyGuardTool()
-with open('/home/kevyn-odjo/Documents/Collegue/requirements.txt', 'r') as f:
+with open('/root/.openclaw/workspace/Collegue/requirements.txt', 'r') as f:
     req_content = f.read()
 dep_request = DependencyGuardRequest(
     content=req_content,
@@ -36,7 +36,7 @@ print("TEST 2: REPO CONSISTENCY CHECK (avec JSParser)")
 print("=" * 80)
 consistency_tool = RepoConsistencyCheckTool()
 files_to_check = []
-collegue_dir = '/home/kevyn-odjo/Documents/Collegue/collegue'
+collegue_dir = '/root/.openclaw/workspace/Collegue/collegue'
 for root, dirs, files in os.walk(collegue_dir):
     dirs[:] = [d for d in dirs if d not in ['__pycache__', '.venv', 'node_modules']]
     for file in files:
@@ -45,7 +45,7 @@ for root, dirs, files in os.walk(collegue_dir):
             try:
                 with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                rel_path = os.path.relpath(filepath, '/home/kevyn-odjo/Documents/Collegue')
+                rel_path = os.path.relpath(filepath, '/root/.openclaw/workspace/Collegue')
                 files_to_check.append(ConsistencyFileInput(path=rel_path, content=content))
                 if len(files_to_check) >= 10:
                     break
@@ -81,8 +81,8 @@ print("=" * 80)
 secret_tool = SecretScanTool()
 secret_files = []
 scan_dirs = [
-    '/home/kevyn-odjo/Documents/Collegue/collegue',
-    '/home/kevyn-odjo/Documents/Collegue/tests',
+    '/root/.openclaw/workspace/Collegue/collegue',
+    '/root/.openclaw/workspace/Collegue/tests',
 ]
 for scan_dir in scan_dirs:
     if os.path.exists(scan_dir):
@@ -96,7 +96,7 @@ for scan_dir in scan_dirs:
                             continue
                         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read()
-                        rel_path = os.path.relpath(filepath, '/home/kevyn-odjo/Documents/Collegue')
+                        rel_path = os.path.relpath(filepath, '/root/.openclaw/workspace/Collegue')
                         secret_files.append(FileContent(path=rel_path, content=content))
                         if len(secret_files) >= 20:
                             break
@@ -133,7 +133,7 @@ print("TEST 4: IMPACT ANALYSIS (avec graphe de dépendances)")
 print("=" * 80)
 impact_tool = ImpactAnalysisTool()
 files_to_analyze = []
-collegue_dir = '/home/kevyn-odjo/Documents/Collegue/collegue'
+collegue_dir = '/root/.openclaw/workspace/Collegue/collegue'
 for root, dirs, files in os.walk(collegue_dir):
     dirs[:] = [d for d in dirs if d not in ['__pycache__', '.venv', 'node_modules']]
     for file in files:
@@ -142,7 +142,7 @@ for root, dirs, files in os.walk(collegue_dir):
             try:
                 with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-                rel_path = os.path.relpath(filepath, '/home/kevyn-odjo/Documents/Collegue')
+                rel_path = os.path.relpath(filepath, '/root/.openclaw/workspace/Collegue')
                 files_to_analyze.append(ImpactFileInput(path=rel_path, content=content))
                 if len(files_to_analyze) >= 8:
                     break

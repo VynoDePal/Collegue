@@ -91,6 +91,7 @@ def _register_tool_with_fastmcp(app: FastMCP, tool: BaseTool):
             kwargs = {
                 "parser": lc.get('parser'),
                 "context_manager": lc.get('context_manager'),
+                "prompt_engine": lc.get('prompt_engine'),
                 "ctx": ctx,
             }
 

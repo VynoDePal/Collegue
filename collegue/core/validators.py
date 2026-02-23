@@ -73,7 +73,9 @@ def validate_k8s_command(value: str) -> str:
 		'get_deployment',
 		'list_services',
 		'list_namespaces',
+		'list_events',
 		'list_nodes',
+		'get_node',
 		'describe_resource',
 		'list_configmaps',
 		'list_secrets',
@@ -83,7 +85,7 @@ def validate_k8s_command(value: str) -> str:
 
 def validate_postgres_command(value: str) -> str:
 	return validate_in_list(
-		['list_schemas', 'list_tables', 'describe_table', 'query'],
+		['list_schemas', 'list_tables', 'describe_table', 'query', 'indexes', 'foreign_keys', 'table_stats', 'sample_data'],
 		value,
 	)
 
@@ -92,11 +94,15 @@ def validate_sentry_command(value: str) -> str:
 	return validate_in_list(
 		[
 			'list_projects',
+			'list_repos',
+			'get_project',
 			'list_issues',
 			'get_issue',
 			'issue_events',
+			'issue_tags',
 			'project_stats',
 			'list_releases',
+			'parse_config',
 		],
 		value,
 	)
