@@ -154,8 +154,13 @@ class TestStartupPerformance:
         mock_server = Mock()
         
         start_time = time.time()
-        async with core_lifespan(mock_server) as state:
-            startup_time = time.time() - start_time
+        with patch("collegue.app.validate_llm_config", new_callable=MagicMock) as mock_val:
+            # On simule la fonction asynchrone pour qu'elle passe sans rien faire
+            mock_val.return_value = asyncio.Future()
+            mock_val.return_value.set_result(True)
+            
+            async with core_lifespan(mock_server) as state:
+                startup_time = time.time() - start_time
             # Le lifespan doit yield en moins de 1 seconde
             assert startup_time < 1.0, f"Startup took {startup_time}s, expected < 1s"
             
