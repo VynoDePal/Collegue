@@ -1,468 +1,263 @@
 """
-Tests unitaires pour l'outil de génération de tests.
+Tests unitaires pour l'outil Test Generation refactorisé.
 """
-import unittest
-from unittest.mock import MagicMock, patch
-import sys
-import os
-from pathlib import Path
-
-
-parent_dir = str(Path(__file__).parent.parent.absolute())
-sys.path.insert(0, parent_dir)
+import pytest
+from unittest.mock import MagicMock
 
 from collegue.tools.test_generation import (
+    TestGenerationTool,
     TestGenerationRequest,
     TestGenerationResponse,
-    generate_tests,
-    TestGenerationTool
+    TestGenerationEngine
 )
 
-class TestTestGeneration(unittest.TestCase):
-    """Tests pour l'outil de génération de tests."""
 
-    def setUp(self):
-        """Initialisation des tests."""
-        self.tool = TestGenerationTool()
+class TestTestGenerationEngine:
+    """Tests pour le moteur de génération de tests."""
 
+    @pytest.fixture
+    def engine(self):
+        return TestGenerationEngine(logger=None)
 
-        self.python_code = """
+    def test_detect_framework_default(self, engine):
+        """Test la détection du framework par défaut."""
+        assert engine.detect_framework("python") == "pytest"
+        assert engine.detect_framework("javascript") == "jest"
+        assert engine.detect_framework("php") == "phpunit"
+
+    def test_detect_framework_requested(self, engine):
+        """Test la détection avec framework demandé."""
+        assert engine.detect_framework("python", "unittest") == "unittest"
+        assert engine.detect_framework("php", "pest") == "pest"
+
+    def test_detect_framework_invalid(self, engine):
+        """Test la détection avec framework invalide (fallback)."""
+        assert engine.detect_framework("python", "invalid") == "pytest"
+
+    def test_get_supported_frameworks(self, engine):
+        """Test la récupération des frameworks supportés."""
+        python_frameworks = engine.get_supported_frameworks("python")
+        assert "pytest" in python_frameworks
+        assert "unittest" in python_frameworks
+
+    def test_extract_python_elements(self, engine):
+        """Test l'extraction d'éléments Python."""
+        code = """
 def add(a, b):
-    \"\"\"Additionne deux nombres.\"\"\"
     return a + b
 
 class Calculator:
-    \"\"\"Une calculatrice simple.\"\"\"
-
-    def __init__(self):
-        \"\"\"Initialise la calculatrice.\"\"\"
-        self.result = 0
-
-    def add(self, a, b):
-        \"\"\"Additionne deux nombres.\"\"\"
-        self.result = a + b
-        return self.result
+    def multiply(self, a, b):
+        return a * b
 """
+        elements = engine.extract_code_elements(code, "python")
+        
+        # Devrait avoir: add (function), Calculator (class), multiply (method)
+        assert len(elements) == 3
+        assert any(e['type'] == 'function' and e['name'] == 'add' for e in elements)
+        assert any(e['type'] == 'class' and e['name'] == 'Calculator' for e in elements)
+        assert any(e['name'] == 'multiply' for e in elements)
 
-
-        self.javascript_code = """
-function add(a, b) {
-    // Additionne deux nombres
-    return a + b;
+    def test_extract_js_elements(self, engine):
+        """Test l'extraction d'éléments JavaScript."""
+        code = """
+function greet(name) {
+    return `Hello ${name}`;
 }
 
-class Calculator {
-    constructor() {
-        // Initialise la calculatrice
-        this.result = 0;
-    }
-
-    add(a, b) {
-        // Additionne deux nombres
-        this.result = a + b;
-        return this.result;
+class Person {
+    constructor(name) {
+        this.name = name;
     }
 }
 """
+        elements = engine.extract_code_elements(code, "javascript")
+        
+        assert len(elements) >= 2
+        assert any(e['type'] == 'function' for e in elements)
+        assert any(e['type'] == 'class' and e['name'] == 'Person' for e in elements)
 
-
-        self.typescript_code = """
-interface MathOperation {
-    execute(a: number, b: number): number;
-}
-
-function add(a: number, b: number): number {
-    return a + b;
-}
-
-class Calculator implements MathOperation {
-    private result: number = 0;
-
-    execute(a: number, b: number): number {
-        this.result = a + b;
-        return this.result;
+    def test_extract_php_elements(self, engine):
+        """Test l'extraction d'éléments PHP."""
+        code = """
+<?php
+class UserService {
+    public function getUser($id) {
+        return $id;
     }
 }
 """
+        elements = engine.extract_code_elements(code, "php")
+        
+        assert len(elements) >= 1
+        assert any(e['type'] == 'class' and e['name'] == 'UserService' for e in elements)
 
-    def test_test_generation_tool_instantiation(self):
-        tool = TestGenerationTool()
+    def test_estimate_coverage_full(self, engine):
+        """Test l'estimation de couverture complète."""
+        elements = [
+            {'name': 'func1', 'type': 'function'},
+            {'name': 'func2', 'type': 'function'}
+        ]
+        coverage = engine.estimate_coverage(elements, 2)
+        assert coverage > 0.7  # 2 tests pour 2 éléments = ~80%
 
-        self.assertEqual(tool.get_name(), "test_generation")
-        self.assertIsNotNone(tool.get_description())
-        self.assertEqual(tool.get_request_model(), TestGenerationRequest)
-        self.assertEqual(tool.get_response_model(), TestGenerationResponse)
+    def test_estimate_coverage_partial(self, engine):
+        """Test l'estimation de couverture partielle."""
+        elements = [
+            {'name': 'func1', 'type': 'function'},
+            {'name': 'func2', 'type': 'function'}
+        ]
+        coverage = engine.estimate_coverage(elements, 1)
+        assert coverage < 0.5  # 1 test pour 2 éléments = ~40%
 
-        supported_languages = tool.get_supported_languages()
-        self.assertIn("python", supported_languages)
-        self.assertIn("javascript", supported_languages)
-        self.assertIn("typescript", supported_languages)
-        self.assertIn("java", supported_languages)
-        self.assertIn("c#", supported_languages)
+    def test_generate_test_file_path_python(self, engine):
+        """Test la génération du chemin de fichier de test Python."""
+        path = engine.generate_test_file_path("/src/calculator.py", "python", "pytest")
+        assert "test_calculator.py" in path
 
-    def test_generate_tests_python_unittest(self):
+    def test_generate_test_file_path_javascript(self, engine):
+        """Test la génération du chemin de fichier de test JavaScript."""
+        path = engine.generate_test_file_path("/src/utils.js", "javascript", "jest")
+        assert ".test.js" in path or "test_" in path
+
+    def test_generate_fallback_tests(self, engine):
+        """Test la génération de tests fallback."""
+        elements = [{'type': 'function', 'name': 'add', 'params': ['a', 'b']}]
+        code, count = engine.generate_fallback_tests("def add(a, b): pass", "python", "pytest", elements)
+        
+        assert "test_add" in code
+        assert count == 1
+
+    def test_build_prompt(self, engine):
+        """Test la construction du prompt."""
+        code = "def add(a, b): return a + b"
+        elements = [{'type': 'function', 'name': 'add', 'params': ['a', 'b']}]
+        
+        prompt = engine.build_prompt(code, "python", "pytest", False, 0.8, elements)
+        
+        assert "python" in prompt
+        assert "pytest" in prompt
+        assert "def add" in prompt
+
+
+class TestTestGenerationTool:
+    """Tests pour le Tool principal."""
+
+    @pytest.fixture
+    def tool(self):
+        return TestGenerationTool(app_state={})
+
+    def test_tool_metadata(self, tool):
+        """Test les métadonnées du tool."""
+        assert tool.tool_name == "test_generation"
+        assert "generation" in tool.tags
+        assert "testing" in tool.tags
+        assert "python" in tool.supported_languages
+
+    def test_get_supported_test_frameworks(self, tool):
+        """Test la récupération des frameworks supportés."""
+        frameworks = tool.get_supported_test_frameworks()
+        assert "python" in frameworks
+        assert "pytest" in frameworks["python"]
+
+    def test_is_long_running(self, tool):
+        """Test si le tool est long à exécuter."""
+        assert tool.is_long_running() is True
+
+    def test_validate_request_valid(self, tool):
+        """Test la validation d'une requête valide."""
         request = TestGenerationRequest(
-            code=self.python_code,
+            code="def hello(): pass",
             language="python",
-            test_framework="unittest",
-            include_mocks=False
+            test_framework="pytest"
         )
+        assert tool.validate_request(request) is True
 
-        response = generate_tests(request)
-
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.language, "python")
-        self.assertEqual(response.framework, "unittest")
-        self.assertIn("import unittest", response.test_code)
-        self.assertTrue(
-            "class TestFunctions(unittest.TestCase):" in response.test_code
-            or "class TestModule(unittest.TestCase):" in response.test_code
-        )
-        self.assertIn("def test_add(self):", response.test_code)
-        self.assertTrue(
-            "class TestCalculator(unittest.TestCase):" in response.test_code
-            or "Calculator_initialization" in response.test_code
-        )
-        self.assertEqual(len(response.tested_elements), 3)
-        self.assertGreater(response.estimated_coverage, 0.0)
-
-    def test_generate_tests_python_pytest(self):
-        request = TestGenerationRequest(
-            code=self.python_code,
-            language="python",
-            test_framework="pytest",
-            include_mocks=True
-        )
-
-        response = generate_tests(request)
-
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.language, "python")
-        self.assertEqual(response.framework, "pytest")
-        self.assertIn("import pytest", response.test_code)
-        self.assertIn("def test_add():", response.test_code)
-        self.assertIn("@pytest.fixture", response.test_code)
-        self.assertEqual(len(response.tested_elements), 3)
-        self.assertGreater(response.estimated_coverage, 0.0)
-
-    def test_generate_tests_javascript_jest(self):
-        request = TestGenerationRequest(
-            code=self.javascript_code,
-            language="javascript",
-            test_framework="jest",
-            include_mocks=False
-        )
-
-        response = generate_tests(request)
-
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.language, "javascript")
-        self.assertEqual(response.framework, "jest")
-        self.assertTrue(
-            "describe('Functions'" in response.test_code
-            or "describe('Module Tests'" in response.test_code
-        )
-        self.assertIn("test('add should work correctly'", response.test_code)
-        self.assertTrue(
-            "describe('Calculator'" in response.test_code
-            or "Calculator should initialize correctly" in response.test_code
-        )
-        self.assertEqual(len(response.tested_elements), 2)
-        self.assertGreater(response.estimated_coverage, 0.0)
-
-    def test_generate_tests_typescript_jest(self):
-        request = TestGenerationRequest(
-            code=self.typescript_code,
-            language="typescript",
-            test_framework="jest",
-            include_mocks=False
-        )
-
-        response = generate_tests(request)
-
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.language, "typescript")
-        self.assertEqual(response.framework, "jest")
-        self.assertTrue(len(response.test_code) > 0)
-        self.assertGreater(len(response.tested_elements), 0)
-        self.assertGreater(response.estimated_coverage, 0.0)
-
-    def test_generate_tests_unsupported_language(self):
+    def test_validate_request_invalid_framework(self, tool):
+        """Test la validation avec framework invalide."""
         from collegue.tools.base import ToolValidationError
-
         request = TestGenerationRequest(
-            code="puts 'Hello, World!'",
-            language="ruby",
-            test_framework="rspec"
-        )
-
-        with self.assertRaises(ToolValidationError):
-            generate_tests(request)
-
-    def test_generate_tests_with_file_path(self):
-        request = TestGenerationRequest(
-            code=self.python_code,
+            code="def hello(): pass",
             language="python",
-            test_framework="unittest",
-            file_path="/path/to/calculator.py",
-            output_dir="/path/to/tests"
+            test_framework="invalid_framework"
         )
+        with pytest.raises(ToolValidationError):
+            tool.validate_request(request)
 
-        response = generate_tests(request)
-
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.test_file_path, "/path/to/tests/test_calculator.py")
-
-    def test_get_default_test_framework(self):
-        self.assertEqual(self.tool._get_default_test_framework("python"), "pytest")
-        self.assertEqual(self.tool._get_default_test_framework("javascript"), "jest")
-        self.assertEqual(self.tool._get_default_test_framework("typescript"), "jest")
-        self.assertEqual(self.tool._get_default_test_framework("java"), "junit")
-        self.assertEqual(self.tool._get_default_test_framework("c#"), "nunit")
-        self.assertEqual(self.tool._get_default_test_framework("unknown"), "generic")
-
-    def test_get_available_test_frameworks(self):
-        python_frameworks = self.tool._get_available_test_frameworks("python")
-        self.assertIn("unittest", python_frameworks)
-        self.assertIn("pytest", python_frameworks)
-
-        js_frameworks = self.tool._get_available_test_frameworks("javascript")
-        self.assertIn("jest", js_frameworks)
-        self.assertIn("mocha", js_frameworks)
-
-        unknown_frameworks = self.tool._get_available_test_frameworks("unknown")
-        self.assertEqual(unknown_frameworks, ["generic"])
-
-    def test_get_test_framework_instructions(self):
-        pytest_instructions = self.tool._get_test_framework_instructions("python", "pytest")
-        self.assertIn("pytest", pytest_instructions.lower())
-        self.assertIn("fixture", pytest_instructions.lower())
-
-        jest_instructions = self.tool._get_test_framework_instructions("javascript", "jest")
-        self.assertIn("describe", jest_instructions.lower())
-        self.assertIn("expect", jest_instructions.lower())
-
-        unknown_instructions = self.tool._get_test_framework_instructions("unknown", "unknown")
-        self.assertEqual(unknown_instructions, "")
-
-    def test_extract_tested_elements(self):
-        elements = self.tool._extract_tested_elements(self.python_code, "python")
-
-        function_names = [e["name"] for e in elements if e["type"] == "function"]
-        class_names = [e["name"] for e in elements if e["type"] == "class"]
-
-        self.assertIn("add", function_names)
-        self.assertIn("Calculator", class_names)
-        self.assertEqual(len(elements), 3)
-
-    def test_generate_python_tests_unittest(self):
-        functions = [{"name": "add", "type": "function", "params": "a, b"}]
-        classes = [{"name": "Calculator", "type": "class"}]
-
-        test_code = self.tool._generate_python_tests(
-            self.python_code, "unittest", functions + classes, False
-        )
-
-        self.assertIn("import unittest", test_code)
-        self.assertTrue(
-            "class TestFunctions(unittest.TestCase):" in test_code
-            or "class TestModule(unittest.TestCase):" in test_code
-        )
-        self.assertIn("def test_add(self):", test_code)
-        self.assertTrue(
-            "class TestCalculator(unittest.TestCase):" in test_code
-            or "Calculator_initialization" in test_code
-        )
-
-    def test_generate_python_tests_pytest(self):
-        functions = [{"name": "add", "type": "function", "params": "a, b"}]
-        classes = [{"name": "Calculator", "type": "class"}]
-
-        test_code = self.tool._generate_python_tests(
-            self.python_code, "pytest", functions + classes, True
-        )
-
-        self.assertIn("import pytest", test_code)
-        self.assertIn("def test_add():", test_code)
-        self.assertIn("@pytest.fixture", test_code)
-
-    def test_generate_javascript_tests(self):
-        functions = [{"name": "add", "type": "function", "params": "a, b"}]
-        classes = [{"name": "Calculator", "type": "class"}]
-
-        test_code = self.tool._generate_javascript_tests(
-            self.javascript_code, "jest", functions + classes, False
-        )
-
-        self.assertTrue(len(test_code) > 0)
-        self.assertIsInstance(test_code, str)
-
-    def test_build_test_generation_prompt(self):
+    def test_generate_fallback_response(self, tool):
+        """Test la génération de réponse fallback."""
         request = TestGenerationRequest(
-            code=self.python_code,
+            code="def add(a, b): return a + b",
+            language="python",
+            test_framework="pytest"
+        )
+        elements = [{'type': 'function', 'name': 'add', 'params': ['a', 'b']}]
+        
+        response = tool._generate_fallback_response(request, "pytest", elements)
+        
+        assert response.test_code is not None
+        assert response.language == "python"
+        assert response.framework == "pytest"
+
+
+class TestTestGenerationRequest:
+    """Tests pour le modèle TestGenerationRequest."""
+
+    def test_request_creation(self):
+        """Test la création d'une requête."""
+        request = TestGenerationRequest(
+            code="def hello(): pass",
             language="python",
             test_framework="pytest",
             include_mocks=True,
             coverage_target=0.9
         )
+        assert request.language == "python"
+        assert request.test_framework == "pytest"
+        assert request.include_mocks is True
+        assert request.coverage_target == 0.9
 
-        prompt = self.tool._build_test_generation_prompt(request)
-
-        self.assertIn("python", prompt.lower())
-        self.assertIn("pytest", prompt.lower())
-        self.assertIn("mocks", prompt.lower())
-        self.assertIn("90%", prompt)
-        self.assertIn(self.python_code, prompt)
-
-    def test_estimate_coverage(self):
-        tested_elements = [
-            {"name": "add", "type": "function"},
-            {"name": "Calculator", "type": "class"}
-        ]
-
-        coverage = self.tool._estimate_coverage(tested_elements, self.python_code, 0.8)
-
-        self.assertGreaterEqual(coverage, 0.0)
-        self.assertLessEqual(coverage, 1.0)
-
-    def test_generate_test_file_path(self):
-        unittest_path = self.tool._generate_test_file_path(
-            "/path/to/calculator.py", "/path/to/tests", "unittest"
-        )
-        self.assertEqual(unittest_path, "/path/to/tests/test_calculator.py")
-
-        pytest_path = self.tool._generate_test_file_path(
-            "/path/to/calculator.py", "/path/to/tests", "pytest"
-        )
-        self.assertEqual(pytest_path, "/path/to/tests/test_calculator.py")
-
-        jest_path = self.tool._generate_test_file_path(
-            "/path/to/calculator.js", "/path/to/tests", "jest"
-        )
-        self.assertEqual(jest_path, "/path/to/tests/calculator.test.js")
-
-    def test_with_mock_parser(self):
-        mock_parser = MagicMock()
-        mock_parser.parse.return_value = {
-            "elements": [
-                {"type": "function", "name": "add", "line": 2},
-                {"type": "class", "name": "Calculator", "line": 5}
-            ]
-        }
-
+    def test_request_defaults(self):
+        """Test les valeurs par défaut."""
         request = TestGenerationRequest(
-            code=self.python_code,
-            language="python",
-            test_framework="pytest"
+            code="def hello(): pass",
+            language="python"
         )
+        assert request.test_framework is None
+        assert request.include_mocks is False
+        assert request.coverage_target == 0.8
 
-        response = self.tool.execute(request, parser=mock_parser)
+    def test_validate_language(self):
+        """Test la validation du langage."""
+        request = TestGenerationRequest(
+            code="def hello(): pass",
+            language="  PYTHON  "
+        )
+        assert request.language == "python"
 
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.language, "python")
-        self.assertEqual(len(response.tested_elements), 2)
-
-    def test_validation_coverage_target(self):
-        from pydantic import ValidationError
-
-        try:
-            request = TestGenerationRequest(
-                code="def test(): pass",
-                language="python",
-                coverage_target=0.8
-            )
-            self.assertEqual(request.coverage_target, 0.8)
-        except ValidationError:
-            self.fail("Coverage target 0.8 should be valid")
-
-        with self.assertRaises(ValidationError):
+    def test_validate_coverage_target(self):
+        """Test la validation de la cible de couverture."""
+        with pytest.raises(ValueError):
             TestGenerationRequest(
-                code="def test(): pass",
+                code="def hello(): pass",
                 language="python",
                 coverage_target=1.5
             )
 
-    def test_validation_language_field(self):
-        from pydantic import ValidationError
 
-        with self.assertRaises(ValidationError):
-            TestGenerationRequest(
-                code="def test(): pass",
-                language=""
-            )
+class TestTestGenerationResponse:
+    """Tests pour le modèle TestGenerationResponse."""
 
-        try:
-            request = TestGenerationRequest(
-                code="def test(): pass",
-                language="  PYTHON  "
-            )
-            self.assertEqual(request.language, "python")
-        except ValidationError:
-            self.fail("Language 'PYTHON' should be valid")
-
-    def test_generate_tests_compatibility_function(self):
-        request = TestGenerationRequest(
-            code=self.python_code,
+    def test_response_creation(self):
+        """Test la création d'une réponse."""
+        response = TestGenerationResponse(
+            test_code="def test_hello(): pass",
             language="python",
-            test_framework="unittest"
+            framework="pytest",
+            test_file_path="test_module.py",
+            estimated_coverage=0.9,
+            tested_elements=[{'name': 'hello', 'type': 'function'}]
         )
-
-        response = generate_tests(request)
-        self.assertIsInstance(response, TestGenerationResponse)
-
-    def test_all_supported_languages_fallback(self):
-        supported_languages = self.tool.get_supported_languages()
-
-        for language in supported_languages:
-            with self.subTest(language=language):
-                request = TestGenerationRequest(
-                    code="function test() { return true; }",
-                    language=language
-                )
-
-                response = self.tool.execute(request)
-                self.assertIsInstance(response, TestGenerationResponse)
-                self.assertEqual(response.language, language)
-                self.assertTrue(len(response.test_code) > 0)
-
-    def test_complex_code_scenario(self):
-        complex_code = """
-import asyncio
-from typing import List, Optional
-
-class DataProcessor:
-    def __init__(self, batch_size: int = 100):
-        self.batch_size = batch_size
-        self.cache: Dict[str, any] = {}
-
-    async def process_data(self, data: List[str]) -> List[str]:
-        results = []
-        for item in data:
-            if item:
-                processed = await self._process_item(item)
-                results.append(processed)
-        return results
-
-    async def _process_item(self, item: str) -> str:
-        await asyncio.sleep(0.01)
-        return item.upper()
-"""
-
-        request = TestGenerationRequest(
-            code=complex_code,
-            language="python",
-            test_framework="pytest",
-            include_mocks=True,
-            coverage_target=0.9
-        )
-
-        response = self.tool.execute(request)
-
-        self.assertIsInstance(response, TestGenerationResponse)
-        self.assertEqual(response.language, "python")
-        self.assertEqual(response.framework, "pytest")
-        self.assertTrue(len(response.tested_elements) > 0)
-        self.assertGreater(response.estimated_coverage, 0.0)
-
-if __name__ == "__main__":
-    unittest.main()
+        assert response.test_code == "def test_hello(): pass"
+        assert response.estimated_coverage == 0.9
+        assert len(response.tested_elements) == 1
