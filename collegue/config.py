@@ -2,8 +2,8 @@
 Configuration - Paramètres de configuration pour le MCP Collègue
 """
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
-from typing import Optional, List, Union
+from pydantic import field_validator, model_validator, AnyHttpUrl
+from typing import Optional, List, Union, Any
 import logging
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,24 @@ class Settings(BaseSettings):
     
     SENTRY_DSN: Optional[str] = None
     SENTRY_ENVIRONMENT: str = "production"
+    
+    @field_validator('SENTRY_DSN')
+    @classmethod
+    def validate_sentry_dsn(cls, v):
+        if v is not None and not v.startswith('http'):
+            raise ValueError(f"Le SENTRY_DSN configuré semble invalide (doit commencer par http/https): {v}")
+        return v
+        
+    @model_validator(mode='after')
+    def validate_oauth_config(self) -> 'Settings':
+        if self.OAUTH_ENABLED:
+            if not self.OAUTH_JWKS_URI and not self.OAUTH_PUBLIC_KEY:
+                raise ValueError("OAUTH_ENABLED est true mais ni OAUTH_JWKS_URI ni OAUTH_PUBLIC_KEY n'est configuré.")
+            if self.OAUTH_JWKS_URI and not self.OAUTH_JWKS_URI.startswith('http'):
+                raise ValueError(f"OAUTH_JWKS_URI doit être une URL HTTP/HTTPS valide. Reçu: {self.OAUTH_JWKS_URI}")
+            if not self.OAUTH_ISSUER:
+                raise ValueError("OAUTH_ISSUER est requis lorsque OAUTH_ENABLED est true.")
+        return self
 
     model_config = {
         "env_file": ".env",
