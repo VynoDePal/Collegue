@@ -666,12 +666,17 @@ def start_background_watchdog(interval_seconds: int = 300) -> Optional[asyncio.T
         return None
 
 
-def stop_background_watchdog():
+async def stop_background_watchdog():
     global _watchdog_task
 
     if _watchdog_task is not None and not _watchdog_task.done():
+        logger.info("🛑 Arrêt du Watchdog demandé, attente de la fin du cycle en cours...")
         _watchdog_task.cancel()
-        logger.info("🛑 Watchdog arrêté")
+        try:
+            await _watchdog_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("🛑 Watchdog arrêté proprement.")
         _watchdog_task = None
 
 

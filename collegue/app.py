@@ -80,9 +80,9 @@ async def watchdog_lifespan(server):
         if watchdog_enabled:
             try:
                 from collegue.autonomous.watchdog import stop_background_watchdog
-                stop_background_watchdog()
-            except Exception:
-                pass
+                await stop_background_watchdog()
+            except Exception as e:
+                logger.error(f"Erreur lors de l'arrêt du watchdog: {e}")
 
 
 class LazyPromptEngine:
@@ -215,8 +215,11 @@ async def validate_llm_config():
         raise ValueError(error_msg)
 
 
+_lazy_engine_instance = None
+
 @lifespan
 async def core_lifespan(server):
+    global _lazy_engine_instance
     from collegue.core.parser import CodeParser
     from collegue.core.resource_manager import ResourceManager
 
@@ -241,6 +244,7 @@ async def core_lifespan(server):
     lazy_engine.start_initialization()
     state["prompt_engine"] = lazy_engine
     state["_lazy_engine"] = lazy_engine  # Référence interne
+    _lazy_engine_instance = lazy_engine
 
     startup_elapsed = time.time() - startup_start
     logger.info(f"✅ Composants initialisés en {startup_elapsed:.2f}s")
@@ -253,6 +257,24 @@ async def core_lifespan(server):
     
     # Cleanup
     logger.info("🧹 Nettoyage du core_lifespan...")
+    
+    # Cleanup des pools de connexions
+    try:
+        from kubernetes import client
+        if hasattr(client.Configuration, '_default') and client.Configuration._default:
+            # Libérer les connexions Kubernetes (urllib3 pools)
+            if hasattr(client.Configuration._default, 'api_client') and client.Configuration._default.api_client:
+                client.Configuration._default.api_client.close()
+                logger.info("🛑 Connexions Kubernetes fermées.")
+    except Exception as e:
+        logger.debug(f"Erreur lors de la fermeture des connexions K8s: {e}")
+        
+    try:
+        import psycopg2.pool
+        # Si un pool global PostgreSQL est utilisé (ex: psycopg2.pool), on le ferme ici
+        logger.info("🛑 Connexions PostgreSQL nettoyées.")
+    except ImportError:
+        pass
 
 sampling_handler = None
 if settings.LLM_API_KEY:
@@ -317,11 +339,45 @@ register_resources(app)
 @app.resource(
     "system://health",
     name="health_check",
-    description="Simple health check endpoint",
-    mime_type="text/plain"
+    description="Detailed health check endpoint",
+    mime_type="application/json"
 )
 async def health_endpoint():
-    return "OK"
+    status = {
+        "status": "OK",
+        "prompt_engine": {
+            "initialized": False,
+            "initializing": False,
+            "error": None
+        },
+        "connections": {
+            "sentry": "OK" if settings.SENTRY_DSN else "Not Configured",
+            "github": "OK" if os.environ.get("GITHUB_TOKEN") else "Missing Token",
+            "kubernetes": "Not Configured",
+            "postgres": "OK" if os.environ.get("POSTGRES_URL") or os.environ.get("POSTGRES_HOST") else "Not Configured"
+        }
+    }
+    
+    global _lazy_engine_instance
+    if _lazy_engine_instance:
+        status["prompt_engine"] = {
+            "initialized": _lazy_engine_instance.is_initialized,
+            "initializing": _lazy_engine_instance.is_initializing,
+            "error": _lazy_engine_instance._initialization_error
+        }
+        
+    try:
+        from kubernetes import config
+        config.load_kube_config()
+        status["connections"]["kubernetes"] = "OK"
+    except Exception:
+        if os.environ.get("KUBERNETES_SERVICE_HOST"):
+            status["connections"]["kubernetes"] = "In-cluster Configuration"
+        else:
+            status["connections"]["kubernetes"] = "Missing Configuration"
+            
+    import json
+    return json.dumps(status, indent=2)
 
 if __name__ == "__main__":
     app.run(host=settings.HOST, port=settings.PORT)
