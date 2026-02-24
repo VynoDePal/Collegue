@@ -69,15 +69,17 @@ services:
   #     WAIT_FOR_CLIENT_SECONDS: ${WAIT_FOR_CLIENT_SECONDS:-600}
   #   restart: "no"
 
-  nginx:
-    build:
-      context: .
-      dockerfile: docker/nginx/Dockerfile
+  # Caddy gère HTTPS automatiquement (remplace nginx et contourne Traefik cassé)
+  caddy:
+    image: caddy:2-alpine
     restart: always
     ports:
-      - "8088:80"
+      - "80:80"
+      - "443:443"
     volumes:
-      - nginx_logs:/var/log/nginx
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       collegue-app:
         condition: service_healthy
@@ -88,4 +90,5 @@ services:
         max-file: "3"
 
 volumes:
-  nginx_logs:
+  caddy_data:
+  caddy_config:

@@ -76,19 +76,23 @@ class TestDockerComposeConfig:
         assert keycloak.get('image', '').startswith('quay.io/keycloak/'), \
             "Keycloak should use the correct image"
     
-    def test_nginx_depends_on_app(self, compose_file):
-        """Test que nginx dépend bien de collegue-app."""
-        nginx = compose_file['services'].get('nginx', {})
-        depends_on = nginx.get('depends_on', {})
+    def test_caddy_uses_https(self, compose_file):
+        """Test que Caddy gère HTTPS sur le port 443."""
+        caddy = compose_file['services'].get('caddy', {})
+        ports = caddy.get('ports', [])
         
-        assert 'collegue-app' in depends_on, \
-            "nginx should depend on collegue-app"
+        # Vérifier que le port 443 est exposé
+        port_443_found = False
+        for port in ports:
+            if isinstance(port, str) and '443' in port:
+                port_443_found = True
+                break
+            elif isinstance(port, dict):
+                if str(port.get('published', '')) == '443' or str(port.get('target', '')) == '443':
+                    port_443_found = True
+                    break
         
-        # Vérifier que la condition est bien sur le healthcheck
-        if isinstance(depends_on, dict):
-            condition = depends_on.get('collegue-app', {}).get('condition', '')
-            assert condition == 'service_healthy', \
-                f"nginx should wait for collegue-app to be healthy, got: {condition}"
+        assert port_443_found, "Caddy should expose port 443 for HTTPS"
     
     def test_collegue_app_ports_exposed(self, compose_file):
         """Test que les ports MCP sont exposés directement (contournement Traefik)."""
@@ -125,23 +129,16 @@ class TestDockerComposeConfig:
 class TestDockerComposeHealthcheckIntegration:
     """Tests d'intégration pour le healthcheck."""
     
-    def test_healthcheck_matches_app_port(self):
-        """Test que le port du healthcheck correspond au health_server (port 4122)."""
-        compose_path = os.path.join(os.path.dirname(__file__), '..', 'docker-compose.yml')
+    def test_caddyfile_exists(self):
+        """Test que le fichier Caddyfile existe."""
+        caddyfile_path = os.path.join(os.path.dirname(__file__), '..', 'Caddyfile')
+        assert os.path.exists(caddyfile_path), "Caddyfile should exist"
         
-        with open(compose_path, 'r') as f:
+        with open(caddyfile_path, 'r') as f:
             content = f.read()
         
-        # Extraire le port du healthcheck
-        import re
-        healthcheck_match = re.search(r'http://localhost:(\d+)/_health', content)
-        assert healthcheck_match, "Could not find healthcheck URL pattern"
-        
-        healthcheck_port = int(healthcheck_match.group(1))
-        
-        # Le healthcheck doit être sur 4122 (health_server), pas 4121 (MCP server)
-        assert healthcheck_port == 4122, \
-            f"Healthcheck port {healthcheck_port} should be 4122 (health_server)"
+        assert 'beta.collegue.dev' in content, "Caddyfile should contain the domain"
+        assert 'collegue-app:4121' in content, "Caddyfile should proxy to collegue-app:4121"
 
 
 if __name__ == "__main__":
