@@ -36,6 +36,7 @@ class TestLazyPromptEngine:
         assert lazy_engine._initialization_error is None
         assert lazy_engine.is_initialized is False
         assert lazy_engine.is_initializing is False
+        assert lazy_engine._init_attempts == 0
     
     @pytest.mark.asyncio
     async def test_start_initialization_creates_task(self, lazy_engine):
@@ -44,6 +45,7 @@ class TestLazyPromptEngine:
             task = lazy_engine.start_initialization()
             assert lazy_engine._initialization_task is not None
             assert lazy_engine.is_initializing is True
+            assert lazy_engine._init_attempts == 1
             # Attendre que la tâche se termine
             await asyncio.sleep(0.1)
     
@@ -83,12 +85,29 @@ class TestLazyPromptEngine:
         assert result is None
     
     @pytest.mark.asyncio
-    async def test_get_engine_returns_none_on_error(self, lazy_engine):
-        """Test que get_engine retourne None si l'init a échoué."""
+    async def test_get_engine_raises_error_after_max_retries(self, lazy_engine):
+        """Test que get_engine lève une exception après MAX_RETRIES échecs."""
         lazy_engine._initialization_error = "Erreur de test"
+        lazy_engine._init_attempts = lazy_engine.MAX_RETRIES
         
-        result = await lazy_engine.get_engine()
-        assert result is None
+        with pytest.raises(RuntimeError) as exc_info:
+            await lazy_engine.get_engine()
+        
+        assert "Échec critique du moteur de prompt" in str(exc_info.value)
+        assert "Erreur de test" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_get_engine_retries_on_error(self, lazy_engine):
+        """Test que get_engine relance l'initialisation si on n'a pas atteint MAX_RETRIES."""
+        lazy_engine._initialization_error = "Erreur de test précédente"
+        lazy_engine._init_attempts = 1
+        
+        with patch.object(lazy_engine, 'start_initialization') as mock_start:
+            # On empêche _initialization_task d'être None pour éviter le blocage du await
+            lazy_engine._initialization_task = asyncio.create_task(asyncio.sleep(0.01))
+            
+            await lazy_engine.get_engine()
+            mock_start.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_initialization_with_timeout_failure(self, lazy_engine):
@@ -109,11 +128,11 @@ class TestLazyPromptEngine:
             assert lazy_engine._initialization_error == "Test error"
     
     def test_getattr_raises_when_not_initialized(self, lazy_engine):
-        """Test que __getattr__ raise si l'engine n'est pas prêt."""
+        """Test que __getattr__ raise avec un message clair si l'engine n'est pas prêt."""
         with pytest.raises(RuntimeError) as exc_info:
             _ = lazy_engine.some_attribute
         
-        assert "pas encore initialisé" in str(exc_info.value)
+        assert "Le service d'analyse (PromptEngine) n'est pas prêt" in str(exc_info.value)
     
     def test_getattr_works_when_initialized(self, lazy_engine, mock_engine):
         """Test que __getattr__ fonctionne quand l'engine est prêt."""
