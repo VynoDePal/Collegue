@@ -91,21 +91,26 @@ class LazyPromptEngine:
     Évite le blocage du lifespan au démarrage du serveur MCP.
     """
     
+    MAX_RETRIES = 3
+    
     def __init__(self):
         self._engine = None
         self._initialization_task = None
         self._initialization_error = None
         self._initialized = False
         self._init_start_time = None
+        self._init_attempts = 0
         
     def start_initialization(self):
-        """Lance l'initialisation en tâche de fond."""
-        if self._initialization_task is None:
+        """Lance l'initialisation en tâche de fond avec gestion des tentatives."""
+        if self._initialization_task is None or (self._initialization_error and self._init_attempts < self.MAX_RETRIES):
+            self._init_attempts += 1
+            self._initialization_error = None
             self._init_start_time = time.time()
             self._initialization_task = asyncio.create_task(
                 self._initialize_with_timeout()
             )
-            logger.info("🚀 Initialisation du PromptEngine lancée en tâche de fond")
+            logger.info(f"🚀 Initialisation du PromptEngine lancée (Tentative {self._init_attempts}/{self.MAX_RETRIES})")
         return self._initialization_task
     
     async def _initialize_with_timeout(self):
@@ -134,21 +139,22 @@ class LazyPromptEngine:
     async def get_engine(self, timeout: float = 30.0):
         """
         Récupère l'engine, en attendant si nécessaire qu'il soit initialisé.
+        Intègre un circuit breaker limitant le nombre de tentatives d'initialisation.
         
         Args:
             timeout: Temps maximum d'attente en secondes
             
         Returns:
-            L'instance EnhancedPromptEngine ou None si erreur
+            L'instance EnhancedPromptEngine ou lève une exception si échec critique.
         """
         if self._initialized and self._engine:
             return self._engine
             
-        if self._initialization_error:
-            logger.warning(f"PromptEngine en erreur: {self._initialization_error}")
-            return None
+        if self._initialization_error and self._init_attempts >= self.MAX_RETRIES:
+            logger.error(f"PromptEngine définitivement en erreur après {self.MAX_RETRIES} tentatives.")
+            raise RuntimeError(f"Échec critique du moteur de prompt: {self._initialization_error}")
             
-        if self._initialization_task is None:
+        if self._initialization_task is None or self._initialization_error:
             self.start_initialization()
             
         try:
@@ -170,13 +176,15 @@ class LazyPromptEngine:
     def __getattr__(self, name):
         """
         Proxy vers l'engine sous-jacent si disponible.
-        Attention: peut raise si l'engine n'est pas prêt.
+        Sécurisé pour renvoyer une erreur MCP explicite au lieu d'un crash inattendu.
         """
         if self._engine is None:
-            raise RuntimeError(
-                f"PromptEngine pas encore initialisé. "
-                f"Utilisez await get_engine() d'abord."
+            status = "En cours d'initialisation" if self.is_initializing else f"Erreur - {self._initialization_error}"
+            error_msg = (
+                f"Le service d'analyse (PromptEngine) n'est pas prêt. "
+                f"Veuillez réessayer dans quelques instants. (État actuel : {status})"
             )
+            raise RuntimeError(error_msg)
         return getattr(self._engine, name)
 
 
