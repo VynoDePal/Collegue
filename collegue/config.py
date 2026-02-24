@@ -23,6 +23,8 @@ class Settings(BaseSettings):
 
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
+    ENGINE_INIT_TIMEOUT: float = 10.0
+    ENGINE_WAIT_TIMEOUT: float = 30.0
     MAX_HISTORY_LENGTH: int = 20
     CACHE_ENABLED: bool = True
     CACHE_TTL: int = 3600

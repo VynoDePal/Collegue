@@ -200,7 +200,7 @@ class TestBaseToolIntegration:
                 self.get_engine_called = False
                 self.timeout_value = None
                 
-            async def get_engine(self, timeout=30.0):
+            async def get_engine(self, timeout=None):
                 self.get_engine_called = True
                 self.timeout_value = timeout
                 return Mock()
@@ -215,7 +215,7 @@ class TestBaseToolIntegration:
         
         # Vérifier que get_engine a été appelé avec le bon timeout
         assert lazy_engine.get_engine_called is True
-        assert lazy_engine.timeout_value == 25.0
+        assert lazy_engine.timeout_value is None
         assert result.result == "ok"
     
     @pytest.mark.asyncio

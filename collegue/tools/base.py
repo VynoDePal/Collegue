@@ -178,7 +178,7 @@ class BaseTool(ABC):
             prompt_engine = kwargs.get('prompt_engine')
             # Support pour le LazyPromptEngine - attendre l'initialisation si nécessaire
             if hasattr(prompt_engine, 'get_engine'):
-                self.prompt_engine = await prompt_engine.get_engine(timeout=25.0)
+                self.prompt_engine = await prompt_engine.get_engine()
             else:
                 self.prompt_engine = prompt_engine
         if not getattr(self, 'parser', None) and kwargs.get('parser'):
