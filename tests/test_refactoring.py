@@ -1,365 +1,249 @@
 """
-Tests pour l'outil de refactoring de code
+Tests unitaires pour l'outil Refactoring refactorisé.
 """
+import pytest
+from unittest.mock import MagicMock, patch, AsyncMock
 
-import sys
-import os
-from pathlib import Path
-
-
-parent_dir = str(Path(__file__).parent.parent.absolute())
-sys.path.insert(0, parent_dir)
-
-import unittest
 from collegue.tools.refactoring import (
-    refactor_code,
+    RefactoringTool,
     RefactoringRequest,
     RefactoringResponse,
-    RefactoringTool
+    RefactoringEngine
 )
 
-class TestRefactoring(unittest.TestCase):
-    """Tests pour les fonctionnalités de refactoring de code."""
 
-    def setUp(self):
-        """Initialisation des tests."""
-        self.tool = RefactoringTool()
+class TestRefactoringEngine:
+    """Tests pour le moteur de refactoring."""
 
-        self.python_code = """
-def old_function_name(a, b):
-    \"\"\"Additionne deux nombres.\"\"\"
-    return a + b
+    @pytest.fixture
+    def engine(self):
+        return RefactoringEngine(logger=None)
 
-result = old_function_name(1, 2)
-"""
+    def test_extract_code_block_with_language(self, engine):
+        """Test l'extraction d'un bloc de code avec langage."""
+        text = "```python\ndef hello():\n    pass\n```"
+        result = engine.extract_code_block(text, "python")
+        assert result == "def hello():\n    pass"
 
-        self.javascript_code = """
-function old_function_name(a, b) {
-    // Additionne deux nombres
-    return a + b;
-}
+    def test_extract_code_block_generic(self, engine):
+        """Test l'extraction d'un bloc de code générique."""
+        text = "```\nconst x = 1;\n```"
+        result = engine.extract_code_block(text, "javascript")
+        assert result == "const x = 1;"
 
-const result = old_function_name(1, 2);
-"""
+    def test_extract_code_block_no_markdown(self, engine):
+        """Test l'extraction sans bloc markdown."""
+        text = "Voici le code:\nconst x = 1;"
+        result = engine.extract_code_block(text, "javascript")
+        assert "const x = 1" in result
 
-        self.complex_python_code = """
-def process_data(data):
-    if data is not None:
-        if len(data) > 0:
-            results = []
-            for item in data:
-                if item != None:
-                    if item > 0:
-                        results.append(item * 2)
-            return results
-    return []
-"""
+    def test_validate_code_syntax_python_valid(self, engine):
+        """Test la validation syntaxique Python valide."""
+        code = "def hello():\n    return 'world'"
+        is_valid, error = engine.validate_code_syntax(code, "python")
+        assert is_valid is True
+        assert error == ""
 
-        self.messy_code = """
+    def test_validate_code_syntax_python_invalid(self, engine):
+        """Test la validation syntaxique Python invalide."""
+        code = "def hello(\n    return 'world'"
+        is_valid, error = engine.validate_code_syntax(code, "python")
+        assert is_valid is False
+        assert "Ligne" in error
 
+    def test_analyze_code_metrics_python(self, engine):
+        """Test l'analyse des métriques Python."""
+        code = """# Comment
+import os
 
-def   badly_formatted( x,y ):
-    result=x+y
-    return result
+def hello():
+    return "world"
 
-
-def another_function():
+class MyClass:
     pass
-
-
 """
+        metrics = engine.analyze_code_metrics(code, "python")
+        assert metrics["total_lines"] == 9
+        assert metrics["function_count"] == 1
+        assert metrics["class_count"] == 1
+        assert metrics["comment_lines"] == 1
 
-    def test_refactoring_tool_instantiation(self):
-        tool = RefactoringTool()
-
-        self.assertEqual(tool.get_name(), "code_refactoring")
-        self.assertIsNotNone(tool.get_description())
-        self.assertEqual(tool.get_request_model(), RefactoringRequest)
-        self.assertEqual(tool.get_response_model(), RefactoringResponse)
-
-        supported_languages = tool.get_supported_languages()
-        self.assertIn("python", supported_languages)
-        self.assertIn("javascript", supported_languages)
-        self.assertIn("typescript", supported_languages)
-
-        supported_types = tool.get_supported_refactoring_types()
-        self.assertIn("rename", supported_types)
-        self.assertIn("extract", supported_types)
-        self.assertIn("simplify", supported_types)
-        self.assertIn("optimize", supported_types)
-        self.assertIn("clean", supported_types)
-        self.assertIn("modernize", supported_types)
-
-    def test_refactor_clean_python_fallback(self):
-        request = RefactoringRequest(
-            code=self.messy_code,
-            language="python",
-            refactoring_type="clean",
-            session_id="test-session"
-        )
-
-        response = refactor_code(request)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.language, "python")
-        self.assertNotEqual(response.refactored_code, self.messy_code)
-        self.assertTrue(len(response.changes) > 0)
-        self.assertEqual(response.changes[0]["type"], "clean")
-
-        original_lines = len([l for l in self.messy_code.split('\n') if l.strip()])
-        refactored_lines = len([l for l in response.refactored_code.split('\n') if l.strip()])
-        self.assertGreaterEqual(original_lines, refactored_lines)
-
-    def test_refactor_simplify_python_fallback(self):
-        request = RefactoringRequest(
-            code=self.complex_python_code,
-            language="python",
-            refactoring_type="simplify",
-            session_id="test-session"
-        )
-
-        response = refactor_code(request)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.language, "python")
-        self.assertTrue(len(response.changes) > 0)
-        self.assertEqual(response.changes[0]["type"], "simplify")
-        self.assertIsInstance(response.improvement_metrics, dict)
-
-    def test_refactor_unsupported_type_validation(self):
-        from collegue.tools.base import ToolError
-
-        request = RefactoringRequest(
-            code=self.python_code,
-            language="python",
-            refactoring_type="unknown_type",
-            session_id="test-session"
-        )
-
-        with self.assertRaises(ToolError):
-            refactor_code(request)
-
-    def test_refactoring_instructions_by_language(self):
-        python_instructions = self.tool._get_refactoring_instructions("python", "rename")
-        self.assertIn("PEP 8", python_instructions)
-        self.assertIn("snake_case", python_instructions)
-
-        js_instructions = self.tool._get_refactoring_instructions("javascript", "rename")
-        self.assertIn("camelCase", js_instructions)
-
-        ts_instructions = self.tool._get_refactoring_instructions("typescript", "modernize")
-        self.assertIn("types", ts_instructions)
-
-        unknown_instructions = self.tool._get_refactoring_instructions("unknown", "rename")
-        self.assertEqual(unknown_instructions, "")
-
-    def test_code_metrics_analysis(self):
-        code_with_comments = """
-# Commentaire principal
-def old_function_name(a, b):
-    # Commentaire dans la fonction
-    return a + b
-
-result = old_function_name(1, 2)  # Commentaire en fin de ligne
-"""
-
-        metrics = self.tool._analyze_code_metrics(code_with_comments, "python")
-
-        self.assertIn("total_lines", metrics)
-        self.assertIn("code_lines", metrics)
-        self.assertIn("comment_lines", metrics)
-        self.assertIn("function_count", metrics)
-        self.assertIn("class_count", metrics)
-        self.assertIn("complexity_score", metrics)
-
-        self.assertGreater(metrics["function_count"], 0)
-
-        self.assertGreater(metrics["comment_lines"], 0)
-
-    def test_explanation_generation(self):
-        changes = [
-            {"type": "rename", "description": "Functions renamed"},
-            {"type": "line_count_change", "description": "Lines reduced"}
-        ]
-
-        improvements = {
-            "lines_reduced": 3,
-            "complexity_reduced": 2,
-            "comments_added": 1
+    def test_calculate_improvements(self, engine):
+        """Test le calcul des améliorations."""
+        original = {
+            "code_lines": 100, "complexity_score": 20, "comment_lines": 5,
+            "function_count": 5, "class_count": 2, "total_lines": 120
         }
-
-        explanation = self.tool._generate_explanation("rename", changes, improvements)
-
-        self.assertIn("rename", explanation.lower())
-        self.assertIn("3 lignes", explanation)
-        self.assertIn("Complexité réduite", explanation)
-
-    def test_local_refactoring_clean(self):
-        cleaned = self.tool._clean_code_basic(self.messy_code, "python")
-
-        self.assertNotEqual(cleaned, self.messy_code)
-
-        lines = cleaned.split('\n')
-        consecutive_empty = 0
-        max_consecutive_empty = 0
-
-        for line in lines:
-            if line.strip() == "":
-                consecutive_empty += 1
-                max_consecutive_empty = max(max_consecutive_empty, consecutive_empty)
-            else:
-                consecutive_empty = 0
-
-        self.assertLessEqual(max_consecutive_empty, 1)
-
-    def test_local_refactoring_simplify(self):
-        code_with_redundant = """
-if condition == True:
-    do_something()
-if other_condition != True:
-    do_other()
-"""
-
-        simplified = self.tool._simplify_code_basic(code_with_redundant, "python")
-
-        self.assertNotIn("== True", simplified)
-        self.assertIn("is not True", simplified)
-
-    def test_llm_error_fallback(self):
-        request = RefactoringRequest(
-            code=self.python_code,
-            language="python",
-            refactoring_type="clean",
-        )
-
-        response = self.tool.execute(request)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(response.language, "python")
-        self.assertIn("Refactoring local basique", response.explanation)
-
-    def test_all_refactoring_types_with_fallback(self):
-        supported_types = self.tool.get_supported_refactoring_types()
-
-        for refactoring_type in supported_types:
-            with self.subTest(refactoring_type=refactoring_type):
-                request = RefactoringRequest(
-                    code=self.python_code,
-                    language="python",
-                    refactoring_type=refactoring_type,
-                )
-
-                response = self.tool.execute(request)
-                self.assertIsInstance(response, RefactoringResponse)
-                self.assertEqual(response.language, "python")
-                self.assertTrue(len(response.changes) > 0)
-
-    def test_refactoring_with_parameters(self):
-        request = RefactoringRequest(
-            code=self.python_code,
-            language="python",
-            refactoring_type="rename",
-            parameters={
-                "old_name": "old_function_name",
-                "new_name": "calculate_sum",
-                "scope": "global",
-            },
-        )
-
-        response = self.tool.execute(request)
-
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertEqual(
-            response.changes[0]["parameters"]["old_name"],
-            "old_function_name",
-        )
-        self.assertEqual(
-            response.changes[0]["parameters"]["new_name"],
-            "calculate_sum",
-        )
-
-    def test_metrics_analysis_different_languages(self):
-        js_metrics = self.tool._analyze_code_metrics(self.javascript_code, "javascript")
-        self.assertGreater(js_metrics["function_count"], 0)
-
-        js_code_with_comments = """
-        // This is a comment
-        function test() {
-            /* Block comment */
-            return true;
+        refactored = {
+            "code_lines": 80, "complexity_score": 15, "comment_lines": 10,
+            "function_count": 7, "class_count": 2, "total_lines": 100
         }
-        """
-        js_metrics_comments = self.tool._analyze_code_metrics(
-            js_code_with_comments,
-            "javascript",
+        
+        improvements = engine.calculate_improvements(original, refactored)
+        
+        assert improvements["lines_reduced"] == 20
+        assert improvements["complexity_reduced"] == 5
+        assert improvements["comments_added"] == 5
+        assert improvements["functions_extracted"] == 2
+        assert "code_lines_change_percent" in improvements
+        assert "complexity_score_change_percent" in improvements
+
+    def test_identify_changes(self, engine):
+        """Test l'identification des changements."""
+        changes = engine.identify_changes(
+            "rename",
+            "def calc(a, b): return a + b",
+            "def add_numbers(num1, num2): return num1 + num2",
+            {"naming_convention": "descriptive"}
         )
-        self.assertGreater(js_metrics_comments["comment_lines"], 0)
+        
+        assert len(changes) >= 1
+        assert changes[0]["type"] == "rename"
 
-    def test_validation_supported_types(self):
-        from collegue.tools.base import ToolError
+    def test_generate_explanation(self, engine):
+        """Test la génération d'explications."""
+        changes = [{"description": "Variables renommées"}]
+        improvements = {"lines_reduced": 10, "complexity_reduced": 5}
+        
+        explanation = engine.generate_explanation("rename", changes, improvements)
+        
+        assert "rename" in explanation
+        assert "10 lignes" in explanation or "5 points" in explanation
 
-        supported_types = self.tool.get_supported_refactoring_types()
-        for refactoring_type in supported_types:
-            request = RefactoringRequest(
-                code="def test(): pass",
-                language="python",
-                refactoring_type=refactoring_type,
-            )
-            try:
-                self.tool.validate_request(request)
-            except ToolError:
-                self.fail(
-                    f"Refactoring type {refactoring_type} should be supported"
-                )
+    def test_clean_code_basic(self, engine):
+        """Test le nettoyage basique du code."""
+        code = "line1\n\n\nline2\n   \nline3\n"
+        cleaned = engine.clean_code_basic(code, "python")
+        # Vérifier qu'il n'y a pas plus d'une ligne vide consécutive
+        assert "\n\n\n" not in cleaned
+        # Vérifier que le code est bien préservé
+        assert "line1" in cleaned
+        assert "line2" in cleaned
+        assert "line3" in cleaned
 
-    def test_refactor_code_compatibility_function(self):
+    def test_simplify_code_basic_python(self, engine):
+        """Test la simplification basique Python."""
+        code = "if x == True:\n    pass"
+        simplified = engine.simplify_code_basic(code, "python")
+        assert "== True" not in simplified
+
+    def test_get_refactoring_type_description(self, engine):
+        """Test la récupération de la description."""
+        desc = engine.get_refactoring_type_description("rename")
+        assert "Renommer" in desc or "renommer" in desc.lower()
+
+
+class TestRefactoringTool:
+    """Tests pour le Tool principal."""
+
+    @pytest.fixture
+    def tool(self):
+        return RefactoringTool(app_state={})
+
+    def test_tool_metadata(self, tool):
+        """Test les métadonnées du tool."""
+        assert tool.tool_name == "code_refactoring"
+        assert "generation" in tool.tags
+        assert "python" in tool.supported_languages
+
+    def test_get_supported_refactoring_types(self, tool):
+        """Test la liste des types supportés."""
+        types = tool.get_supported_refactoring_types()
+        assert "rename" in types
+        assert "clean" in types
+        assert "modernize" in types
+
+    def test_is_long_running(self, tool):
+        """Test si le tool est long à exécuter."""
+        assert tool.is_long_running() is True
+
+    def test_validate_request_valid(self, tool):
+        """Test la validation d'une requête valide."""
         request = RefactoringRequest(
-            code=self.python_code,
+            code="def hello(): pass",
+            language="python",
+            refactoring_type="clean"
+        )
+        assert tool.validate_request(request) is True
+
+    def test_validate_request_invalid_type(self, tool):
+        """Test la validation d'un type invalide."""
+        from collegue.tools.base import ToolError
+        request = RefactoringRequest(
+            code="def hello(): pass",
+            language="python",
+            refactoring_type="invalid_type"
+        )
+        with pytest.raises(ToolError):
+            tool.validate_request(request)
+
+    def test_perform_local_refactoring_clean(self, tool):
+        """Test le refactoring local de type clean."""
+        request = RefactoringRequest(
+            code="import os\n\n\ndef hello():\n    pass\n\n",
+            language="python",
+            refactoring_type="clean"
+        )
+        response = tool._perform_local_refactoring(request)
+        
+        assert response.refactored_code is not None
+        assert response.language == "python"
+        assert "clean" in response.changes[0]["type"]
+
+    def test_build_prompt(self, tool):
+        """Test la construction du prompt."""
+        request = RefactoringRequest(
+            code="def calc(a, b): return a + b",
+            language="python",
+            refactoring_type="rename"
+        )
+        prompt = tool._build_prompt(request)
+        
+        assert "rename" in prompt
+        assert "python" in prompt
+        assert "def calc(a, b)" in prompt
+
+
+class TestRefactoringRequest:
+    """Tests pour le modèle RefactoringRequest."""
+
+    def test_request_creation(self):
+        """Test la création d'une requête."""
+        request = RefactoringRequest(
+            code="def hello(): pass",
             language="python",
             refactoring_type="clean",
+            parameters={"remove_unused_imports": True}
         )
+        assert request.language == "python"
+        assert request.refactoring_type == "clean"
+        assert request.parameters["remove_unused_imports"] is True
 
-        response = refactor_code(request)
-        self.assertIsInstance(response, RefactoringResponse)
-
-    def test_complex_refactoring_scenario(self):
-        complex_code = """
-def process_user_data(users):
-    valid_users = []
-    if users != None:
-        if len(users) > 0:
-            for user in users:
-                if user != None:
-                    if user.get('age') != None:
-                        if user['age'] >= 18:
-                            if user.get('name') != None:
-                                if len(user['name']) > 0:
-                                    valid_users.append(user)
-    return valid_users
-"""
-
+    def test_request_optional_fields(self):
+        """Test les champs optionnels."""
         request = RefactoringRequest(
-            code=complex_code,
+            code="def hello(): pass",
             language="python",
-            refactoring_type="simplify",
-            parameters={"target": "reduce_nesting"},
+            refactoring_type="clean",
+            file_path="/path/to/file.py",
+            session_id="abc123"
         )
+        assert request.file_path == "/path/to/file.py"
+        assert request.session_id == "abc123"
 
-        response = self.tool.execute(request)
 
-        self.assertIsInstance(response, RefactoringResponse)
-        self.assertIsInstance(response.improvement_metrics, dict)
-        self.assertTrue(len(response.changes) > 0)
+class TestRefactoringResponse:
+    """Tests pour le modèle RefactoringResponse."""
 
-        original_metrics = self.tool._analyze_code_metrics(complex_code, "python")
-        new_metrics = self.tool._analyze_code_metrics(
-            response.refactored_code,
-            "python",
+    def test_response_creation(self):
+        """Test la création d'une réponse."""
+        response = RefactoringResponse(
+            refactored_code="def greet(): pass",
+            original_code="def hello(): pass",
+            language="python",
+            changes=[{"type": "rename", "description": "Renamed"}],
+            explanation="Variables renommées",
+            improvement_metrics={"lines_reduced": 5}
         )
-        self.assertLessEqual(
-            new_metrics["complexity_score"],
-            original_metrics["complexity_score"],
-        )
-
-if __name__ == '__main__':
-    unittest.main()
+        assert response.refactored_code == "def greet(): pass"
+        assert response.improvement_metrics["lines_reduced"] == 5
