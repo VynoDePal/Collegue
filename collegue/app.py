@@ -114,18 +114,18 @@ class LazyPromptEngine:
         return self._initialization_task
     
     async def _initialize_with_timeout(self):
-        """Initialise le PromptEngine avec un timeout de 10 secondes."""
+        """Initialise le PromptEngine avec le timeout configuré."""
         try:
             # Utiliser to_thread pour ne pas bloquer l'event loop
             self._engine = await asyncio.wait_for(
                 asyncio.to_thread(self._create_engine),
-                timeout=10.0
+                timeout=settings.ENGINE_INIT_TIMEOUT
             )
             self._initialized = True
             elapsed = time.time() - self._init_start_time
             logger.info(f"✅ EnhancedPromptEngine initialisé en {elapsed:.2f}s")
         except asyncio.TimeoutError:
-            self._initialization_error = "Timeout après 10s lors de l'initialisation"
+            self._initialization_error = f"Timeout après {settings.ENGINE_INIT_TIMEOUT}s lors de l'initialisation"
             logger.error(f"⏱️ {self._initialization_error}")
         except Exception as e:
             self._initialization_error = str(e)
@@ -136,17 +136,20 @@ class LazyPromptEngine:
         from collegue.prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
         return EnhancedPromptEngine()
     
-    async def get_engine(self, timeout: float = 30.0):
+    async def get_engine(self, timeout: float = None):
         """
         Récupère l'engine, en attendant si nécessaire qu'il soit initialisé.
         Intègre un circuit breaker limitant le nombre de tentatives d'initialisation.
         
         Args:
-            timeout: Temps maximum d'attente en secondes
+            timeout: Temps maximum d'attente en secondes (par défaut settings.ENGINE_WAIT_TIMEOUT)
             
         Returns:
             L'instance EnhancedPromptEngine ou lève une exception si échec critique.
         """
+        if timeout is None:
+            timeout = settings.ENGINE_WAIT_TIMEOUT
+            
         if self._initialized and self._engine:
             return self._engine
             
