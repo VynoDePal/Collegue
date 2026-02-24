@@ -395,16 +395,16 @@ class AutoFixer:
 Analyse cette erreur et génère un correctif MINIMAL.
 
 ## FORMAT DE RÉPONSE (JSON strict)
-{
+{{
     "filepath": "{filepath or 'chemin/vers/fichier.py'}",
     "explanation": "Explication courte de la cause et du fix",
     "patches": [
-        {
+        {{
             "search": "copie EXACTE du code à remplacer depuis CODE BRUT ci-dessus",
             "replace": "le nouveau code corrigé"
-        }
+        }}
     ]
-}
+}}
 
 ## RÈGLES CRITIQUES
 1. COPIE le code EXACTEMENT depuis la section "CODE BRUT" (pas depuis le code avec numéros de ligne)
