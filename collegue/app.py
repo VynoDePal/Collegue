@@ -191,6 +191,30 @@ class LazyPromptEngine:
         return getattr(self._engine, name)
 
 
+async def validate_llm_config():
+    """Valide la clé API et le modèle configuré au lancement."""
+    if not settings.LLM_API_KEY:
+        error_msg = "❌ Configuration LLM manquante : LLM_API_KEY n'est pas définie."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+        
+    logger.info(f"🔍 Validation du modèle LLM '{settings.LLM_MODEL}' en cours...")
+    try:
+        from google import genai
+        client = genai.Client(api_key=settings.LLM_API_KEY)
+        
+        def check_model():
+            return client.models.get(model=settings.LLM_MODEL)
+            
+        model = await asyncio.to_thread(check_model)
+        logger.info(f"✅ Configuration LLM validée: Le modèle '{model.name}' est disponible.")
+        return True
+    except Exception as e:
+        error_msg = f"❌ Configuration LLM invalide (Clé API ou modèle '{settings.LLM_MODEL}' incorrect) : {str(e)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+
 @lifespan
 async def core_lifespan(server):
     from collegue.core.parser import CodeParser
@@ -198,6 +222,9 @@ async def core_lifespan(server):
 
     startup_start = time.time()
     logger.info("🔄 Démarrage du core_lifespan...")
+    
+    # Validation stricte du LLM au démarrage
+    await validate_llm_config()
 
     state = {
         "parser": CodeParser(),
