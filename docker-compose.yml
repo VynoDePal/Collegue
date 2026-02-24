@@ -50,25 +50,6 @@ services:
     ports:
       - "4123:8080"
 
-  # kc-provisioner: TEMPORAIREMENT DÉSACTIVÉ - bloquait le démarrage (client windsurf non trouvé)
-  # TODO: Réactiver après création du client OAuth dans Keycloak ou suppression si non nécessaire
-  # kc-provisioner:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/kc-provisioner/Dockerfile
-  #   depends_on:
-  #     keycloak:
-  #       condition: service_started
-  #   environment:
-  #     KC_URL: http://keycloak:8080
-  #     KC_REALM: ${KC_REALM:-master}
-  #     KC_ADMIN_USERNAME: ${KEYCLOAK_ADMIN}
-  #     KC_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
-  #     PROVISION_CLIENT_ID: ${PROVISION_CLIENT_ID:-windsurf-client}
-  #     REQUIRED_SCOPE: ${OAUTH_REQUIRED_SCOPES:-mcp.read}
-  #     WAIT_FOR_CLIENT_SECONDS: ${WAIT_FOR_CLIENT_SECONDS:-600}
-  #   restart: "no"
-
   nginx:
     build:
       context: .
