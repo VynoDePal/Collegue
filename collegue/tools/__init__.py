@@ -33,11 +33,13 @@ def register_tools(app: FastMCP):
 
 def _discover_tools() -> List[Type[BaseTool]]:
     """
-    Découvre automatiquement toutes les classes qui héritent de BaseTool
+    Découvre automatiquement toutes les classes qui héritent de BaseTool.
+    Cherche dans les fichiers .py à la racine ET dans les packages (sous-dossiers).
     """
     tools = []
     current_dir = os.path.dirname(__file__)
     
+    # 1. Découverte des fichiers .py à la racine
     for filename in os.listdir(current_dir):
         if (filename.endswith('.py') and
             not filename.startswith('_') and
@@ -56,6 +58,27 @@ def _discover_tools() -> List[Type[BaseTool]]:
                         
             except ImportError as e:
                 print(f"Erreur lors de l'import de {module_name}: {e}")
+    
+    # 2. Découverte des packages (sous-dossiers avec __init__.py)
+    for item in os.listdir(current_dir):
+        item_path = os.path.join(current_dir, item)
+        if os.path.isdir(item_path) and not item.startswith('_'):
+            init_file = os.path.join(item_path, '__init__.py')
+            if os.path.exists(init_file):
+                # C'est un package Python
+                try:
+                    package_module = importlib.import_module(f'collegue.tools.{item}')
+                    
+                    # Chercher les classes BaseTool dans le package
+                    for name, obj in inspect.getmembers(package_module):
+                        if (inspect.isclass(obj) and
+                            issubclass(obj, BaseTool) and
+                            obj != BaseTool and
+                            obj.__module__.startswith(f'collegue.tools.{item}')):
+                            tools.append(obj)
+                            
+                except ImportError as e:
+                    print(f"Erreur lors de l'import du package {item}: {e}")
     
     return tools
 
