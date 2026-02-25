@@ -8,6 +8,7 @@ import os
 
 
 class PHPModuleReference(BaseModel):
+	model_config = {'extra': 'forbid'}
 	"""Modèle pour une référence de module/extension PHP."""
 	name: str
 	description: str

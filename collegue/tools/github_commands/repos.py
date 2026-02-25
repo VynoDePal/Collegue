@@ -9,6 +9,7 @@ from ..clients import GitHubClient
 
 
 class RepoInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	name: str
 	full_name: str
 	description: Optional[str] = None

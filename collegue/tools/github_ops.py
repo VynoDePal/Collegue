@@ -18,6 +18,7 @@ from ..core.shared import validate_github_command
 
 
 class GitHubRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     command: str = Field(
         ...,
         description="Commande à exécuter. IMPORTANT: list_prs/list_issues/get_repo nécessitent owner ET repo. Commandes: list_repos, get_repo, get_file, create_pr, list_prs, get_pr, create_issue, list_issues, get_issue, pr_files, pr_comments, create_branch, update_file, repo_branches, repo_commits, search_code, list_workflows"
@@ -53,6 +54,7 @@ class GitHubRequest(BaseModel):
         return validate_github_command(v)
 
 class GitHubResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     success: bool
     command: str
     message: str

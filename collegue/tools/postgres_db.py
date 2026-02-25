@@ -21,6 +21,7 @@ except ImportError:
 
 
 class PostgresRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de requête pour les opérations PostgreSQL.
 
     PARAMÈTRES REQUIS PAR COMMANDE:
@@ -72,6 +73,7 @@ class PostgresRequest(BaseModel):
 
 
 class TableInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur une table."""
     name: str
     schema_name: str
@@ -81,6 +83,7 @@ class TableInfo(BaseModel):
 
 
 class ColumnInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur une colonne."""
     name: str
     type: str
@@ -92,6 +95,7 @@ class ColumnInfo(BaseModel):
 
 
 class IndexInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur un index."""
     name: str
     table: str
@@ -102,6 +106,7 @@ class IndexInfo(BaseModel):
 
 
 class ForeignKeyInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur une clé étrangère."""
     name: str
     table: str
@@ -111,6 +116,7 @@ class ForeignKeyInfo(BaseModel):
 
 
 class QueryResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Résultat d'une requête."""
     columns: List[str]
     rows: List[Dict[str, Any]]
@@ -119,6 +125,7 @@ class QueryResult(BaseModel):
 
 
 class PostgresResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de réponse pour les opérations PostgreSQL."""
     success: bool
     command: str

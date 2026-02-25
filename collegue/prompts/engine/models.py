@@ -18,6 +18,7 @@ class PromptVariableType(str, Enum):
     OBJECT = "object"
 
 class PromptVariable(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     description: str
     type: PromptVariableType = PromptVariableType.STRING
@@ -27,6 +28,7 @@ class PromptVariable(BaseModel):
     example: Optional[Any] = None
 
 class PromptTemplate(BaseModel):
+    model_config = {'extra': 'forbid'}
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str
@@ -43,6 +45,7 @@ class PromptTemplate(BaseModel):
     version: str = "1.0.0"
 
 class PromptCategory(BaseModel):
+    model_config = {'extra': 'forbid'}
     id: str
     name: str
     description: str
@@ -50,6 +53,7 @@ class PromptCategory(BaseModel):
     icon: Optional[str] = None
 
 class PromptExecution(BaseModel):
+    model_config = {'extra': 'forbid'}
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     template_id: str
     variables: Dict[str, Any]
@@ -62,6 +66,7 @@ class PromptExecution(BaseModel):
     feedback: Optional[Dict[str, Any]] = None
 
 class PromptLibrary(BaseModel):
+    model_config = {'extra': 'forbid'}
     templates: Dict[str, PromptTemplate] = {}
     categories: Dict[str, PromptCategory] = {}
     history: List[PromptExecution] = []

@@ -73,6 +73,7 @@ REFACTORING_LANGUAGE_INSTRUCTIONS = {
 
 
 class RefactoringRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     code: str = Field(..., description="Code à refactorer")
     language: str = Field(..., description="Langage de programmation du code")
     session_id: Optional[str] = Field(None, description="Identifiant de session")
@@ -81,6 +82,7 @@ class RefactoringRequest(BaseModel):
     file_path: Optional[str] = Field(None, description="Chemin du fichier contenant le code")
 
 class RefactoringResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     refactored_code: str = Field(..., description="Code refactoré")
     original_code: str = Field(..., description="Code original")
     language: str = Field(..., description="Langage du code")
@@ -89,6 +91,7 @@ class RefactoringResponse(BaseModel):
     improvement_metrics: Optional[Dict[str, Any]] = Field(None, description="Métriques d'amélioration")
 
 class LLMRefactoringResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     refactored_code: str = Field(..., description="Code refactoré complet")
     changes_summary: str = Field(..., description="Résumé des changements effectués")
     changes_count: int = Field(default=0, description="Nombre de modifications")

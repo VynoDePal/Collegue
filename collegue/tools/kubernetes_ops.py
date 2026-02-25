@@ -29,6 +29,7 @@ except ImportError:
 
 
 class KubernetesRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de requête pour les opérations Kubernetes.
 
     PARAMÈTRES REQUIS PAR COMMANDE:
@@ -64,6 +65,7 @@ class KubernetesRequest(BaseModel):
         return validate_k8s_command(v)
 
 class PodInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     status: str
@@ -77,6 +79,7 @@ class PodInfo(BaseModel):
 
 
 class ContainerStatus(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     ready: bool
     restart_count: int
@@ -87,6 +90,7 @@ class ContainerStatus(BaseModel):
 
 
 class PodDetail(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     status: str
@@ -101,6 +105,7 @@ class PodDetail(BaseModel):
 
 
 class DeploymentInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     replicas: str
@@ -113,6 +118,7 @@ class DeploymentInfo(BaseModel):
 
 
 class ServiceInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     type: str
@@ -124,6 +130,7 @@ class ServiceInfo(BaseModel):
 
 
 class NamespaceInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     status: str
     age: str
@@ -131,6 +138,7 @@ class NamespaceInfo(BaseModel):
 
 
 class EventInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     type: str
@@ -144,6 +152,7 @@ class EventInfo(BaseModel):
 
 
 class NodeInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     status: str
     roles: List[str] = []
@@ -156,6 +165,7 @@ class NodeInfo(BaseModel):
 
 
 class ConfigMapInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     data_keys: List[str] = []
@@ -163,6 +173,7 @@ class ConfigMapInfo(BaseModel):
 
 
 class SecretInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     name: str
     namespace: str
     type: str
@@ -171,6 +182,7 @@ class SecretInfo(BaseModel):
 
 
 class KubernetesResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     success: bool
     command: str
     message: str

@@ -7,6 +7,7 @@ import json
 
 
 class PHPBestPractice(BaseModel):
+	model_config = {'extra': 'forbid'}
 	"""Modèle pour une bonne pratique PHP."""
 	title: str
 	description: str

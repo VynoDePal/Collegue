@@ -12,12 +12,14 @@ except ImportError:
 
 
 class OrchestratorRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     query: str = Field(..., description="Requête utilisateur à traiter")
     tools: Optional[List[str]] = Field(None, description="Liste des tools à utiliser (vide = auto-détection)")
     context: Optional[Dict[str, Any]] = Field(None, description="Contexte additionnel")
 
 
 class OrchestratorResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     result: str = Field(..., description="Résultat généré par le LLM")
     tools_used: List[str] = Field(default_factory=list, description="Tools utilisés")
     execution_time: float = Field(..., description="Temps d'exécution en secondes")

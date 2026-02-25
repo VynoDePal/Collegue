@@ -9,6 +9,7 @@ from ..clients import GitHubClient
 
 
 class WorkflowRun(BaseModel):
+	model_config = {'extra': 'forbid'}
 	id: int
 	name: str
 	status: str

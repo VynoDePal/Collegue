@@ -8,6 +8,7 @@ import json
 
 
 class PHPFrameworkReference(BaseModel):
+	model_config = {'extra': 'forbid'}
 	"""Modèle pour une référence de framework PHP."""
 	name: str
 	description: str

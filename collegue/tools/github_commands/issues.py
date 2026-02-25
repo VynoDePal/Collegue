@@ -9,6 +9,7 @@ from ..clients import GitHubClient
 
 
 class IssueInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	number: int
 	title: str
 	state: str

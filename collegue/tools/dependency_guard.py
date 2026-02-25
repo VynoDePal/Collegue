@@ -26,6 +26,7 @@ from ..core.shared import aggregate_severities
 
 
 class DependencyGuardRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     content: str = Field(
         ...,
         description="Contenu du fichier de dépendances (package-lock.json, requirements.txt, pyproject.toml). Le type est auto-détecté."
@@ -61,6 +62,7 @@ class DependencyGuardRequest(BaseModel):
         return v
 
 class DependencyIssue(BaseModel):
+    model_config = {'extra': 'forbid'}
     package: str = Field(..., description="Nom du package")
     version: Optional[str] = Field(None, description="Version concernée")
     issue_type: str = Field(..., description="Type: not_found, vulnerable, deprecated, blocked, version_conflict")
@@ -70,6 +72,7 @@ class DependencyIssue(BaseModel):
     cve_ids: Optional[List[str]] = Field(None, description="IDs CVE si vulnérabilité")
 
 class DependencyGuardResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     valid: bool = Field(..., description="True si aucune vulnérabilité critique/haute")
     summary: str = Field(..., description="Résumé de l'analyse")
     total_dependencies: int = Field(..., description="Nombre total de dépendances analysées")

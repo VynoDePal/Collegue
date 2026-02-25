@@ -20,6 +20,7 @@ class OptimizationStrategy(str, Enum):
     SELF_CONSISTENCY = "self_consistency"
 
 class PromptOptimization(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour une optimisation de prompt."""
     name: str
     description: str

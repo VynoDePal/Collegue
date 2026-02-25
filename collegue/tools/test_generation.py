@@ -11,6 +11,7 @@ from .utils import test_generators_adapter as _test_templates
 
 
 class TestGenerationRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     __test__ = False
     code: str = Field(..., description="Code à tester", min_length=1)
     language: str = Field(..., description="Langage de programmation du code")
@@ -35,6 +36,7 @@ class TestGenerationRequest(BaseModel):
 
 
 class TestGenerationResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     __test__ = False
     test_code: str = Field(..., description="Code de test généré")
     language: str = Field(..., description="Langage du code de test")
@@ -45,6 +47,7 @@ class TestGenerationResponse(BaseModel):
 
 
 class LLMTestGenerationResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     test_code: str = Field(..., description="Code de test complet et exécutable")
     test_count: int = Field(..., description="Nombre de tests générés")
     coverage_estimate: float = Field(

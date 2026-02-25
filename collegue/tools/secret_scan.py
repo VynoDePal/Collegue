@@ -22,6 +22,7 @@ from ..core.shared import FileContent, aggregate_severities
 
 
 class SecretScanRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de requête pour le scan de secrets."""
     target: Optional[str] = Field(
         None,
@@ -86,6 +87,7 @@ class SecretScanRequest(BaseModel):
 
 
 class SecretFinding(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Un secret détecté."""
     type: str = Field(..., description="Type de secret (api_key, password, token, etc.)")
     severity: str = Field(..., description="Sévérité: low, medium, high, critical")
@@ -98,6 +100,7 @@ class SecretFinding(BaseModel):
 
 
 class SecretScanResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de réponse pour le scan de secrets."""
     clean: bool = Field(..., description="True si aucun secret trouvé")
     total_findings: int = Field(..., description="Nombre total de secrets détectés")

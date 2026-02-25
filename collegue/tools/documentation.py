@@ -37,6 +37,7 @@ LANGUAGE_INSTRUCTIONS = {
 
 
 class DocumentationRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     code: str = Field(..., description="Code à documenter")
     language: str = Field(..., description="Langage de programmation du code")
     session_id: Optional[str] = Field(None, description="Identifiant de session")
@@ -47,6 +48,7 @@ class DocumentationRequest(BaseModel):
     focus_on: Optional[str] = Field(None, description="Éléments à documenter (functions, classes, modules, all)")
 
 class DocumentationResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     documentation: str = Field(..., description="Documentation générée")
     language: str = Field(..., description="Langage du code documenté")
     format: str = Field(..., description="Format de la documentation")

@@ -26,6 +26,7 @@ from .scanners.dockerfile import DockerfileScanner
 
 
 class CustomPolicy(BaseModel):
+    model_config = {'extra': 'forbid'}
     id: str = Field(..., description="Identifiant unique de la policy")
     description: Optional[str] = Field(None, description="Description de la policy")
     content: str = Field(..., description="Contenu de la règle (regex ou YAML)")
@@ -33,6 +34,7 @@ class CustomPolicy(BaseModel):
     severity: str = Field("medium", description="Sévérité: low, medium, high, critical")
 
 class IacGuardrailsRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     files: List[FileInput] = Field(
         ...,
         description="Liste des fichiers IaC à scanner [{path, content}, ...]",
@@ -93,6 +95,7 @@ class IacGuardrailsRequest(BaseModel):
         return validate_fast_deep(v)
 
 class IacFinding(BaseModel):
+    model_config = {'extra': 'forbid'}
     rule_id: str = Field(..., description="Identifiant de la règle")
     severity: str = Field(..., description="Sévérité: low, medium, high, critical")
     path: str = Field(..., description="Chemin du fichier")
@@ -105,6 +108,7 @@ class IacFinding(BaseModel):
     engine: str = Field("embedded-rules", description="Moteur qui a détecté")
 
 class LLMSecurityInsight(BaseModel):
+    model_config = {'extra': 'forbid'}
     category: str = Field(..., description="Catégorie: vulnerability, misconfiguration, compliance, best_practice")
     insight: str = Field(..., description="L'insight détaillé")
     risk_level: str = Field("medium", description="Niveau de risque: low, medium, high, critical")
@@ -112,6 +116,7 @@ class LLMSecurityInsight(BaseModel):
     compliance_frameworks: List[str] = Field(default_factory=list, description="Standards impactés: CIS, SOC2, HIPAA, etc.")
 
 class RemediationAction(BaseModel):
+    model_config = {'extra': 'forbid'}
     tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
     action_type: str = Field(..., description="Type: fix_config, add_security, remove_exposure")
     rationale: str = Field(..., description="Pourquoi cette action")
@@ -120,6 +125,7 @@ class RemediationAction(BaseModel):
     score: float = Field(0.0, description="Score de pertinence (0.0-1.0)", ge=0.0, le=1.0)
 
 class IacGuardrailsResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     passed: bool = Field(..., description="True si aucun problème critique/high")
     summary: Dict[str, int] = Field(
         ...,

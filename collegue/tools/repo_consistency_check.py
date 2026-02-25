@@ -37,6 +37,7 @@ from .analyzers.php import PHPAnalyzer
 
 
 class ConsistencyCheckRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de requête pour la vérification de cohérence."""
     files: List[FileInput] = Field(
         ...,
@@ -100,12 +101,14 @@ class ConsistencyCheckRequest(BaseModel):
         return v
 
 class LLMInsight(BaseModel):
+    model_config = {'extra': 'forbid'}
     category: str = Field(..., description="Catégorie: pattern, architecture, debt, suggestion")
     insight: str = Field(..., description="L'insight détaillé")
     confidence: str = Field("medium", description="Confiance: low, medium, high")
     affected_files: List[str] = Field(default_factory=list, description="Fichiers concernés")
 
 class SuggestedAction(BaseModel):
+    model_config = {'extra': 'forbid'}
     tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
     action_type: str = Field(..., description="Type: refactor, cleanup, restructure")
     rationale: str = Field(..., description="Pourquoi cette action")
@@ -115,6 +118,7 @@ class SuggestedAction(BaseModel):
 
 
 class ConsistencyCheckResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     valid: bool = Field(..., description="True si aucun problème trouvé")
     summary: Dict[str, int] = Field(
         ...,

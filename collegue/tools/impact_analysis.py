@@ -24,6 +24,7 @@ from ..core.shared import (
 
 
 class ImpactAnalysisRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     change_intent: str = Field(
         ...,
         description="Description du changement prévu (ex: 'renommer UserService en AuthService', 'modifier l'API /users')"
@@ -63,38 +64,45 @@ class ImpactAnalysisRequest(BaseModel):
         return validate_fast_deep(v)
 
 class ImpactedFile(BaseModel):
+    model_config = {'extra': 'forbid'}
     path: str = Field(..., description="Chemin du fichier")
     reason: str = Field(..., description="Raison de l'impact")
     confidence: str = Field(..., description="Niveau de confiance: high, medium, low")
     impact_type: str = Field("direct", description="Type: direct, indirect, test")
 
 class RiskNote(BaseModel):
+    model_config = {'extra': 'forbid'}
     category: str = Field(..., description="Catégorie: breaking_change, security, data_migration, performance, compat")
     note: str = Field(..., description="Description du risque")
     confidence: str = Field(..., description="Niveau de confiance")
     severity: str = Field("medium", description="Sévérité: low, medium, high, critical")
 
 class SearchQuery(BaseModel):
+    model_config = {'extra': 'forbid'}
     query: str = Field(..., description="Pattern de recherche")
     rationale: str = Field(..., description="Pourquoi cette recherche")
     search_type: str = Field("text", description="Type: text, regex, symbol")
 
 class TestRecommendation(BaseModel):
+    model_config = {'extra': 'forbid'}
     command: str = Field(..., description="Commande à exécuter")
     rationale: str = Field(..., description="Pourquoi ce test")
     scope: str = Field("unit", description="Scope: unit, integration, e2e")
     priority: str = Field("medium", description="Priorité: low, medium, high")
 
 class FollowupAction(BaseModel):
+    model_config = {'extra': 'forbid'}
     action: str = Field(..., description="Action à effectuer")
     rationale: str = Field(..., description="Pourquoi cette action")
 
 class LLMInsight(BaseModel):
+    model_config = {'extra': 'forbid'}
     category: str = Field(..., description="Catégorie: semantic, architectural, business, suggestion")
     insight: str = Field(..., description="L'insight détaillé")
     confidence: str = Field("medium", description="Confiance: low, medium, high")
 
 class ImpactAnalysisResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     change_summary: str = Field(..., description="Résumé du changement analysé")
     impacted_files: List[ImpactedFile] = Field(
         default_factory=list,

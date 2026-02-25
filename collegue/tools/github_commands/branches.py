@@ -10,12 +10,14 @@ from ..base import ToolExecutionError
 
 
 class BranchInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	name: str
 	commit_sha: str
 	protected: bool = False
 
 
 class CommitInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	sha: str
 	message: str
 	author: str
