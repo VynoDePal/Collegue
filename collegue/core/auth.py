@@ -6,6 +6,7 @@ pour éviter la duplication entre sentry_monitor.py et github_ops.py.
 """
 import os
 from typing import Optional, Dict, Any
+from .security_logger import security_logger
 
 
 def get_token_from_http_headers(*header_names: str) -> Optional[str]:
@@ -34,11 +35,37 @@ def resolve_token(
     env_var: str,
     *header_names: str
 ) -> Optional[str]:
-    return (
+    """
+    Résout un token depuis la requête, l'environnement ou les headers HTTP.
+    Log les échecs d'authentification pour la sécurité.
+    """
+    token = (
         request_token
         or os.environ.get(env_var)
         or get_token_from_http_headers(*header_names)
     )
+    
+    # Log les échecs d'authentification
+    if not token:
+        # Récupérer les infos de la requête si disponible
+        client_ip = None
+        user_agent = None
+        try:
+            from fastmcp.server.dependencies import get_http_headers
+            headers = get_http_headers() or {}
+            client_ip = headers.get('x-forwarded-for') or headers.get('x-real-ip')
+            user_agent = headers.get('user-agent')
+        except Exception:
+            pass
+        
+        security_logger.log_auth_failure(
+            reason="token_not_found",
+            client_ip=client_ip,
+            user_agent=user_agent,
+            extra={"source": "resolve_token", "env_var": env_var}
+        )
+    
+    return token
 
 
 def resolve_org(
