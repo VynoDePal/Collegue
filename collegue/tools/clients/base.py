@@ -9,6 +9,8 @@ from abc import ABC
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Callable, TypeVar, Generic
 from enum import Enum
+from ...core.header_security import sanitize_header_value
+from ...core.security_logger import security_logger
 
 
 class HTTPMethod(Enum):
@@ -72,7 +74,18 @@ class APIClient(ABC):
 
 	def _get_auth_header(self) -> Dict[str, str]:
 		if self.auth_token:
-			return {"Authorization": f"Bearer {self.auth_token}"}
+			try:
+				sanitized_token = sanitize_header_value(self.auth_token, "auth_token")
+				return {"Authorization": f"Bearer {sanitized_token}"}
+			except Exception as e:
+				# Log the security event
+				security_logger.log_suspicious_activity(
+					activity_type="header_injection_attempt",
+					description=f"CRLF injection attempt in auth token: {e}",
+					severity="error"
+				)
+				# Return empty auth header on security violation
+				return {}
 		return {}
 
 	def _build_url(self, endpoint: str) -> str:
@@ -86,7 +99,19 @@ class APIClient(ABC):
 			**self._get_auth_header()
 		}
 		if extra_headers:
-			headers.update(extra_headers)
+			# Sanitize extra headers to prevent injection
+			for key, value in extra_headers.items():
+				try:
+					headers[key] = sanitize_header_value(value, f"header:{key}")
+			except Exception as e:
+				# Log the security event
+				security_logger.log_suspicious_activity(
+					activity_type="header_injection_attempt",
+					description=f"CRLF injection attempt in header {key}: {e}",
+					severity="error"
+				)
+				# Skip this header on security violation
+				continue
 		return headers
 
 	def _should_retry(self, error: Exception, status_code: int, retry_count: int) -> bool:
