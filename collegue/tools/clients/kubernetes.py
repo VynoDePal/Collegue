@@ -47,6 +47,16 @@ class KubernetesClient:
     def _run_kubectl(self, command: List[str]) -> APIResponse:
         import subprocess
 
+        # Validation stricte des arguments
+        if not all(isinstance(arg, str) for arg in command):
+            raise ValueError("Command arguments must be strings")
+        
+        # Sanitization - rejeter les caractères dangereux
+        dangerous_chars = [';', '&', '|', '$', '`', '\n']
+        for arg in command:
+            if any(char in arg for char in dangerous_chars):
+                raise ValueError(f"Dangerous character detected in argument: {arg}")
+
         args = self._get_kubectl_args() + command
 
         try:
