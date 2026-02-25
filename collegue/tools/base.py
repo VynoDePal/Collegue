@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Type
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 import asyncio
+from ..core.security_logger import security_logger
 
 
 class ToolError(Exception):
@@ -167,6 +168,27 @@ class BaseTool(ABC):
 
     def execute(self, request: BaseModel, **kwargs) -> BaseModel:
         self.validate_request(request)
+        
+        # Log l'accès aux données sensibles
+        try:
+            client_ip = None
+            user_id = None
+            from fastmcp.server.dependencies import get_http_headers
+            headers = get_http_headers() or {}
+            client_ip = headers.get('x-forwarded-for') or headers.get('x-real-ip')
+            # Essayer de récupérer l'user_id depuis les headers d'auth
+            user_id = headers.get('x-user-id') or headers.get('x-collegue-user-id')
+        except Exception:
+            pass
+        
+        security_logger.log_data_access(
+            user_id=user_id or "anonymous",
+            resource=self.tool_name,
+            action="execute",
+            client_ip=client_ip,
+            extra={"request_type": request.__class__.__name__}
+        )
+        
         result = self._execute_core_logic(request, **kwargs)
         self._validate_result(result)
         return result
