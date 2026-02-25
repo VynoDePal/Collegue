@@ -10,6 +10,7 @@ import fnmatch
 from typing import List, Optional, Tuple
 from .models import SecretFinding
 from .config import SECRET_PATTERNS, SEVERITY_LEVELS, SECRET_RECOMMENDATIONS, DEFAULT_EXTENSIONS, DEFAULT_EXCLUDES
+from ...core.file_security import safe_read_file, FileSecurityError
 
 
 class SecretDetectionEngine:
@@ -107,15 +108,14 @@ class SecretDetectionEngine:
                  max_size: int) -> List[SecretFinding]:
         """Scanne un fichier pour trouver des secrets."""
         try:
-            if os.path.getsize(filepath) > max_size:
-                if self.logger:
-                    self.logger.debug(f"Fichier ignoré (trop grand): {filepath}")
-                return []
-            
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            
+            # Utiliser safe_read_file pour éviter les attaques TOCTOU et symlinks
+            content = safe_read_file(filepath, max_size)
             return self.scan_content(content, filepath, severity_threshold)
+        except FileSecurityError as e:
+            # Log les violations de sécurité au niveau warning
+            if self.logger:
+                self.logger.warning(f"Security violation for {filepath}: {e}")
+            return []
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"Erreur lecture {filepath}: {e}")
