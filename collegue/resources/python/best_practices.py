@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Any
 import json
 
 class PythonBestPractice(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour une bonne pratique Python."""
     title: str
     description: str

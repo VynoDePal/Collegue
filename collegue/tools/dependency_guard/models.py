@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class DependencyIssue(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Un problème détecté sur une dépendance."""
     package: str = Field(..., description="Nom du package")
     version: Optional[str] = Field(None, description="Version concernée")
@@ -17,6 +18,7 @@ class DependencyIssue(BaseModel):
 
 
 class DependencyGuardRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour la validation des dépendances."""
     content: str = Field(
         ...,
@@ -54,6 +56,7 @@ class DependencyGuardRequest(BaseModel):
 
 
 class DependencyGuardResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse de la validation des dépendances."""
     valid: bool = Field(..., description="True si aucune vulnérabilité critique/haute")
     summary: str = Field(..., description="Résumé de l'analyse")

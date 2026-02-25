@@ -7,6 +7,7 @@ from ...core.shared import FileInput, validate_fast_deep
 
 
 class CustomPolicy(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Policy personnalisée pour le scan IaC."""
     id: str = Field(..., description="Identifiant unique de la policy")
     description: Optional[str] = Field(None, description="Description de la policy")
@@ -16,6 +17,7 @@ class CustomPolicy(BaseModel):
 
 
 class IacGuardrailsRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour le scan IaC Guardrails."""
     files: List[FileInput] = Field(
         ...,
@@ -78,6 +80,7 @@ class IacGuardrailsRequest(BaseModel):
 
 
 class IacFinding(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Un finding de sécurité détecté."""
     rule_id: str = Field(..., description="Identifiant de la règle")
     severity: str = Field(..., description="Sévérité: low, medium, high, critical")
@@ -92,6 +95,7 @@ class IacFinding(BaseModel):
 
 
 class LLMSecurityInsight(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Insight généré par le LLM en mode deep analysis."""
     category: str = Field(..., description="Catégorie: vulnerability, misconfiguration, compliance, best_practice")
     insight: str = Field(..., description="L'insight détaillé")
@@ -101,6 +105,7 @@ class LLMSecurityInsight(BaseModel):
 
 
 class RemediationAction(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Action de remédiation suggérée."""
     tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
     action_type: str = Field(..., description="Type: fix_config, add_security, remove_exposure")
@@ -111,6 +116,7 @@ class RemediationAction(BaseModel):
 
 
 class IacGuardrailsResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse du scan IaC Guardrails."""
     passed: bool = Field(..., description="True si aucun problème critique/high")
     summary: Dict[str, int] = Field(

@@ -42,6 +42,7 @@ except ImportError:
 
 
 class SentryRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de requête pour les opérations Sentry.
 
     PARAMÈTRES REQUIS PAR COMMANDE:
@@ -87,6 +88,7 @@ class SentryRequest(BaseModel):
 
 
 class ConfigInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information de configuration extraite."""
     token: Optional[str] = None
     organization: Optional[str] = None
@@ -95,6 +97,7 @@ class ConfigInfo(BaseModel):
 
 
 class RepoInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur un repository Sentry (intégration)."""
     id: str
     name: str
@@ -104,6 +107,7 @@ class RepoInfo(BaseModel):
 
 
 class ProjectInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur un projet Sentry."""
     id: str
     slug: str
@@ -114,6 +118,7 @@ class ProjectInfo(BaseModel):
     organization: Optional[Dict[str, Any]] = None
 
 class IssueInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur une issue Sentry."""
     id: str
     short_id: str
@@ -131,6 +136,7 @@ class IssueInfo(BaseModel):
 
 
 class EventInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur un événement/stacktrace."""
     event_id: str
     title: str
@@ -145,6 +151,7 @@ class EventInfo(BaseModel):
 
 
 class ReleaseInfo(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Information sur une release."""
     version: str
     short_version: str
@@ -156,6 +163,7 @@ class ReleaseInfo(BaseModel):
 
 
 class ProjectStats(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Statistiques d'un projet."""
     project: str
     total_events: int = 0
@@ -166,6 +174,7 @@ class ProjectStats(BaseModel):
 
 
 class TagDistribution(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Distribution d'un tag."""
     key: str
     name: str
@@ -173,6 +182,7 @@ class TagDistribution(BaseModel):
 
 
 class SentryResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle de réponse pour les opérations Sentry."""
     success: bool
     command: str

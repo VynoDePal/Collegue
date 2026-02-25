@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TestGenerationRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour la génération de tests."""
     __test__ = False
     
@@ -32,6 +33,7 @@ class TestGenerationRequest(BaseModel):
 
 
 class TestGenerationResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse de la génération de tests."""
     __test__ = False
     
@@ -44,6 +46,7 @@ class TestGenerationResponse(BaseModel):
 
 
 class LLMTestGenerationResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Résultat structuré de la génération de tests par LLM."""
     test_code: str = Field(..., description="Code de test complet et exécutable")
     test_count: int = Field(..., description="Nombre de tests générés")

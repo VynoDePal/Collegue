@@ -7,6 +7,7 @@ from ...core.shared import validate_fast_deep
 
 
 class LLMInsight(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Insight généré par le LLM en mode deep analysis."""
     category: str = Field(..., description="Catégorie: pattern, architecture, debt, suggestion")
     insight: str = Field(..., description="L'insight détaillé")
@@ -15,6 +16,7 @@ class LLMInsight(BaseModel):
 
 
 class SuggestedAction(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Action suggérée pour corriger les problèmes."""
     tool_name: str = Field(..., description="Nom du tool à appeler (ex: code_refactoring)")
     action_type: str = Field(..., description="Type: refactor, cleanup, restructure")
@@ -25,6 +27,7 @@ class SuggestedAction(BaseModel):
 
 
 class ConsistencyCheckRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour la vérification de cohérence."""
     files: List = Field(
         ...,
@@ -88,6 +91,7 @@ class ConsistencyCheckRequest(BaseModel):
 
 
 class ConsistencyCheckResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse de la vérification de cohérence."""
     valid: bool = Field(..., description="True si aucun problème trouvé")
     summary: Dict[str, int] = Field(

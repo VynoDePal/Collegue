@@ -19,6 +19,7 @@ from . import validators as _validators
 
 
 class ConsistencyIssue(BaseModel):
+	model_config = {'extra': 'forbid'}
 	"""Issue de cohérence détectée dans le code.
 
 	Modèle Pydantic partagé entre repo_consistency_check et les analyzers.
@@ -35,6 +36,7 @@ class ConsistencyIssue(BaseModel):
 
 
 class FileInput(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Un fichier avec son chemin et contenu."""
     path: str = Field(..., description="Chemin relatif du fichier")
     content: str = Field(..., description="Contenu du fichier")

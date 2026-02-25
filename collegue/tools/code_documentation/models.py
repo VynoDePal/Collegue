@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class DocumentationRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour la génération de documentation."""
     code: str = Field(..., description="Code à documenter")
     language: str = Field(..., description="Langage de programmation du code")
@@ -18,6 +19,7 @@ class DocumentationRequest(BaseModel):
 
 
 class DocumentationResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse de la génération de documentation."""
     documentation: str = Field(..., description="Documentation générée")
     language: str = Field(..., description="Langage du code documenté")

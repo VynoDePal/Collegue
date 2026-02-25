@@ -9,6 +9,7 @@ from ..clients import GitHubClient
 
 
 class SearchResult(BaseModel):
+	model_config = {'extra': 'forbid'}
 	name: str
 	path: str
 	repository: str

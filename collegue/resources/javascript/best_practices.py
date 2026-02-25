@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any
 import json
 
 class JavaScriptBestPractice(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour une bonne pratique JavaScript."""
     title: str
     description: str

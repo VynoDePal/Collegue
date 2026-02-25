@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMConfig(BaseModel):
+	model_config = {'extra': 'forbid'}
 	"""Configuration pour Google Gemini."""
 	model_name: str
 	api_key: Optional[str] = None
@@ -22,6 +23,7 @@ class LLMConfig(BaseModel):
 
 
 class LLMResponse(BaseModel):
+	model_config = {'extra': 'forbid'}
 	"""Réponse de Google Gemini."""
 	text: str
 	usage: Dict[str, int] = {}

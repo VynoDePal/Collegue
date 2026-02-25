@@ -9,6 +9,7 @@ from ..clients import GitHubClient
 
 
 class PRInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	number: int
 	title: str
 	state: str
@@ -23,6 +24,7 @@ class PRInfo(BaseModel):
 
 
 class IssueInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	number: int
 	title: str
 	state: str
@@ -38,12 +40,14 @@ class IssueInfo(BaseModel):
 
 
 class BranchInfo(BaseModel):
+	model_config = {'extra': 'forbid'}
 	name: str
 	commit: str
 	protected: bool = False
 
 
 class FileChange(BaseModel):
+	model_config = {'extra': 'forbid'}
 	filename: str
 	status: str
 	additions: int
@@ -53,6 +57,7 @@ class FileChange(BaseModel):
 
 
 class Comment(BaseModel):
+	model_config = {'extra': 'forbid'}
 	id: int
 	user: str
 	body: str

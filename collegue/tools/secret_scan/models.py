@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class SecretFinding(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Un secret détecté dans le code."""
     type: str = Field(..., description="Type de secret (api_key, password, token, etc.)")
     severity: str = Field(..., description="Sévérité: low, medium, high, critical")
@@ -18,6 +19,7 @@ class SecretFinding(BaseModel):
 
 
 class SecretScanRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour le scan de secrets."""
     target: Optional[str] = Field(
         None,
@@ -82,6 +84,7 @@ class SecretScanRequest(BaseModel):
 
 
 class SecretScanResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse du scan de secrets."""
     clean: bool = Field(..., description="True si aucun secret trouvé")
     total_findings: int = Field(..., description="Nombre total de secrets détectés")

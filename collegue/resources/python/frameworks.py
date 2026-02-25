@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any
 import json
 
 class PythonFrameworkReference(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour une référence de framework Python."""
     name: str
     description: str

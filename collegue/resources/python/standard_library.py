@@ -7,6 +7,7 @@ import json
 import os
 
 class PythonModuleReference(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour une référence de module Python."""
     name: str
     description: str

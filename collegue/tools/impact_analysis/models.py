@@ -7,6 +7,7 @@ from ...core.shared import validate_fast_deep, validate_confidence_mode
 
 
 class ImpactAnalysisRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour l'analyse d'impact."""
     change_intent: str = Field(
         ...,
@@ -48,6 +49,7 @@ class ImpactAnalysisRequest(BaseModel):
 
 
 class ImpactedFile(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Fichier impacté par le changement."""
     path: str = Field(..., description="Chemin du fichier")
     reason: str = Field(..., description="Raison de l'impact")
@@ -56,6 +58,7 @@ class ImpactedFile(BaseModel):
 
 
 class RiskNote(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Note de risque identifiée."""
     category: str = Field(..., description="Catégorie: breaking_change, security, data_migration, performance, compat")
     note: str = Field(..., description="Description du risque")
@@ -64,6 +67,7 @@ class RiskNote(BaseModel):
 
 
 class SearchQuery(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête de recherche pour compléter l'analyse."""
     query: str = Field(..., description="Pattern de recherche")
     rationale: str = Field(..., description="Pourquoi cette recherche")
@@ -71,6 +75,7 @@ class SearchQuery(BaseModel):
 
 
 class TestRecommendation(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Recommandation de test à exécuter."""
     command: str = Field(..., description="Commande à exécuter")
     rationale: str = Field(..., description="Pourquoi ce test")
@@ -79,12 +84,14 @@ class TestRecommendation(BaseModel):
 
 
 class FollowupAction(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Action de suivi recommandée."""
     action: str = Field(..., description="Action à effectuer")
     rationale: str = Field(..., description="Pourquoi cette action")
 
 
 class LLMInsight(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Insight généré par le LLM en mode deep."""
     category: str = Field(..., description="Catégorie: semantic, architectural, business, suggestion")
     insight: str = Field(..., description="L'insight détaillé")
@@ -92,6 +99,7 @@ class LLMInsight(BaseModel):
 
 
 class ImpactAnalysisResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse de l'analyse d'impact."""
     change_summary: str = Field(..., description="Résumé du changement analysé")
     impacted_files: List[ImpactedFile] = Field(default_factory=list, description="Fichiers impactés")

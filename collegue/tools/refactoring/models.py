@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class RefactoringRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Requête pour le refactoring de code."""
     code: str = Field(..., description="Code à refactorer")
     language: str = Field(..., description="Langage de programmation du code")
@@ -16,6 +17,7 @@ class RefactoringRequest(BaseModel):
 
 
 class RefactoringResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Réponse du refactoring de code."""
     refactored_code: str = Field(..., description="Code refactoré")
     original_code: str = Field(..., description="Code original")
@@ -26,6 +28,7 @@ class RefactoringResponse(BaseModel):
 
 
 class LLMRefactoringResult(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Résultat structuré du refactoring par LLM."""
     refactored_code: str = Field(..., description="Code refactoré complet")
     changes_summary: str = Field(..., description="Résumé des changements effectués")

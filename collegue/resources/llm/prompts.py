@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class PromptTemplate(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour un template de prompt."""
     name: str
     description: str

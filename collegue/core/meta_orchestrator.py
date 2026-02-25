@@ -14,22 +14,26 @@ except ImportError:
 _TOOLS_CACHE = None
 
 class OrchestratorStep(BaseModel):
+    model_config = {'extra': 'forbid'}
     tool: str = Field(..., description="Nom de l'outil à exécuter")
     reason: str = Field(..., description="Raison de l'utilisation de cet outil")
     params: Dict[str, Any] = Field(..., description="Paramètres d'appel de l'outil")
 
 class OrchestratorPlan(BaseModel):
+    model_config = {'extra': 'forbid'}
     steps: List[OrchestratorStep] = Field(..., description="Liste séquentielle des étapes à exécuter")
 
 
 
 class OrchestratorRequest(BaseModel):
+    model_config = {'extra': 'forbid'}
     query: str = Field(..., description="Requête utilisateur à traiter")
     tools: Optional[List[str]] = Field(None, description="Liste des tools à utiliser (vide = auto-détection)")
     context: Optional[Dict[str, Any]] = Field(None, description="Contexte additionnel")
 
 
 class OrchestratorResponse(BaseModel):
+    model_config = {'extra': 'forbid'}
     result: str = Field(..., description="Résultat généré par le LLM")
     tools_used: List[str] = Field(default_factory=list, description="Tools utilisés")
     execution_time: float = Field(..., description="Temps d'exécution en secondes")

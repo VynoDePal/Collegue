@@ -7,6 +7,7 @@ import json
 import os
 
 class JavaScriptAPIReference(BaseModel):
+    model_config = {'extra': 'forbid'}
     """Modèle pour une référence d'API JavaScript."""
     name: str
     description: str
