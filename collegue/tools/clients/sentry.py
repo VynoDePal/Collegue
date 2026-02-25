@@ -4,6 +4,7 @@ Sentry API client for error tracking operations.
 Provides access to Sentry API for listing projects, issues, and releases.
 """
 import os
+import re
 from typing import Dict, Optional
 from .base import APIClient, APIResponse, APIError
 
@@ -22,12 +23,29 @@ class SentryClient(APIClient):
             raise APIError("Sentry token required. Provide token or set SENTRY_AUTH_TOKEN env var.")
 
         self.organization = organization or os.environ.get('SENTRY_ORG', '')
+        if self.organization:
+            self._validate_slug(self.organization, "organization")
 
         super().__init__(
             base_url=f"{base_url}/api/0",
             auth_token=auth_token,
             **kwargs
         )
+
+    def _validate_slug(self, value: str, param_name: str) -> None:
+        """
+        Validate Sentry slugs (org, project, issue_id) to prevent SSRF/Path Traversal.
+        Allow alphanumeric, dash, underscore.
+        """
+        if not value:
+            return
+            
+        # Sentry slugs are typically lowercase alphanumeric + dashes. 
+        # Issue IDs are numeric but treated as strings.
+        # We allow a bit more flexibility but forbid dangerous chars.
+        # STRICT ALLOWLIST: ^[a-zA-Z0-9_\-]+$
+        if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
+            raise APIError(f"Invalid characters in {param_name}: '{value}'. Suspected path traversal attack.")
 
     def _get_auth_header(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.auth_token}"}
@@ -56,6 +74,7 @@ class SentryClient(APIClient):
             )
 
         if project:
+            self._validate_slug(project, "project")
             endpoint = f"projects/{self.organization}/{project}/issues/"
         else:
             endpoint = f"organizations/{self.organization}/issues/"
@@ -67,10 +86,12 @@ class SentryClient(APIClient):
         return self._get(endpoint, params=params)
 
     def get_issue(self, issue_id: str) -> APIResponse:
+        self._validate_slug(issue_id, "issue_id")
         endpoint = f"issues/{issue_id}/"
         return self._get(endpoint)
 
     def get_issue_events(self, issue_id: str, limit: int = 100) -> APIResponse:
+        self._validate_slug(issue_id, "issue_id")
         endpoint = f"issues/{issue_id}/events/"
         return self._get(endpoint, params={"limit": limit, "full": "true"})
 
@@ -86,6 +107,7 @@ class SentryClient(APIClient):
             )
 
         if project:
+            self._validate_slug(project, "project")
             endpoint = f"projects/{self.organization}/{project}/releases/"
         else:
             endpoint = f"organizations/{self.organization}/releases/"
@@ -119,6 +141,7 @@ class SentryClient(APIClient):
             )
 
     def get_issue_tags(self, issue_id: str) -> APIResponse:
+        self._validate_slug(issue_id, "issue_id")
         endpoint = f"issues/{issue_id}/tags/"
         return self._get(endpoint)
 
@@ -128,6 +151,7 @@ class SentryClient(APIClient):
                 success=False,
                 error_message="Organization slug required"
             )
+        self._validate_slug(project_slug, "project_slug")
         endpoint = f"projects/{self.organization}/{project_slug}/"
         return self._get(endpoint)
 
@@ -150,6 +174,8 @@ class SentryClient(APIClient):
                 success=False,
                 error_message="Organization slug required"
             )
+        
+        self._validate_slug(project, "project")
             
         stat_periods = {
             '1h': '1h', '24h': '1d', '7d': '1d', '14d': '1d', '30d': '1d'
