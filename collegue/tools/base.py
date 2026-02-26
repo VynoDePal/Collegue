@@ -105,7 +105,6 @@ class BaseTool(ABC):
 
                 self.logger.info(f"Prompt préparé avec version {version} pour {tool_name}")
                 return prompt
-
             except Exception as e:
                 self.logger.warning(f"Erreur lors de la préparation du prompt optimisé: {e}")
                 if hasattr(self, '_build_prompt'):
