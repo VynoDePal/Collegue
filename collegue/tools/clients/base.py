@@ -103,15 +103,15 @@ class APIClient(ABC):
 			for key, value in extra_headers.items():
 				try:
 					headers[key] = sanitize_header_value(value, f"header:{key}")
-			except Exception as e:
-				# Log the security event
-				security_logger.log_suspicious_activity(
-					activity_type="header_injection_attempt",
-					description=f"CRLF injection attempt in header {key}: {e}",
-					severity="error"
-				)
-				# Skip this header on security violation
-				continue
+				except Exception as e:
+					# Log the security event
+					security_logger.log_suspicious_activity(
+						activity_type="header_injection_attempt",
+						description=f"CRLF injection attempt in header {key}: {e}",
+						severity="error"
+					)
+					# Skip this header on security violation
+					continue
 		return headers
 
 	def _should_retry(self, error: Exception, status_code: int, retry_count: int) -> bool:
