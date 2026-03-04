@@ -3,6 +3,7 @@ Sentry Monitor Tool - Récupération des erreurs et monitoring depuis Sentry
 
 Permet à Collègue de récupérer les stacktraces réelles et prioriser le refactoring.
 """
+
 import logging
 import os
 from typing import Any, Dict, List, Optional, Type
@@ -11,15 +12,15 @@ from .base import BaseTool, ToolExecutionError
 from ..core.shared import validate_sentry_command
 from .clients import SentryClient
 from .transformers import (
-	transform_projects,
-	transform_project,
-	transform_issues,
-	transform_issue,
-	transform_sentry_events,
-	transform_releases,
-	transform_repos,
-	transform_tags,
-	transform_project_stats,
+    transform_projects,
+    transform_project,
+    transform_issues,
+    transform_issue,
+    transform_sentry_events,
+    transform_releases,
+    transform_repos,
+    transform_tags,
+    transform_project_stats,
 )
 from ..core.auth import resolve_token, resolve_org, register_config_with_github
 
@@ -30,12 +31,14 @@ except Exception:
 
 try:
     import requests
+
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
 
 try:
     from collegue.autonomous.config_registry import get_config_registry
+
     HAS_CONFIG_REGISTRY = True
 except ImportError:
     HAS_CONFIG_REGISTRY = False
@@ -54,33 +57,48 @@ class SentryRequest(BaseModel):
     - list_releases: organization (+ project optionnel)
     - parse_config: content (contenu du fichier .sentryclirc ou sentry.properties)
     """
+
     command: str = Field(
         ...,
-        description="Commande Sentry. list_issues nécessite organization. get_issue/issue_events nécessitent issue_id. Commandes: list_projects, list_issues, get_issue, issue_events, project_stats, list_releases, issue_tags, parse_config"
+        description="Commande Sentry. list_issues nécessite organization. get_issue/issue_events nécessitent issue_id. Commandes: list_projects, list_issues, get_issue, issue_events, project_stats, list_releases, issue_tags, parse_config",
     )
     organization: Optional[str] = Field(
         None,
-        description="REQUIS pour la plupart des commandes. Slug de l'organisation Sentry (utilise SENTRY_ORG de l'environnement si non fourni)"
+        description="REQUIS pour la plupart des commandes. Slug de l'organisation Sentry (utilise SENTRY_ORG de l'environnement si non fourni)",
     )
     project: Optional[str] = Field(
         None,
-        description="Slug du projet Sentry (requis pour project_stats, optionnel pour filtrer list_issues)"
+        description="Slug du projet Sentry (requis pour project_stats, optionnel pour filtrer list_issues)",
     )
     issue_id: Optional[str] = Field(
         None,
-        description="REQUIS pour get_issue, issue_events, issue_tags. ID numérique de l'issue Sentry"
+        description="REQUIS pour get_issue, issue_events, issue_tags. ID numérique de l'issue Sentry",
     )
-    query: Optional[str] = Field(None, description="Filtres de recherche Sentry (ex: 'is:unresolved', 'level:error')")
-    time_range: str = Field("24h", description="Période d'analyse: '1h', '24h', '7d', '14d', '30d'")
+    query: Optional[str] = Field(
+        None,
+        description="Filtres de recherche Sentry (ex: 'is:unresolved', 'level:error')",
+    )
+    time_range: str = Field(
+        "24h", description="Période d'analyse: '1h', '24h', '7d', '14d', '30d'"
+    )
     limit: int = Field(25, description="Nombre max de résultats (1-100)", ge=1, le=100)
-    token: Optional[str] = Field(None, description="Token Sentry (utilise automatiquement SENTRY_AUTH_TOKEN de l'environnement si non fourni)")
-    sentry_url: Optional[str] = Field(None, description="URL Sentry self-hosted (défaut: https://sentry.io)")
+    token: Optional[str] = Field(
+        None,
+        description="Token Sentry (utilise automatiquement SENTRY_AUTH_TOKEN de l'environnement si non fourni)",
+    )
+    sentry_url: Optional[str] = Field(
+        None, description="URL Sentry self-hosted (défaut: https://sentry.io)"
+    )
 
+    content: Optional[str] = Field(
+        None, description="Contenu du fichier de configuration pour parse_config"
+    )
+    format: Optional[str] = Field(
+        "ini",
+        description="Format du fichier: 'ini' (.sentryclirc) ou 'properties' (sentry.properties)",
+    )
 
-    content: Optional[str] = Field(None, description="Contenu du fichier de configuration pour parse_config")
-    format: Optional[str] = Field("ini", description="Format du fichier: 'ini' (.sentryclirc) ou 'properties' (sentry.properties)")
-
-    @field_validator('command')
+    @field_validator("command")
     @classmethod
     def validate_command(cls, v: str) -> str:
         return validate_sentry_command(v)
@@ -88,6 +106,7 @@ class SentryRequest(BaseModel):
 
 class ConfigInfo(BaseModel):
     """Information de configuration extraite."""
+
     token: Optional[str] = None
     organization: Optional[str] = None
     project: Optional[str] = None
@@ -96,6 +115,7 @@ class ConfigInfo(BaseModel):
 
 class RepoInfo(BaseModel):
     """Information sur un repository Sentry (intégration)."""
+
     id: str
     name: str
     provider: Optional[str] = None
@@ -105,6 +125,7 @@ class RepoInfo(BaseModel):
 
 class ProjectInfo(BaseModel):
     """Information sur un projet Sentry."""
+
     id: str
     slug: str
     name: str
@@ -113,8 +134,10 @@ class ProjectInfo(BaseModel):
     options: Optional[Dict[str, Any]] = None
     organization: Optional[Dict[str, Any]] = None
 
+
 class IssueInfo(BaseModel):
     """Information sur une issue Sentry."""
+
     id: str
     short_id: str
     title: str
@@ -132,6 +155,7 @@ class IssueInfo(BaseModel):
 
 class EventInfo(BaseModel):
     """Information sur un événement/stacktrace."""
+
     event_id: str
     title: str
     message: Optional[str] = None
@@ -146,6 +170,7 @@ class EventInfo(BaseModel):
 
 class ReleaseInfo(BaseModel):
     """Information sur une release."""
+
     version: str
     short_version: str
     date_created: str
@@ -157,6 +182,7 @@ class ReleaseInfo(BaseModel):
 
 class ProjectStats(BaseModel):
     """Statistiques d'un projet."""
+
     project: str
     total_events: int = 0
     total_issues: int = 0
@@ -167,6 +193,7 @@ class ProjectStats(BaseModel):
 
 class TagDistribution(BaseModel):
     """Distribution d'un tag."""
+
     key: str
     name: str
     values: List[Dict[str, Any]] = []
@@ -174,6 +201,7 @@ class TagDistribution(BaseModel):
 
 class SentryResponse(BaseModel):
     """Modèle de réponse pour les opérations Sentry."""
+
     success: bool
     command: str
     message: str
@@ -202,7 +230,31 @@ class SentryMonitorTool(BaseTool):
     """
 
     tool_name = "sentry_monitor"
-    tool_description = "Récupère les erreurs, stacktraces et statistiques depuis Sentry pour prioriser le debugging"
+    tool_description = (
+        "Récupère les erreurs, stacktraces et statistiques depuis Sentry pour prioriser le debugging.\n"
+        "\n"
+        "PARAMÈTRE REQUIS:\n"
+        "- command: L'action à effectuer.\n"
+        "  -> Commandes d'exploration: 'list_projects', 'list_repos', 'list_releases', 'project_stats'.\n"
+        "  -> Commandes d'issues: 'list_issues', 'get_issue', 'issue_events' (stacktraces), 'issue_tags'.\n"
+        "  -> Utilitaire: 'parse_config' (.sentryclirc local).\n"
+        "\n"
+        "DEPENDANCES DE PARAMÈTRES CRITIQUES:\n"
+        "- 'organization': REQUIS pour TOUTES les requêtes API (sauf parse_config). Utilise org SENTRY_ORG si absent.\n"
+        "- 'project': REQUIS pour 'get_project', 'project_stats'. Optionnel mais utile pour 'list_issues' et 'list_releases'.\n"
+        "- 'issue_id': REQUIS pour 'get_issue', 'issue_events', 'issue_tags'.\n"
+        "- 'content': REQUIS pour 'parse_config'.\n"
+        "\n"
+        "PARAMÈTRES OPTIONNELS UTILES:\n"
+        "- query: Filtre pour 'list_issues' (ex: 'is:unresolved', 'level:error').\n"
+        "- time_range: Période pour 'project_stats' ('1h', '24h', '7d', '14d', '30d').\n"
+        "- limit: Nombre max de résultats (défaut: 25).\n"
+        "- token / sentry_url: Pour cibler des instances self-hosted ou écraser la config env.\n"
+        "\n"
+        "UTILISATION:\n"
+        "Utilisez 'list_issues' pour trouver des bugs récents. Utilisez ABSOLUMENT 'issue_events' "
+        "pour récupérer les STACKTRACES complètes d'une issue avant de tenter de la corriger."
+    )
     tags = {"integration", "monitoring"}
     request_model = SentryRequest
     response_model = SentryResponse
@@ -221,13 +273,13 @@ class SentryMonitorTool(BaseTool):
 
         info = ConfigInfo()
 
-        if 'auth' in config:
-            info.token = config['auth'].get('token')
+        if "auth" in config:
+            info.token = config["auth"].get("token")
 
-        if 'defaults' in config:
-            info.organization = config['defaults'].get('org')
-            info.project = config['defaults'].get('project')
-            info.sentry_url = config['defaults'].get('url')
+        if "defaults" in config:
+            info.organization = config["defaults"].get("org")
+            info.project = config["defaults"].get("project")
+            info.sentry_url = config["defaults"].get("url")
 
         return info
 
@@ -237,62 +289,75 @@ class SentryMonitorTool(BaseTool):
 
         for line in content.splitlines():
             line = line.strip()
-            if not line or line.startswith('#') or line.startswith('!'):
+            if not line or line.startswith("#") or line.startswith("!"):
                 continue
 
-            if '=' in line:
-                key, value = line.split('=', 1)
+            if "=" in line:
+                key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
 
-                if key == 'auth.token':
+                if key == "auth.token":
                     info.token = value
-                elif key == 'defaults.org':
+                elif key == "defaults.org":
                     info.organization = value
-                elif key == 'defaults.project':
+                elif key == "defaults.project":
                     info.project = value
-                elif key == 'defaults.url':
+                elif key == "defaults.url":
                     info.sentry_url = value
 
         return info
 
-    def _get_sentry_client(self, request: SentryRequest, token: Optional[str] = None, org: Optional[str] = None) -> SentryClient:
+    def _get_sentry_client(
+        self,
+        request: SentryRequest,
+        token: Optional[str] = None,
+        org: Optional[str] = None,
+    ) -> SentryClient:
         """Create and configure SentryClient with resolved credentials."""
         return SentryClient(
             token=token or request.token,
             organization=org or request.organization,
-            base_url=request.sentry_url or "https://sentry.io"
+            base_url=request.sentry_url or "https://sentry.io",
         )
 
     def _execute_core_logic(self, request: SentryRequest, **kwargs) -> SentryResponse:
         """Exécute la logique principale."""
-        org = resolve_org(request.organization, 'SENTRY_ORG', 'x-sentry-org', 'x-collegue-sentry-org')
-        token = resolve_token(request.token, 'SENTRY_AUTH_TOKEN', 'x-sentry-token', 'x-collegue-sentry-token')
-
+        org = resolve_org(
+            request.organization, "SENTRY_ORG", "x-sentry-org", "x-collegue-sentry-org"
+        )
+        token = resolve_token(
+            request.token,
+            "SENTRY_AUTH_TOKEN",
+            "x-sentry-token",
+            "x-collegue-sentry-token",
+        )
 
         if org and HAS_CONFIG_REGISTRY:
             try:
-                github_token = resolve_token(None, 'GITHUB_TOKEN', 'x-github-token', 'x-collegue-github-token')
+                github_token = resolve_token(
+                    None, "GITHUB_TOKEN", "x-github-token", "x-collegue-github-token"
+                )
                 register_config_with_github(
                     owner=org,
                     repo=None,
                     github_token=github_token,
                     sentry_org=org,
-                    sentry_token=token
+                    sentry_token=token,
                 )
             except Exception:
                 pass
 
-        if not org and request.command not in ['get_issue', 'parse_config']:
+        if not org and request.command not in ["get_issue", "parse_config"]:
             raise ToolExecutionError(
                 "Organisation Sentry requise. Fournissez organization ou définissez SENTRY_ORG."
             )
 
-        if request.command == 'parse_config':
+        if request.command == "parse_config":
             if not request.content:
                 raise ToolExecutionError("content requis pour parse_config")
 
-            if request.format == 'properties':
+            if request.format == "properties":
                 info = self._parse_sentry_properties(request.content)
             else:
                 info = self._parse_sentryclirc(request.content)
@@ -301,94 +366,106 @@ class SentryMonitorTool(BaseTool):
                 success=True,
                 command=request.command,
                 message="✅ Configuration Sentry parsée avec succès",
-                config=info
+                config=info,
             )
 
-        if request.command == 'list_projects':
+        if request.command == "list_projects":
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_projects()
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list projects")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list projects"
+                )
             projects_data = response.data or []
             projects = transform_projects(projects_data)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(projects)} projet(s) dans '{org}'",
-                projects=projects
+                projects=projects,
             )
 
-        elif request.command == 'list_repos':
+        elif request.command == "list_repos":
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_repos()
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list repos")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list repos"
+                )
             repos_data = response.data or []
             repos = transform_repos(repos_data)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(repos)} dépôt(s) liés à '{org}'",
-                repos=repos
+                repos=repos,
             )
 
-        elif request.command == 'get_project':
+        elif request.command == "get_project":
             if not request.project:
                 raise ToolExecutionError("project requis pour get_project")
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_project(request.project)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get project")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get project"
+                )
             data = response.data or {}
             project_info = transform_project(data)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ Projet {project_info.slug}",
-                projects=[project_info]
+                projects=[project_info],
             )
 
-        elif request.command == 'list_issues':
+        elif request.command == "list_issues":
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_issues(
                 project=request.project,
                 query=request.query or "is:unresolved",
-                limit=request.limit
+                limit=request.limit,
             )
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list issues")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list issues"
+                )
             issues_data = response.data or []
             issues = transform_issues(issues_data, request.limit)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(issues)} issue(s) trouvée(s)",
-                issues=issues
+                issues=issues,
             )
 
-        elif request.command == 'get_issue':
+        elif request.command == "get_issue":
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour get_issue")
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue(request.issue_id)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get issue")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get issue"
+                )
             data = response.data or {}
             issue = transform_issue(data)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ Issue {issue.short_id}: {issue.title[:50]}",
-                issue=issue
+                issue=issue,
             )
 
-        elif request.command == 'issue_events':
+        elif request.command == "issue_events":
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_events")
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue_events(request.issue_id, limit=request.limit)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get issue events")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get issue events"
+                )
             events_data = response.data or []
             # Transform events data to EventInfo objects
             events = transform_sentry_events(events_data, request.limit)
@@ -396,56 +473,64 @@ class SentryMonitorTool(BaseTool):
                 success=True,
                 command=request.command,
                 message=f"✅ {len(events)} événement(s) avec stacktrace",
-                events=events
+                events=events,
             )
 
-        elif request.command == 'issue_tags':
+        elif request.command == "issue_tags":
             if not request.issue_id:
                 raise ToolExecutionError("issue_id requis pour issue_tags")
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue_tags(request.issue_id)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get issue tags")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get issue tags"
+                )
             tags_data = response.data or []
             tags = transform_tags(tags_data)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(tags)} tag(s) analysé(s)",
-                tags=tags
+                tags=tags,
             )
 
-        elif request.command == 'project_stats':
+        elif request.command == "project_stats":
             if not request.project:
                 raise ToolExecutionError("project requis pour project_stats")
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_project_stats(request.project, request.time_range)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get project stats")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get project stats"
+                )
             stats_data = response.data or {}
             # Extract stats from response
-            total_events = stats_data.get('total', 0)
-            unresolved = stats_data.get('unresolved', 0)
+            total_events = stats_data.get("total", 0)
+            unresolved = stats_data.get("unresolved", 0)
             stats = transform_project_stats(stats_data, request.project)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ Statistiques de '{request.project}'",
-                stats=stats
+                stats=stats,
             )
 
-        elif request.command == 'list_releases':
+        elif request.command == "list_releases":
             client = self._get_sentry_client(request, token=token, org=org)
-            response = client.list_releases(project=request.project, limit=request.limit)
+            response = client.list_releases(
+                project=request.project, limit=request.limit
+            )
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list releases")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list releases"
+                )
             releases_data = response.data or []
             releases = transform_releases(releases_data, request.limit)
             return SentryResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(releases)} release(s)",
-                releases=releases
+                releases=releases,
             )
 
         else:
