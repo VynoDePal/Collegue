@@ -3,6 +3,7 @@ Kubernetes Operations Tool - Gestion et inspection des clusters Kubernetes
 
 Permet à Collègue de lister les pods, lire les logs et décrire les ressources.
 """
+
 import logging
 import os
 import json
@@ -12,17 +13,24 @@ from .base import BaseTool, ToolExecutionError
 from ..core.shared import validate_k8s_command
 from .clients import KubernetesClient
 from .transformers import (
-	transform_pods, transform_pod_detail,
-	transform_deployments, transform_deployment,
-	transform_services, transform_namespaces,
-	transform_events, transform_nodes, transform_node,
-	transform_configmaps, transform_secrets,
-	_format_age,
+    transform_pods,
+    transform_pod_detail,
+    transform_deployments,
+    transform_deployment,
+    transform_services,
+    transform_namespaces,
+    transform_events,
+    transform_nodes,
+    transform_node,
+    transform_configmaps,
+    transform_secrets,
+    _format_age,
 )
 
 try:
     from kubernetes import client, config
     from kubernetes.client.rest import ApiException
+
     HAS_K8S = True
 except ImportError:
     HAS_K8S = False
@@ -37,31 +45,50 @@ class KubernetesRequest(BaseModel):
     - get_pod, get_deployment, pod_logs: name + namespace
     - describe_resource: name + resource_type + namespace
     """
+
     command: str = Field(
         ...,
-        description="Commande K8s. get_pod/pod_logs nécessitent 'name'. describe_resource nécessite 'name' ET 'resource_type'. Commandes: list_pods, get_pod, pod_logs, list_deployments, get_deployment, list_services, list_namespaces, list_events, list_nodes, describe_resource, list_configmaps, list_secrets"
+        description="Commande K8s. get_pod/pod_logs nécessitent 'name'. describe_resource nécessite 'name' ET 'resource_type'. Commandes: list_pods, get_pod, pod_logs, list_deployments, get_deployment, list_services, list_namespaces, list_events, list_nodes, describe_resource, list_configmaps, list_secrets",
     )
-    namespace: str = Field("default", description="Namespace Kubernetes (défaut: 'default')")
+    namespace: str = Field(
+        "default", description="Namespace Kubernetes (défaut: 'default')"
+    )
     name: Optional[str] = Field(
         None,
-        description="REQUIS pour get_pod, pod_logs, get_deployment, describe_resource. Nom de la ressource K8s"
+        description="REQUIS pour get_pod, pod_logs, get_deployment, describe_resource. Nom de la ressource K8s",
     )
     resource_type: Optional[str] = Field(
         None,
-        description="REQUIS pour describe_resource. Type: 'pod', 'deployment', 'service', 'configmap', 'secret'"
+        description="REQUIS pour describe_resource. Type: 'pod', 'deployment', 'service', 'configmap', 'secret'",
     )
-    container: Optional[str] = Field(None, description="Nom du container spécifique pour pod_logs (optionnel si un seul container)")
-    tail_lines: int = Field(100, description="Nombre de lignes de logs à récupérer (1-5000)", ge=1, le=5000)
-    previous: bool = Field(False, description="Récupérer les logs du container précédent (après crash)")
-    label_selector: Optional[str] = Field(None, description="Filtrer par labels (ex: 'app=nginx', 'env=prod')")
-    field_selector: Optional[str] = Field(None, description="Filtrer par champs (ex: 'status.phase=Running')")
-    kubeconfig: Optional[str] = Field(None, description="Chemin kubeconfig (utilise ~/.kube/config par défaut)")
-    context: Optional[str] = Field(None, description="Contexte K8s à utiliser (optionnel)")
+    container: Optional[str] = Field(
+        None,
+        description="Nom du container spécifique pour pod_logs (optionnel si un seul container)",
+    )
+    tail_lines: int = Field(
+        100, description="Nombre de lignes de logs à récupérer (1-5000)", ge=1, le=5000
+    )
+    previous: bool = Field(
+        False, description="Récupérer les logs du container précédent (après crash)"
+    )
+    label_selector: Optional[str] = Field(
+        None, description="Filtrer par labels (ex: 'app=nginx', 'env=prod')"
+    )
+    field_selector: Optional[str] = Field(
+        None, description="Filtrer par champs (ex: 'status.phase=Running')"
+    )
+    kubeconfig: Optional[str] = Field(
+        None, description="Chemin kubeconfig (utilise ~/.kube/config par défaut)"
+    )
+    context: Optional[str] = Field(
+        None, description="Contexte K8s à utiliser (optionnel)"
+    )
 
-    @field_validator('command')
+    @field_validator("command")
     @classmethod
     def validate_command(cls, v: str) -> str:
         return validate_k8s_command(v)
+
 
 class PodInfo(BaseModel):
     name: str
@@ -202,13 +229,40 @@ class KubernetesOpsTool(BaseTool):
     """
 
     tool_name = "kubernetes_ops"
-    tool_description = "Inspecte les clusters Kubernetes: pods, logs, déploiements, services, événements"
+    tool_description = (
+        "Inspecte les clusters Kubernetes: pods, logs, déploiements, services, événements.\n"
+        "\n"
+        "PARAMÈTRE REQUIS:\n"
+        "- command: L'action à scripter.\n"
+        "  -> Commandes globales: 'list_namespaces', 'list_nodes', 'get_node'.\n"
+        "  -> Commandes par namespace: 'list_pods', 'list_deployments', 'list_services', 'list_events', 'list_configmaps', 'list_secrets'.\n"
+        "  -> Commandes ciblées: 'get_pod', 'pod_logs', 'get_deployment', 'describe_resource'.\n"
+        "\n"
+        "DEPENDANCES DE PARAMÈTRES CRITIQUES:\n"
+        "- 'name': REQUIS pour 'get_pod', 'pod_logs', 'get_deployment', 'describe_resource', 'get_node'.\n"
+        "- 'resource_type': REQUIS pour 'describe_resource' ('pod', 'deployment', 'service', 'configmap', 'secret').\n"
+        "\n"
+        "PARAMÈTRES OPTIONNELS:\n"
+        "- namespace: Cible des commandes (défaut: 'default').\n"
+        "- container: Nom du container pour 'pod_logs' (optionnel si un seul container).\n"
+        "- tail_lines: Nombre de lignes pour 'pod_logs' (défaut: 100).\n"
+        "- previous: Booléen pour 'pod_logs'. Si True, récupère les logs du container précédent (utile après un crash).\n"
+        "- label_selector: Filtre pour les listes (ex: 'app=nginx').\n"
+        "- field_selector: Filtre pour les listes (ex: 'status.phase=Running').\n"
+        "- kubeconfig: Chemin custom. Défaut: ~/.kube/config ou incluster.\n"
+        "- context: Contexte K8s spécifique.\n"
+        "\n"
+        "UTILISATION:\n"
+        "Essentiel pour diagnostiquer des crash loops (utilisez 'previous=True' sur 'pod_logs') ou valider le déploiement de ressources YAML."
+    )
     tags = {"integration", "devops"}
     request_model = KubernetesRequest
     response_model = KubernetesResponse
     supported_languages = ["yaml"]
 
-    def _load_config(self, kubeconfig: Optional[str] = None, context: Optional[str] = None):
+    def _load_config(
+        self, kubeconfig: Optional[str] = None, context: Optional[str] = None
+    ):
         if not HAS_K8S:
             raise ToolExecutionError(
                 "kubernetes non installé. Installez avec: pip install kubernetes"
@@ -218,7 +272,6 @@ class KubernetesOpsTool(BaseTool):
             if kubeconfig:
                 config.load_kube_config(config_file=kubeconfig, context=context)
             else:
-
                 try:
                     config.load_incluster_config()
                 except config.ConfigException:
@@ -230,30 +283,34 @@ class KubernetesOpsTool(BaseTool):
         return KubernetesClient(
             kubeconfig=request.kubeconfig,
             context=request.context,
-            namespace=request.namespace
+            namespace=request.namespace,
         )
 
-    def _execute_core_logic(self, request: KubernetesRequest, **kwargs) -> KubernetesResponse:
+    def _execute_core_logic(
+        self, request: KubernetesRequest, **kwargs
+    ) -> KubernetesResponse:
         client = self._get_kubernetes_client(request)
 
-        if request.command == 'list_pods':
+        if request.command == "list_pods":
             response = client.list_pods(
                 namespace=request.namespace,
                 label_selector=request.label_selector,
-                field_selector=request.field_selector
+                field_selector=request.field_selector,
             )
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list pods")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list pods"
+                )
             pods_data = response.data or []
             pods = transform_pods(pods_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(pods)} pod(s) dans '{request.namespace}'",
-                pods=pods
+                pods=pods,
             )
 
-        elif request.command == 'get_pod':
+        elif request.command == "get_pod":
             if not request.name:
                 raise ToolExecutionError("name requis pour get_pod")
             response = client.get_pod(request.name, request.namespace)
@@ -264,10 +321,10 @@ class KubernetesOpsTool(BaseTool):
                 success=True,
                 command=request.command,
                 message=f"✅ Pod {pod.name}: {pod.status}",
-                pod=pod
+                pod=pod,
             )
 
-        elif request.command == 'pod_logs':
+        elif request.command == "pod_logs":
             if not request.name:
                 raise ToolExecutionError("name requis pour pod_logs")
             response = client.get_pod_logs(
@@ -275,108 +332,128 @@ class KubernetesOpsTool(BaseTool):
                 namespace=request.namespace,
                 container=request.container,
                 tail_lines=request.tail_lines,
-                previous=request.previous
+                previous=request.previous,
             )
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get pod logs")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get pod logs"
+                )
             logs = response.data or ""
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ Logs de '{request.name}' ({len(logs)} caractères)",
-                logs=logs[:50000]
+                logs=logs[:50000],
             )
 
-        elif request.command == 'list_deployments':
+        elif request.command == "list_deployments":
             response = client.list_deployments(request.namespace)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list deployments")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list deployments"
+                )
             deployments_data = response.data or []
             deployments = transform_deployments(deployments_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(deployments)} deployment(s) dans '{request.namespace}'",
-                deployments=deployments
+                deployments=deployments,
             )
 
-        elif request.command == 'get_deployment':
+        elif request.command == "get_deployment":
             if not request.name:
                 raise ToolExecutionError("name requis pour get_deployment")
             response = client.get_deployment(request.name, request.namespace)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to get deployment")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to get deployment"
+                )
             deployment = transform_deployment(response.data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ Deployment {deployment.name}: {deployment.replicas}",
-                deployment=deployment
+                deployment=deployment,
             )
 
-        elif request.command == 'list_services':
+        elif request.command == "list_services":
             response = client.list_services(request.namespace)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list services")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list services"
+                )
             services_data = response.data or []
             services = transform_services(services_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(services)} service(s) dans '{request.namespace}'",
-                services=services
+                services=services,
             )
 
-        elif request.command == 'list_namespaces':
+        elif request.command == "list_namespaces":
             response = client.list_namespaces()
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list namespaces")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list namespaces"
+                )
             namespaces_data = response.data or []
             namespaces = transform_namespaces(namespaces_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(namespaces)} namespace(s)",
-                namespaces=namespaces
+                namespaces=namespaces,
             )
 
-        elif request.command == 'list_events':
+        elif request.command == "list_events":
             response = client.list_events(
-                namespace=request.namespace,
-                field_selector=request.field_selector
+                namespace=request.namespace, field_selector=request.field_selector
             )
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list events")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list events"
+                )
             events_data = response.data or []
             events = transform_events(events_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(events)} événement(s) dans '{request.namespace}'",
-                events=events
+                events=events,
             )
 
-        elif request.command == 'list_nodes':
+        elif request.command == "list_nodes":
             response = client.list_nodes()
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list nodes")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list nodes"
+                )
             nodes_data = response.data or []
             nodes = transform_nodes(nodes_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(nodes)} nœud(s)",
-                nodes=nodes
+                nodes=nodes,
             )
 
-        elif request.command == 'get_node':
+        elif request.command == "get_node":
             if not request.name:
                 raise ToolExecutionError("name requis pour get_node")
             response = client.list_nodes()
             if not response.success:
                 raise ToolExecutionError(response.error_message or "Failed to get node")
             nodes_data = response.data or []
-            node_dict = next((n for n in nodes_data if n.get('metadata', {}).get('name') == request.name), None)
+            node_dict = next(
+                (
+                    n
+                    for n in nodes_data
+                    if n.get("metadata", {}).get("name") == request.name
+                ),
+                None,
+            )
             if not node_dict:
                 raise ToolExecutionError(f"Nœud '{request.name}' introuvable")
             node = transform_node(node_dict)
@@ -384,52 +461,63 @@ class KubernetesOpsTool(BaseTool):
                 success=True,
                 command=request.command,
                 message=f"✅ Nœud {node.name}: {node.status}",
-                node=node
+                node=node,
             )
 
-        elif request.command == 'list_configmaps':
+        elif request.command == "list_configmaps":
             response = client.list_configmaps(request.namespace)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list configmaps")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list configmaps"
+                )
             configmaps_data = response.data or []
             configmaps = transform_configmaps(configmaps_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(configmaps)} ConfigMap(s) dans '{request.namespace}'",
-                configmaps=configmaps
+                configmaps=configmaps,
             )
 
-        elif request.command == 'list_secrets':
+        elif request.command == "list_secrets":
             response = client.list_secrets(request.namespace)
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to list secrets")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to list secrets"
+                )
             secrets_data = response.data or []
             secrets = transform_secrets(secrets_data)
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ {len(secrets)} Secret(s) dans '{request.namespace}'",
-                secrets=secrets
+                secrets=secrets,
             )
 
-        elif request.command == 'describe_resource':
+        elif request.command == "describe_resource":
             if not request.name or not request.resource_type:
-                raise ToolExecutionError("name et resource_type requis pour describe_resource")
+                raise ToolExecutionError(
+                    "name et resource_type requis pour describe_resource"
+                )
             response = client.describe_resource(
                 resource_type=request.resource_type,
                 name=request.name,
-                namespace=request.namespace
+                namespace=request.namespace,
             )
             if not response.success:
-                raise ToolExecutionError(response.error_message or "Failed to describe resource")
+                raise ToolExecutionError(
+                    response.error_message or "Failed to describe resource"
+                )
             import yaml
-            yaml_output = yaml.dump(response.data, default_flow_style=False, allow_unicode=True)
+
+            yaml_output = yaml.dump(
+                response.data, default_flow_style=False, allow_unicode=True
+            )
             return KubernetesResponse(
                 success=True,
                 command=request.command,
                 message=f"✅ Description de {request.resource_type}/{request.name}",
-                resource_yaml=yaml_output
+                resource_yaml=yaml_output,
             )
 
         else:
