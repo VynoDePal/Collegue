@@ -41,16 +41,21 @@ class RepoConsistencyCheckTool(BaseTool):
 
     tool_name = "repo_consistency_check"
     tool_description = (
-        "Outil pour détecter les incohérences dans le code source. "
-        "PARAMÈTRES REQUIS : "
-        "1. 'files': Une liste de dictionnaires représentant les fichiers à analyser. "
-        "Format exact: [{'path': 'chemin/fichier.py', 'content': 'le code brut...'}] "
-        "PARAMÈTRES OPTIONNELS : "
-        "- 'language': ex: 'python', 'typescript', 'javascript', 'php', ou 'auto'. "
-        "- 'checks': liste de vérifications ('unused_imports', 'unused_vars', 'dead_code', 'duplication', 'unresolved_symbol'). "
-        "- 'analysis_depth': 'fast' (heuristiques seules) ou 'deep' (analyse IA enrichie). "
-        "- 'auto_chain': (bool) active le refactoring automatique si la dette technique est jugée trop élevée. "
-        "REMARQUE : Cet outil retourne un rapport sur les problèmes trouvés et suggère des actions (qui doivent ensuite être appliquées explicitement)."
+        "Analyse le code source pour détecter les incohérences (imports/variables inutilisés, code mort, duplication, symboles non résolus).\n"
+        "\n"
+        "PARAMÈTRE REQUIS:\n"
+        "- files: Liste d'objets représentant les fichiers à analyser. "
+        "Format EXACT: [{'path': 'src/main.py', 'content': 'def foo():...'}, ...]. "
+        "Il est crucial de fournir le contenu brut ('content') et le chemin ('path') pour chaque fichier.\n"
+        "\n"
+        "PARAMÈTRES OPTIONNELS UTILES:\n"
+        "- language: Langage des fichiers ('python', 'typescript', 'javascript', 'php', 'auto'). Défaut: 'auto'.\n"
+        "- checks: Liste des vérifications à lancer. Options: 'unused_imports', 'unused_vars', 'dead_code', 'duplication', 'unresolved_symbol'.\n"
+        "- analysis_depth: 'fast' (heuristiques ultra-rapides) ou 'deep' (heuristiques + analyse LLM approfondie avec insights).\n"
+        "- auto_chain: Booléen. Si True et que le score de refactoring est élevé, déclenche automatiquement l'outil 'code_refactoring'.\n"
+        "\n"
+        "UTILISATION:\n"
+        'Idéal pour un audit rapide de la qualité du code après plusieurs modifications ou pour détecter des variables/dangers "hallucinés" par une IA.'
     )
     tags = {"analysis", "quality"}
     request_model = ConsistencyCheckRequest
