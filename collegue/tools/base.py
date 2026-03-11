@@ -299,19 +299,11 @@ class BaseTool(ABC):
 
     def validate_request(self, request: Union[BaseModel, Dict[str, Any]]) -> bool:
         """
-        Valide la requête en vérifiant qu'elle est conforme au modèle
-        attendu, sans toutefois retourner une version normalisée.
-        
-        La méthode peut instancier en interne le modèle de requête
-        attendu (p. ex. `expected_model(**request)` ou via
-        `request.model_dump()`) afin d'effectuer les validations,
-        notamment sur le champ `language` lorsque présent. La
-        normalisation « officielle » (et le retour de l'instance
-        normalisée) reste de la responsabilité de `normalize_request()`.
+        Valide la requête sans la normaliser.
         
         Cette méthode peut être surchargée par les sous-classes pour
-        ajouter des validations spécifiques. Elle doit retourner True
-        si la validation réussit, ou lever une exception sinon.
+        ajouter des validations spécifiques. Elle retourne True si la 
+        validation réussit. La normalisation est gérée par normalize_request().
         
         Args:
             request: Requête à valider (BaseModel ou dict)
@@ -412,13 +404,8 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Normaliser la requête vers le type attendu
         normalized_request = self.normalize_request(request)
-        
-        # Valider la requête (peut être surchargée par les sous-classes)
         self.validate_request(normalized_request)
-        
-        # Vérifier les quotas avec la requête normalisée
         self._check_quotas(normalized_request, **kwargs)
         
         # Log l'accès aux données sensibles
@@ -443,13 +430,11 @@ class BaseTool(ABC):
             }
         )
         
-        # Exécuter la logique métier avec la requête normalisée
         start_time = time.time()
         try:
             result = self._execute_core_logic(normalized_request, **kwargs)
             self._validate_result(result)
             
-            # Enregistrer le temps d'exécution
             execution_time = time.time() - start_time
             self.logger.debug(f"Tool {self.tool_name} executed in {execution_time:.2f}s")
             
@@ -475,13 +460,8 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Normaliser la requête vers le type attendu
         normalized_request = self.normalize_request(request)
-        
-        # Valider la requête (peut être surchargée par les sous-classes)
         self.validate_request(normalized_request)
-        
-        # Vérifier les quotas avec la requête normalisée
         self._check_quotas(normalized_request, **kwargs)
 
         if not self.prompt_engine and kwargs.get('prompt_engine'):
@@ -499,12 +479,10 @@ class BaseTool(ABC):
 
         if ctx:
             await ctx.report_progress(progress=0, total=total_steps)
-        # Validation et normalisation déjà faites avant _check_quotas
 
         if ctx:
             await ctx.report_progress(progress=1, total=total_steps)
 
-        # Exécuter avec vérification du temps
         start_time = time.time()
         try:
             if hasattr(self, '_execute_core_logic_async'):
@@ -512,10 +490,9 @@ class BaseTool(ABC):
             else:
                 result = await asyncio.to_thread(self._execute_core_logic, normalized_request, **kwargs)
             
-            # Vérifier le temps d'exécution périodiquement
             if self.quota_enabled and self._quota_manager:
                 elapsed = time.time() - start_time
-                if elapsed > 1.0:  # Vérifier toutes les secondes
+                if elapsed > 1.0:
                     self._check_execution_time(**kwargs)
 
             self._validate_result(result)
