@@ -285,13 +285,16 @@ from collegue.tools.quotas import QuotaConfig
 class AnalyzerTool(BaseTool):
     tool_name = "code_analyzer"
     
-    def __init__(self, config=None, app_state=None):
-        super().__init__(config, app_state)
-        # Configurer des quotas stricts
-        self._quota_manager.config = QuotaConfig(
-            llm_tokens_per_session=50000,
-            max_files_per_request=50
-        )
+    def _get_quota_manager(self, **kwargs):
+        """Surcharge pour configurer des quotas personnalisés."""
+        manager = super()._get_quota_manager(**kwargs)
+        # Configurer des quotas stricts si pas déjà configuré
+        if manager.config.llm_tokens_per_session == QuotaConfig.from_env().llm_tokens_per_session:
+            manager.config = QuotaConfig(
+                llm_tokens_per_session=50000,
+                max_files_per_request=50
+            )
+        return manager
     
     def _execute_core_logic(self, request, **kwargs):
         # Vérifications automatiques

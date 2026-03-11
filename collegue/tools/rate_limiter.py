@@ -45,6 +45,13 @@ class RateLimitConfig:
     burst: int = 10
     strategy: RateLimitStrategy = RateLimitStrategy.TOKEN_BUCKET
     
+    def __post_init__(self):
+        """Valide les valeurs après initialisation."""
+        if self.requests_per_minute <= 0:
+            raise ValueError(f"requests_per_minute must be > 0, got {self.requests_per_minute}")
+        if self.burst <= 0:
+            raise ValueError(f"burst must be > 0, got {self.burst}")
+    
     @property
     def requests_per_second(self) -> float:
         return self.requests_per_minute / 60.0

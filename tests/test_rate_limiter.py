@@ -90,14 +90,16 @@ class TestTokenBucketLimiter:
         limiter = TokenBucketLimiter(config, "test")
         
         results = {"allowed": 0, "blocked": 0}
+        lock = threading.Lock()
         
         def make_requests():
             for _ in range(20):
                 allowed, _ = limiter.allow_request()
-                if allowed:
-                    results["allowed"] += 1
-                else:
-                    results["blocked"] += 1
+                with lock:
+                    if allowed:
+                        results["allowed"] += 1
+                    else:
+                        results["blocked"] += 1
         
         threads = [threading.Thread(target=make_requests) for _ in range(5)]
         for t in threads:
@@ -225,6 +227,45 @@ class TestRateLimiterFactory:
         limiter = RateLimiterFactory.create(config, "test")
         
         assert isinstance(limiter, SlidingWindowLimiter)
+
+
+class TestRateLimitConfigValidation:
+    """Tests pour la validation de RateLimitConfig."""
+    
+    def test_requests_per_minute_zero_raises(self):
+        """Test que requests_per_minute=0 lève une erreur."""
+        with pytest.raises(ValueError) as exc_info:
+            RateLimitConfig(requests_per_minute=0, burst=10)
+        
+        assert "requests_per_minute must be > 0" in str(exc_info.value)
+    
+    def test_requests_per_minute_negative_raises(self):
+        """Test que requests_per_minute négatif lève une erreur."""
+        with pytest.raises(ValueError) as exc_info:
+            RateLimitConfig(requests_per_minute=-1, burst=10)
+        
+        assert "requests_per_minute must be > 0" in str(exc_info.value)
+    
+    def test_burst_zero_raises(self):
+        """Test que burst=0 lève une erreur."""
+        with pytest.raises(ValueError) as exc_info:
+            RateLimitConfig(requests_per_minute=60, burst=0)
+        
+        assert "burst must be > 0" in str(exc_info.value)
+    
+    def test_burst_negative_raises(self):
+        """Test que burst négatif lève une erreur."""
+        with pytest.raises(ValueError) as exc_info:
+            RateLimitConfig(requests_per_minute=60, burst=-5)
+        
+        assert "burst must be > 0" in str(exc_info.value)
+    
+    def test_valid_config_no_raise(self):
+        """Test qu'une config valide ne lève pas d'erreur."""
+        config = RateLimitConfig(requests_per_minute=60, burst=10)
+        
+        assert config.requests_per_minute == 60
+        assert config.burst == 10
     
     def test_create_unknown_strategy(self):
         """Test la création avec une stratégie inconnue."""
