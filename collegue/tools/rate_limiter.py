@@ -307,6 +307,9 @@ class RateLimiterManager:
         """
         Récupère ou crée un rate limiter pour un tool.
         
+        Si une config est explicitement fournie et différente de l'existante,
+        le limiter est recréé avec la nouvelle config.
+        
         Args:
             tool_name: Nom du tool
             config: Configuration optionnelle (sinon utilise DEFAULT_LIMITS)
@@ -315,20 +318,60 @@ class RateLimiterManager:
             RateLimiter configuré pour ce tool
         """
         with self._lock:
+            should_create_new = False
+            
             if tool_name not in self._limiters:
+                should_create_new = True
                 if config is None:
                     config = self.DEFAULT_LIMITS.get(
                         tool_name,
                         self.DEFAULT_LIMITS["default"]
                     )
-                
+            elif config is not None:
+                # Vérifier si la config est différente de l'existante
+                existing_limiter = self._limiters[tool_name]
+                if self._config_differs(existing_limiter.config, config):
+                    should_create_new = True
+                    self._logger.info(
+                        f"Updating rate limiter for {tool_name} with new config"
+                    )
+            
+            if should_create_new:
+                effective_config = config or self.DEFAULT_LIMITS.get(
+                    tool_name,
+                    self.DEFAULT_LIMITS["default"]
+                )
                 self._limiters[tool_name] = RateLimiterFactory.create(
-                    config,
+                    effective_config,
                     tool_name
                 )
-                self._logger.info(f"Created rate limiter for {tool_name}")
+                self._logger.info(f"Created/Updated rate limiter for {tool_name}")
             
             return self._limiters[tool_name]
+    
+    def _config_differs(
+        self,
+        config1: RateLimitConfig,
+        config2: RateLimitConfig
+    ) -> bool:
+        """Compare deux configurations pour détecter les différences."""
+        return (
+            config1.requests_per_minute != config2.requests_per_minute or
+            config1.burst != config2.burst or
+            config1.strategy != config2.strategy
+        )
+    
+    def update_limiter(self, tool_name: str, config: RateLimitConfig):
+        """
+        Force la mise à jour d'un limiter existant avec une nouvelle config.
+        
+        Args:
+            tool_name: Nom du tool
+            config: Nouvelle configuration
+        """
+        with self._lock:
+            self._limiters[tool_name] = RateLimiterFactory.create(config, tool_name)
+            self._logger.info(f"Force updated rate limiter for {tool_name}")
     
     def check_rate_limit(self, tool_name: str) -> None:
         """
