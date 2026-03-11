@@ -288,12 +288,14 @@ class AnalyzerTool(BaseTool):
     def _get_quota_manager(self, **kwargs):
         """Surcharge pour configurer des quotas personnalisés."""
         manager = super()._get_quota_manager(**kwargs)
-        # Configurer des quotas stricts si pas déjà configuré
-        if manager.config.llm_tokens_per_session == QuotaConfig.from_env().llm_tokens_per_session:
+        
+        # Utiliser un flag pour éviter les overrides répétés
+        if not getattr(manager, '_custom_configured', False):
             manager.config = QuotaConfig(
                 llm_tokens_per_session=50000,
                 max_files_per_request=50
             )
+            manager._custom_configured = True
         return manager
     
     def _execute_core_logic(self, request, **kwargs):

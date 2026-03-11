@@ -297,21 +297,44 @@ class BaseTool(ABC):
             )
         return True
 
-    def validate_request(self, request: BaseModel) -> bool:
+    def validate_request(self, request: BaseModel) -> BaseModel:
+        """
+        Valide et retourne la requête normalisée.
+        
+        Si la requête est d'un type différent du modèle attendu,
+        elle est convertie vers le bon type.
+        
+        Args:
+            request: Requête à valider
+        
+        Returns:
+            BaseModel: La requête validée et normalisée
+        
+        Raises:
+            ToolValidationError: Si la validation échoue
+        """
         try:
             expected_model = self.get_request_model()
+            validated_request = request
+            
             if not isinstance(request, expected_model):
                 if hasattr(request, 'model_dump'):
-                    request = expected_model(**request.model_dump())
+                    # Convertir vers le type attendu
+                    validated_request = expected_model(**request.model_dump())
+                elif isinstance(request, dict):
+                    # Convertir depuis un dict
+                    validated_request = expected_model(**request)
                 else:
                     raise ToolValidationError(
-                        f"Type de requête invalide. Attendu: {expected_model.__name__}"
+                        f"Type de requête invalide. Attendu: {expected_model.__name__}, "
+                        f"reçu: {type(request).__name__}"
                     )
 
-            if hasattr(request, 'language') and request.language:
-                self.validate_language(request.language)
+            # Valider le langage si présent
+            if hasattr(validated_request, 'language') and validated_request.language:
+                self.validate_language(validated_request.language)
 
-            return True
+            return validated_request
 
         except ValidationError as e:
             raise ToolValidationError(f"Validation de la requête échouée: {e}")
@@ -347,11 +370,11 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Valider la requête
-        self.validate_request(request)
+        # Valider la requête et utiliser la version normalisée
+        validated_request = self.validate_request(request)
         
-        # Vérifier les quotas
-        self._check_quotas(request, **kwargs)
+        # Vérifier les quotas avec la requête validée
+        self._check_quotas(validated_request, **kwargs)
         
         # Log l'accès aux données sensibles
         try:
@@ -375,10 +398,10 @@ class BaseTool(ABC):
             }
         )
         
-        # Exécuter la logique métier
+        # Exécuter la logique métier avec la requête validée
         start_time = time.time()
         try:
-            result = self._execute_core_logic(request, **kwargs)
+            result = self._execute_core_logic(validated_request, **kwargs)
             self._validate_result(result)
             
             # Enregistrer le temps d'exécution
@@ -409,10 +432,10 @@ class BaseTool(ABC):
         
         # Valider la requête AVANT de vérifier les quotas
         # pour éviter d'inspecter des champs non normalisés
-        self.validate_request(request)
+        validated_request = self.validate_request(request)
         
-        # Vérifier les quotas APRÈS validation
-        self._check_quotas(request, **kwargs)
+        # Vérifier les quotas APRÈS validation avec la requête normalisée
+        self._check_quotas(validated_request, **kwargs)
 
         if not self.prompt_engine and kwargs.get('prompt_engine'):
             prompt_engine = kwargs.get('prompt_engine')
@@ -438,9 +461,9 @@ class BaseTool(ABC):
         start_time = time.time()
         try:
             if hasattr(self, '_execute_core_logic_async'):
-                result = await self._execute_core_logic_async(request, **kwargs)
+                result = await self._execute_core_logic_async(validated_request, **kwargs)
             else:
-                result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
+                result = await asyncio.to_thread(self._execute_core_logic, validated_request, **kwargs)
             
             # Vérifier le temps d'exécution périodiquement
             if self.quota_enabled and self._quota_manager:
