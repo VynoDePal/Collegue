@@ -299,7 +299,15 @@ class BaseTool(ABC):
 
     def validate_request(self, request: Union[BaseModel, Dict[str, Any]]) -> bool:
         """
-        Valide la requête sans la normaliser.
+        Valide la requête en vérifiant qu'elle est conforme au modèle
+        attendu, sans toutefois retourner une version normalisée.
+        
+        La méthode peut instancier en interne le modèle de requête
+        attendu (p. ex. `expected_model(**request)` ou via
+        `request.model_dump()`) afin d'effectuer les validations,
+        notamment sur le champ `language` lorsque présent. La
+        normalisation « officielle » (et le retour de l'instance
+        normalisée) reste de la responsabilité de `normalize_request()`.
         
         Cette méthode peut être surchargée par les sous-classes pour
         ajouter des validations spécifiques. Elle doit retourner True
@@ -404,11 +412,11 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Valider la requête (peut être surchargée par les sous-classes)
-        self.validate_request(request)
-        
         # Normaliser la requête vers le type attendu
         normalized_request = self.normalize_request(request)
+        
+        # Valider la requête (peut être surchargée par les sous-classes)
+        self.validate_request(normalized_request)
         
         # Vérifier les quotas avec la requête normalisée
         self._check_quotas(normalized_request, **kwargs)
@@ -467,11 +475,11 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Valider la requête (peut être surchargée par les sous-classes)
-        self.validate_request(request)
-        
         # Normaliser la requête vers le type attendu
         normalized_request = self.normalize_request(request)
+        
+        # Valider la requête (peut être surchargée par les sous-classes)
+        self.validate_request(normalized_request)
         
         # Vérifier les quotas avec la requête normalisée
         self._check_quotas(normalized_request, **kwargs)

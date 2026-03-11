@@ -54,7 +54,19 @@ echo ""
 # 6. Logs du conteneur MCP
 echo "6. DERNIERS LOGS MCP"
 echo "--------------------"
-docker logs $(docker ps -q --filter name=collegue-app) 2>&1 | tail -20
+MCP_CONTAINER_IDS=$(docker ps -q --filter name=collegue-app)
+if [ -z "$MCP_CONTAINER_IDS" ]; then
+  echo "Aucun conteneur ne correspond au filtre 'collegue-app'."
+elif [ "$(printf '%s\n' $MCP_CONTAINER_IDS | wc -l)" -gt 1 ]; then
+  echo "Attention: plusieurs conteneurs correspondent au filtre 'collegue-app'."
+  docker ps --filter name=collegue-app
+  MCP_CONTAINER_ID=$(printf '%s\n' $MCP_CONTAINER_IDS | head -n 1)
+  echo ""
+  echo "Affichage des logs du premier conteneur: $MCP_CONTAINER_ID"
+  docker logs "$MCP_CONTAINER_ID" 2>&1 | tail -20
+else
+  docker logs "$MCP_CONTAINER_IDS" 2>&1 | tail -20
+fi
 echo ""
 
 # 7. Test avec le client MCP
