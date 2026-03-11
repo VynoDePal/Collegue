@@ -4,28 +4,65 @@ Base Tool - Classe de base pour tous les outils du projet Collègue
 Le timing, logging, error handling et caching sont gérés par les
 middleware FastMCP natifs configurés dans app.py.
 """
+import os
+import time
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Tuple
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 import asyncio
 from ..core.security_logger import security_logger
+from .rate_limiter import (
+    get_rate_limiter_manager,
+    RateLimitExceeded,
+    RateLimitConfig,
+)
+from .quotas import (
+    get_global_quota_manager,
+    QuotaExceeded,
+    QuotaManager,
+)
 
 
 class ToolError(Exception):
     pass
 
+
 class ToolValidationError(ToolError):
     pass
+
 
 class ToolExecutionError(ToolError):
     pass
 
+
 class ToolConfigurationError(ToolError):
     pass
 
+
+class ToolRateLimitError(ToolExecutionError):
+    """Erreur de rate limiting spécifique aux tools."""
+    pass
+
+
+class ToolQuotaError(ToolExecutionError):
+    """Erreur de quota spécifique aux tools."""
+    pass
+
+
 class BaseTool(ABC):
+    """
+    Classe de base pour tous les outils Collegue.
+    
+    Fournit:
+    - Validation des requêtes et réponses
+    - Rate limiting par tool
+    - Gestion des quotas (tokens, fichiers, temps d'exécution)
+    - Logging de sécurité
+    - Support async/sync
+    """
+    
     tool_name: str = ""
     tool_description: str = ""
     request_model: Optional[Type[BaseModel]] = None
@@ -33,6 +70,11 @@ class BaseTool(ABC):
     supported_languages: List[str] = ["python", "javascript", "typescript"]
     long_running: bool = False
     tags: set = set()
+    
+    # Configuration du rate limiting et des quotas
+    rate_limit_enabled: bool = True
+    quota_enabled: bool = True
+    custom_rate_limit: Optional[RateLimitConfig] = None
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, app_state: Optional[Dict[str, Any]] = None):
         self.config = config or {}
@@ -41,6 +83,10 @@ class BaseTool(ABC):
 
         self.prompt_engine = self.app_state.get('prompt_engine')
         self.context_manager = self.app_state.get('context_manager')
+        
+        # Gestionnaire de quotas pour cette session
+        self._quota_manager: Optional[QuotaManager] = None
+        self._session_id: str = "default"
 
         self._validate_config()
 
@@ -73,6 +119,116 @@ class BaseTool(ABC):
 
     def is_long_running(self) -> bool:
         return self.long_running
+    
+    def _get_session_id(self, **kwargs) -> str:
+        """Récupère l'ID de session depuis les headers ou kwargs."""
+        # Essayer de récupérer depuis les headers HTTP
+        try:
+            from fastmcp.server.dependencies import get_http_headers
+            headers = get_http_headers() or {}
+            session_id = headers.get('x-session-id') or headers.get('x-collegue-session-id')
+            if session_id:
+                return str(session_id)
+        except Exception:
+            pass
+        
+        # Sinon depuis les kwargs
+        return kwargs.get('session_id', self._session_id)
+    
+    def _check_rate_limit(self):
+        """
+        Vérifie le rate limiting pour ce tool.
+        
+        Raises:
+            ToolRateLimitError: Si la limite de taux est dépassée
+        """
+        if not self.rate_limit_enabled:
+            return
+        
+        try:
+            manager = get_rate_limiter_manager()
+            manager.check_rate_limit(self.tool_name)
+        except RateLimitExceeded as e:
+            self.logger.warning(f"Rate limit exceeded for {self.tool_name}: {e}")
+            raise ToolRateLimitError(str(e))
+    
+    def _get_quota_manager(self, **kwargs) -> QuotaManager:
+        """Récupère ou crée le gestionnaire de quotas pour cette session."""
+        if self._quota_manager is None:
+            session_id = self._get_session_id(**kwargs)
+            global_manager = get_global_quota_manager()
+            self._quota_manager = global_manager.get_session_manager(session_id)
+            self._session_id = session_id
+        return self._quota_manager
+    
+    def _check_quotas(self, request: BaseModel, **kwargs):
+        """
+        Vérifie les quotas avant l'exécution.
+        
+        Raises:
+            ToolQuotaError: Si un quota est dépassé
+        """
+        if not self.quota_enabled:
+            return
+        
+        try:
+            manager = self._get_quota_manager(**kwargs)
+            manager.start_execution()
+            
+            # Vérifier la taille de la requête si applicable
+            if hasattr(request, 'model_dump'):
+                import json
+                try:
+                    request_size = len(json.dumps(request.model_dump()).encode('utf-8'))
+                    manager.check_request_size(request_size)
+                except QuotaExceeded:
+                    pass  # Ignorer si la requête est trop grande pour JSON
+            
+            # Vérifier les fichiers si présents dans la requête
+            file_paths = []
+            if hasattr(request, 'file_path'):
+                file_paths.append(request.file_path)
+            if hasattr(request, 'file_paths'):
+                file_paths.extend(request.file_paths)
+            if hasattr(request, 'path'):
+                file_paths.append(request.path)
+            
+            for path in file_paths:
+                if path and os.path.exists(path):
+                    size = manager.check_file_size(path)
+                    manager.record_file_processed(path, size)
+                    
+        except QuotaExceeded as e:
+            self.logger.warning(f"Quota exceeded for {self.tool_name}: {e}")
+            raise ToolQuotaError(str(e))
+    
+    def _record_llm_tokens(self, tokens: int, **kwargs):
+        """Enregistre l'utilisation de tokens LLM."""
+        if self.quota_enabled and self._quota_manager:
+            try:
+                self._quota_manager.record_llm_tokens(tokens)
+            except QuotaExceeded as e:
+                self.logger.warning(f"LLM token quota exceeded: {e}")
+                raise ToolQuotaError(str(e))
+    
+    def _check_execution_time(self, **kwargs) -> float:
+        """
+        Vérifie le temps d'exécution.
+        
+        Returns:
+            Temps d'exécution actuel
+        
+        Raises:
+            ToolQuotaError: Si le temps max est dépassé
+        """
+        if not self.quota_enabled or not self._quota_manager:
+            return 0.0
+        
+        try:
+            return self._quota_manager.check_execution_time()
+        except QuotaExceeded as e:
+            self.logger.warning(f"Execution time quota exceeded: {e}")
+            raise ToolQuotaError(str(e))
 
     async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
         if not self.prompt_engine:
@@ -166,7 +322,30 @@ class BaseTool(ABC):
             )
 
     def execute(self, request: BaseModel, **kwargs) -> BaseModel:
+        """
+        Exécute le tool avec rate limiting et vérification des quotas.
+        
+        Args:
+            request: Requête validée
+            **kwargs: Arguments additionnels
+        
+        Returns:
+            Résultat du tool
+        
+        Raises:
+            ToolRateLimitError: Si le rate limiting est dépassé
+            ToolQuotaError: Si un quota est dépassé
+            ToolValidationError: Si la requête est invalide
+            ToolExecutionError: En cas d'erreur d'exécution
+        """
+        # Vérifier rate limiting
+        self._check_rate_limit()
+        
+        # Valider la requête
         self.validate_request(request)
+        
+        # Vérifier les quotas
+        self._check_quotas(request, **kwargs)
         
         # Log l'accès aux données sensibles
         try:
@@ -175,7 +354,6 @@ class BaseTool(ABC):
             from fastmcp.server.dependencies import get_http_headers
             headers = get_http_headers() or {}
             client_ip = headers.get('x-forwarded-for') or headers.get('x-real-ip')
-            # Essayer de récupérer l'user_id depuis les headers d'auth
             user_id = headers.get('x-user-id') or headers.get('x-collegue-user-id')
         except Exception:
             pass
@@ -185,19 +363,49 @@ class BaseTool(ABC):
             resource=self.tool_name,
             action="execute",
             client_ip=client_ip,
-            extra={"request_type": request.__class__.__name__}
+            extra={
+                "request_type": request.__class__.__name__,
+                "session_id": self._session_id,
+            }
         )
         
-        result = self._execute_core_logic(request, **kwargs)
-        self._validate_result(result)
-        return result
+        # Exécuter la logique métier
+        start_time = time.time()
+        try:
+            result = self._execute_core_logic(request, **kwargs)
+            self._validate_result(result)
+            
+            # Enregistrer le temps d'exécution
+            execution_time = time.time() - start_time
+            self.logger.debug(f"Tool {self.tool_name} executed in {execution_time:.2f}s")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error executing {self.tool_name}: {e}")
+            raise
 
     async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
+        """
+        Exécute le tool de manière asynchrone avec rate limiting et quotas.
+        
+        Args:
+            request: Requête validée
+            **kwargs: Arguments additionnels (peut inclure ctx, session_id)
+        
+        Returns:
+            Résultat du tool
+        """
         ctx = kwargs.get('ctx')
+        
+        # Vérifier rate limiting
+        self._check_rate_limit()
+        
+        # Vérifier les quotas
+        self._check_quotas(request, **kwargs)
 
         if not self.prompt_engine and kwargs.get('prompt_engine'):
             prompt_engine = kwargs.get('prompt_engine')
-            # Support pour le LazyPromptEngine - attendre l'initialisation si nécessaire
             if hasattr(prompt_engine, 'get_engine'):
                 self.prompt_engine = await prompt_engine.get_engine()
             else:
@@ -216,15 +424,30 @@ class BaseTool(ABC):
         if ctx:
             await ctx.report_progress(progress=1, total=total_steps)
 
-        if hasattr(self, '_execute_core_logic_async'):
-            result = await self._execute_core_logic_async(request, **kwargs)
-        else:
-            result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
+        # Exécuter avec vérification du temps
+        start_time = time.time()
+        try:
+            if hasattr(self, '_execute_core_logic_async'):
+                result = await self._execute_core_logic_async(request, **kwargs)
+            else:
+                result = await asyncio.to_thread(self._execute_core_logic, request, **kwargs)
+            
+            # Vérifier le temps d'exécution périodiquement
+            if self.quota_enabled and self._quota_manager:
+                elapsed = time.time() - start_time
+                if elapsed > 1.0:  # Vérifier toutes les secondes
+                    self._check_execution_time(**kwargs)
 
-        self._validate_result(result)
-        if ctx:
-            await ctx.report_progress(progress=total_steps, total=total_steps)
-        return result
+            self._validate_result(result)
+            
+            if ctx:
+                await ctx.report_progress(progress=total_steps, total=total_steps)
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error in async execution of {self.tool_name}: {e}")
+            raise
 
     async def sample_llm(
         self,
@@ -248,6 +471,15 @@ class BaseTool(ABC):
                 result_type=result_type,
                 temperature=temperature
             )
+            
+            # Estimer et enregistrer les tokens utilisés (approximation)
+            # GPT-4 ~ 4 chars/token en moyenne
+            total_chars = len(prompt)
+            if system_prompt:
+                total_chars += len(system_prompt)
+            estimated_tokens = total_chars // 4
+            self._record_llm_tokens(estimated_tokens)
+            
             return result.result if result_type else (result.text or "")
 
         raise ToolExecutionError(
@@ -255,7 +487,8 @@ class BaseTool(ABC):
         )
 
     def get_info(self) -> Dict[str, Any]:
-        return {
+        """Retourne les informations détaillées du tool."""
+        base_info = {
             "name": self.get_name(),
             "description": self.get_description(),
             "supported_languages": self.get_supported_languages(),
@@ -265,8 +498,26 @@ class BaseTool(ABC):
             "usage_description": self.get_usage_description(),
             "parameters": self.get_parameters_info(),
             "examples": self.get_examples(),
-            "capabilities": self.get_capabilities()
+            "capabilities": self.get_capabilities(),
+            "rate_limiting": {
+                "enabled": self.rate_limit_enabled,
+            },
+            "quotas": {
+                "enabled": self.quota_enabled,
+            },
         }
+        
+        # Ajouter les statistiques de rate limiting si disponibles
+        if self.rate_limit_enabled:
+            try:
+                manager = get_rate_limiter_manager()
+                stats = manager.get_stats(self.tool_name)
+                if stats:
+                    base_info["rate_limiting"]["stats"] = stats.get(self.tool_name)
+            except Exception:
+                pass
+        
+        return base_info
 
     def get_usage_description(self) -> str:
         return f"Outil {self.get_name()}: {self.get_description()}"
@@ -295,3 +546,12 @@ class BaseTool(ABC):
                 "expected_response": "Réponse selon la logique de l'outil"
             }
         ]
+    
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Retourne les capacités spéciales du tool."""
+        return {
+            "supports_streaming": False,
+            "supports_cancellation": False,
+            "requires_filesystem": False,
+            "requires_network": False,
+        }
