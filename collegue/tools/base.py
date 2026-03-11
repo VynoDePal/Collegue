@@ -87,6 +87,13 @@ class BaseTool(ABC):
         # Gestionnaire de quotas pour cette session
         self._quota_manager: Optional[QuotaManager] = None
         self._session_id: str = "default"
+        
+        # Enregistrer pour nettoyage périodique
+        from ..core.memory_manager import get_memory_manager
+        get_memory_manager().track_object(
+            f"{self.__class__.__name__}_{id(self)}",
+            self
+        )
 
         self._validate_config()
 
@@ -154,6 +161,28 @@ class BaseTool(ABC):
         except RateLimitExceeded as e:
             self.logger.warning(f"Rate limit exceeded for {self.tool_name}: {e}")
             raise ToolRateLimitError(str(e))
+    
+    def cleanup(self) -> None:
+        """
+        Nettoie les ressources pour éviter les fuites mémoire.
+        
+        Cette méthode doit être appelée quand le tool n'est plus utilisé,
+        surtout pour les sessions longues.
+        """
+        self.logger.debug(f"Cleaning up {self.tool_name}")
+        
+        # Libérer les références circulaires potentielles
+        self.app_state = None
+        self.config = None
+        self.prompt_engine = None
+        self.context_manager = None
+        self._quota_manager = None
+        
+        # Forcer le garbage collection pour ce tool
+        import gc
+        gc.collect()
+        
+        self.logger.info(f"{self.tool_name} cleaned up")
     
     def _get_quota_manager(self, **kwargs) -> QuotaManager:
         """Récupère ou crée le gestionnaire de quotas pour cette session."""

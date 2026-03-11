@@ -5,14 +5,21 @@ Meta Orchestrator - Tool intelligent utilisant FastMCP sampling with tools
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
+from .memory_manager import TTLCache, LimitedSizeHistory
+
 try:
     from fastmcp import FastMCP, Context
 except ImportError:
     FastMCP = Any
     Context = Any
 
-# Cache global pour les outils découverts
+# Cache global pour les outils découverts (avec TTL de 1 heure)
 _TOOLS_CACHE = None
+_MAX_TOOLS_CACHE_SIZE = 50
+_TOOLS_CACHE_TTL = 3600  # 1 heure
+
+# Historique des exécutions (limité à 100 entrées)
+_EXECUTION_HISTORY = LimitedSizeHistory(max_size=100, name="orchestrator_executions")
 
 
 class OrchestratorStep(BaseModel):
@@ -82,15 +89,19 @@ def register_meta_orchestrator(app: FastMCP):
         import collegue.tools
         from collegue.tools.base import BaseTool
 
-        global _TOOLS_CACHE
+        global _TOOLS_CACHE, _MAX_TOOLS_CACHE_SIZE, _TOOLS_CACHE_TTL
         start_time = time.time()
         await ctx.info(
             f"Démarrage orchestration (mode v4 robust): {request.query[:100]}..."
         )
 
-        # 1. Découverte des tools (avec Cache)
+        # 1. Découverte des tools (avec Cache TTL)
         if _TOOLS_CACHE is None:
-            _TOOLS_CACHE = {}
+            _TOOLS_CACHE = TTLCache(
+                max_size=_MAX_TOOLS_CACHE_SIZE,
+                ttl_seconds=_TOOLS_CACHE_TTL,
+                name="tools_discovery"
+            )
             try:
                 for _, name, _ in pkgutil.iter_modules(collegue.tools.__path__):
                     if name.startswith("_") or name == "base":
@@ -130,18 +141,28 @@ def register_meta_orchestrator(app: FastMCP):
 
                                     formatted_args = "\\n".join(args_desc)
 
-                                    _TOOLS_CACHE[tool_name] = {
+                                    _TOOLS_CACHE.set(tool_name, {
                                         "class": obj,
                                         "description": temp_instance.get_description(),
                                         "prompt_desc": f"{tool_name}: {temp_instance.get_description()}\\n  Arguments:\\n{formatted_args}",
                                         "schema": schema,
-                                    }
+                                    })
+                                    
+                                    # Nettoyer explicitement l'instance temporaire
+                                    if hasattr(temp_instance, 'cleanup'):
+                                        temp_instance.cleanup()
+                                    del temp_instance
+                                    
                                 except Exception as e:
                                     await ctx.warning(f"Skip {name}: {e}")
                     except Exception:
                         pass
             except Exception as e:
                 await ctx.error(f"Erreur discovery: {e}")
+        
+        # Nettoyer le cache si trop grand
+        if len(_TOOLS_CACHE) > _MAX_TOOLS_CACHE_SIZE:
+            await ctx.info("Nettoyage du cache tools...")
 
         available_tools = _TOOLS_CACHE
         tools_desc = "\\n".join(

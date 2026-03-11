@@ -80,6 +80,18 @@ class IacGuardrailsScanTool(BaseTool):
         self._k8s_scanner = KubernetesScanner(logger=self.logger)
         self._tf_scanner = TerraformScanner(logger=self.logger)
         self._dockerfile_scanner = DockerfileScanner(logger=self.logger)
+    
+    def cleanup(self) -> None:
+        """Nettoie les ressources pour éviter les fuites mémoire."""
+        super().cleanup()
+        
+        # Libérer les références aux scanners et engine
+        self._engine = None
+        self._k8s_scanner = None
+        self._tf_scanner = None
+        self._dockerfile_scanner = None
+        
+        self.logger.info("IaC Guardrails Scan tool cleaned up")
 
     def get_usage_description(self) -> str:
         return (
