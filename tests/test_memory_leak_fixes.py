@@ -55,16 +55,16 @@ class TestMemoryManager:
         # Créer un objet et le suivre
         obj = TestTool()
         manager.track_object("temp_obj", obj)
+        assert manager._stats.tracked_objects == 1
         
         # Supprimer la référence
         del obj
+        
+        # Forcer GC pour déclencher le callback de weakref
         gc.collect()
         
-        # Nettoyer
-        cleaned = manager.cleanup()
-        
-        # La référence devrait être nettoyée
-        assert cleaned >= 0  # Au moins 0 (peut être 1 si GC a déjà nettoyé)
+        # Le callback on_delete devrait avoir nettoyé l'entrée automatiquement
+        assert manager._stats.tracked_objects == 0
     
     def test_register_cleanup_callback(self):
         """Test l'enregistrement de callbacks de nettoyage."""
@@ -142,13 +142,13 @@ class TestTTLCache:
     
     def test_cache_expires_entries(self):
         """Test que les entrées expirées sont supprimées."""
-        cache = TTLCache(max_size=10, ttl_seconds=0.01, name="test")  # 10ms TTL
+        cache = TTLCache(max_size=10, ttl_seconds=0.1, name="test")  # 100ms TTL
         
         cache.set("key1", "value1")
         
-        # Attendre l'expiration
+        # Attendre l'expiration (marge plus large pour CI)
         import time
-        time.sleep(0.02)
+        time.sleep(0.15)
         
         # L'entrée devrait être expirée
         result = cache.get("key1", default="expired")
@@ -200,11 +200,11 @@ class TestBaseToolMemory:
         assert tool._quota_manager is None
     
     def test_base_tool_cleanup_calls_gc(self):
-        """Test que cleanup appelle gc.collect()."""
+        """Test que cleanup appelle gc.collect() quand force_gc=True."""
         tool = TestTool()
         
         with patch('gc.collect') as mock_gc:
-            tool.cleanup()
+            tool.cleanup(force_gc=True)
             mock_gc.assert_called_once()
 
 

@@ -5,7 +5,7 @@ Meta Orchestrator - Tool intelligent utilisant FastMCP sampling with tools
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
-from .memory_manager import TTLCache, LimitedSizeHistory
+from .memory_manager import TTLCache
 
 try:
     from fastmcp import FastMCP, Context
@@ -17,9 +17,6 @@ except ImportError:
 _TOOLS_CACHE = None
 _MAX_TOOLS_CACHE_SIZE = 50
 _TOOLS_CACHE_TTL = 3600  # 1 heure
-
-# Historique des exécutions (limité à 100 entrées)
-_EXECUTION_HISTORY = LimitedSizeHistory(max_size=100, name="orchestrator_executions")
 
 
 class OrchestratorStep(BaseModel):
@@ -97,7 +94,8 @@ def register_meta_orchestrator(app: FastMCP):
 
         # 1. Découverte des tools (avec Cache TTL)
         if _TOOLS_CACHE is None:
-            _TOOLS_CACHE = TTLCache(
+            # Construire le cache dans une variable locale pour éviter les race conditions
+            _tools_cache_local = TTLCache(
                 max_size=_MAX_TOOLS_CACHE_SIZE,
                 ttl_seconds=_TOOLS_CACHE_TTL,
                 name="tools_discovery"
@@ -141,7 +139,7 @@ def register_meta_orchestrator(app: FastMCP):
 
                                     formatted_args = "\\n".join(args_desc)
 
-                                    _TOOLS_CACHE.set(tool_name, {
+                                    _tools_cache_local.set(tool_name, {
                                         "class": obj,
                                         "description": temp_instance.get_description(),
                                         "prompt_desc": f"{tool_name}: {temp_instance.get_description()}\\n  Arguments:\\n{formatted_args}",
@@ -159,10 +157,9 @@ def register_meta_orchestrator(app: FastMCP):
                         pass
             except Exception as e:
                 await ctx.error(f"Erreur discovery: {e}")
-        
-        # Nettoyer le cache si trop grand
-        if len(_TOOLS_CACHE) > _MAX_TOOLS_CACHE_SIZE:
-            await ctx.info("Nettoyage du cache tools...")
+            
+            # Assigner le cache complet une fois rempli (évite les race conditions)
+            _TOOLS_CACHE = _tools_cache_local
 
         available_tools = _TOOLS_CACHE
         tools_desc = "\\n".join(

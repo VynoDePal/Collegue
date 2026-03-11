@@ -90,8 +90,9 @@ class BaseTool(ABC):
         
         # Enregistrer pour nettoyage périodique
         from ..core.memory_manager import get_memory_manager
+        self._memory_manager_id = f"{self.__class__.__name__}_{id(self)}"
         get_memory_manager().track_object(
-            f"{self.__class__.__name__}_{id(self)}",
+            self._memory_manager_id,
             self
         )
 
@@ -162,14 +163,26 @@ class BaseTool(ABC):
             self.logger.warning(f"Rate limit exceeded for {self.tool_name}: {e}")
             raise ToolRateLimitError(str(e))
     
-    def cleanup(self) -> None:
+    def cleanup(self, force_gc: bool = False) -> None:
         """
         Nettoie les ressources pour éviter les fuites mémoire.
         
         Cette méthode doit être appelée quand le tool n'est plus utilisé,
         surtout pour les sessions longues.
+        
+        Args:
+            force_gc: Si True, force le garbage collection (peut ajouter de la latence)
         """
         self.logger.debug(f"Cleaning up {self.tool_name}")
+        
+        # Dé-enregistrer l'objet du MemoryManager
+        if hasattr(self, '_memory_manager_id'):
+            try:
+                from ..core.memory_manager import get_memory_manager
+                get_memory_manager().untrack_object(self._memory_manager_id)
+            except Exception:
+                # Ne jamais faire échouer le nettoyage à cause du MemoryManager
+                pass
         
         # Libérer les références circulaires potentielles
         self.app_state = None
@@ -178,9 +191,10 @@ class BaseTool(ABC):
         self.context_manager = None
         self._quota_manager = None
         
-        # Forcer le garbage collection pour ce tool
-        import gc
-        gc.collect()
+        # Forcer le garbage collection si demandé (optionnel pour éviter les pauses)
+        if force_gc:
+            import gc
+            gc.collect()
         
         self.logger.info(f"{self.tool_name} cleaned up")
     
