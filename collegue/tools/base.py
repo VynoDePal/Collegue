@@ -8,7 +8,7 @@ import os
 import time
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Union
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 import asyncio
@@ -297,47 +297,81 @@ class BaseTool(ABC):
             )
         return True
 
-    def validate_request(self, request: BaseModel) -> BaseModel:
+    def validate_request(self, request: Union[BaseModel, Dict[str, Any]]) -> bool:
         """
-        Valide et retourne la requête normalisée.
+        Valide la requête sans la normaliser.
         
-        Si la requête est d'un type différent du modèle attendu,
-        elle est convertie vers le bon type.
+        Cette méthode peut être surchargée par les sous-classes pour
+        ajouter des validations spécifiques. Elle retourne True si la 
+        validation réussit. La normalisation est gérée par normalize_request().
         
         Args:
-            request: Requête à valider
+            request: Requête à valider (BaseModel ou dict)
         
         Returns:
-            BaseModel: La requête validée et normalisée
+            bool: True si la validation réussit
         
         Raises:
             ToolValidationError: Si la validation échoue
         """
         try:
             expected_model = self.get_request_model()
-            validated_request = request
             
-            if not isinstance(request, expected_model):
-                if hasattr(request, 'model_dump'):
-                    # Convertir vers le type attendu
-                    validated_request = expected_model(**request.model_dump())
-                elif isinstance(request, dict):
-                    # Convertir depuis un dict
-                    validated_request = expected_model(**request)
-                else:
-                    raise ToolValidationError(
-                        f"Type de requête invalide. Attendu: {expected_model.__name__}, "
-                        f"reçu: {type(request).__name__}"
-                    )
+            # Vérifier que la requête est du bon type ou convertible
+            if isinstance(request, expected_model):
+                validated_request = request
+            elif isinstance(request, dict):
+                validated_request = expected_model(**request)
+            elif hasattr(request, 'model_dump'):
+                validated_request = expected_model(**request.model_dump())
+            else:
+                raise ToolValidationError(
+                    f"Type de requête invalide. Attendu: {expected_model.__name__}, "
+                    f"reçu: {type(request).__name__}"
+                )
 
             # Valider le langage si présent
             if hasattr(validated_request, 'language') and validated_request.language:
                 self.validate_language(validated_request.language)
 
-            return validated_request
+            return True
 
         except ValidationError as e:
             raise ToolValidationError(f"Validation de la requête échouée: {e}")
+
+    def normalize_request(self, request: Union[BaseModel, Dict[str, Any]]) -> BaseModel:
+        """
+        Normalise la requête vers le modèle attendu.
+        
+        Cette méthode convertit un dict ou un modèle compatible vers
+        le type de requête attendu par le tool.
+        
+        Args:
+            request: Requête à normaliser (BaseModel ou dict)
+        
+        Returns:
+            BaseModel: La requête normalisée
+        
+        Raises:
+            ToolValidationError: Si la normalisation échoue
+        """
+        try:
+            expected_model = self.get_request_model()
+            
+            if isinstance(request, expected_model):
+                return request
+            elif isinstance(request, dict):
+                return expected_model(**request)
+            elif hasattr(request, 'model_dump'):
+                return expected_model(**request.model_dump())
+            else:
+                raise ToolValidationError(
+                    f"Type de requête invalide. Attendu: {expected_model.__name__}, "
+                    f"reçu: {type(request).__name__}"
+                )
+
+        except ValidationError as e:
+            raise ToolValidationError(f"Normalisation de la requête échouée: {e}")
 
     @abstractmethod
     def _execute_core_logic(self, request: BaseModel, **kwargs) -> BaseModel:
@@ -350,7 +384,7 @@ class BaseTool(ABC):
                 f"Type de réponse invalide. Attendu: {expected.__name__}"
             )
 
-    def execute(self, request: BaseModel, **kwargs) -> BaseModel:
+    def execute(self, request: Union[BaseModel, Dict[str, Any]], **kwargs) -> BaseModel:
         """
         Exécute le tool avec rate limiting et vérification des quotas.
         
@@ -370,11 +404,9 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Valider la requête et utiliser la version normalisée
-        validated_request = self.validate_request(request)
-        
-        # Vérifier les quotas avec la requête validée
-        self._check_quotas(validated_request, **kwargs)
+        normalized_request = self.normalize_request(request)
+        self.validate_request(normalized_request)
+        self._check_quotas(normalized_request, **kwargs)
         
         # Log l'accès aux données sensibles
         try:
@@ -393,18 +425,16 @@ class BaseTool(ABC):
             action="execute",
             client_ip=client_ip,
             extra={
-                "request_type": request.__class__.__name__,
+                "request_type": normalized_request.__class__.__name__,
                 "session_id": self._session_id,
             }
         )
         
-        # Exécuter la logique métier avec la requête validée
         start_time = time.time()
         try:
-            result = self._execute_core_logic(validated_request, **kwargs)
+            result = self._execute_core_logic(normalized_request, **kwargs)
             self._validate_result(result)
             
-            # Enregistrer le temps d'exécution
             execution_time = time.time() - start_time
             self.logger.debug(f"Tool {self.tool_name} executed in {execution_time:.2f}s")
             
@@ -414,7 +444,7 @@ class BaseTool(ABC):
             self.logger.error(f"Error executing {self.tool_name}: {e}")
             raise
 
-    async def execute_async(self, request: BaseModel, **kwargs) -> BaseModel:
+    async def execute_async(self, request: Union[BaseModel, Dict[str, Any]], **kwargs) -> BaseModel:
         """
         Exécute le tool de manière asynchrone avec rate limiting et quotas.
         
@@ -430,12 +460,9 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Valider la requête AVANT de vérifier les quotas
-        # pour éviter d'inspecter des champs non normalisés
-        validated_request = self.validate_request(request)
-        
-        # Vérifier les quotas APRÈS validation avec la requête normalisée
-        self._check_quotas(validated_request, **kwargs)
+        normalized_request = self.normalize_request(request)
+        self.validate_request(normalized_request)
+        self._check_quotas(normalized_request, **kwargs)
 
         if not self.prompt_engine and kwargs.get('prompt_engine'):
             prompt_engine = kwargs.get('prompt_engine')
@@ -452,23 +479,20 @@ class BaseTool(ABC):
 
         if ctx:
             await ctx.report_progress(progress=0, total=total_steps)
-        # Validation déjà faite avant _check_quotas
 
         if ctx:
             await ctx.report_progress(progress=1, total=total_steps)
 
-        # Exécuter avec vérification du temps
         start_time = time.time()
         try:
             if hasattr(self, '_execute_core_logic_async'):
-                result = await self._execute_core_logic_async(validated_request, **kwargs)
+                result = await self._execute_core_logic_async(normalized_request, **kwargs)
             else:
-                result = await asyncio.to_thread(self._execute_core_logic, validated_request, **kwargs)
+                result = await asyncio.to_thread(self._execute_core_logic, normalized_request, **kwargs)
             
-            # Vérifier le temps d'exécution périodiquement
             if self.quota_enabled and self._quota_manager:
                 elapsed = time.time() - start_time
-                if elapsed > 1.0:  # Vérifier toutes les secondes
+                if elapsed > 1.0:
                     self._check_execution_time(**kwargs)
 
             self._validate_result(result)

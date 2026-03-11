@@ -3,7 +3,7 @@ Tests pour les corrections de l'issue #199 - Problèmes résiduels rate limiting
 """
 import pytest
 from pydantic import BaseModel
-from collegue.tools.base import BaseTool
+from collegue.tools.base import BaseTool, ToolValidationError
 from collegue.tools.rate_limiter import (
     get_rate_limiter_manager,
     reset_rate_limiter_manager,
@@ -54,46 +54,75 @@ class TestCustomRateLimitTool(BaseTool):
         return TestResponse(result="OK")
 
 
-class TestValidateRequestReturnsNormalized:
-    """Tests que validate_request retourne la requête normalisée."""
+class TestNormalizeRequestReturnsNormalized:
+    """Tests que normalize_request retourne la requête normalisée."""
     
-    def test_validate_request_returns_base_model(self):
-        """Test que validate_request retourne une instance BaseModel."""
+    def test_normalize_request_returns_base_model(self):
+        """Test que normalize_request retourne une instance BaseModel."""
         tool = TestTool()
         request = TestRequest(code="test")
         
-        result = tool.validate_request(request)
+        result = tool.normalize_request(request)
         
         assert isinstance(result, BaseModel)
         assert isinstance(result, TestRequest)
         assert result.code == "test"
     
-    def test_validate_request_returns_same_type_if_correct(self):
-        """Test que validate_request retourne le même type si déjà correct."""
+    def test_normalize_request_returns_same_instance_if_correct(self):
+        """Test que normalize_request retourne la même instance si déjà correct."""
         tool = TestTool()
         request = TestRequest(code="hello", language="python")
         
-        result = tool.validate_request(request)
+        result = tool.normalize_request(request)
         
         assert result is request  # Même instance si déjà bon type
     
-    def test_validate_request_converts_dict(self):
-        """Test que validate_request convertit un dict vers le modèle."""
+    def test_normalize_request_converts_dict(self):
+        """Test que normalize_request convertit un dict vers le modèle."""
         tool = TestTool()
         request_dict = {"code": "from_dict", "language": "javascript"}
         
-        result = tool.validate_request(request_dict)
+        result = tool.normalize_request(request_dict)
         
         assert isinstance(result, TestRequest)
         assert result.code == "from_dict"
         assert result.language == "javascript"
     
-    def test_validate_request_invalid_type_raises(self):
+    def test_normalize_request_invalid_type_raises(self):
+        """Test que normalize_request lève une erreur pour type invalide."""
+        tool = TestTool()
+        
+        with pytest.raises(ToolValidationError):
+            tool.normalize_request(12345)
+
+
+class TestValidateRequest:
+    """Tests que validate_request fonctionne correctement."""
+    
+    def test_validate_request_returns_true_for_valid_request(self):
+        """Test que validate_request retourne True pour une requête valide."""
+        tool = TestTool()
+        request = TestRequest(code="test")
+        
+        result = tool.validate_request(request)
+        
+        assert result is True
+    
+    def test_validate_request_returns_true_for_valid_dict(self):
+        """Test que validate_request retourne True pour un dict valide."""
+        tool = TestTool()
+        request_dict = {"code": "test", "language": "python"}
+        
+        result = tool.validate_request(request_dict)
+        
+        assert result is True
+    
+    def test_validate_request_raises_for_invalid_type(self):
         """Test que validate_request lève une erreur pour type invalide."""
         tool = TestTool()
         
-        with pytest.raises(Exception):  # ToolValidationError
-            tool.validate_request(12345)  # Type invalide
+        with pytest.raises(ToolValidationError):
+            tool.validate_request(12345)
 
 
 class TestCustomRateLimitUpdatesExisting:
@@ -111,10 +140,8 @@ class TestCustomRateLimitUpdatesExisting:
         """Test que custom_rate_limit crée un nouveau limiter."""
         tool = TestCustomRateLimitTool()
         
-        # Vérifier le rate limit (devrait créer le limiter)
         tool._check_rate_limit()
         
-        # Vérifier que le limiter a été créé avec la bonne config
         manager = get_rate_limiter_manager()
         limiter = manager.get_limiter("custom_rate_tool")
         
@@ -125,15 +152,12 @@ class TestCustomRateLimitUpdatesExisting:
         """Test que custom_rate_limit met à jour un limiter existant."""
         manager = get_rate_limiter_manager()
         
-        # Créer d'abord un limiter avec config par défaut
         default_config = RateLimitConfig(requests_per_minute=60, burst=10)
         manager.get_limiter("dynamic_tool", default_config)
         
-        # Vérifier la config par défaut
         limiter = manager.get_limiter("dynamic_tool")
         assert limiter.config.requests_per_minute == 60
         
-        # Maintenant créer un tool avec config personnalisée
         class DynamicTool(BaseTool):
             tool_name = "dynamic_tool"
             request_model = TestRequest
@@ -149,7 +173,6 @@ class TestCustomRateLimitUpdatesExisting:
         tool = DynamicTool()
         tool._check_rate_limit()
         
-        # Vérifier que la config a été mise à jour
         updated_limiter = manager.get_limiter("dynamic_tool")
         assert updated_limiter.config.requests_per_minute == 15
         assert updated_limiter.config.burst == 3
@@ -162,17 +185,12 @@ class TestCustomRateLimitUpdatesExisting:
         config2 = RateLimitConfig(requests_per_minute=60, burst=10)
         config3 = RateLimitConfig(requests_per_minute=30, burst=5)
         
-        # Configs identiques
         assert not manager._config_differs(config1, config2)
-        
-        # Configs différentes (rpm)
         assert manager._config_differs(config1, config3)
         
-        # Configs différentes (burst)
         config4 = RateLimitConfig(requests_per_minute=60, burst=20)
         assert manager._config_differs(config1, config4)
         
-        # Configs différentes (strategy)
         config5 = RateLimitConfig(
             requests_per_minute=60,
             burst=10,
@@ -198,7 +216,6 @@ class TestExecuteUsesValidatedRequest:
         """Test execute() avec un dict comme requête."""
         tool = TestTool()
         
-        # Appeler avec un dict au lieu d'un TestRequest
         request_dict = {"code": "test_dict", "language": "python"}
         result = tool.execute(request_dict)
         
@@ -236,15 +253,12 @@ class TestUpdateLimiterMethod:
         """Test que update_limiter force la mise à jour."""
         manager = get_rate_limiter_manager()
         
-        # Créer un limiter initial
         initial_config = RateLimitConfig(requests_per_minute=100, burst=20)
         manager.get_limiter("force_update_tool", initial_config)
         
-        # Forcer la mise à jour avec une nouvelle config
         new_config = RateLimitConfig(requests_per_minute=5, burst=1)
         manager.update_limiter("force_update_tool", new_config)
         
-        # Vérifier que la config a été forcée
         limiter = manager.get_limiter("force_update_tool")
         assert limiter.config.requests_per_minute == 5
         assert limiter.config.burst == 1
