@@ -115,7 +115,14 @@ class QuotaManager:
         """Marque le début de l'exécution d'un tool."""
         with self._lock:
             self._usage.execution_start_time = time.time()
-            self._logger.debug("Execution started")
+            
+            # Reset des compteurs per-request (pas LLM tokens qui est per-session)
+            self._usage.files_processed = 0
+            self._usage.total_bytes_processed = 0
+            self._usage.request_size_bytes = 0
+            self._file_sizes.clear()
+            
+            self._logger.debug("Execution started - per-request counters reset")
     
     def record_llm_tokens(self, tokens: int):
         """

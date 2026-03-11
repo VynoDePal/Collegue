@@ -147,6 +147,9 @@ class BaseTool(ABC):
         
         try:
             manager = get_rate_limiter_manager()
+            # Utiliser la configuration personnalisée si définie
+            if self.custom_rate_limit is not None:
+                manager.get_limiter(self.tool_name, self.custom_rate_limit)
             manager.check_rate_limit(self.tool_name)
         except RateLimitExceeded as e:
             self.logger.warning(f"Rate limit exceeded for {self.tool_name}: {e}")
@@ -404,7 +407,11 @@ class BaseTool(ABC):
         # Vérifier rate limiting
         self._check_rate_limit()
         
-        # Vérifier les quotas
+        # Valider la requête AVANT de vérifier les quotas
+        # pour éviter d'inspecter des champs non normalisés
+        self.validate_request(request)
+        
+        # Vérifier les quotas APRÈS validation
         self._check_quotas(request, **kwargs)
 
         if not self.prompt_engine and kwargs.get('prompt_engine'):
@@ -422,7 +429,7 @@ class BaseTool(ABC):
 
         if ctx:
             await ctx.report_progress(progress=0, total=total_steps)
-        self.validate_request(request)
+        # Validation déjà faite avant _check_quotas
 
         if ctx:
             await ctx.report_progress(progress=1, total=total_steps)
