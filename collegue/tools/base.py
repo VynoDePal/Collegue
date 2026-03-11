@@ -179,10 +179,13 @@ class BaseTool(ABC):
             if hasattr(request, 'model_dump'):
                 import json
                 try:
-                    request_size = len(json.dumps(request.model_dump()).encode('utf-8'))
+                    request_json = json.dumps(request.model_dump())
+                except (TypeError, ValueError):
+                    # Ignorer les erreurs de sérialisation JSON lors de l'estimation de la taille
+                    pass
+                else:
+                    request_size = len(request_json.encode('utf-8'))
                     manager.check_request_size(request_size)
-                except QuotaExceeded:
-                    pass  # Ignorer si la requête est trop grande pour JSON
             
             # Vérifier les fichiers si présents dans la requête
             file_paths = []
