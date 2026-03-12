@@ -2,7 +2,6 @@
 Tests pour les corrections de fuites mémoire (issue #141).
 """
 import gc
-import pytest
 from unittest.mock import Mock, patch
 from pydantic import BaseModel
 
