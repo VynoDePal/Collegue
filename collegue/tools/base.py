@@ -190,6 +190,11 @@ class BaseTool(ABC):
         self.prompt_engine = None
         self.context_manager = None
         self._quota_manager = None
+
+        # Nettoyer les attributs injectés dynamiquement (ex: parser)
+        for attr_name in ("parser",):
+            if hasattr(self, attr_name):
+                setattr(self, attr_name, None)
         
         # Forcer le garbage collection si demandé (optionnel pour éviter les pauses)
         if force_gc:

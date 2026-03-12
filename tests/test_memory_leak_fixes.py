@@ -156,17 +156,21 @@ class TestTTLCache:
         assert result == "default_value"
     
     def test_cache_expires_entries(self):
-        """Test que les entrées expirées sont supprimées."""
+        """Test que les entrées expirées sont supprimées (avec patch du temps)."""
+        from unittest.mock import patch
+        
         cache = TTLCache(max_size=10, ttl_seconds=0.1, name="test")  # 100ms TTL
         
-        cache.set("key1", "value1")
-        
-        # Attendre l'expiration (marge plus large pour CI)
-        import time
-        time.sleep(0.15)
-        
-        # L'entrée devrait être expirée
-        result = cache.get("key1", default="expired")
+        # Simuler l'expiration en patchant le temps monotone
+        start_time = 1000.0
+        with patch(
+            "collegue.core.memory_manager.time.monotonic",
+            side_effect=[start_time, start_time + 0.2],  # set() puis get()
+        ):
+            cache.set("key1", "value1")
+            # L'entrée devrait être expirée lorsque nous la lisons
+            result = cache.get("key1", default="expired")
+            
         assert result == "expired"
     
     def test_cache_respects_max_size(self):

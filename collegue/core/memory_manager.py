@@ -53,10 +53,11 @@ class MemoryManager:
 
         Args:
             obj_id: Identifiant unique de l'objet
-            obj: Objet à suivre
+            obj: Objet à suivre (doit être weakref-able)
 
         Raises:
             ValueError: Si un objet avec le même ID est déjà suivi
+            TypeError: Si l'objet n'est pas weakref-able (ex: int, str, tuple)
         """
         # Capturer l'ID dans la closure
         captured_id = obj_id
@@ -82,7 +83,13 @@ class MemoryManager:
                 if existing_ref() is not None:
                     raise ValueError(f"Object with ID '{obj_id}' is already tracked")
                 # L'ancienne entrée est morte, on peut la remplacer
-            self._tracked_objects[obj_id] = weakref.ref(obj, on_delete)
+            try:
+                self._tracked_objects[obj_id] = weakref.ref(obj, on_delete)
+            except TypeError as e:
+                raise TypeError(
+                    f"Object of type {type(obj).__name__} is not weakref-able. "
+                    f"Only objects that support weak references can be tracked."
+                ) from e
             self._stats.tracked_objects = len(self._tracked_objects)
 
     def untrack_object(self, obj_id: str) -> None:
@@ -214,7 +221,7 @@ class TTLCache:
     Cache avec expiration automatique (TTL).
 
     Les entrées expirent après un certain temps et sont automatiquement nettoyées.
-    Implémente l'interface Mapping pour être compatible avec les opérations dict-like.
+    Fournit des opérations de cache de base de type dict (get/set/clear/items/keys/values).
     Thread-safe via un verrou interne.
     """
 

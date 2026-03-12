@@ -254,6 +254,7 @@ RÈGLES :
 
             await ctx.info(f"Étape {i + 1}: {tool_name} ({step.reason})")
 
+            tool_instance = None
             try:
                 tool_class = available_tools[tool_name]["class"]
                 tool_instance = tool_class({})  # Nouvelle instance propre
@@ -275,6 +276,16 @@ RÈGLES :
                 err_msg = f"Erreur exécution {tool_name}: {e}"
                 await ctx.error(err_msg)
                 execution_results.append({"step": i + 1, "error": err_msg})
+            finally:
+                # Nettoyer explicitement l'instance après usage
+                if tool_instance is not None:
+                    try:
+                        if hasattr(tool_instance, 'cleanup'):
+                            tool_instance.cleanup()
+                        del tool_instance
+                    except Exception:
+                        # Ne jamais faire échouer le nettoyage
+                        pass
 
         # 4. Étape SYNTHÈSE
         await ctx.info("Phase 3: Synthèse...")
