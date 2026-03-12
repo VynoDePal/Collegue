@@ -5,14 +5,18 @@ Meta Orchestrator - Tool intelligent utilisant FastMCP sampling with tools
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
+from .memory_manager import TTLCache
+
 try:
     from fastmcp import FastMCP, Context
 except ImportError:
     FastMCP = Any
     Context = Any
 
-# Cache global pour les outils découverts
+# Cache global pour les outils découverts (avec TTL de 1 heure)
 _TOOLS_CACHE = None
+_MAX_TOOLS_CACHE_SIZE = 50
+_TOOLS_CACHE_TTL = 3600  # 1 heure
 
 
 class OrchestratorStep(BaseModel):
@@ -82,15 +86,21 @@ def register_meta_orchestrator(app: FastMCP):
         import collegue.tools
         from collegue.tools.base import BaseTool
 
-        global _TOOLS_CACHE
+        global _TOOLS_CACHE, _MAX_TOOLS_CACHE_SIZE, _TOOLS_CACHE_TTL
         start_time = time.time()
         await ctx.info(
             f"Démarrage orchestration (mode v4 robust): {request.query[:100]}..."
         )
 
-        # 1. Découverte des tools (avec Cache)
-        if _TOOLS_CACHE is None:
-            _TOOLS_CACHE = {}
+        # 1. Découverte des tools (avec Cache TTL)
+        # Relancer la discovery si le cache est None ou vide (après expiration)
+        if _TOOLS_CACHE is None or len(_TOOLS_CACHE) == 0:
+            # Construire le cache dans une variable locale pour éviter les race conditions
+            _tools_cache_local = TTLCache(
+                max_size=_MAX_TOOLS_CACHE_SIZE,
+                ttl_seconds=_TOOLS_CACHE_TTL,
+                name="tools_discovery"
+            )
             try:
                 for _, name, _ in pkgutil.iter_modules(collegue.tools.__path__):
                     if name.startswith("_") or name == "base":
@@ -104,6 +114,7 @@ def register_meta_orchestrator(app: FastMCP):
                                 and obj != BaseTool
                                 and obj.__module__ == module.__name__
                             ):
+                                temp_instance = None
                                 try:
                                     # Instantiation temporaire pour métadonnées
                                     temp_instance = obj({})
@@ -130,18 +141,28 @@ def register_meta_orchestrator(app: FastMCP):
 
                                     formatted_args = "\\n".join(args_desc)
 
-                                    _TOOLS_CACHE[tool_name] = {
+                                    _tools_cache_local.set(tool_name, {
                                         "class": obj,
                                         "description": temp_instance.get_description(),
                                         "prompt_desc": f"{tool_name}: {temp_instance.get_description()}\\n  Arguments:\\n{formatted_args}",
                                         "schema": schema,
-                                    }
+                                    })
+
                                 except Exception as e:
                                     await ctx.warning(f"Skip {name}: {e}")
+                                finally:
+                                    # Nettoyer explicitement l'instance temporaire (même en cas d'erreur)
+                                    if temp_instance is not None:
+                                        if hasattr(temp_instance, 'cleanup'):
+                                            temp_instance.cleanup()
+                                        del temp_instance
                     except Exception:
                         pass
             except Exception as e:
                 await ctx.error(f"Erreur discovery: {e}")
+            
+            # Assigner le cache complet une fois rempli (évite les race conditions)
+            _TOOLS_CACHE = _tools_cache_local
 
         available_tools = _TOOLS_CACHE
         tools_desc = "\\n".join(
@@ -233,6 +254,7 @@ RÈGLES :
 
             await ctx.info(f"Étape {i + 1}: {tool_name} ({step.reason})")
 
+            tool_instance = None
             try:
                 tool_class = available_tools[tool_name]["class"]
                 tool_instance = tool_class({})  # Nouvelle instance propre
@@ -254,6 +276,16 @@ RÈGLES :
                 err_msg = f"Erreur exécution {tool_name}: {e}"
                 await ctx.error(err_msg)
                 execution_results.append({"step": i + 1, "error": err_msg})
+            finally:
+                # Nettoyer explicitement l'instance après usage
+                if tool_instance is not None:
+                    try:
+                        if hasattr(tool_instance, 'cleanup'):
+                            tool_instance.cleanup()
+                        del tool_instance
+                    except Exception:
+                        # Ne jamais faire échouer le nettoyage
+                        pass
 
         # 4. Étape SYNTHÈSE
         await ctx.info("Phase 3: Synthèse...")
