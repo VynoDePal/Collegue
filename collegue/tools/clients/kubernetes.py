@@ -2,12 +2,22 @@
 Kubernetes API client for cluster operations.
 
 Provides a client for common Kubernetes operations with kubectl-like interface.
+Includes protection against command injection attacks.
 """
 from typing import List, Optional
 from .base import APIResponse
 
 
+class KubernetesSecurityError(Exception):
+    """Exception levée en cas de tentative d'injection de commande."""
+    pass
+
+
 class KubernetesClient:
+    """Client Kubernetes avec protection contre l'injection de commandes."""
+
+    # Caractères dangereux qui pourraient être utilisés pour l'injection
+    DANGEROUS_CHARS = [';', '&', '|', '$', '`', '\n', '||', '&&']
 
     def __init__(
         self,
@@ -16,6 +26,14 @@ class KubernetesClient:
         namespace: str = "default",
         timeout: int = 30
     ):
+        # Valider tous les paramètres pour éviter l'injection
+        self._validate_string_arg("namespace", namespace)
+        
+        if kubeconfig:
+            self._validate_string_arg("kubeconfig", kubeconfig)
+        if context:
+            self._validate_string_arg("context", context)
+        
         self.kubeconfig = kubeconfig
         self.context = context
         self.namespace = namespace
@@ -30,6 +48,26 @@ class KubernetesClient:
             self._k8s_client = None
             self._k8s_config = None
             self._use_kubectl = True
+
+    def _validate_string_arg(self, name: str, value: str) -> None:
+        """
+        Valide qu'une chaîne ne contient pas de caractères dangereux.
+        
+        Args:
+            name: Nom du paramètre (pour le message d'erreur)
+            value: Valeur à valider
+        
+        Raises:
+            KubernetesSecurityError: Si des caractères dangereux sont détectés
+        """
+        if not isinstance(value, str):
+            raise KubernetesSecurityError(f"{name} must be a string, got {type(value).__name__}")
+        
+        for char in self.DANGEROUS_CHARS:
+            if char in value:
+                raise KubernetesSecurityError(
+                    f"Dangerous character '{char}' detected in {name}: {value}"
+                )
 
     def _get_kubectl_args(self) -> List[str]:
         args = ["kubectl"]
@@ -49,13 +87,15 @@ class KubernetesClient:
 
         # Validation stricte des arguments
         if not all(isinstance(arg, str) for arg in command):
-            raise ValueError("Command arguments must be strings")
+            raise KubernetesSecurityError("Command arguments must be strings")
         
         # Sanitization - rejeter les caractères dangereux
-        dangerous_chars = [';', '&', '|', '$', '`', '\n']
         for arg in command:
-            if any(char in arg for char in dangerous_chars):
-                raise ValueError(f"Dangerous character detected in argument: {arg}")
+            for char in self.DANGEROUS_CHARS:
+                if char in arg:
+                    raise KubernetesSecurityError(
+                        f"Dangerous character '{char}' detected in argument: {arg}"
+                    )
 
         args = self._get_kubectl_args() + command
 
@@ -100,10 +140,18 @@ class KubernetesClient:
         label_selector: Optional[str] = None,
         field_selector: Optional[str] = None
     ) -> APIResponse:
+        # Valider les paramètres
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
+        if label_selector:
+            self._validate_string_arg("label_selector", label_selector)
+        if field_selector:
+            self._validate_string_arg("field_selector", field_selector)
+        
         if self._use_kubectl:
             cmd = ["get", "pods", "-o", "json"]
-
-            ns = namespace or self.namespace
+            
             if ns:
                 cmd.extend(["-n", ns])
 
@@ -122,7 +170,6 @@ class KubernetesClient:
                 )
                 v1 = self._k8s_client.CoreV1Api()
 
-                ns = namespace or self.namespace
                 pods = v1.list_namespaced_pod(
                     namespace=ns,
                     label_selector=label_selector,
@@ -133,12 +180,18 @@ class KubernetesClient:
                     success=True,
                     data=[pod.to_dict() for pod in pods.items]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def get_pod(self, name: str, namespace: Optional[str] = None) -> APIResponse:
+        # Valider les paramètres
+        self._validate_string_arg("name", name)
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
-            ns = namespace or self.namespace
             return self._run_kubectl(["get", "pod", name, "-n", ns, "-o", "json"])
         else:
             try:
@@ -147,10 +200,11 @@ class KubernetesClient:
                     context=self.context
                 )
                 v1 = self._k8s_client.CoreV1Api()
-                ns = namespace or self.namespace
                 pod = v1.read_namespaced_pod(name=name, namespace=ns)
 
                 return APIResponse(success=True, data=pod.to_dict())
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
@@ -162,6 +216,13 @@ class KubernetesClient:
         tail_lines: int = 100,
         previous: bool = False
     ) -> APIResponse:
+        # Valider les paramètres
+        self._validate_string_arg("name", name)
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        if container:
+            self._validate_string_arg("container", container)
+        
         if self._use_kubectl:
             cmd = ["logs", name]
 
@@ -196,10 +257,16 @@ class KubernetesClient:
                 )
 
                 return APIResponse(success=True, data=logs)
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_deployments(self, namespace: Optional[str] = None) -> APIResponse:
+        # Valider les paramètres
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "deployments", "-n", ns, "-o", "json"])
@@ -217,11 +284,17 @@ class KubernetesClient:
                     success=True,
                     data=[d.to_dict() for d in deployments.items]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_services(self, namespace: Optional[str] = None) -> APIResponse:
         """List services in namespace."""
+        # Valider les paramètres
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "services", "-n", ns, "-o", "json"])
@@ -239,10 +312,13 @@ class KubernetesClient:
                     success=True,
                     data=[s.to_dict() for s in services.items]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_namespaces(self) -> APIResponse:
+        # Pas de validation nécessaire (pas de paramètres utilisateur)
         if self._use_kubectl:
             return self._run_kubectl(["get", "namespaces", "-o", "json"])
         else:
@@ -258,10 +334,17 @@ class KubernetesClient:
                     success=True,
                     data=[ns.to_dict() for ns in namespaces.items]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def get_deployment(self, name: str, namespace: Optional[str] = None) -> APIResponse:
+        # Valider les paramètres
+        self._validate_string_arg("name", name)
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "deployment", name, "-n", ns, "-o", "json"])
@@ -276,6 +359,8 @@ class KubernetesClient:
                 deployment = apps_v1.read_namespaced_deployment(name=name, namespace=ns)
 
                 return APIResponse(success=True, data=deployment.to_dict())
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
@@ -284,6 +369,13 @@ class KubernetesClient:
         namespace: Optional[str] = None,
         field_selector: Optional[str] = None
     ) -> APIResponse:
+        # Valider les paramètres
+        ns = namespace or self.namespace
+        if ns:
+            self._validate_string_arg("namespace", ns)
+        if field_selector:
+            self._validate_string_arg("field_selector", field_selector)
+        
         if self._use_kubectl:
             cmd = ["get", "events", "-o", "json"]
             ns = namespace or self.namespace
@@ -317,10 +409,13 @@ class KubernetesClient:
                     success=True,
                     data=[e.to_dict() for e in sorted_events[:50]]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_nodes(self) -> APIResponse:
+        # Pas de validation nécessaire (pas de paramètres utilisateur)
         if self._use_kubectl:
             return self._run_kubectl(["get", "nodes", "-o", "json"])
         else:
@@ -336,10 +431,16 @@ class KubernetesClient:
                     success=True,
                     data=[n.to_dict() for n in nodes.items]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_configmaps(self, namespace: Optional[str] = None) -> APIResponse:
+        # Valider les paramètres
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "configmaps", "-n", ns, "-o", "json"])
@@ -357,10 +458,16 @@ class KubernetesClient:
                     success=True,
                     data=[cm.to_dict() for cm in configmaps.items]
                 )
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
     def list_secrets(self, namespace: Optional[str] = None) -> APIResponse:
+        # Valider les paramètres
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "secrets", "-n", ns, "-o", "json"])
@@ -383,6 +490,8 @@ class KubernetesClient:
                     data.append(secret_dict)
 
                 return APIResponse(success=True, data=data)
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
 
@@ -392,6 +501,12 @@ class KubernetesClient:
         name: str,
         namespace: Optional[str] = None
     ) -> APIResponse:
+        # Valider les paramètres
+        self._validate_string_arg("resource_type", resource_type)
+        self._validate_string_arg("name", name)
+        ns = namespace or self.namespace
+        self._validate_string_arg("namespace", ns)
+        
         if self._use_kubectl:
             cmd = ["get", resource_type, name, "-o", "yaml"]
             ns = namespace or self.namespace
@@ -430,5 +545,7 @@ class KubernetesClient:
 
                 resource_dict = self._k8s_client.ApiClient().sanitize_for_serialization(resource)
                 return APIResponse(success=True, data=resource_dict)
+            except KubernetesSecurityError:
+                raise
             except Exception as e:
                 return APIResponse(success=False, error_message=str(e))
