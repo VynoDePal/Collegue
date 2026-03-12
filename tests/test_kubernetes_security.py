@@ -4,7 +4,6 @@ Tests de sécurité pour KubernetesClient - Protection contre command injection.
 import pytest
 from unittest.mock import patch, MagicMock
 from collegue.tools.clients.kubernetes import KubernetesClient, KubernetesSecurityError
-from collegue.tools.clients.base import APIResponse
 
 
 class TestCommandInjectionProtection:

@@ -8,7 +8,7 @@ from typing import List, Optional
 from .base import APIResponse
 
 
-class KubernetesSecurityError(Exception):
+class KubernetesSecurityError(ValueError):
     """Exception levée en cas de tentative d'injection de commande."""
     pass
 
@@ -17,7 +17,8 @@ class KubernetesClient:
     """Client Kubernetes avec protection contre l'injection de commandes."""
 
     # Caractères dangereux qui pourraient être utilisés pour l'injection
-    DANGEROUS_CHARS = [';', '&', '|', '$', '`', '\n', '||', '&&']
+    # Ordre: tokens multi-caractères en premier pour un matching correct
+    DANGEROUS_CHARS = [';', '||', '&&', '|', '&', '$', '`', '\n']
 
     def __init__(
         self,
@@ -28,12 +29,12 @@ class KubernetesClient:
     ):
         # Valider tous les paramètres pour éviter l'injection
         self._validate_string_arg("namespace", namespace)
-        
+
         if kubeconfig:
             self._validate_string_arg("kubeconfig", kubeconfig)
         if context:
             self._validate_string_arg("context", context)
-        
+
         self.kubeconfig = kubeconfig
         self.context = context
         self.namespace = namespace
@@ -52,21 +53,24 @@ class KubernetesClient:
     def _validate_string_arg(self, name: str, value: str) -> None:
         """
         Valide qu'une chaîne ne contient pas de caractères dangereux.
-        
+
         Args:
             name: Nom du paramètre (pour le message d'erreur)
             value: Valeur à valider
-        
+
         Raises:
             KubernetesSecurityError: Si des caractères dangereux sont détectés
         """
         if not isinstance(value, str):
             raise KubernetesSecurityError(f"{name} must be a string, got {type(value).__name__}")
-        
+
         for char in self.DANGEROUS_CHARS:
             if char in value:
+                # Éviter la log injection: ne pas inclure la valeur brute complète
+                # Utiliser repr() et tronquer pour éviter l'exposition de données sensibles
+                safe_value = repr(value[:50]) if len(value) <= 50 else repr(value[:47] + "...")
                 raise KubernetesSecurityError(
-                    f"Dangerous character '{char}' detected in {name}: {value}"
+                    f"Dangerous character '{char}' detected in {name}: {safe_value}"
                 )
 
     def _get_kubectl_args(self) -> List[str]:
@@ -88,14 +92,25 @@ class KubernetesClient:
         # Validation stricte des arguments
         if not all(isinstance(arg, str) for arg in command):
             raise KubernetesSecurityError("Command arguments must be strings")
-        
+
         # Sanitization - rejeter les caractères dangereux
-        for arg in command:
+        for i, arg in enumerate(command):
             for char in self.DANGEROUS_CHARS:
                 if char in arg:
+                    # Éviter la log injection: ne pas inclure l'argument complet
+                    safe_arg = repr(arg[:50]) if len(arg) <= 50 else repr(arg[:47] + "...")
                     raise KubernetesSecurityError(
-                        f"Dangerous character '{char}' detected in argument: {arg}"
+                        f"Dangerous character '{char}' detected in argument[{i}]: {safe_arg}"
                     )
+
+        # Valider également les attributs pouvant influencer la commande kubectl
+        # (ils pourraient être modifiés après __init__)
+        if self.kubeconfig is not None:
+            self._validate_string_arg("kubeconfig", self.kubeconfig)
+        if self.context is not None:
+            self._validate_string_arg("context", self.context)
+        if self.namespace is not None:
+            self._validate_string_arg("namespace", self.namespace)
 
         args = self._get_kubectl_args() + command
 
@@ -143,15 +158,15 @@ class KubernetesClient:
         # Valider les paramètres
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if label_selector:
             self._validate_string_arg("label_selector", label_selector)
         if field_selector:
             self._validate_string_arg("field_selector", field_selector)
-        
+
         if self._use_kubectl:
             cmd = ["get", "pods", "-o", "json"]
-            
+
             if ns:
                 cmd.extend(["-n", ns])
 
@@ -190,7 +205,7 @@ class KubernetesClient:
         self._validate_string_arg("name", name)
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             return self._run_kubectl(["get", "pod", name, "-n", ns, "-o", "json"])
         else:
@@ -222,7 +237,7 @@ class KubernetesClient:
         self._validate_string_arg("namespace", ns)
         if container:
             self._validate_string_arg("container", container)
-        
+
         if self._use_kubectl:
             cmd = ["logs", name]
 
@@ -266,7 +281,7 @@ class KubernetesClient:
         # Valider les paramètres
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "deployments", "-n", ns, "-o", "json"])
@@ -294,7 +309,7 @@ class KubernetesClient:
         # Valider les paramètres
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "services", "-n", ns, "-o", "json"])
@@ -344,7 +359,7 @@ class KubernetesClient:
         self._validate_string_arg("name", name)
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "deployment", name, "-n", ns, "-o", "json"])
@@ -375,7 +390,7 @@ class KubernetesClient:
             self._validate_string_arg("namespace", ns)
         if field_selector:
             self._validate_string_arg("field_selector", field_selector)
-        
+
         if self._use_kubectl:
             cmd = ["get", "events", "-o", "json"]
             ns = namespace or self.namespace
@@ -440,7 +455,7 @@ class KubernetesClient:
         # Valider les paramètres
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "configmaps", "-n", ns, "-o", "json"])
@@ -467,7 +482,7 @@ class KubernetesClient:
         # Valider les paramètres
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             ns = namespace or self.namespace
             return self._run_kubectl(["get", "secrets", "-n", ns, "-o", "json"])
@@ -506,7 +521,7 @@ class KubernetesClient:
         self._validate_string_arg("name", name)
         ns = namespace or self.namespace
         self._validate_string_arg("namespace", ns)
-        
+
         if self._use_kubectl:
             cmd = ["get", resource_type, name, "-o", "yaml"]
             ns = namespace or self.namespace
