@@ -54,6 +54,9 @@ class MemoryManager:
         Args:
             obj_id: Identifiant unique de l'objet
             obj: Objet à suivre
+
+        Raises:
+            ValueError: Si un objet avec le même ID est déjà suivi
         """
         # Capturer l'ID dans la closure
         captured_id = obj_id
@@ -62,13 +65,23 @@ class MemoryManager:
             # Supprimer l'entrée du dict quand l'objet est garbage collecté
             with self._lock:
                 try:
+                    # Vérifier que l'entrée correspond toujours à cette weakref
+                    # pour éviter de supprimer un nouvel objet tracké avec le même ID
                     if captured_id in self._tracked_objects:
-                        del self._tracked_objects[captured_id]
-                        self._stats.tracked_objects = len(self._tracked_objects)
+                        existing_ref = self._tracked_objects[captured_id]
+                        if existing_ref is ref or existing_ref() is None:
+                            del self._tracked_objects[captured_id]
+                            self._stats.tracked_objects = len(self._tracked_objects)
                 except KeyError:
                     pass  # Déjà supprimé
 
         with self._lock:
+            # Refuser les doublons pour éviter les problèmes de callback
+            if obj_id in self._tracked_objects:
+                existing_ref = self._tracked_objects[obj_id]
+                if existing_ref() is not None:
+                    raise ValueError(f"Object with ID '{obj_id}' is already tracked")
+                # L'ancienne entrée est morte, on peut la remplacer
             self._tracked_objects[obj_id] = weakref.ref(obj, on_delete)
             self._stats.tracked_objects = len(self._tracked_objects)
 
@@ -82,11 +95,13 @@ class MemoryManager:
     def register_cleanup_callback(self, callback: Callable) -> None:
         """
         Enregistre une fonction de nettoyage à appeler périodiquement.
-        
+        Thread-safe via verrou interne.
+
         Args:
             callback: Fonction à appeler lors du nettoyage
         """
-        self._cleanup_callbacks.append(callback)
+        with self._lock:
+            self._cleanup_callbacks.append(callback)
     
     def cleanup(self, force: bool = False) -> int:
         """

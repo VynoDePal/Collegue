@@ -42,18 +42,33 @@ class TestMemoryManager:
     def test_track_object(self):
         """Test le suivi d'objets."""
         manager = MemoryManager()
-        obj = TestTool()  # Utiliser un objet qui supporte weakref
         
-        manager.track_object("test_obj", obj)
+        # Utiliser un objet dummy weakref-able sans effets de bord
+        class DummyObject:
+            pass
         
-        assert manager._stats.tracked_objects == 1
+        obj = DummyObject()
+        
+        try:
+            manager.track_object("test_obj", obj)
+            
+            assert manager._stats.tracked_objects == 1
+        finally:
+            # Nettoyer explicitement pour ne pas laisser d'état global
+            del obj
+            gc.collect()
     
     def test_cleanup_removes_dead_refs(self):
         """Test que cleanup supprime les références mortes."""
         manager = MemoryManager()
         
+        # Utiliser un objet dummy weakref-able sans effets de bord
+        # pour éviter de polluer le MemoryManager global
+        class DummyObject:
+            pass
+        
         # Créer un objet et le suivre
-        obj = TestTool()
+        obj = DummyObject()
         manager.track_object("temp_obj", obj)
         assert manager._stats.tracked_objects == 1
         
@@ -179,8 +194,14 @@ class TestBaseToolMemory:
         
         tool = TestTool()
         
-        # Le tool devrait être suivi
-        assert manager._stats.tracked_objects == initial_count + 1
+        try:
+            # Le tool devrait être suivi
+            assert manager._stats.tracked_objects == initial_count + 1
+        finally:
+            # Nettoyer explicitement pour ne pas laisser d'état global
+            tool.cleanup()
+            del tool
+            gc.collect()
     
     def test_base_tool_cleanup_releases_references(self):
         """Test que cleanup libère les références."""

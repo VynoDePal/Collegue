@@ -93,7 +93,8 @@ def register_meta_orchestrator(app: FastMCP):
         )
 
         # 1. Découverte des tools (avec Cache TTL)
-        if _TOOLS_CACHE is None:
+        # Relancer la discovery si le cache est None ou vide (après expiration)
+        if _TOOLS_CACHE is None or len(_TOOLS_CACHE) == 0:
             # Construire le cache dans une variable locale pour éviter les race conditions
             _tools_cache_local = TTLCache(
                 max_size=_MAX_TOOLS_CACHE_SIZE,
