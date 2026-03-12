@@ -30,14 +30,14 @@ class MemoryStats:
 class MemoryManager:
     """
     Gestionnaire centralisé de la mémoire.
-    
+
     Fournit:
     - Suivi des objets avec références faibles
     - Nettoyage périodique automatique
     - Limitation de la taille des collections
     - Cache avec TTL (Time To Live)
     """
-    
+
     def __init__(self, max_history_size: int = 100, cleanup_threshold: int = 1000):
         self.max_history_size = max_history_size
         self.cleanup_threshold = cleanup_threshold
@@ -45,35 +45,39 @@ class MemoryManager:
         self._cleanup_callbacks: List[Callable] = []
         self._stats = MemoryStats()
         self._logger = logging.getLogger(__name__)
+        self._lock = threading.RLock()
     
     def track_object(self, obj_id: str, obj: Any) -> None:
         """
         Suit un objet avec une référence faible.
-        
+
         Args:
             obj_id: Identifiant unique de l'objet
             obj: Objet à suivre
         """
         # Capturer l'ID dans la closure
         captured_id = obj_id
-        
+
         def on_delete(ref):
             # Supprimer l'entrée du dict quand l'objet est garbage collecté
-            try:
-                if captured_id in self._tracked_objects:
-                    del self._tracked_objects[captured_id]
-                    self._stats.tracked_objects = len(self._tracked_objects)
-            except KeyError:
-                pass  # Déjà supprimé
-        
-        self._tracked_objects[obj_id] = weakref.ref(obj, on_delete)
-        self._stats.tracked_objects = len(self._tracked_objects)
-    
+            with self._lock:
+                try:
+                    if captured_id in self._tracked_objects:
+                        del self._tracked_objects[captured_id]
+                        self._stats.tracked_objects = len(self._tracked_objects)
+                except KeyError:
+                    pass  # Déjà supprimé
+
+        with self._lock:
+            self._tracked_objects[obj_id] = weakref.ref(obj, on_delete)
+            self._stats.tracked_objects = len(self._tracked_objects)
+
     def untrack_object(self, obj_id: str) -> None:
         """Arrête de suivre un objet."""
-        if obj_id in self._tracked_objects:
-            del self._tracked_objects[obj_id]
-            self._stats.tracked_objects = len(self._tracked_objects)
+        with self._lock:
+            if obj_id in self._tracked_objects:
+                del self._tracked_objects[obj_id]
+                self._stats.tracked_objects = len(self._tracked_objects)
     
     def register_cleanup_callback(self, callback: Callable) -> None:
         """
@@ -87,39 +91,41 @@ class MemoryManager:
     def cleanup(self, force: bool = False) -> int:
         """
         Déclenche le nettoyage de la mémoire.
-        
+
         Args:
             force: Si True, force le garbage collection complet
-        
+
         Returns:
             Nombre d'objets nettoyés
         """
-        # Exécuter les callbacks de nettoyage enregistrés
-        for callback in self._cleanup_callbacks:
-            try:
-                callback()
-            except Exception as e:
-                self._logger.warning(f"Cleanup callback failed: {e}")
-        
-        # Forcer le garbage collection si demandé (pour mettre à jour les weakrefs)
-        if force:
-            gc.collect()
-        
-        # Nettoyer les références faibles mortes
-        dead_refs = [
-            obj_id for obj_id, ref in list(self._tracked_objects.items())
-            if ref() is None
-        ]
-        for obj_id in dead_refs:
-            del self._tracked_objects[obj_id]
-        
-        cleaned = len(dead_refs)
-        self._stats.tracked_objects = len(self._tracked_objects)
-        
-        if cleaned > 0:
-            self._logger.info(f"Memory cleanup: {cleaned} objects cleaned")
-        
-        return cleaned
+        with self._lock:
+            # Exécuter les callbacks de nettoyage enregistrés
+            for callback in self._cleanup_callbacks:
+                try:
+                    callback()
+                except Exception as e:
+                    self._logger.warning(f"Cleanup callback failed: {e}")
+
+            # Forcer le garbage collection si demandé (pour mettre à jour les weakrefs)
+            if force:
+                gc.collect()
+
+            # Nettoyer les références faibles mortes
+            dead_refs = [
+                obj_id for obj_id, ref in list(self._tracked_objects.items())
+                if ref() is None
+            ]
+            for obj_id in dead_refs:
+                del self._tracked_objects[obj_id]
+
+            cleaned = len(dead_refs)
+            self._stats.cleaned_objects += cleaned
+            self._stats.tracked_objects = len(self._tracked_objects)
+
+            if cleaned > 0:
+                self._logger.info(f"Memory cleanup: {cleaned} objects cleaned")
+
+            return cleaned
     
     def get_stats(self) -> MemoryStats:
         """Retourne les statistiques de mémoire."""
@@ -191,11 +197,12 @@ class LimitedSizeHistory:
 class TTLCache:
     """
     Cache avec expiration automatique (TTL).
-    
+
     Les entrées expirent après un certain temps et sont automatiquement nettoyées.
     Implémente l'interface Mapping pour être compatible avec les opérations dict-like.
+    Thread-safe via un verrou interne.
     """
-    
+
     def __init__(self, max_size: int = 100, ttl_seconds: float = 3600, name: str = "cache"):
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
@@ -203,102 +210,114 @@ class TTLCache:
         self._cache: Dict[str, Any] = {}
         self._timestamps: Dict[str, float] = {}
         self._logger = logging.getLogger(f"{__name__}.{name}")
+        self._lock = threading.RLock()
     
     def _is_expired(self, key: str) -> bool:
-        """Vérifie si une entrée est expirée."""
+        """Vérifie si une entrée est expirée (utilise time.monotonic pour robustesse)."""
         if key not in self._timestamps:
             return True
-        return time.time() - self._timestamps[key] > self.ttl_seconds
-    
+        return time.monotonic() - self._timestamps[key] > self.ttl_seconds
+
     def _cleanup_expired(self) -> int:
         """Nettoie les entrées expirées."""
-        expired_keys = [
-            key for key in list(self._cache.keys())
-            if self._is_expired(key)
-        ]
-        for key in expired_keys:
-            del self._cache[key]
-            del self._timestamps[key]
-        
-        if expired_keys:
-            self._logger.debug(f"Cleaned {len(expired_keys)} expired entries from {self.name}")
-        
-        return len(expired_keys)
-    
+        with self._lock:
+            expired_keys = [
+                key for key in list(self._cache.keys())
+                if self._is_expired(key)
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+                del self._timestamps[key]
+
+            if expired_keys:
+                self._logger.debug(f"Cleaned {len(expired_keys)} expired entries from {self.name}")
+
+            return len(expired_keys)
+
     def get(self, key: str, default: Any = None) -> Any:
         """
         Récupère une valeur du cache.
-        
+
         Retourne default si la clé n'existe pas ou est expirée.
         """
-        self._cleanup_expired()
-        
-        if key in self._cache and not self._is_expired(key):
-            return self._cache[key]
-        
-        # Nettoyer si expiré
-        if key in self._cache:
-            del self._cache[key]
-            del self._timestamps[key]
-        
-        return default
-    
+        with self._lock:
+            self._cleanup_expired()
+
+            if key in self._cache and not self._is_expired(key):
+                return self._cache[key]
+
+            # Nettoyer si expiré
+            if key in self._cache:
+                del self._cache[key]
+                del self._timestamps[key]
+
+            return default
+
     def set(self, key: str, value: Any) -> None:
         """Stocke une valeur dans le cache."""
-        # Nettoyer si nécessaire avant d'ajouter
-        if len(self._cache) >= self.max_size:
-            self._cleanup_expired()
-            
-            # Si toujours plein, supprimer l'entrée la plus ancienne
-            if len(self._cache) >= self.max_size and self._timestamps:
-                oldest_key = min(self._timestamps, key=self._timestamps.get)
-                del self._cache[oldest_key]
-                del self._timestamps[oldest_key]
-        
-        self._cache[key] = value
-        self._timestamps[key] = time.time()
-    
+        with self._lock:
+            # Nettoyer si nécessaire avant d'ajouter
+            if len(self._cache) >= self.max_size:
+                self._cleanup_expired()
+
+                # Si toujours plein, supprimer l'entrée la plus ancienne
+                if len(self._cache) >= self.max_size and self._timestamps:
+                    oldest_key = min(self._timestamps, key=self._timestamps.get)
+                    del self._cache[oldest_key]
+                    del self._timestamps[oldest_key]
+
+            self._cache[key] = value
+            self._timestamps[key] = time.monotonic()
+
     def clear(self) -> None:
         """Vide le cache."""
-        self._cache.clear()
-        self._timestamps.clear()
-        self._logger.info(f"Cache {self.name} cleared")
+        with self._lock:
+            self._cache.clear()
+            self._timestamps.clear()
+            self._logger.info(f"Cache {self.name} cleared")
     
     def items(self) -> Iterator[Tuple[str, Any]]:
         """Retourne un itérateur sur les paires (clé, valeur) non expirées."""
-        self._cleanup_expired()
-        return iter(list(self._cache.items()))
-    
+        with self._lock:
+            self._cleanup_expired()
+            return iter(list(self._cache.items()))
+
     def keys(self) -> Iterator[str]:
         """Retourne un itérateur sur les clés non expirées."""
-        self._cleanup_expired()
-        return iter(list(self._cache.keys()))
-    
+        with self._lock:
+            self._cleanup_expired()
+            return iter(list(self._cache.keys()))
+
     def values(self) -> Iterator[Any]:
         """Retourne un itérateur sur les valeurs non expirées."""
-        self._cleanup_expired()
-        return iter(list(self._cache.values()))
-    
+        with self._lock:
+            self._cleanup_expired()
+            return iter(list(self._cache.values()))
+
     def __getitem__(self, key: str) -> Any:
         """Permet l'accès par index : cache[key]"""
-        result = self.get(key)
-        if result is None and key not in self._cache:
-            raise KeyError(key)
-        return result
-    
+        with self._lock:
+            result = self.get(key)
+            if result is None and key not in self._cache:
+                raise KeyError(key)
+            return result
+
     def __contains__(self, key: str) -> bool:
         """Permet l'opérateur 'in' : key in cache"""
-        self._cleanup_expired()
-        return key in self._cache and not self._is_expired(key)
-    
+        with self._lock:
+            self._cleanup_expired()
+            return key in self._cache and not self._is_expired(key)
+
     def __len__(self) -> int:
-        self._cleanup_expired()
-        return len(self._cache)
-    
+        with self._lock:
+            self._cleanup_expired()
+            return len(self._cache)
+
     def __iter__(self) -> Iterator[str]:
         """Permet d'itérer sur les clés : for key in cache"""
-        self._cleanup_expired()
-        return iter(list(self._cache.keys()))
+        with self._lock:
+            self._cleanup_expired()
+            return iter(list(self._cache.keys()))
 
 
 # Instance globale du gestionnaire de mémoire

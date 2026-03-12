@@ -196,7 +196,7 @@ class BaseTool(ABC):
             import gc
             gc.collect()
         
-        self.logger.info(f"{self.tool_name} cleaned up")
+        self.logger.debug(f"{self.tool_name} cleaned up")
     
     def _get_quota_manager(self, **kwargs) -> QuotaManager:
         """Récupère ou crée le gestionnaire de quotas pour cette session."""

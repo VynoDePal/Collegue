@@ -113,6 +113,7 @@ def register_meta_orchestrator(app: FastMCP):
                                 and obj != BaseTool
                                 and obj.__module__ == module.__name__
                             ):
+                                temp_instance = None
                                 try:
                                     # Instantiation temporaire pour métadonnées
                                     temp_instance = obj({})
@@ -145,14 +146,15 @@ def register_meta_orchestrator(app: FastMCP):
                                         "prompt_desc": f"{tool_name}: {temp_instance.get_description()}\\n  Arguments:\\n{formatted_args}",
                                         "schema": schema,
                                     })
-                                    
-                                    # Nettoyer explicitement l'instance temporaire
-                                    if hasattr(temp_instance, 'cleanup'):
-                                        temp_instance.cleanup()
-                                    del temp_instance
-                                    
+
                                 except Exception as e:
                                     await ctx.warning(f"Skip {name}: {e}")
+                                finally:
+                                    # Nettoyer explicitement l'instance temporaire (même en cas d'erreur)
+                                    if temp_instance is not None:
+                                        if hasattr(temp_instance, 'cleanup'):
+                                            temp_instance.cleanup()
+                                        del temp_instance
                     except Exception:
                         pass
             except Exception as e:
