@@ -7,10 +7,15 @@ prévenant les fuites sur les sessions longues.
 import gc
 import weakref
 import logging
+import threading
 import time
 from typing import Any, Dict, Optional, Callable, List, Iterator, Tuple
 from dataclasses import dataclass
 from collections import deque
+
+
+# Lock pour le singleton MemoryManager
+_memory_manager_lock = threading.Lock()
 
 
 @dataclass
@@ -102,7 +107,7 @@ class MemoryManager:
         
         # Nettoyer les références faibles mortes
         dead_refs = [
-            obj_id for obj_id, ref in self._tracked_objects.items()
+            obj_id for obj_id, ref in list(self._tracked_objects.items())
             if ref() is None
         ]
         for obj_id in dead_refs:
@@ -301,10 +306,12 @@ _memory_manager: Optional[MemoryManager] = None
 
 
 def get_memory_manager() -> MemoryManager:
-    """Retourne l'instance globale du gestionnaire de mémoire."""
+    """Retourne l'instance globale du gestionnaire de mémoire (thread-safe)."""
     global _memory_manager
     if _memory_manager is None:
-        _memory_manager = MemoryManager()
+        with _memory_manager_lock:
+            if _memory_manager is None:
+                _memory_manager = MemoryManager()
     return _memory_manager
 
 
