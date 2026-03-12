@@ -157,7 +157,6 @@ class TestTTLCache:
     
     def test_cache_expires_entries(self):
         """Test que les entrées expirées sont supprimées (avec patch du temps)."""
-        from unittest.mock import patch
         
         cache = TTLCache(max_size=10, ttl_seconds=0.1, name="test")  # 100ms TTL
         
