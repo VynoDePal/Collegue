@@ -1,0 +1,102 @@
+[
+  {
+    "workers": 1,
+    "total_calls": 5,
+    "ok": 5,
+    "rate_limited_global": 0,
+    "rate_limited_tool": 0,
+    "rate_limited_llm": 0,
+    "tool_error": 0,
+    "network": 0,
+    "races": 0,
+    "latencies_ms": [
+      31.589727994287387,
+      13.780307999695651,
+      12.543931996333413,
+      13.69242399232462,
+      15.48528199782595
+    ],
+    "wall_clock_sec": 0.12357293500099331
+  },
+  {
+    "workers": 5,
+    "total_calls": 25,
+    "ok": 7,
+    "rate_limited_global": 0,
+    "rate_limited_tool": 18,
+    "rate_limited_llm": 0,
+    "tool_error": 0,
+    "network": 0,
+    "races": 0,
+    "latencies_ms": [
+      40.29342401190661,
+      37.40836899669375,
+      55.82954699639231,
+      239.93382000480779,
+      239.89525600336492,
+      484.01574698800687,
+      99.06981899985112
+    ],
+    "wall_clock_sec": 2.0344993299950147
+  },
+  {
+    "workers": 10,
+    "total_calls": 50,
+    "ok": 2,
+    "rate_limited_global": 29,
+    "rate_limited_tool": 19,
+    "rate_limited_llm": 0,
+    "tool_error": 0,
+    "network": 0,
+    "races": 0,
+    "latencies_ms": [
+      346.4124140009517,
+      193.91263400029857
+    ],
+    "wall_clock_sec": 2.54038297200168
+  },
+  {
+    "workers": 20,
+    "total_calls": 100,
+    "ok": 4,
+    "rate_limited_global": 72,
+    "rate_limited_tool": 24,
+    "rate_limited_llm": 0,
+    "tool_error": 0,
+    "network": 0,
+    "races": 0,
+    "latencies_ms": [
+      178.95343199779745,
+      211.21788800519425,
+      175.32255699916277,
+      265.3859639976872
+    ],
+    "wall_clock_sec": 4.135930869000731
+  },
+  {
+    "workers": 50,
+    "total_calls": 250,
+    "ok": 12,
+    "rate_limited_global": 159,
+    "rate_limited_tool": 79,
+    "rate_limited_llm": 0,
+    "tool_error": 0,
+    "network": 0,
+    "races": 0,
+    "latencies_ms": [
+      121.12808800884522,
+      342.15878500253893,
+      197.3147630051244,
+      308.7798100023065,
+      263.734021995333,
+      110.54650500591379,
+      451.2428580055712,
+      307.1282320015598,
+      186.23698900046293,
+      124.010214000009,
+      276.84626998961903,
+      261.73371699405834
+    ],
+    "wall_clock_sec": 12.279543063996243
+  }
+]

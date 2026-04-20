@@ -1,0 +1,63 @@
+{
+  "summary": {
+    "duration_sec": 183.3,
+    "requests": 60,
+    "errors": 0,
+    "mem_min_mib": 241.2,
+    "mem_max_mib": 241.7,
+    "mem_mean_mib": 241.5,
+    "mem_drift_pct": 0.21,
+    "mem_stable_within_15pct": true
+  },
+  "samples": [
+    {
+      "t_sec": 0.0,
+      "requests_so_far": 0,
+      "memory_mib": 241.2,
+      "cpu_pct": 5.95,
+      "raw": "241.2MiB / 14.58GiB | 5.95%"
+    },
+    {
+      "t_sec": 31.590151847005473,
+      "requests_so_far": 11,
+      "memory_mib": 241.5,
+      "cpu_pct": 4.59,
+      "raw": "241.5MiB / 14.58GiB | 4.59%"
+    },
+    {
+      "t_sec": 61.62135040800786,
+      "requests_so_far": 21,
+      "memory_mib": 241.4,
+      "cpu_pct": 5.9,
+      "raw": "241.4MiB / 14.58GiB | 5.90%"
+    },
+    {
+      "t_sec": 91.65318173800188,
+      "requests_so_far": 31,
+      "memory_mib": 241.7,
+      "cpu_pct": 5.31,
+      "raw": "241.7MiB / 14.58GiB | 5.31%"
+    },
+    {
+      "t_sec": 121.68323109700577,
+      "requests_so_far": 41,
+      "memory_mib": 241.7,
+      "cpu_pct": 5.5,
+      "raw": "241.7MiB / 14.58GiB | 5.50%"
+    },
+    {
+      "t_sec": 151.71121258400672,
+      "requests_so_far": 51,
+      "memory_mib": 241.5,
+      "cpu_pct": 5.48,
+      "raw": "241.5MiB / 14.58GiB | 5.48%"
+    },
+    {
+      "t_sec": 183.27607595200243,
+      "requests_so_far": 60,
+      "memory_mib": 241.5,
+      "cpu_pct": 4.54,
+      "raw": "241.5MiB / 14.58GiB | 4.54%"
+    }
+  ]
+}
