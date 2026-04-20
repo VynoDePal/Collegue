@@ -123,6 +123,29 @@ class IacGuardrailsScanTool(BaseTool):
             "Sortie SARIF pour intégration CI/CD",
         ]
 
+    # Patterns that are known to trigger catastrophic backtracking. Matched against
+    # the regex source itself (not against scanned content) to reject DoS patterns
+    # supplied via custom_policies before they ever reach re.finditer.
+    _REDOS_PATTERNS = (
+        r"\([^)]{0,200}[*+]\)[*+]",              # (...+)+, (...*)*, (...+)*, (...*)+
+        r"\([^)]*\|[^)]*\)[*+]",                 # (a|b)+ alternation with quantifier
+    )
+    # Upper bound on content size fed to a user-supplied regex. Larger files are truncated
+    # so a linear-time regex on 10 MB stays cheap and a quadratic one stays bounded.
+    _MAX_REGEX_CONTENT_SIZE = 1_000_000
+    _MAX_REGEX_MATCHES = 5_000
+
+    @classmethod
+    def _regex_looks_dangerous(cls, pattern: str) -> bool:
+        """Detect obvious ReDoS shapes in a user-supplied regex."""
+        import re as _re
+        if len(pattern) > 10_000:
+            return True
+        for p in cls._REDOS_PATTERNS:
+            if _re.search(p, pattern):
+                return True
+        return False
+
     def _apply_custom_policies(
         self, content: str, filepath: str, policies: List[CustomPolicy]
     ) -> List[IacFinding]:
@@ -132,16 +155,36 @@ class IacGuardrailsScanTool(BaseTool):
 
         findings = []
 
+        # Cap content size once for all regex policies on this file
+        scan_content = content[: self._MAX_REGEX_CONTENT_SIZE]
+        if len(content) > self._MAX_REGEX_CONTENT_SIZE:
+            self.logger.info(
+                f"Custom policy scan: content truncated from {len(content)} to "
+                f"{self._MAX_REGEX_CONTENT_SIZE} bytes for {filepath}"
+            )
+
         for policy in policies:
             if policy.language == "regex":
-                try:
-                    matches = list(
-                        re.finditer(
-                            policy.content, content, re.MULTILINE | re.IGNORECASE
-                        )
+                if self._regex_looks_dangerous(policy.content):
+                    self.logger.warning(
+                        f"Policy {policy.id} rejected: regex pattern matches a known "
+                        f"ReDoS shape (nested quantifiers or alternation)."
                     )
+                    continue
+                try:
+                    matches_iter = re.finditer(
+                        policy.content, scan_content, re.MULTILINE | re.IGNORECASE
+                    )
+                    matches = []
+                    for i, m in enumerate(matches_iter):
+                        if i >= self._MAX_REGEX_MATCHES:
+                            self.logger.warning(
+                                f"Policy {policy.id} hit match cap ({self._MAX_REGEX_MATCHES})"
+                            )
+                            break
+                        matches.append(m)
                     for match in matches:
-                        line_num = content[: match.start()].count("\n") + 1
+                        line_num = scan_content[: match.start()].count("\n") + 1
                         findings.append(
                             IacFinding(
                                 rule_id=policy.id,
@@ -165,8 +208,13 @@ class IacGuardrailsScanTool(BaseTool):
                     rule_def = yaml.safe_load(policy.content)
                     if isinstance(rule_def, dict):
                         pattern = rule_def.get("pattern", "")
+                        if pattern and self._regex_looks_dangerous(pattern):
+                            self.logger.warning(
+                                f"YAML policy {policy.id} rejected: pattern has ReDoS shape"
+                            )
+                            continue
                         if pattern and re.search(
-                            pattern, content, re.MULTILINE | re.IGNORECASE
+                            pattern, scan_content, re.MULTILINE | re.IGNORECASE
                         ):
                             findings.append(
                                 IacFinding(
