@@ -28,7 +28,16 @@ class Settings(BaseSettings):
     MAX_HISTORY_LENGTH: int = 20
     CACHE_ENABLED: bool = True
     CACHE_TTL: int = 3600
-    
+
+    # --- LLM rate limiting (per-client identity) ---
+    # Protects the shared LLM quota from being exhausted by a single abusive
+    # or mis-configured client. Applies ONLY to tools that call the LLM
+    # (see collegue.core.llm_rate_limiter.LLM_DEPENDENT_TOOLS).
+    # Set either value to 0 to disable that window (not recommended in prod).
+    LLM_RATE_LIMIT_ENABLED: bool = True
+    LLM_RATE_LIMIT_PER_MINUTE: int = 15
+    LLM_RATE_LIMIT_PER_DAY: int = 500
+
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
     
     OAUTH_ENABLED: bool = False

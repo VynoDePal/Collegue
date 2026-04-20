@@ -321,11 +321,25 @@ app.add_middleware(RateLimitingMiddleware(
     max_requests_per_second=10.0,
     burst_capacity=20,
 ))
+
+# LLM-specific rate limiter: protects the shared Gemini quota from a single
+# client monopolising it. Registered AFTER the generic rate limiter so that
+# obviously abusive traffic is rejected cheaply before we hit this bucket.
+if settings.LLM_RATE_LIMIT_ENABLED:
+    from collegue.core.middleware_llm_rate_limit import LLMRateLimitingMiddleware
+    app.add_middleware(LLMRateLimitingMiddleware(
+        per_minute=settings.LLM_RATE_LIMIT_PER_MINUTE,
+        per_day=settings.LLM_RATE_LIMIT_PER_DAY,
+    ))
+
 if settings.CACHE_ENABLED:
     app.add_middleware(ResponseCachingMiddleware(
         call_tool_settings=CallToolSettings(ttl=settings.CACHE_TTL),
     ))
-logger.info("Middleware FastMCP configurés (error, logging, timing, rate_limit, cache)")
+logger.info(
+    "Middleware FastMCP configurés (error, logging, timing, rate_limit, "
+    "llm_rate_limit=%s, cache)", settings.LLM_RATE_LIMIT_ENABLED,
+)
 
 from collegue.core import register_core
 from collegue.tools import register_tools
