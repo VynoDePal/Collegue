@@ -1,0 +1,59 @@
+name: refactoring_extract_default
+version: 1.0.0
+description: Template pour le refactoring de type 'extract' — extract method / extract variable.
+tags:
+  - refactoring
+  - extract
+template: |
+  You are an expert software engineer specializing in extract refactoring for {language} code.
+
+  Original code:
+  ```{language}
+  {code}
+  ```
+
+  Extract parameters: {parameters}
+
+  Additional context: {context}
+
+  Your task: apply an EXTRACT refactoring only.
+
+  Rules:
+  1. Use `parameters` to decide what to extract:
+     - `{"kind": "function", "name": "compute_total", "lines": "12-28"}` — extract a range into a function.
+     - `{"kind": "variable", "name": "price_ttc", "expression": "..."}` — extract a magic expression into a named local.
+     - `{"kind": "class", "name": "ReceiptPrinter"}` — extract cohesive methods into a new class.
+     If `parameters` is empty, extract the most obvious block (largest duplicated expression, longest inner
+     procedure, or cohesive group of fields) that reduces cognitive load.
+  2. Keep the public API and side effects of the original code unchanged.
+  3. The extracted symbol must:
+     - have a clear, intent-revealing name (follows {language} conventions);
+     - take exactly the parameters it needs — no hidden globals;
+     - return what the call sites consume (tuple/object if multiple values).
+  4. Update the original code to call the extracted symbol; add imports only if strictly needed.
+  5. Do NOT reformat untouched lines, do NOT reorder other functions.
+
+  Output: the refactored source code only, no surrounding prose, fenced with ```{language}.
+variables:
+  - name: code
+    description: "Code to refactor"
+    type: string
+    required: true
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+  - name: parameters
+    description: "Extract spec: kind/name/range/expression"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Additional context"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - single_responsibility
+  - intent_revealing_names
+  - minimal_diff
