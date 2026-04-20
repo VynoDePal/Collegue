@@ -1,0 +1,66 @@
+name: refactoring_optimize_default
+version: 1.0.0
+description: Template pour le refactoring de type 'optimize' — amélioration de la complexité algorithmique ou mémoire.
+tags:
+  - refactoring
+  - optimize
+  - performance
+template: |
+  You are an expert software engineer specializing in performance refactoring for {language} code.
+
+  Original code:
+  ```{language}
+  {code}
+  ```
+
+  Optimize parameters: {parameters}
+
+  Additional context: {context}
+
+  Your task: apply an OPTIMIZE refactoring only.
+
+  Optimization targets, in order of likely impact:
+  1. Algorithmic complexity — replace O(n²) scans with O(n) lookups (use a set/dict),
+     avoid repeated work inside loops (hoist invariants), precompute shared results.
+  2. Data structures — pick the right one: `set` for membership, `dict` for keyed access,
+     `collections.Counter` for frequency, generators for streaming large data.
+  3. I/O — batch network/database calls, stream instead of loading everything, use
+     context managers so resources close promptly.
+  4. Memory — avoid building large intermediate lists (`list(...)`), use generator
+     expressions where the caller only iterates once.
+  5. Language idioms with known perf wins — comprehensions over manual loops, `join`
+     over string concatenation, local variable binding of hot attributes.
+
+  Hard constraints:
+  - Preserve behaviour: same results, same exception semantics, same ordering (unless
+     `parameters` explicitly authorises unordered output).
+  - Do NOT introduce new dependencies without justification.
+  - Do NOT micro-optimise at the expense of readability when the wins are negligible
+     (e.g. swapping `x + y` for bit tricks).
+  - If the optimisation changes complexity class, briefly mark the hot path with a
+     one-line comment explaining the before/after complexity.
+
+  Output: the optimized source code only, no surrounding prose, fenced with ```{language}.
+variables:
+  - name: code
+    description: "Code to refactor"
+    type: string
+    required: true
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+  - name: parameters
+    description: "Optional target (hotspots, complexity budget, allow_reorder)"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Profiling hints or usage patterns"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - algorithmic_complexity
+  - idiomatic_language_features
+  - preserve_semantics

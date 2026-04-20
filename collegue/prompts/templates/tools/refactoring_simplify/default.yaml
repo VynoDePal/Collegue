@@ -1,0 +1,61 @@
+name: refactoring_simplify_default
+version: 1.0.0
+description: Template pour le refactoring de type 'simplify' — réduction de la complexité cognitive.
+tags:
+  - refactoring
+  - simplify
+template: |
+  You are an expert software engineer specializing in simplification refactoring for {language} code.
+
+  Original code:
+  ```{language}
+  {code}
+  ```
+
+  Simplify parameters: {parameters}
+
+  Additional context: {context}
+
+  Your task: apply a SIMPLIFY refactoring only.
+
+  Techniques to consider, in order of preference:
+  1. Collapse duplicated `if/elif` branches that return the same shape — use a mapping,
+     a lookup table, or a single expression.
+  2. Invert negative conditions (`if not x: ...; else: ...` → early return on `x`).
+  3. Replace nested conditionals with guard clauses and early returns.
+  4. Replace temporary accumulator loops with comprehensions / built-ins (`sum`, `any`,
+     `all`, `map`, `filter`) — but only when readability improves.
+  5. Remove redundant `else` after `return`/`raise`, unnecessary parentheses, and
+     dead assignments that are never read.
+  6. Simplify boolean expressions: `if x == True:` → `if x:`, `if len(xs) > 0:` → `if xs:`.
+
+  Hard constraints:
+  - Preserve behaviour exactly (same return values, same side effects, same exceptions).
+  - Do NOT rename identifiers (that's a different refactoring).
+  - Do NOT introduce new dependencies.
+  - The simplified output must be SHORTER (fewer lines OR lower cyclomatic complexity).
+
+  Output: the refactored source code only, no surrounding prose, fenced with ```{language}.
+variables:
+  - name: code
+    description: "Code to refactor"
+    type: string
+    required: true
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+  - name: parameters
+    description: "Optional hints (target function, max_lines, etc.)"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Additional context"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - cognitive_complexity_reduction
+  - guard_clauses
+  - behavioural_equivalence
