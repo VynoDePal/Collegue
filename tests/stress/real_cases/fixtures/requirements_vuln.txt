@@ -1,0 +1,5 @@
+django==1.11
+flask==0.12
+requests==2.6.0
+urllib-3==1.0.0
+python-dateutils==1.0
