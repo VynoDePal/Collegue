@@ -257,3 +257,12 @@ package.json
 package-lock.json
 
 app.yaml
+
+# === Collègue MCP — artefacts locaux et runtime ===
+# Surcharge Docker Compose spécifique à chaque développeur (mount kubeconfig, ports…)
+docker-compose.override.yml
+
+# Rapports générés par la suite stress (runs, injection_audit, real_cases)
+tests/stress/reports/
+
+.claude

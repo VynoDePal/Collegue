@@ -57,7 +57,9 @@ class Settings(BaseSettings):
     @field_validator('SENTRY_DSN')
     @classmethod
     def validate_sentry_dsn(cls, v):
-        if v is not None and not v.startswith('http'):
+        if v in (None, ""):
+            return None
+        if not v.startswith('http'):
             raise ValueError(f"Le SENTRY_DSN configuré semble invalide (doit commencer par http/https): {v}")
         return v
         

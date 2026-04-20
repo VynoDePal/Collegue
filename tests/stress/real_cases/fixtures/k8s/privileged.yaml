@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: risky-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: risky
+  template:
+    metadata:
+      labels:
+        app: risky
+    spec:
+      containers:
+        - name: app
+          image: nginx:latest
+          securityContext:
+            privileged: true
+            runAsNonRoot: false
+            allowPrivilegeEscalation: true
+          ports:
+            - containerPort: 80
