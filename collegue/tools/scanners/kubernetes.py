@@ -38,13 +38,17 @@ class KubernetesScanner(BaseScanner):
 
 	def _scan_pod(self, doc: Dict, filepath: str, lines: List[str], doc_idx: int) -> List[IacFinding]:
 		"""Scan Pod spec for security issues."""
-		findings = []
 		spec = doc.get('spec', {})
-		containers = spec.get('containers', [])
+		return self._scan_containers(spec.get('containers', []), filepath, lines, doc_idx)
 
+	def _scan_containers(self, containers: List[Dict], filepath: str,
+	                     lines: List[str], doc_idx: int) -> List[IacFinding]:
+		"""Scan a list of container specs (shared between Pod and Deployment scanners)."""
+		findings = []
 		for idx, container in enumerate(containers):
-			# Check privileged mode
-			if container.get('securityContext', {}).get('privileged', False):
+			sec = container.get('securityContext', {}) or {}
+
+			if sec.get('privileged', False):
 				line = self._find_line(lines, 'privileged:', doc_idx)
 				findings.append(IacFinding(
 					rule_id='K8S-001',
@@ -58,7 +62,35 @@ class KubernetesScanner(BaseScanner):
 					engine="k8s-scanner"
 				))
 
-			# Check resource limits
+			# runAsNonRoot should be explicitly true; false or missing both deserve a finding
+			if sec.get('runAsNonRoot') is False:
+				line = self._find_line(lines, 'runAsNonRoot:', doc_idx)
+				findings.append(IacFinding(
+					rule_id='K8S-008',
+					rule_title='Container allowed to run as root',
+					severity='high',
+					path=filepath,
+					line=line,
+					message=f"Container '{container.get('name', idx)}' has runAsNonRoot=false",
+					remediation="Set securityContext.runAsNonRoot: true",
+					references=['https://kubernetes.io/docs/concepts/security/pod-security-standards/'],
+					engine="k8s-scanner"
+				))
+
+			if sec.get('allowPrivilegeEscalation', False) is True:
+				line = self._find_line(lines, 'allowPrivilegeEscalation:', doc_idx)
+				findings.append(IacFinding(
+					rule_id='K8S-010',
+					rule_title='Privilege escalation allowed',
+					severity='high',
+					path=filepath,
+					line=line,
+					message=f"Container '{container.get('name', idx)}' allows privilege escalation",
+					remediation="Set securityContext.allowPrivilegeEscalation: false",
+					references=['https://kubernetes.io/docs/concepts/security/pod-security-standards/'],
+					engine="k8s-scanner"
+				))
+
 			if not container.get('resources', {}).get('limits'):
 				line = self._find_line(lines, 'containers:', doc_idx)
 				findings.append(IacFinding(
@@ -79,6 +111,12 @@ class KubernetesScanner(BaseScanner):
 		"""Scan Deployment spec for security issues."""
 		findings = []
 		spec = doc.get('spec', {}).get('template', {}).get('spec', {})
+
+		# Containers inside a Deployment's template need the same security checks as
+		# top-level Pod containers — privileged, runAsNonRoot, resource limits, etc.
+		findings.extend(self._scan_containers(
+			spec.get('containers', []) or [], filepath, lines, doc_idx
+		))
 
 		# Check hostNetwork
 		if spec.get('hostNetwork', False):
