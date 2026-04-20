@@ -1,0 +1,6 @@
+workers,total,ok,rate_limited_global,rate_limited_tool,rate_limited_llm,tool_error,network,races,error_rate_pct,wall_clock_sec,throughput_req_per_sec,lat_p50,lat_p95,lat_p99
+1,5,5,0,0,0,0,0,0,0.0,0.12,40.5,13.8,31.6,31.6
+5,25,7,0,18,0,0,0,0,72.0,2.03,3.4,99.1,484.0,484.0
+10,50,2,29,19,0,0,0,0,96.0,2.54,0.8,346.4,346.4,346.4
+20,100,4,72,24,0,0,0,0,96.0,4.14,1.0,211.2,265.4,265.4
+50,250,12,159,79,0,0,0,0,95.2,12.28,1.0,263.7,451.2,451.2
