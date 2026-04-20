@@ -38,7 +38,8 @@ async def test_orchestrator_planning_and_execution():
     tool_decorator = app.tool.return_value
     smart_orchestrator_func = tool_decorator.call_args[0][0]
     
-    # Mock _TOOLS_CACHE
+    # Inject a fake tools registry via the lifespan_context — same pattern
+    # the orchestrator uses in production now that _TOOLS_CACHE is gone (#211).
     mock_tools_cache = {
         "mock_tool": {
             "class": lambda x: MockToolInstance(),
@@ -47,10 +48,9 @@ async def test_orchestrator_planning_and_execution():
             "schema": {}
         }
     }
-    
-    mo._TOOLS_CACHE = mock_tools_cache
-    
+
     mock_ctx = MockContext()
+    mock_ctx.lifespan_context = {"tools_registry": mock_tools_cache}
     
     # Plan response
     plan_response = MagicMock()

@@ -1,11 +1,19 @@
 """
 Meta Orchestrator - Tool intelligent utilisant FastMCP sampling with tools
+
+Tool discovery was previously driven by a module-level ``_TOOLS_CACHE`` global
+populated lazily on the first request. That global was replaced (issue #211)
+by a lifespan-injected :class:`~collegue.core.tools_registry.ToolsRegistry`
+that is built once at server startup. See ``collegue/core/tools_registry.py``
+for the discovery logic and the concurrency-safe wrapper used as a fallback
+when the handler is invoked outside of a proper lifespan context (tests,
+ad-hoc scripts).
 """
 
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
-from .memory_manager import TTLCache
+from .tools_registry import ToolsRegistry
 
 try:
     from fastmcp import FastMCP, Context
@@ -13,10 +21,11 @@ except ImportError:
     FastMCP = Any
     Context = Any
 
-# Cache global pour les outils découverts (avec TTL de 1 heure)
-_TOOLS_CACHE = None
-_MAX_TOOLS_CACHE_SIZE = 50
-_TOOLS_CACHE_TTL = 3600  # 1 heure
+# Fallback registry used only when ``ctx.lifespan_context`` does not already
+# carry one (e.g. in unit tests that invoke the handler directly). The
+# ``ToolsRegistry`` itself is asyncio-safe, so concurrent cold-start requests
+# will trigger at most one discovery.
+_FALLBACK_REGISTRY: ToolsRegistry = ToolsRegistry()
 
 
 class OrchestratorStep(BaseModel):
@@ -80,91 +89,27 @@ def register_meta_orchestrator(app: FastMCP):
         """
         import time
         import json
-        import importlib
-        import inspect
-        import pkgutil
-        import collegue.tools
-        from collegue.tools.base import BaseTool
 
-        global _TOOLS_CACHE, _MAX_TOOLS_CACHE_SIZE, _TOOLS_CACHE_TTL
         start_time = time.time()
         await ctx.info(
             f"Démarrage orchestration (mode v4 robust): {request.query[:100]}..."
         )
 
-        # 1. Découverte des tools (avec Cache TTL)
-        # Relancer la discovery si le cache est None ou vide (après expiration)
-        if _TOOLS_CACHE is None or len(_TOOLS_CACHE) == 0:
-            # Construire le cache dans une variable locale pour éviter les race conditions
-            _tools_cache_local = TTLCache(
-                max_size=_MAX_TOOLS_CACHE_SIZE,
-                ttl_seconds=_TOOLS_CACHE_TTL,
-                name="tools_discovery"
-            )
-            try:
-                for _, name, _ in pkgutil.iter_modules(collegue.tools.__path__):
-                    if name.startswith("_") or name == "base":
-                        continue
-                    try:
-                        module = importlib.import_module(f"collegue.tools.{name}")
-                        for _, obj in inspect.getmembers(module):
-                            if (
-                                inspect.isclass(obj)
-                                and issubclass(obj, BaseTool)
-                                and obj != BaseTool
-                                and obj.__module__ == module.__name__
-                            ):
-                                temp_instance = None
-                                try:
-                                    # Instantiation temporaire pour métadonnées
-                                    temp_instance = obj({})
-                                    tool_name = temp_instance.get_name()
-                                    if tool_name == "smart_orchestrator":
-                                        continue
-
-                                    schema = temp_instance.get_request_model().model_json_schema()
-                                    props = schema.get("properties", {})
-                                    required = schema.get("required", [])
-
-                                    args_desc = []
-                                    for prop_name, prop_info in props.items():
-                                        req_mark = (
-                                            "(REQUIS)"
-                                            if prop_name in required
-                                            else "(optionnel)"
-                                        )
-                                        prop_type = prop_info.get("type", "any")
-                                        prop_desc = prop_info.get("description", "")
-                                        args_desc.append(
-                                            f"    - {prop_name} ({prop_type}): {prop_desc} {req_mark}"
-                                        )
-
-                                    formatted_args = "\\n".join(args_desc)
-
-                                    _tools_cache_local.set(tool_name, {
-                                        "class": obj,
-                                        "description": temp_instance.get_description(),
-                                        "prompt_desc": f"{tool_name}: {temp_instance.get_description()}\\n  Arguments:\\n{formatted_args}",
-                                        "schema": schema,
-                                    })
-
-                                except Exception as e:
-                                    await ctx.warning(f"Skip {name}: {e}")
-                                finally:
-                                    # Nettoyer explicitement l'instance temporaire (même en cas d'erreur)
-                                    if temp_instance is not None:
-                                        if hasattr(temp_instance, 'cleanup'):
-                                            temp_instance.cleanup()
-                                        del temp_instance
-                    except Exception:
-                        pass
-            except Exception as e:
-                await ctx.error(f"Erreur discovery: {e}")
-            
-            # Assigner le cache complet une fois rempli (évite les race conditions)
-            _TOOLS_CACHE = _tools_cache_local
-
-        available_tools = _TOOLS_CACHE
+        # 1. Tool registry — populated once by core_lifespan at startup and
+        # injected via ``ctx.lifespan_context``. When the handler is called
+        # outside of a full lifespan (unit tests, scripts), fall back to a
+        # module-level ``ToolsRegistry`` whose lock prevents concurrent
+        # cold-start races.
+        lc = ctx.lifespan_context or {}
+        injected = lc.get("tools_registry")
+        if isinstance(injected, ToolsRegistry):
+            available_tools = await injected.get()
+        elif isinstance(injected, dict):
+            # Accept a raw dict too: convenient for unit tests that just want
+            # to stub a fixed set of tools without wrapping in ToolsRegistry.
+            available_tools = injected
+        else:
+            available_tools = await _FALLBACK_REGISTRY.get()
         tools_desc = "\\n".join(
             [info["prompt_desc"] for name, info in available_tools.items()]
         )
@@ -172,8 +117,7 @@ def register_meta_orchestrator(app: FastMCP):
         # 2. Étape PLANIFICATION (avec Structured Output)
         await ctx.info("Phase 1: Planification...")
 
-        # Récupération du prompt engine depuis le contexte
-        lc = ctx.lifespan_context or {}
+        # Récupération du prompt engine depuis le même contexte que le registry
         prompt_engine = lc.get("prompt_engine")
 
         # Construction du prompt

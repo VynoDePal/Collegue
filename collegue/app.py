@@ -222,17 +222,31 @@ async def core_lifespan(server):
     global _lazy_engine_instance
     from collegue.core.parser import CodeParser
     from collegue.core.resource_manager import ResourceManager
+    from collegue.core.tools_registry import ToolsRegistry, discover_tools
 
     startup_start = time.time()
     logger.info("🔄 Démarrage du core_lifespan...")
-    
+
     # Validation stricte du LLM au démarrage
     await validate_llm_config()
+
+    # Eager tool discovery — runs once at startup. Before #211 this was driven
+    # lazily by the first `smart_orchestrator` call through a module-level
+    # ``_TOOLS_CACHE`` global, which had no lock around initialisation. Running
+    # it here means: (a) no cold-start race under concurrent load, and
+    # (b) startup logs surface any broken tool before the first request.
+    discovery_start = time.time()
+    tools_registry = ToolsRegistry(initial=discover_tools())
+    logger.info(
+        "🔎 Tool registry construit en %.2fs — %d outils disponibles",
+        time.time() - discovery_start, len(await tools_registry.get()),
+    )
 
     state = {
         "parser": CodeParser(),
         "resource_manager": ResourceManager(),
         "prompt_engine": None,
+        "tools_registry": tools_registry,
     }
 
     # Initialisation rapide des composants essentiels
@@ -251,6 +265,7 @@ async def core_lifespan(server):
     logger.info(f"   - Parser: disponible")
     logger.info(f"   - ResourceManager: disponible")
     logger.info(f"   - PromptEngine: initialisation en cours (lazy)")
+    logger.info(f"   - ToolsRegistry: pré-chargé ({len(await tools_registry.get())} outils)")
     
     print(f"✅ Composants initialisés via lifespan context: {list(state.keys())}")
     yield state
