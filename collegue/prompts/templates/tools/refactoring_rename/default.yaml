@@ -1,0 +1,54 @@
+name: refactoring_rename_default
+version: 1.0.0
+description: Template pour le refactoring de type 'rename' — renommage d'identifiants.
+tags:
+  - refactoring
+  - rename
+template: |
+  You are an expert software engineer specializing in rename refactoring for {language} code.
+
+  Original code:
+  ```{language}
+  {code}
+  ```
+
+  Rename parameters: {parameters}
+
+  Additional context: {context}
+
+  Your task: apply a RENAME refactoring only.
+
+  Rules:
+  1. Change ONLY the identifier(s) described in `parameters` (e.g. `{"from": "foo", "to": "bar"}`).
+     If `parameters` is empty, infer the best single rename that most improves clarity.
+  2. Update EVERY occurrence of the renamed symbol in the provided code, including:
+     - definitions, calls, imports, type hints, docstrings, string references and comments
+       where it clearly refers to the identifier (not unrelated matches).
+  3. Do NOT change program behaviour, do NOT reorder imports, do NOT reformat untouched lines.
+  4. Respect {language} naming conventions (PEP 8 for python, camelCase for JS/TS, etc.)
+     when inferring the target name.
+  5. Keep all other code exactly as provided — single-purpose refactoring.
+
+  Output: the refactored source code only, no surrounding prose, fenced with ```{language}.
+variables:
+  - name: code
+    description: "Code to refactor"
+    type: string
+    required: true
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+  - name: parameters
+    description: "Rename spec, typically {'from': '...', 'to': '...'}"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Optional extra context (call sites, usages)"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - naming_conventions
+  - minimal_diff

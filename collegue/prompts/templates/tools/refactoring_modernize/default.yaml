@@ -1,0 +1,68 @@
+name: refactoring_modernize_default
+version: 1.0.0
+description: Template pour le refactoring de type 'modernize' — migration vers les idiomes récents du langage.
+tags:
+  - refactoring
+  - modernize
+template: |
+  You are an expert software engineer specializing in modernization refactoring for {language} code.
+
+  Original code:
+  ```{language}
+  {code}
+  ```
+
+  Modernize parameters: {parameters}
+
+  Additional context: {context}
+
+  Your task: apply a MODERNIZE refactoring only — adopt current language idioms.
+
+  Python modernisation cheatsheet (apply only what fits):
+  - `%`/`.format()` → f-strings.
+  - `dict(a=1, b=2)` → `{"a": 1, "b": 2}`.
+  - Manual class boilerplate → `@dataclass` / `NamedTuple` when the class is a data container.
+  - `os.path` joins → `pathlib.Path`.
+  - `typing.Dict/List/Tuple` → builtin generics (`dict[str, int]`) when target is Py ≥ 3.9.
+  - `typing.Optional[X]` → `X | None` when target is Py ≥ 3.10.
+  - Loop + `append` → list/dict/set comprehension when the body is a single expression.
+  - `try/except/pass` swallow → narrow exception + logging.
+  - `open(...)` calls → `with open(...) as f:` context manager.
+
+  JavaScript / TypeScript modernisation cheatsheet:
+  - `var` → `const`/`let`.
+  - `function foo() {{}}` callbacks → arrow functions where `this` binding is not needed.
+  - Promise chains → `async/await`.
+  - Object property shorthand, spread operator, optional chaining (`?.`), nullish coalescing (`??`).
+
+  General constraints:
+  - Only modernise constructs the `parameters` or the context allows (e.g. minimum language
+     version). If unspecified, pick a conservative floor (Python 3.10+, ES2020+).
+  - Preserve behaviour: same results, same side effects, same edge cases.
+  - Do NOT introduce new third-party dependencies — stick to stdlib / built-ins.
+  - Keep the public API stable.
+
+  Output: the modernized source code only, no surrounding prose, fenced with ```{language}.
+variables:
+  - name: code
+    description: "Code to refactor"
+    type: string
+    required: true
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+  - name: parameters
+    description: "Target version, idiom allowlist, etc."
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Project constraints (min supported language version, style guide)"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - idiomatic_modern_code
+  - stdlib_first
+  - behaviour_preservation

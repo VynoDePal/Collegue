@@ -1,0 +1,63 @@
+name: refactoring_clean_default
+version: 1.0.0
+description: Template pour le refactoring de type 'clean' — suppression de code mort et imports inutiles.
+tags:
+  - refactoring
+  - clean
+template: |
+  You are an expert software engineer specializing in cleanup refactoring for {language} code.
+
+  Original code:
+  ```{language}
+  {code}
+  ```
+
+  Clean parameters: {parameters}
+
+  Additional context: {context}
+
+  Your task: apply a CLEAN refactoring only.
+
+  Remove, in this order:
+  1. Unused imports (never referenced by the remaining code).
+  2. Unused local variables and parameters the function never reads.
+  3. Private helpers (prefixed `_`) that are no longer called by anything in the given snippet.
+  4. Commented-out code blocks that are clearly leftovers (TODOs with a real description stay).
+  5. Trailing debug artifacts: `print(...)`, `console.log(...)`, `var_dump(...)` used for debugging.
+  6. Duplicated literal strings → extract to a module-level constant IF used ≥ 3 times.
+
+  Non-goals (do NOT do these here):
+  - Do NOT rename anything (rename refactoring handles it).
+  - Do NOT restructure control flow (simplify refactoring handles it).
+  - Do NOT touch public exported names — only internals.
+  - Do NOT remove code whose effect you cannot fully verify from the snippet (preserve on doubt).
+
+  Hard constraints:
+  - Behaviour must stay identical.
+  - Whitespace consistent with the rest of the file.
+  - Output MUST be shorter (or equal if nothing to clean).
+
+  Output: the cleaned source code only, no surrounding prose, fenced with ```{language}.
+variables:
+  - name: code
+    description: "Code to refactor"
+    type: string
+    required: true
+  - name: language
+    description: "Programming language"
+    type: string
+    required: true
+  - name: parameters
+    description: "Optional scope (keep_logs=true, etc.)"
+    type: string
+    required: false
+    default: ""
+  - name: context
+    description: "Additional context"
+    type: string
+    required: false
+    default: ""
+optimization_hints:
+  - dead_code_removal
+  - import_pruning
+  - conservative_on_doubt
