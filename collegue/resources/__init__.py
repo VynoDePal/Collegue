@@ -3,6 +3,7 @@ Resources - Ressources de référence pour les langages et frameworks
 """
 import os
 import logging
+import sys
 
 
 logging.basicConfig(level=logging.INFO)
@@ -34,10 +35,10 @@ def register_resources(app):
         from .skills import register_skills
         register_skills(app, _compat)
         
-        print("✅ Toutes les ressources ont été chargées avec succès")
-        
+        print("✅ Toutes les ressources ont été chargées avec succès", file=sys.stderr)
+
     except ImportError as e:
-        print(f"⚠️ Avertissement: Certains modules de ressources ne sont pas disponibles: {e}")
+        print(f"⚠️ Avertissement: Certains modules de ressources ne sont pas disponibles: {e}", file=sys.stderr)
     except Exception as e:
-        print(f"❌ Erreur lors de l'enregistrement des ressources: {e}")
+        print(f"❌ Erreur lors de l'enregistrement des ressources: {e}", file=sys.stderr)
         raise

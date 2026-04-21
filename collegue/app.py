@@ -267,7 +267,7 @@ async def core_lifespan(server):
     logger.info(f"   - PromptEngine: initialisation en cours (lazy)")
     logger.info(f"   - ToolsRegistry: pré-chargé ({len(await tools_registry.get())} outils)")
     
-    print(f"✅ Composants initialisés via lifespan context: {list(state.keys())}")
+    print(f"✅ Composants initialisés via lifespan context: {list(state.keys())}", file=sys.stderr)
     yield state
     
     # Cleanup
@@ -305,11 +305,11 @@ if settings.LLM_API_KEY:
             default_model=settings.LLM_MODEL,
             client=gemini_client,
         )
-        print(f"✅ Sampling handler configuré avec Google Gemini ({settings.LLM_MODEL})")
+        print(f"✅ Sampling handler configuré avec Google Gemini ({settings.LLM_MODEL})", file=sys.stderr)
     except ImportError:
-        print("⚠️ OpenAISamplingHandler non disponible - pip install 'fastmcp[openai]'")
+        print("⚠️ OpenAISamplingHandler non disponible - pip install 'fastmcp[openai]'", file=sys.stderr)
     except Exception as e:
-        print(f"⚠️ Impossible de configurer le sampling handler: {e}")
+        print(f"⚠️ Impossible de configurer le sampling handler: {e}", file=sys.stderr)
 
 app = FastMCP(
     auth=auth_provider,

@@ -1,10 +1,25 @@
 #!/bin/sh
 
-# Script d'entrée qui gère les deux services :
-# - health_server sur le port 4122 (FastAPI)
-# - MCP server sur le port 4121 (FastMCP)
+# Script d'entrée avec deux modes selon MCP_TRANSPORT :
+#
+# - MCP_TRANSPORT=stdio → le container parle MCP par stdin/stdout
+#   (usage "docker run -i --rm ... collegue-mcp" depuis un client MCP).
+#   Pas de health server — le client gère le cycle de vie du process.
+#
+# - MCP_TRANSPORT=http (défaut) → serveur long-running avec healthcheck
+#   sur 4122 et MCP streamable sur 4121, pour docker compose.
 
 set -e
+
+if [ "${MCP_TRANSPORT:-http}" = "stdio" ]; then
+    # Mode stdio : exec direct, pas de background, pas de health server.
+    # exec transfère PID 1 à fastmcp pour que les signaux (SIGTERM à l'arrêt
+    # du container) soient reçus sans être interceptés par ce wrapper shell.
+    exec fastmcp run /app/collegue/app.py:app \
+        --transport stdio \
+        --log-level "${FASTMCP_LOG_LEVEL:-WARNING}" \
+        --no-banner
+fi
 
 echo "Starting health server on port 4122..."
 python3 /app/collegue/health_server.py &
