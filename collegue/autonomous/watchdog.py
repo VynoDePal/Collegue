@@ -245,7 +245,6 @@ class AutoFixer:
         global _processed_issues
         import ast
         import json
-        import re
 
         issue_id = issue.id
 

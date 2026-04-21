@@ -124,13 +124,16 @@ class RepoConsistencyCheckTool(BaseTool):
                 f"- [{issue.severity.upper()}] {issue.kind} @ {issue.path}:{issue.line or '?'}: {issue.message}"
             )
 
+        files_block = "\n".join(files_summary)
+        issues_block = "\n".join(issues_summary) if issues_summary else "Aucune issue détectée"
+
         return f"""Analyse les incohérences détectées dans ce code et fournis des insights.
 
 ## Fichiers analysés
-{"\n".join(files_summary)}
+{files_block}
 
 ## Issues détectées ({len(issues)} total)
-{"\n".join(issues_summary) if issues_summary else "Aucune issue détectée"}
+{issues_block}
 
 ---
 
