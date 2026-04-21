@@ -13,10 +13,6 @@ from __future__ import annotations
 import pytest
 
 _KNOWN_FAILURES: frozenset[str] = frozenset({
-    "tests/test_impact_analysis.py::TestImpactAnalysisRequest::test_request_creation",
-    "tests/test_impact_analysis.py::TestImpactAnalysisRequest::test_request_defaults",
-    "tests/test_impact_analysis.py::TestImpactAnalysisTool::test_execute_core_logic",
-    "tests/test_impact_analysis.py::TestImpactAnalysisTool::test_validate_request_valid",
     "tests/test_secret_scan.py::TestSecretScanTool::test_scan_batch_files",
     "tests/test_test_generation_fixes.py::test_test_generation_success",
 })
