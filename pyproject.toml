@@ -3,3 +3,16 @@ testpaths = ["tests"]
 norecursedirs = ["stress", "prompts", "__pycache__"]
 asyncio_mode = "auto"
 addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Narrow initial rule set: only real bugs (undefined names, duplicate
+# definitions). Style rules (unused imports, f-string-no-placeholder, etc.)
+# will be enabled in follow-up PRs once the codebase is cleaned up.
+select = ["F811", "F821", "F822", "F823"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F811", "F821", "F822", "F823"]
