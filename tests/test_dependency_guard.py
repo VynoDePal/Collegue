@@ -149,7 +149,7 @@ class TestDependencyGuardTool:
         """Test la blocklist."""
         with patch.object(tool._engine, 'check_package_existence') as mock_check:
             mock_check.return_value = {'exists': True}
-            
+
             request = DependencyGuardRequest(
                 content="suspicious-package>=1.0",
                 language="python",
@@ -157,8 +157,23 @@ class TestDependencyGuardTool:
                 blocklist=["suspicious-package"]
             )
             response = tool._execute_core_logic(request)
-            
+
             assert any(i.issue_type == 'blocked' for i in response.issues)
+
+    def test_scan_allowlist(self, tool):
+        """Test que l'allowlist signale tout package hors liste."""
+        request = DependencyGuardRequest(
+            content="django==4.0\nflask==2.0\nrequests==2.28",
+            language="python",
+            check_existence=False,
+            check_vulnerabilities=False,
+            allowlist=["django", "requests"],
+        )
+        response = tool._execute_core_logic(request)
+
+        not_allowed = [i for i in response.issues if i.issue_type == "not_allowed"]
+        assert len(not_allowed) == 1
+        assert not_allowed[0].package == "flask"
 
     def test_scan_nonexistent_package(self, tool):
         """Test la détection de package inexistant."""

@@ -30,16 +30,6 @@ _KNOWN_FAILURES: frozenset[str] = frozenset({
     "tests/test_repo_consistency_check.py::TestRepoConsistencyCheckTool::test_scan_no_issues",
     "tests/test_repo_consistency_check.py::TestRepoConsistencyCheckTool::test_scan_unused_imports_python",
     "tests/test_secret_scan.py::TestSecretScanTool::test_scan_batch_files",
-    "tests/test_security_tools.py::TestDependencyGuardTool::test_parse_package_json",
-    "tests/test_security_tools.py::TestDependencyGuardTool::test_parse_requirements_txt",
-    "tests/test_security_tools.py::TestSecretScanTool::test_clean_code",
-    "tests/test_security_tools.py::TestSecretScanTool::test_detect_aws_key",
-    "tests/test_security_tools.py::TestSecretScanTool::test_detect_github_token",
-    "tests/test_security_tools.py::TestSecretScanTool::test_detect_openai_key",
-    "tests/test_security_tools.py::TestSecretScanTool::test_detect_password_in_url",
-    "tests/test_security_tools.py::TestSecretScanTool::test_detect_private_key",
-    "tests/test_security_tools.py::TestSecretScanTool::test_mask_secret",
-    "tests/test_security_tools.py::TestSecretScanTool::test_scan_file",
     "tests/test_test_generation_fixes.py::test_test_generation_success",
 })
 
