@@ -2,6 +2,7 @@
 Tools Package - Enregistrement direct des outils avec FastMCP
 """
 import os
+import sys
 import importlib
 import inspect
 from typing import Dict, List, Type, Any
@@ -26,9 +27,9 @@ def register_tools(app: FastMCP):
         try:
             tool_instance = tool_class({})
             _register_tool_with_fastmcp(app, tool_instance)
-            print(f"Outil '{tool_class.__name__}' enregistré avec succès")
+            print(f"Outil '{tool_class.__name__}' enregistré avec succès", file=sys.stderr)
         except Exception as e:
-            print(f"Erreur lors de l'enregistrement de '{tool_class.__name__}': {e}")
+            print(f"Erreur lors de l'enregistrement de '{tool_class.__name__}': {e}", file=sys.stderr)
 
 
 def _discover_tools() -> List[Type[BaseTool]]:
@@ -57,7 +58,7 @@ def _discover_tools() -> List[Type[BaseTool]]:
                         tools.append(obj)
                         
             except ImportError as e:
-                print(f"Erreur lors de l'import de {module_name}: {e}")
+                print(f"Erreur lors de l'import de {module_name}: {e}", file=sys.stderr)
     
     # 2. Découverte des packages (sous-dossiers avec __init__.py)
     for item in os.listdir(current_dir):
@@ -78,7 +79,7 @@ def _discover_tools() -> List[Type[BaseTool]]:
                             tools.append(obj)
                             
                 except ImportError as e:
-                    print(f"Erreur lors de l'import du package {item}: {e}")
+                    print(f"Erreur lors de l'import du package {item}: {e}", file=sys.stderr)
     
     return tools
 

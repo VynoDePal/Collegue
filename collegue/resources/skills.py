@@ -2,6 +2,7 @@
 Skills Provider - Migration vers FastMCP 3.0 SkillsDirectoryProvider
 """
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,7 @@ def register_skills(app: Any, app_state: dict):
             
             # Compter les skills pour information
             skill_count = len([d for d in skills_dir.iterdir() if d.is_dir() and (d / "SKILL.md").exists()])
-            print(f"✅ {skill_count} skills chargés via SkillsProvider FastMCP")
+            print(f"✅ {skill_count} skills chargés via SkillsProvider FastMCP", file=sys.stderr)
         else:
             logger.warning(f"Dossier skills introuvable: {skills_dir}")
             
@@ -177,6 +178,6 @@ def _register_skills_fallback(app: Any, app_state: dict):
             _register_annex(app, skill_name, skill_path, annex_file)
     
     if skills:
-        print(f"✅ {len(skills)} skills chargés via fallback MCP resources")
+        print(f"✅ {len(skills)} skills chargés via fallback MCP resources", file=sys.stderr)
     else:
-        print("⚠️ Aucun skill trouvé")
+        print("⚠️ Aucun skill trouvé", file=sys.stderr)

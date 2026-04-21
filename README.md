@@ -48,9 +48,13 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
 
 ## 🐳 Auto-hébergement (Docker)
 
-Cette section couvre l'hébergement local du serveur Collègue dans un container Docker, puis la configuration de votre IDE pour s'y connecter en HTTP (streamable transport, port `4121`).
+Deux modes sont supportés selon l'envie : **serveur long-running** (`docker compose`) accédé en HTTP, ou **container à la volée** (`docker run -i --rm`) que le client MCP spawne/tue à chaque session en stdio. Choisissez un mode ci-dessous.
 
-### 1. Lancer le serveur
+### Mode A — Serveur long-running (docker compose, transport HTTP)
+
+Cette variante couvre l'hébergement local du serveur Collègue dans un container Docker qui tourne en permanence, puis la configuration de votre IDE pour s'y connecter en HTTP (streamable transport, port `4121`).
+
+#### 1. Lancer le serveur
 
 ```bash
 git clone https://github.com/VynoDePal/Collegue.git
@@ -72,11 +76,11 @@ Vérification :
 curl -s http://localhost:4122/_health
 ```
 
-### 2. Configurer le client MCP
+#### 2. Configurer le client MCP
 
-Pointez votre IDE sur `http://localhost:4121/mcp/` au lieu du wrapper NPM. Trois modes selon le client.
+Pointez votre IDE sur `http://localhost:4121/mcp/` au lieu du wrapper NPM. Trois variantes selon le client.
 
-#### Claude Code (CLI Anthropic)
+##### Claude Code (CLI Anthropic)
 
 ```bash
 claude mcp add --transport http collegue-local http://localhost:4121/mcp/
@@ -95,7 +99,7 @@ Ou en JSON dans `~/.claude/settings.json` :
 }
 ```
 
-#### Windsurf / Cursor / Antigravity
+##### Windsurf / Cursor / Antigravity
 
 Dans `~/.codeium/windsurf/mcp_config.json` (ou équivalent selon le client) :
 
@@ -109,7 +113,7 @@ Dans `~/.codeium/windsurf/mcp_config.json` (ou équivalent selon le client) :
 }
 ```
 
-#### Claude Desktop
+##### Claude Desktop
 
 Claude Desktop ne parle pas le transport HTTP nativement — il faut un pont stdio→HTTP. Exemple avec `mcp-remote` (`~/Library/Application Support/Claude/claude_desktop_config.json` sur macOS, `%APPDATA%\Claude\claude_desktop_config.json` sur Windows) :
 
@@ -124,7 +128,7 @@ Claude Desktop ne parle pas le transport HTTP nativement — il faut un pont std
 }
 ```
 
-### 3. Activer les outils d'intégration
+#### 3. Activer les outils d'intégration
 
 Les outils qui appellent des APIs externes (PostgreSQL, GitHub, Sentry, Kubernetes) lisent leurs credentials **depuis l'environnement du container**, pas depuis la config MCP client. Ajoutez-les à votre `.env` avant `docker compose up` :
 
@@ -143,7 +147,7 @@ Reprise du container après modification du `.env` :
 docker compose up -d --force-recreate
 ```
 
-### 4. Dépannage
+#### 4. Dépannage
 
 | Symptôme | Cause probable | Action |
 |---|---|---|
@@ -151,6 +155,79 @@ docker compose up -d --force-recreate
 | `curl /mcp/` → `404` | Le container n'a pas fini son démarrage | Attendre ~10s, relancer ; sinon `docker compose logs -f collegue-app` |
 | Outils d'intégration absents des réponses | `.env` chargé avant la correction → variables non visibles | `docker compose up -d --force-recreate` |
 | Rate limit LLM atteint rapidement | Quota Gemini Free Tier (20 req/jour) | Passer en tier payant ou ajuster `LLM_RATE_LIMIT_PER_DAY` |
+
+### Mode B — Container à la volée (docker run, transport stdio)
+
+Cette variante est pratique si vous préférez que votre IDE spawne un container Collègue frais à chaque session MCP (pas de serveur qui tourne en arrière-plan). Le client parle au container par stdin/stdout — aucun port exposé, pas de `docker compose`.
+
+#### 1. Construire l'image localement
+
+```bash
+git clone https://github.com/VynoDePal/Collegue.git
+cd Collegue
+docker build -f docker/collegue/Dockerfile -t collegue-mcp .
+```
+
+> L'image n'est pas (encore) publiée sur Docker Hub, il faut donc la construire soi-même. Elle pèse ~450 Mo.
+
+#### 2. Configurer le client MCP
+
+Ajoutez ceci à votre config `mcpServers` (même fichier que les exemples ci-dessus). Les credentials des outils d'intégration passent en `-e` directement dans `args`, plus besoin de `.env` puisqu'aucun fichier n'est monté dans le container.
+
+```json
+{
+  "mcpServers": {
+    "collegue": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e", "MCP_TRANSPORT=stdio",
+        "-e", "LLM_API_KEY=votre_clé_gemini_ici",
+        "-e", "GITHUB_TOKEN=ghp_xxxxxxxxxxxx",
+        "-e", "SENTRY_AUTH_TOKEN=sntrys_xxxxxxxxxxxx",
+        "-e", "SENTRY_ORG=my-organization",
+        "collegue-mcp"
+      ]
+    }
+  }
+}
+```
+
+**Flags importants :**
+- `-i` : laisse stdin ouvert (obligatoire pour le transport stdio)
+- `--rm` : supprime le container à la fin de la session
+- `MCP_TRANSPORT=stdio` : bascule `entrypoint.sh` en mode stdio (sans ça, le container démarre le serveur HTTP sur 4121 et le client stdio bloque)
+
+#### 3. Accès à Kubernetes / PostgreSQL local depuis le container
+
+Le container ne voit par défaut ni votre `~/.kube/config` ni un service PostgreSQL tournant sur votre machine hôte. Si vous en avez besoin, ajoutez un bind-mount ou `--network=host` :
+
+```json
+"args": [
+  "run", "-i", "--rm",
+  "-e", "MCP_TRANSPORT=stdio",
+  "-e", "LLM_API_KEY=...",
+  "-e", "KUBECONFIG=/root/.kube/config",
+  "-v", "${HOME}/.kube/config:/root/.kube/config:ro",
+  "--network=host",
+  "collegue-mcp"
+]
+```
+
+> `--network=host` ne fonctionne que sur Linux. Sur macOS/Windows, utilisez `host.docker.internal` dans vos URLs (ex: `POSTGRES_URL=postgresql://user:pwd@host.docker.internal:5432/db`).
+
+#### 4. Comparaison des deux modes
+
+| Critère | Mode A (compose + HTTP) | Mode B (docker run + stdio) |
+|---|---|---|
+| Démarrage | Une fois, `docker compose up -d` | À chaque session du client MCP |
+| Latence du 1er appel | ~50 ms (serveur déjà chaud) | ~2-3 s (cold start du container) |
+| Credentials | `.env` dans le repo cloné | Variables `-e` dans la config MCP |
+| Ports exposés | `4121`, `4122` | Aucun |
+| Adapté au travail hors-ligne | Oui | Oui |
+| Watchdog autonome | Disponible | Indisponible (pas de boucle long-running) |
 
 ---
 
