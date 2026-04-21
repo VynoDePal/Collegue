@@ -17,12 +17,6 @@ _KNOWN_FAILURES: frozenset[str] = frozenset({
     "tests/test_impact_analysis.py::TestImpactAnalysisRequest::test_request_defaults",
     "tests/test_impact_analysis.py::TestImpactAnalysisTool::test_execute_core_logic",
     "tests/test_impact_analysis.py::TestImpactAnalysisTool::test_validate_request_valid",
-    "tests/test_repo_consistency_check.py::TestConsistencyCheckRequest::test_request_language_auto",
-    "tests/test_repo_consistency_check.py::TestConsistencyCheckRequest::test_request_validation_checks",
-    "tests/test_repo_consistency_check.py::TestRepoConsistencyCheckTool::test_mode_validation",
-    "tests/test_repo_consistency_check.py::TestRepoConsistencyCheckTool::test_scan_multiple_files",
-    "tests/test_repo_consistency_check.py::TestRepoConsistencyCheckTool::test_scan_no_issues",
-    "tests/test_repo_consistency_check.py::TestRepoConsistencyCheckTool::test_scan_unused_imports_python",
     "tests/test_secret_scan.py::TestSecretScanTool::test_scan_batch_files",
     "tests/test_test_generation_fixes.py::test_test_generation_success",
 })
