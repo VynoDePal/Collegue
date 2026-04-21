@@ -128,11 +128,11 @@ class TestSecretScanTool:
 
     def test_scan_batch_files(self, tool):
         """Test le scan batch de fichiers."""
-        from collegue.core.shared import FileContent
+        from collegue.tools.secret_scan.models import SecretScanFile
         # Clé AWS valide (20 caractères après AKIA)
         files = [
-            FileContent(path="config.py", content="api_key = 'AKIAIOSFODNN7EXAMPLE'"),
-            FileContent(path="clean.py", content="print('hello')")
+            SecretScanFile(path="config.py", content="api_key = 'AKIAIOSFODNN7EXAMPLE'"),
+            SecretScanFile(path="clean.py", content="print('hello')")
         ]
         request = SecretScanRequest(files=files, severity_threshold="low")
         response = tool._execute_core_logic(request)
