@@ -12,6 +12,7 @@ from collegue.tools.impact_analysis import (
     RiskNote,
     ImpactAnalysisEngine
 )
+from collegue.tools.impact_analysis.models import ImpactFile
 from collegue.core.shared import FileInput
 
 
@@ -155,7 +156,7 @@ class TestImpactAnalysisTool:
         """Test la validation d'une requête valide."""
         request = ImpactAnalysisRequest(
             change_intent="Renommer UserService",
-            files=[FileInput(path="test.py", content="class UserService: pass")]
+            files=[ImpactFile(path="test.py", content="class UserService: pass")]
         )
         assert tool.validate_request(request) is True
 
@@ -174,8 +175,8 @@ class TestImpactAnalysisTool:
         request = ImpactAnalysisRequest(
             change_intent="Renommer UserService en AuthService",
             files=[
-                FileInput(path="services/user.py", content="class UserService: pass"),
-                FileInput(path="api/auth.py", content="from services.user import UserService")
+                ImpactFile(path="services/user.py", content="class UserService: pass"),
+                ImpactFile(path="api/auth.py", content="from services.user import UserService")
             ]
         )
         
@@ -193,7 +194,7 @@ class TestImpactAnalysisRequest:
         """Test la création d'une requête."""
         request = ImpactAnalysisRequest(
             change_intent="Modifier l'API /users",
-            files=[FileInput(path="api.py", content="...")],
+            files=[ImpactFile(path="api.py", content="...")],
             confidence_mode="balanced",
             analysis_depth="fast"
         )
@@ -204,7 +205,7 @@ class TestImpactAnalysisRequest:
         """Test les valeurs par défaut."""
         request = ImpactAnalysisRequest(
             change_intent="Test",
-            files=[FileInput(path="test.py", content="")]
+            files=[ImpactFile(path="test.py", content="")]
         )
         assert request.confidence_mode == "balanced"
         assert request.analysis_depth == "fast"
