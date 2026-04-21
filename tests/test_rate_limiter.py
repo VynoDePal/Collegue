@@ -129,21 +129,27 @@ class TestFixedWindowLimiter:
         assert allowed is False
         assert wait > 0
     
-    @pytest.mark.slow
     def test_window_reset(self):
-        """Test la réinitialisation de la fenêtre."""
-        config = RateLimitConfig(requests_per_minute=60, burst=1)  # 1 req/min
+        """Test la réinitialisation de la fenêtre.
+
+        FixedWindowLimiter.allow_request() s'appuie sur ``requests_per_minute``
+        (le champ ``burst`` n'est lu que par TokenBucket), donc on passe par
+        ``requests_per_minute=1`` pour borner la fenêtre à 1 requête. Et on
+        rétrécit ``_window_size`` pour garder le test sous la seconde au lieu
+        d'attendre 60s en temps réel.
+        """
+        config = RateLimitConfig(requests_per_minute=1, burst=1)
         limiter = FixedWindowLimiter(config, "test")
-        
-        limiter.allow_request()
-        
-        # Bloqué dans la même fenêtre
+        limiter._window_size = 0.3
+
+        allowed, _ = limiter.allow_request()
+        assert allowed is True
+
         allowed, _ = limiter.allow_request()
         assert allowed is False
-        
-        # Attendre la prochaine fenêtre (60 secondes pour 1 req/min)
-        time.sleep(60.1)
-        
+
+        time.sleep(0.4)
+
         allowed, _ = limiter.allow_request()
         assert allowed is True
 
