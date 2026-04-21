@@ -28,6 +28,12 @@ PAYLOAD_MODULES = [
     "payloads.test_generation",
     "payloads.code_refactoring",
     "payloads.smart_orchestrator",
+    # API-integration tools (#206) — default Mode A (no credentials set,
+    # the tool must return TOOL-ERR cleanly, never CRASH-500).
+    "payloads.github_ops",
+    "payloads.sentry_monitor",
+    "payloads.postgres_db",
+    "payloads.kubernetes_ops",
 ]
 
 
