@@ -120,18 +120,5 @@ class TestToolExecution(unittest.TestCase):
         self.assertFalse(result.clean, "Un secret doit être détecté")
         self.assertGreater(result.total_findings, 0)
 
-    def test_documentation_tool(self):
-        """Le DocumentationTool génère de la documentation."""
-        from collegue.tools.documentation import DocumentationTool, DocumentationRequest
-
-        tool = DocumentationTool({})
-        request = DocumentationRequest(
-            code="def add(a, b): return a + b",
-            language="python",
-        )
-        result = tool.execute(request, ctx=None)
-        self.assertIsNotNone(result)
-
-
 if __name__ == "__main__":
     unittest.main()

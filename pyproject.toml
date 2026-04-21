@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["stress", "prompts", "__pycache__"]
+asyncio_mode = "auto"
+addopts = "-q"

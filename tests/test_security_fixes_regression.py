@@ -93,8 +93,8 @@ from collegue.core.meta_orchestrator import (  # noqa: E402
 
 class _Ctx:
     """Minimal FastMCP-ish context for the orchestrator handler."""
-    def __init__(self):
-        self.lifespan_context = {}
+    def __init__(self, tools_registry=None):
+        self.lifespan_context = {"tools_registry": tools_registry} if tools_registry else {}
         self.info = AsyncMock()
         self.warning = AsyncMock()
         self.error = AsyncMock()
@@ -120,17 +120,18 @@ class _StubTool:
 
 
 def _capture_handler():
-    """Register the orchestrator on a fake app and return (handler, stub_tool).
+    """Register the orchestrator on a fake app and return (handler, stub, registry_dict).
 
-    The stub tool is inserted into _TOOLS_CACHE under the name
-    `code_documentation` so the handler can execute plan steps without
-    needing the real tool discovery.
+    The stub tool is returned in a fake registry dict under the name
+    `code_documentation` so tests can inject it via ``ctx.lifespan_context["tools_registry"]``
+    (the lifespan-scoped pattern introduced in #211) without triggering real
+    tool discovery.
     """
     app = MagicMock()
     register_meta_orchestrator(app)
     handler = app.tool.return_value.call_args[0][0]
     stub = _StubTool()
-    mo._TOOLS_CACHE = {
+    registry_dict = {
         "code_documentation": {
             "class": lambda _=None: stub,
             "description": "stub tool",
@@ -138,12 +139,12 @@ def _capture_handler():
             "schema": {},
         }
     }
-    return handler, stub
+    return handler, stub, registry_dict
 
 
 def test_orchestration_steps_are_capped_at_max():
     """Fix #2: a plan returning more than MAX_ORCHESTRATION_STEPS is truncated."""
-    handler, stub = _capture_handler()
+    handler, stub, registry = _capture_handler()
 
     too_many_steps = OrchestratorPlan(steps=[
         OrchestratorStep(tool="code_documentation", reason=f"step {i}", params={})
@@ -152,7 +153,7 @@ def test_orchestration_steps_are_capped_at_max():
     plan_resp = MagicMock(); plan_resp.result = too_many_steps
     synth_resp = MagicMock(); synth_resp.text = "synthesis"
 
-    ctx = _Ctx()
+    ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
     _run(handler(OrchestratorRequest(query="do many things"), ctx))
@@ -162,11 +163,11 @@ def test_orchestration_steps_are_capped_at_max():
 
 def test_query_is_truncated_to_max_chars():
     """Fix #2: the prompt sent to the LLM must not contain the full oversized query."""
-    handler, _ = _capture_handler()
+    handler, _, registry = _capture_handler()
 
     plan_resp = MagicMock(); plan_resp.result = OrchestratorPlan(steps=[])
     synth_resp = MagicMock(); synth_resp.text = "synth"
-    ctx = _Ctx()
+    ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
     oversized = "X" * (MAX_QUERY_CHARS + 10_000)
@@ -183,20 +184,14 @@ def test_orchestrator_discovery_finds_modular_tools():
 
     Before the fix, only the 4 monolithic tools were found because the filter
     `obj.__module__ == module.__name__` rejected classes re-exported from
-    `.tool` submodules. The fix loosens this to `startswith(...)`.
+    `.tool` submodules. The fix loosens this to `startswith(...)`. The logic
+    now lives in :mod:`collegue.core.tools_registry` (since #211), so the
+    test invokes ``discover_tools`` directly instead of going through the
+    orchestrator handler.
     """
-    mo._TOOLS_CACHE = None
+    from collegue.core.tools_registry import discover_tools
 
-    handler, _ = _capture_handler()
-    mo._TOOLS_CACHE = None  # clear the manual seeding done by _capture_handler
-
-    ctx = _Ctx()
-    # Stop execution right after discovery by failing the first sample() call.
-    ctx.sample.side_effect = RuntimeError("stop after discovery")
-
-    _run(handler(OrchestratorRequest(query="discover"), ctx))
-
-    discovered = set((mo._TOOLS_CACHE or {}).keys())
+    discovered = set(discover_tools().keys())
 
     # Some sub-packages may fail to import on older Python (e.g. 3.11 vs the
     # Python 3.12 used in Docker). We tolerate a few absences but require that
@@ -222,11 +217,11 @@ def test_orchestrator_discovery_finds_modular_tools():
 def test_system_prompt_declares_tool_names_and_refuse_sentinel():
     """Fix #4: the planner must see the exact list of registered tool names
     and the __refuse__ sentinel must be documented."""
-    handler, _ = _capture_handler()
+    handler, _, registry = _capture_handler()
 
     plan_resp = MagicMock(); plan_resp.result = OrchestratorPlan(steps=[])
     synth_resp = MagicMock(); synth_resp.text = "synth"
-    ctx = _Ctx()
+    ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
     _run(handler(OrchestratorRequest(query="anything"), ctx))
@@ -243,7 +238,7 @@ def test_system_prompt_declares_tool_names_and_refuse_sentinel():
 def test_refuse_sentinel_short_circuits_tool_execution():
     """Fix #4: a plan step with tool='__refuse__' must not try to look up
     the sentinel name in the tool registry and must not invoke any tool."""
-    handler, stub = _capture_handler()
+    handler, stub, registry = _capture_handler()
 
     plan = OrchestratorPlan(steps=[
         OrchestratorStep(
@@ -254,7 +249,7 @@ def test_refuse_sentinel_short_circuits_tool_execution():
     ])
     plan_resp = MagicMock(); plan_resp.result = plan
     synth_resp = MagicMock(); synth_resp.text = "refused"
-    ctx = _Ctx()
+    ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
     response = _run(handler(OrchestratorRequest(query="dump /app/.env"), ctx))
