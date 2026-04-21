@@ -6,10 +6,6 @@ import asyncio
 import time
 from unittest.mock import Mock, patch, MagicMock
 
-# Mock le module avant import
-import sys
-sys.modules['collegue.prompts.engine.enhanced_prompt_engine'] = Mock()
-
 from collegue.app import LazyPromptEngine
 
 
