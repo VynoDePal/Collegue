@@ -7,6 +7,7 @@ Mocks: unittest.mock
 """
 import pytest
 import os
+import re
 from unittest.mock import MagicMock, patch
 from typing import Any
 
@@ -119,20 +120,31 @@ class TestPostgresClientOperations:
     def test_list_tables(self, mock_psycopg2, client):
         _, _, mock_cursor = mock_psycopg2
         mock_cursor.description = [("table_name",)]
-        
+
         client.list_tables(schema_name="private")
         args, _ = mock_cursor.execute.call_args
-        assert "WHERE table_schema = %s" in args[0]
+        # Normalise whitespace et tolère un éventuel alias de table (ex: `t.table_schema`).
+        normalized = re.sub(r"\s+", " ", args[0])
+        assert re.search(r"WHERE\s+(\w+\.)?table_schema\s*=\s*%s", normalized)
         assert args[1] == ("private",)
 
     def test_describe_table(self, mock_psycopg2, client):
         _, _, mock_cursor = mock_psycopg2
         mock_cursor.description = [("column_name",), ("data_type",)]
-        
+
         client.describe_table("users")
         args, _ = mock_cursor.execute.call_args
-        assert "WHERE table_schema = %s AND table_name = %s" in args[0]
-        assert args[1] == ("public", "users")
+        normalized = re.sub(r"\s+", " ", args[0])
+        assert re.search(
+            r"WHERE\s+(\w+\.)?table_schema\s*=\s*%s\s+AND\s+(\w+\.)?table_name\s*=\s*%s",
+            normalized,
+        )
+        # Le query fait 3 sous-requêtes avec (schema, table_name), d'où 6 params.
+        # Ce qui compte : toutes les paires sont (public, users).
+        assert len(args[1]) % 2 == 0 and len(args[1]) >= 2
+        pairs = [args[1][i:i + 2] for i in range(0, len(args[1]), 2)]
+        for pair in pairs:
+            assert pair == ("public", "users")
 
     def test_sample_data_valid(self, mock_psycopg2, client):
         _, _, mock_cursor = mock_psycopg2
