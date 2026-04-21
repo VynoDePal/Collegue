@@ -10,6 +10,7 @@ from collegue.tools.repo_consistency_check import (
     ConsistencyCheckResponse
 )
 from collegue.tools.repo_consistency_check.engine import ConsistencyAnalysisEngine
+from collegue.tools.repo_consistency_check.models import ConsistencyFile
 from collegue.core.shared import FileInput, ConsistencyIssue
 
 
@@ -112,7 +113,7 @@ class TestRepoConsistencyCheckTool:
     def test_scan_unused_imports_python(self, tool):
         """Test la détection d'imports non utilisés en Python."""
         files = [
-            FileInput(path="test.py", content="import os\nimport sys\nprint('hello')")
+            ConsistencyFile(path="test.py", content="import os\nimport sys\nprint('hello')")
         ]
         request = ConsistencyCheckRequest(
             files=files,
@@ -130,7 +131,7 @@ class TestRepoConsistencyCheckTool:
     def test_scan_no_issues(self, tool):
         """Test le scan sans problèmes."""
         files = [
-            FileInput(path="test.py", content="print('hello')")
+            ConsistencyFile(path="test.py", content="print('hello')")
         ]
         request = ConsistencyCheckRequest(
             files=files,
@@ -145,8 +146,8 @@ class TestRepoConsistencyCheckTool:
     def test_scan_multiple_files(self, tool):
         """Test le scan de plusieurs fichiers."""
         files = [
-            FileInput(path="file1.py", content="x = 1"),
-            FileInput(path="file2.py", content="y = 2")
+            ConsistencyFile(path="file1.py", content="x = 1"),
+            ConsistencyFile(path="file2.py", content="y = 2")
         ]
         request = ConsistencyCheckRequest(
             files=files,
@@ -158,7 +159,7 @@ class TestRepoConsistencyCheckTool:
 
     def test_mode_validation(self, tool):
         """Test la validation du mode."""
-        files = [FileInput(path="test.py", content="pass")]
+        files = [ConsistencyFile(path="test.py", content="pass")]
         request = ConsistencyCheckRequest(files=files, language="python", mode="deep")
         assert request.mode == "deep"
         
@@ -171,7 +172,7 @@ class TestConsistencyCheckRequest:
 
     def test_request_validation_checks(self):
         """Test la validation des checks."""
-        files = [FileInput(path="test.py", content="pass")]
+        files = [ConsistencyFile(path="test.py", content="pass")]
         request = ConsistencyCheckRequest(
             files=files,
             language="python",
@@ -188,6 +189,6 @@ class TestConsistencyCheckRequest:
 
     def test_request_language_auto(self):
         """Test la détection auto du langage."""
-        files = [FileInput(path="test.py", content="pass")]
+        files = [ConsistencyFile(path="test.py", content="pass")]
         request = ConsistencyCheckRequest(files=files, language="auto")
         assert request.language == "auto"
