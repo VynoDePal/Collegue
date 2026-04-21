@@ -1,26 +1,26 @@
 """pytest configuration for the Collegue test suite.
 
-Known pre-existing failures are listed in ``_KNOWN_FAILURES`` and skipped at
-collection time so CI stays green while they are triaged under issue #218.
-When a test is fixed, remove its nodeid from the set — pytest will re-collect
-it automatically on the next run.
+The ``_KNOWN_FAILURES`` set was introduced to unblock CI (#212) while the
+32 pre-existing test failures exposed by the new pipeline were triaged in
+#218. All of them have now been fixed, so the set is empty.
 
-Do NOT add unrelated tests here. Every entry must correspond to a documented
-failure in issue #218.
+The mechanism stays in place as a pattern: if a future regression temporarily
+breaks a test that cannot be fixed immediately, add its nodeid here with a
+follow-up issue reference, then remove it once the fix lands. Keep the set
+as close to empty as possible — every entry is a silenced red flag.
 """
 from __future__ import annotations
 
 import pytest
 
-_KNOWN_FAILURES: frozenset[str] = frozenset({
-    "tests/test_secret_scan.py::TestSecretScanTool::test_scan_batch_files",
-    "tests/test_test_generation_fixes.py::test_test_generation_success",
-})
+_KNOWN_FAILURES: frozenset[str] = frozenset()
 
-_SKIP_REASON = "pre-existing failure, tracked in #218"
+_SKIP_REASON = "pre-existing failure — document in a tracking issue before adding"
 
 
 def pytest_collection_modifyitems(config, items):
+    if not _KNOWN_FAILURES:
+        return
     for item in items:
         if item.nodeid in _KNOWN_FAILURES:
             item.add_marker(pytest.mark.skip(reason=_SKIP_REASON))
