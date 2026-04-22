@@ -19,6 +19,26 @@ logger = logging.getLogger(__name__)
 class EnhancedPromptEngine(PromptEngine):
 
     def __init__(self, templates_dir: str = None, storage_dir: str = None):
+        """Construct the engine and load seed templates from ``templates_dir``.
+
+        A/B testing (``ab_testing_enabled=True``) runs a ε-greedy bandit on
+        the versions attached to each template. The bandit is only *actually*
+        exploratory when a template has **≥ 2 versions with distinct content**
+        (see :meth:`_select_version_ab_testing`) — otherwise the single
+        available version is returned deterministically. This safety guard
+        was added under #232 to stop the selection from faking randomness
+        over identical clones (which happened before #231 dedup).
+
+        Parameters
+        ----------
+        templates_dir:
+            Override for the YAML seed directory. Defaults to the
+            ``collegue/prompts/templates/tools`` tree in the installed package.
+        storage_dir:
+            Override for the on-disk JSON store. Defaults to the package
+            ``collegue/prompts/templates`` directory (``versions/versions.json``
+            lives alongside).
+        """
         super().__init__(storage_path=storage_dir)
         self.version_manager = PromptVersionManager(storage_dir)
         self.language_optimizer = LanguageOptimizer()
@@ -30,6 +50,30 @@ class EnhancedPromptEngine(PromptEngine):
             os.path.dirname(__file__), '..', 'templates', 'tools'
         )
         self._load_tool_templates()
+        self._log_ab_readiness()
+
+    def _log_ab_readiness(self) -> None:
+        """Count templates with real variants vs clones and log the breakdown.
+
+        Gives operators a one-line signal at startup : if the count of
+        "A/B enabled" templates is 0, the fancy bandit is not doing anything —
+        someone needs to author variant YAMLs (v2, experimental, …) with
+        different content.
+        """
+        active = 0
+        single_variant = 0
+        for template in self.library.templates.values():
+            versions = self.version_manager.get_all_versions(template.id)
+            unique = {v.content for v in versions}
+            if len(unique) >= 2:
+                active += 1
+            else:
+                single_variant += 1
+        logger.info(
+            "A/B testing status: %d template(s) with ≥ 2 real variants, "
+            "%d with a single variant (bandit returns deterministically for these)",
+            active, single_variant,
+        )
 
     def _load_tool_templates(self) -> None:
         """Load YAML seed templates from ``tool_templates_dir`` — idempotently.
@@ -217,19 +261,41 @@ class EnhancedPromptEngine(PromptEngine):
         return prompt, prompt_version.id
 
     def _select_version_ab_testing(self, template_id: str) -> Optional[PromptVersion]:
+        """Pick a :class:`PromptVersion` for ``template_id``.
+
+        A/B-safe selection policy (added under #232) :
+
+        1. Gather all versions attached to this template.
+        2. Compute the set of **distinct contents**. If there is only one
+           unique content, skip the bandit entirely and return the best
+           (or latest) version deterministically. No fake randomness over
+           clones.
+        3. Otherwise run the ε-greedy bandit : ``exploration_rate`` of the
+           time, pick a random version (explore); the rest of the time,
+           pick the current best (exploit).
+
+        Without step 2, before #231 fixed the loader, this function would
+        pick between 132 identical JSON copies — spending CPU on a coin
+        flip that couldn't change the output. After #231, templates are
+        distinct but most tools still have only 1 version, so the guard
+        keeps the path deterministic until someone authors real variants.
+        """
+        versions = self.version_manager.get_all_versions(template_id)
+        if not versions:
+            return None
+
+        unique_contents = {v.content for v in versions}
+        if len(unique_contents) < 2:
+            # No real variation to explore — return a stable choice.
+            best = self.version_manager.get_best_version(template_id)
+            return best or versions[-1]
 
         if not self.ab_testing_enabled:
             return self.version_manager.get_best_version(template_id)
 
-
         if random.random() < self.exploration_rate:
-            versions = self.version_manager.get_all_versions(template_id)
-            if versions:
-                return random.choice(versions)
-        else:
-            return self.version_manager.get_best_version(template_id)
-
-        return None
+            return random.choice(versions)
+        return self.version_manager.get_best_version(template_id)
 
     def _format_version_prompt(self, version: PromptVersion, variables: Dict[str, Any]) -> str:
 
