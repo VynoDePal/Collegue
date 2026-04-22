@@ -1,0 +1,27 @@
+{
+  "_note": "Payload Sentry anonymisé pour le test E2E du Watchdog (#208). Shape conforme à SentryResponse/IssueInfo/EventInfo.",
+  "issue": {
+    "id": "i-sample-001",
+    "short_id": "PROJ-42",
+    "title": "AttributeError: 'NoneType' object has no attribute 'email'",
+    "type": "error",
+    "level": "error",
+    "status": "unresolved",
+    "user_count": 3,
+    "count": 7,
+    "permalink": "https://sandbox.sentry.io/organizations/test-org/issues/i-sample-001/",
+    "first_seen": "2026-04-20T12:00:00Z",
+    "last_seen": "2026-04-21T08:30:00Z",
+    "metadata": {
+      "type": "AttributeError",
+      "value": "'NoneType' object has no attribute 'email'",
+      "filename": "collegue/fixtures/sample_source.py"
+    }
+  },
+  "event": {
+    "event_id": "evt-sample-001",
+    "title": "AttributeError: 'NoneType' object has no attribute 'email'",
+    "timestamp": "2026-04-21T08:29:58Z",
+    "stacktrace": "File \"collegue/fixtures/sample_source.py\", line 19, in get_user_email\n    return user.email\nAttributeError: 'NoneType' object has no attribute 'email'"
+  }
+}
