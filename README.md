@@ -52,26 +52,33 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
 
 Au-delà des tests unitaires + stress (robustesse), une suite d'**évaluations golden** mesure la *correction* des tools qui appellent un LLM — par exemple : les tests générés par `test_generation` sont-ils réellement exécutables et corrects ? Voir [docs/llm_evals.md](docs/llm_evals.md).
 
-Matrice 5 modèles × 2 paths (avec vs sans MCP Collègue) sur 8 cas Python — **80 appels LLM, 0 crash**. Snapshot :
+Matrice **5 modèles × 3 paths × 13 cas Python** (fonctions pures à decorators complexes en passant par async context managers) — **195 appels LLM, 0 crash**. Trois paths comparés : MCP Collègue, prompt "compétent" (utilisateur qui connaît pytest), prompt naïf.
 
-| Modèle | MCP `test_generation` | Raw LLM direct | **Δ MCP − raw** |
-|---|---|---|---|
-| `gemini-2.5-flash` | **1.000** | 0.875 | +0.125 |
-| `gemini-3-flash-preview` | 0.989 | 0.875 | +0.114 |
-| `gemini-3.1-pro-preview` | 0.868 | 0.344 | **+0.524** |
-| `gemma-4-26b-a4b-it` | 0.847 | 0.847 | +0.000 |
-| `gemma-4-31b-it` | **1.000** | **1.000** | +0.000 |
+| Modèle | **MCP** | Competent | Raw | Δ MCP−Competent | Δ MCP−Raw |
+|---|---|---|---|---|---|
+| `gemini-2.5-flash` | **0.833** | 0.656 | 0.867 | **+0.177** | −0.034 |
+| `gemini-3-flash-preview` | 0.918 | **0.959** | 0.615 | **−0.041** | +0.303 |
+| `gemini-3.1-pro-preview` | **0.917** | 0.911 | 0.538 | +0.006 | +0.379 |
+| `gemma-4-26b-a4b-it` | **0.982** | 0.903 | 0.972 | +0.079 | +0.010 |
+| `gemma-4-31b-it` | 0.864 | **0.977** | 0.943 | **−0.113** | −0.079 |
 
-**Lecture** : sur Gemini, le prompt engineering du tool MCP Collègue apporte entre +0.11 et +0.52 sur l'exactitude des tests générés. Sur Gemma, même score dans les deux cas — le gain est spécifique aux modèles qui suivent bien les instructions structurées.
+**Lecture honnête** :
+
+- Face à un utilisateur naïf, MCP délivre un **gros lift sur Gemini 3.x** (+0.30 à +0.38) ; marginal ou négatif ailleurs.
+- Face à un utilisateur qui écrit un prompt soigné, MCP **ne gagne que sur `gemini-2.5-flash`** (+0.177) ; sur 3 modèles sur 5 le prompt compétent égale ou bat le MCP.
+- `gemma-4-26b-a4b-it` est le meilleur baseline du corpus (0.982 en MCP, 0.972 en raw) — candidat prod sérieux.
+- La valeur réelle du MCP = **"éviter à l'utilisateur d'écrire un prompt soigné"** + gain net sur `gemini-2.5-flash`. Pas le game-changer universel qu'une mesure à 8 cas suggérait.
+
+Détails complets dans [docs/llm_evals.md](docs/llm_evals.md) · 13 cas × 5 modèles × 3 paths = 195 scores reproductibles.
 
 ```bash
-# Run matrice complète
+# Matrice complète
 python -m tests.evals.runner \
-  --tool test_generation --tool test_generation_raw \
+  --tool test_generation --tool test_generation_raw --tool test_generation_competent \
   --model gemini-2.5-flash --model gemini-3-flash-preview \
   --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it
 
-# Run simple (1 modèle)
+# Run simple (1 modèle, MCP seulement)
 python -m tests.evals.runner --tool test_generation
 ```
 

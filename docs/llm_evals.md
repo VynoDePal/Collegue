@@ -59,50 +59,98 @@ Chaque run produit :
 
 Le runner **n'est jamais gating** (`exit 0` toujours). L'utilisateur lit le rapport et juge.
 
-## Matrice 5 modèles × 2 paths (snapshot golden-evals-v1)
+## Matrice 5 modèles × 3 paths × 13 cas (golden-evals-v1, run final)
 
-Run complet 80 appels (`python -m tests.evals.runner --tool test_generation --tool test_generation_raw --model gemini-2.5-flash --model gemini-3-flash-preview --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it`).
+Run complet **195 appels LLM** (`python -m tests.evals.runner --tool test_generation --tool test_generation_raw --tool test_generation_competent --model gemini-2.5-flash --model gemini-3-flash-preview --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it`).
 
-### Scores moyens par path (agrégat sur 8 cas)
+### Trois paths évalués en parallèle
 
-| Modèle | MCP (`test_generation`) | Raw (`test_generation_raw`) | **Δ MCP − raw** |
+| Path | Prompt |
+|---|---|
+| **`test_generation`** (MCP) | Prompt élaboré du `TestGenerationTool` : extraction d'éléments, coverage target, framework preamble, liste d'instructions |
+| **`test_generation_competent`** | Prompt "développeur qui connaît pytest" : exige edge cases, parametrize, pytest.raises, nommage, tests runnable |
+| **`test_generation_raw`** | Prompt minimal : *"Write a pytest test file for the following code"* |
+
+Les 13 cas couvrent : fonctions pures, classes, type hints, exceptions, generators, async, properties, héritage, **state machine**, **async context manager**, **retry decorator**, **pipeline composition**, **LRU memoize**.
+
+### Scores moyens par path
+
+| Modèle | MCP | Competent | Raw |
 |---|---|---|---|
-| `gemini-2.5-flash` | 1.000 | 0.875 | **+0.125** |
-| `gemini-3-flash-preview` | 0.989 | 0.875 | **+0.114** |
-| `gemini-3.1-pro-preview` | 0.868 | 0.344 | **+0.524** |
-| `gemma-4-26b-a4b-it` | 0.847 | 0.847 | +0.000 |
-| `gemma-4-31b-it` | 1.000 | 1.000 | +0.000 |
+| `gemini-2.5-flash` | **0.833** | 0.656 | 0.867 |
+| `gemini-3-flash-preview` | 0.918 | **0.959** | 0.615 |
+| `gemini-3.1-pro-preview` | **0.917** | 0.911 | 0.538 |
+| `gemma-4-26b-a4b-it` | **0.982** | 0.903 | 0.972 |
+| `gemma-4-31b-it` | 0.864 | **0.977** | 0.943 |
 
-### Lectures principales
+### Δ par modèle (la lecture honnête)
 
-1. **Sur Gemini, l'outil MCP apporte +0.11 à +0.52 de qualité** par rapport à un prompt brut. Le cas le plus spectaculaire : `gemini-3.1-pro-preview` passe de **0.344 en raw à 0.868 en MCP** — sans le prompt engineering du tool, ce modèle génère des tests majoritairement non-exécutables.
-2. **Sur Gemma, aucune différence** — les deux paths produisent exactement le même score. Gemma semble parser notre prompt structuré comme du texte libre et tomber sur la même stratégie de génération dans les deux cas.
-3. **Le duo `gemini-2.5-flash` + MCP obtient un score parfait 1.000** (192 tests générés, tous passent) — c'est la configuration de référence pour la prod.
-4. **`gemma-4-31b-it` perfect sur les deux paths** — modèle remarquablement stable sur ce corpus Python simple ; à confirmer sur des cas plus tordus.
+#### Δ MCP − Raw (MCP vs utilisateur naïf)
 
-### Scores par case × modèle (MCP path)
+| Modèle | MCP | Raw | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.833 | 0.867 | **−0.034** |
+| `gemini-3-flash-preview` | 0.918 | 0.615 | **+0.303** |
+| `gemini-3.1-pro-preview` | 0.917 | 0.538 | **+0.379** |
+| `gemma-4-26b-a4b-it` | 0.982 | 0.972 | +0.010 |
+| `gemma-4-31b-it` | 0.864 | 0.943 | **−0.079** |
 
-| Case | 2.5-flash | 3-flash-prev | 3.1-pro-prev | gemma-4-26b | gemma-4-31b |
-|---|---|---|---|---|---|
-| 01_arithmetic | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| 02_class_init | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| 03_type_hints | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| 04_exceptions | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
-| 05_generator | 1.000 | 1.000 | 0.000 | 1.000 | 1.000 |
-| 06_async_fn | 1.000 | 0.909 | 1.000 | 0.778 | 1.000 |
-| 07_property | 1.000 | 1.000 | 0.944 | 1.000 | 1.000 |
-| 08_inheritance | 1.000 | 1.000 | 1.000 | 0.000 | 1.000 |
+#### Δ MCP − Competent (MCP vs utilisateur qui sait ce qu'il fait)
 
-Deux zéros isolés sur la diagonale MCP :
-- `gemini-3.1-pro-preview · 05_generator` — LLM retourne du code, mais le scorer ne collecte aucun test (sortie probablement tronquée côté reasoning)
-- `gemma-4-26b-a4b-it · 08_inheritance` — même symptôme, classe spécifique à l'héritage
+| Modèle | MCP | Competent | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.833 | 0.656 | **+0.177** |
+| `gemini-3-flash-preview` | 0.918 | 0.959 | **−0.041** |
+| `gemini-3.1-pro-preview` | 0.917 | 0.911 | +0.006 |
+| `gemma-4-26b-a4b-it` | 0.982 | 0.903 | **+0.079** |
+| `gemma-4-31b-it` | 0.864 | 0.977 | **−0.113** |
 
-À investiguer si on veut pousser la qualité — candidat pour une v2 avec retry ou prompt adjustment ciblé sur ces edge cases.
+#### Δ Competent − Raw (la plus-value d'un prompt soigné sans MCP)
 
-### Seuils de régression
+| Modèle | Competent | Raw | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.656 | 0.867 | **−0.211** |
+| `gemini-3-flash-preview` | 0.959 | 0.615 | **+0.344** |
+| `gemini-3.1-pro-preview` | 0.911 | 0.538 | **+0.373** |
+| `gemma-4-26b-a4b-it` | 0.903 | 0.972 | **−0.069** |
+| `gemma-4-31b-it` | 0.977 | 0.943 | +0.034 |
 
-- **MCP `gemini-2.5-flash` moyenne < 0.95** → investiguer avant merge (c'est le couple prod le plus stable)
-- **Δ MCP − raw < +0.05 sur Gemini** → le prompt engineering du tool régresse, red flag
+### Lecture honnête (révision de la v2)
+
+La v2 (8 cas simples, 2 paths) racontait une histoire uniforme — *"MCP délivre +0.11 à +0.52 sur tous les Gemini"*. **Cette conclusion ne survit pas à la v3**. Avec 5 cas complexes en plus et le path `competent` ajouté, l'image devient nuancée :
+
+1. **MCP bat le prompt naïf sur Gemini 3.x** — `+0.303` et `+0.379` sur `gemini-3-flash-preview` et `gemini-3.1-pro-preview`. Vrai valeur ajoutée quand l'utilisateur écrit un prompt minimal.
+
+2. **MCP est battu ou à égalité avec un prompt "compétent" sur 3 modèles sur 5** :
+   - `gemini-3-flash-preview` : competent gagne de **−0.041**
+   - `gemini-3.1-pro-preview` : égalité (+0.006)
+   - `gemma-4-31b-it` : competent gagne de **−0.113**
+
+   Sur ces modèles, la plus-value du tool MCP est essentiellement **"éviter à l'utilisateur d'écrire le prompt lui-même"** — pas **"produire de meilleurs tests qu'un dev attentif"**.
+
+3. **MCP est *contre-productif* face à un prompt naïf sur 2 modèles** :
+   - `gemini-2.5-flash` : **−0.034** (marginal)
+   - `gemma-4-31b-it` : **−0.079** (significatif)
+
+   Indique que le prompt engineering du tool ne s'adapte pas à ces modèles — le surcoût en tokens n'est pas récompensé.
+
+4. **Seul `gemini-2.5-flash` voit MCP battre significativement `competent`** (+0.177). C'est la config prod actuelle par défaut — la seule où l'investissement prompt-engineering du tool est nettement rentable.
+
+5. **`gemma-4-26b-a4b-it` est étonnamment robuste** — 0.982 en MCP, 0.972 en raw. Le meilleur modèle du corpus quel que soit le path. Candidat prod sérieux si le pricing est avantageux.
+
+6. **Le path competent échoue sur `gemini-2.5-flash` (0.656)** — anomalie liée à des réponses LLM tronquées au max_tokens. Le prompt long + reasoning Gemini 2.5 consomme le budget avant d'émettre les tests. Fix partiel dans le scorer (`_strip_fences` gère les fences non fermées), reste ~4 cas vraiment tronqués. Pas un défaut du path `competent` en tant que tel.
+
+### Implications produit
+
+- **Utilisateur naïf (prompt minimal)** : MCP justifié sur Gemini 3.x. Marginal sur les autres.
+- **Utilisateur expérimenté (prompt soigné)** : MCP n'apporte rien sur `gemini-3-flash-preview` et `gemma-4-31b-it`. Valeur réelle uniquement sur `gemini-2.5-flash`.
+- **Robustesse des modèles** : `gemma-4-26b` et `gemma-4-31b` dominent en baseline raw, ce qui suggère une capacité "out of the box" solide sans prompt engineering dédié.
+
+### Seuils de régression mis à jour
+
+- **MCP `gemini-2.5-flash` avg < 0.75** (au lieu de 0.95) → investiguer, c'est le couple où le MCP apporte le plus
+- **Δ MCP − Competent < −0.15 sur 3 modèles sur 5** → le tool MCP devient nuisible, red flag produit
+- **Raw avg < 0.50 sur un Gemini** → plausiblement un bug de réponse LLM truncation, vérifier logs
 
 ## Baseline historique (Gemini 2.5 Flash uniquement, v0)
 

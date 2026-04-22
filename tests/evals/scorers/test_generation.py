@@ -171,25 +171,47 @@ def _strip_fences(raw: str) -> str:
     The LLM often wraps its output in several fences — ``bash`` for install
     commands, ``python`` for the source under test, ``python`` again for
     the actual tests. We:
-      1. Extract every fence with its tag (so we can tell ``bash`` apart)
+      1. Extract every *closed* fence with its tag (so we can tell ``bash`` apart)
       2. Prefer python-tagged blocks that contain ``def test_``
-      3. Fall back to any block with ``def test_``
-      4. Fall back to the first python-tagged block
-      5. If nothing matches, return the raw text (pytest will surface the
+      3. Fall back to any closed block with ``def test_``
+      4. Fall back to the first python-tagged closed block
+      5. Handle an **unclosed** trailing fence (common when max_tokens
+         truncates the response mid-block): strip the opening fence line
+         and keep whatever Python remains
+      6. If nothing else works, return the raw text (pytest will surface the
          syntax error — a legitimate 0.0 score signal).
     """
     fence_re = re.compile(r"```([A-Za-z0-9_+-]*)\s*\n(.*?)```", flags=re.DOTALL)
     blocks = [(tag.lower(), body) for tag, body in fence_re.findall(raw)]
-    if not blocks:
-        return raw
 
-    python_blocks = [b for tag, b in blocks if tag in ("python", "py", "")]
-    for block in python_blocks:
-        if "def test_" in block:
-            return textwrap.dedent(block)
-    for tag, block in blocks:
-        if "def test_" in block:
-            return textwrap.dedent(block)
-    if python_blocks:
-        return textwrap.dedent(python_blocks[0])
-    return textwrap.dedent(blocks[0][1])
+    if blocks:
+        python_blocks = [b for tag, b in blocks if tag in ("python", "py", "")]
+        for block in python_blocks:
+            if "def test_" in block:
+                return textwrap.dedent(block)
+        for tag, block in blocks:
+            if "def test_" in block:
+                return textwrap.dedent(block)
+        if python_blocks:
+            return textwrap.dedent(python_blocks[0])
+        return textwrap.dedent(blocks[0][1])
+
+    # No closed fence matched. Two likely cases :
+    # (a) Raw output opens with ```python but was truncated before the close →
+    #     strip the opening fence marker and whatever trailing backticks remain.
+    # (b) Raw output has no fences at all → pass through.
+    unclosed = re.match(
+        r"^\s*```([A-Za-z0-9_+-]*)\s*\n(.*)",
+        raw,
+        flags=re.DOTALL,
+    )
+    if unclosed:
+        body = unclosed.group(2)
+        # Drop any trailing lone-backticks that might have been partial.
+        body = re.sub(r"\n?`{1,3}\s*$", "", body)
+        if "def test_" in body:
+            return textwrap.dedent(body)
+        # Opening fence but no recognisable test — last-ditch attempt.
+        return textwrap.dedent(body)
+
+    return raw

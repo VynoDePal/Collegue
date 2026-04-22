@@ -84,6 +84,20 @@ _RAW_SYSTEM_PROMPT = (
     "code you receive. Output the test file as a single Python code block."
 )
 
+# "Competent user" prompt — what a mid-level developer who actually knows
+# pytest would write. Not as elaborate as the MCP tool's prompt (no element
+# extraction, no coverage target numerics), but contains the common-sense
+# asks a skilled user would include: edge cases, parametrize, explicit
+# exception testing, runnable-as-is. Measures the **real** marginal value
+# of the MCP tool over a non-beginner user, not over a naive one.
+_COMPETENT_SYSTEM_PROMPT = (
+    "You are an expert Python developer writing production-grade pytest tests. "
+    "Always: cover normal + edge + error paths, use parametrize for repeated "
+    "inputs, use pytest.raises for exception assertions, name tests "
+    "descriptively, keep tests runnable as-is with stdlib + pytest only. "
+    "Output a single Python code block — no prose."
+)
+
 
 async def _run_test_generation_raw(case: Dict[str, Any], ctx: EvalContext) -> str:
     """Bypass the MCP tool entirely — just ask the LLM for tests.
@@ -103,13 +117,49 @@ async def _run_test_generation_raw(case: Dict[str, Any], ctx: EvalContext) -> st
         f"```python\n{case['code']}\n```\n"
     )
     response = await generate_text(config, prompt, system_prompt=_RAW_SYSTEM_PROMPT)
-    # Record the call so the JSON report matches what the MCP path does.
     ctx.calls.append({
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
         "prompt_len": len(prompt),
         "response_len": len(response.text or ""),
         "path": "raw",
+    })
+    return response.text or ""
+
+
+async def _run_test_generation_competent(case: Dict[str, Any], ctx: EvalContext) -> str:
+    """Bypass the MCP tool but use a 'competent user' prompt.
+
+    This is the honest comparison : not MCP-vs-naive-user, but
+    MCP-vs-user-who-knows-what-they're-doing. If Δ MCP − competent is
+    close to zero on Gemini models, the MCP tool's value is mostly
+    "the user didn't have to write a careful prompt themselves".
+    """
+    config = LLMConfig(
+        model_name=ctx.model,
+        api_key=settings.LLM_API_KEY,
+        max_tokens=EvalContext.MIN_MAX_TOKENS,
+        temperature=0.5,
+    )
+    framework = case.get("framework", "pytest")
+    language = case.get("language", "python")
+    prompt = (
+        f"Write a comprehensive {framework} test suite for the following {language} code.\n\n"
+        f"Requirements:\n"
+        f"- Cover normal cases, edge cases, and error/exception conditions.\n"
+        f"- Use @pytest.mark.parametrize when you have multiple similar inputs.\n"
+        f"- Assert exception types explicitly with pytest.raises.\n"
+        f"- Give each test a descriptive name: test_<what>_<condition>_<expected>.\n"
+        f"- Tests must be runnable as-is; only import stdlib + pytest.\n\n"
+        f"```{language}\n{case['code']}\n```\n"
+    )
+    response = await generate_text(config, prompt, system_prompt=_COMPETENT_SYSTEM_PROMPT)
+    ctx.calls.append({
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "prompt_len": len(prompt),
+        "response_len": len(response.text or ""),
+        "path": "competent",
     })
     return response.text or ""
 
@@ -124,6 +174,11 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "run": _run_test_generation_raw,
         "score": tg_scorer.score,
         "cases_subdir": "test_generation_raw",
+    },
+    "test_generation_competent": {
+        "run": _run_test_generation_competent,
+        "score": tg_scorer.score,
+        "cases_subdir": "test_generation_competent",
     },
 }
 
@@ -289,27 +344,63 @@ def _write_matrix_report(
         lines.append("| " + " | ".join(agg_row) + " |")
         lines.append("")
 
-    # Δ MCP minus raw, per model (only meaningful when both tools are in the run).
+    def _avg_for(tool: str, model: str) -> Optional[float]:
+        recs = [
+            idx[(tool, model, c)]
+            for c in case_ids
+            if (tool, model, c) in idx and not idx[(tool, model, c)].get("raw_error")
+        ]
+        return _aggregate(recs)["avg"] if recs else None
+
+    def _fmt(v: Optional[float]) -> str:
+        return f"{v:.3f}" if v is not None else "—"
+
+    def _fmt_delta(a: Optional[float], b: Optional[float]) -> str:
+        if a is None or b is None:
+            return "—"
+        d = a - b
+        return f"{'+' if d >= 0 else ''}{d:.3f}"
+
+    # Δ MCP − raw (naive user), per model.
     if "test_generation" in tools and "test_generation_raw" in tools:
-        lines.append("## Δ `test_generation` − `test_generation_raw` (per model)")
+        lines.append("## Δ `test_generation` − `test_generation_raw` (naive baseline)")
         lines.append("")
-        lines.append("Positive = MCP tool adds value over raw prompt. Negative = MCP tool is counter-productive.")
+        lines.append("Positive = MCP tool adds value over a naive \"write tests\" prompt.")
         lines.append("")
         lines.append("| Model | MCP avg | Raw avg | Δ |")
         lines.append("|---|---|---|---|")
         for model in models:
-            mcp_recs = [idx[("test_generation", model, c)] for c in case_ids if ("test_generation", model, c) in idx and not idx[("test_generation", model, c)].get("raw_error")]
-            raw_recs = [idx[("test_generation_raw", model, c)] for c in case_ids if ("test_generation_raw", model, c) in idx and not idx[("test_generation_raw", model, c)].get("raw_error")]
-            mcp_avg = _aggregate(mcp_recs)["avg"] if mcp_recs else None
-            raw_avg = _aggregate(raw_recs)["avg"] if raw_recs else None
-            mcp_s = f"{mcp_avg:.3f}" if mcp_avg is not None else "—"
-            raw_s = f"{raw_avg:.3f}" if raw_avg is not None else "—"
-            if mcp_avg is not None and raw_avg is not None:
-                delta = mcp_avg - raw_avg
-                delta_s = f"{'+' if delta >= 0 else ''}{delta:.3f}"
-            else:
-                delta_s = "—"
-            lines.append(f"| `{model}` | {mcp_s} | {raw_s} | {delta_s} |")
+            mcp_avg = _avg_for("test_generation", model)
+            raw_avg = _avg_for("test_generation_raw", model)
+            lines.append(f"| `{model}` | {_fmt(mcp_avg)} | {_fmt(raw_avg)} | {_fmt_delta(mcp_avg, raw_avg)} |")
+        lines.append("")
+
+    # Δ MCP − competent (skilled user), per model — the honest comparison.
+    if "test_generation" in tools and "test_generation_competent" in tools:
+        lines.append("## Δ `test_generation` − `test_generation_competent` (honest baseline)")
+        lines.append("")
+        lines.append("Positive = MCP tool beats a skilled developer's prompt. Near-zero = the tool's value is mostly saving the user from writing the careful prompt themselves.")
+        lines.append("")
+        lines.append("| Model | MCP avg | Competent avg | Δ |")
+        lines.append("|---|---|---|---|")
+        for model in models:
+            mcp_avg = _avg_for("test_generation", model)
+            comp_avg = _avg_for("test_generation_competent", model)
+            lines.append(f"| `{model}` | {_fmt(mcp_avg)} | {_fmt(comp_avg)} | {_fmt_delta(mcp_avg, comp_avg)} |")
+        lines.append("")
+
+    # Δ competent − raw, per model — quantifies "how much better is a skilled prompt on its own".
+    if "test_generation_competent" in tools and "test_generation_raw" in tools:
+        lines.append("## Δ `test_generation_competent` − `test_generation_raw` (skilled-vs-naive prompt lift)")
+        lines.append("")
+        lines.append("Tells us how much of the MCP lift is actually reproducible by just being a careful user.")
+        lines.append("")
+        lines.append("| Model | Competent avg | Raw avg | Δ |")
+        lines.append("|---|---|---|---|")
+        for model in models:
+            comp_avg = _avg_for("test_generation_competent", model)
+            raw_avg = _avg_for("test_generation_raw", model)
+            lines.append(f"| `{model}` | {_fmt(comp_avg)} | {_fmt(raw_avg)} | {_fmt_delta(comp_avg, raw_avg)} |")
         lines.append("")
 
     # Errors section (if any).

@@ -1,0 +1,48 @@
+name: "Order state machine"
+description: "Enforces a linear transition graph. Tests must cover valid transitions, rejections, and terminal-state immutability."
+language: python
+framework: pytest
+min_expected_tests: 5
+code: |
+  from enum import Enum
+
+  class OrderStatus(str, Enum):
+      PENDING = "pending"
+      PAID = "paid"
+      SHIPPED = "shipped"
+      DELIVERED = "delivered"
+      CANCELLED = "cancelled"
+
+  _TRANSITIONS = {
+      OrderStatus.PENDING: {OrderStatus.PAID, OrderStatus.CANCELLED},
+      OrderStatus.PAID: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
+      OrderStatus.SHIPPED: {OrderStatus.DELIVERED},
+      OrderStatus.DELIVERED: set(),
+      OrderStatus.CANCELLED: set(),
+  }
+
+
+  class Order:
+      def __init__(self, order_id: str):
+          if not order_id:
+              raise ValueError("order_id must be non-empty")
+          self.order_id = order_id
+          self.status = OrderStatus.PENDING
+          self._history: list[OrderStatus] = [self.status]
+
+      def transition(self, new_status: OrderStatus) -> None:
+          allowed = _TRANSITIONS[self.status]
+          if new_status not in allowed:
+              raise ValueError(
+                  f"Cannot transition from {self.status.value} to {new_status.value}"
+              )
+          self.status = new_status
+          self._history.append(new_status)
+
+      @property
+      def is_terminal(self) -> bool:
+          return not _TRANSITIONS[self.status]
+
+      @property
+      def history(self) -> list[OrderStatus]:
+          return list(self._history)

@@ -1,0 +1,60 @@
+name: "LRU memoize decorator"
+description: "Hand-rolled LRU cache tracking hit/miss stats and evicting on maxsize. Tests must cover cache hits, misses, eviction order, and stats."
+language: python
+framework: pytest
+min_expected_tests: 5
+code: |
+  from collections import OrderedDict
+  from functools import wraps
+  from typing import Any, Callable
+
+
+  class MemoizeStats:
+      def __init__(self) -> None:
+          self.hits: int = 0
+          self.misses: int = 0
+
+      @property
+      def calls(self) -> int:
+          return self.hits + self.misses
+
+      def reset(self) -> None:
+          self.hits = 0
+          self.misses = 0
+
+
+  def memoize(maxsize: int = 128) -> Callable:
+      """LRU memoize decorator. Exposes a ``.stats`` attribute and a ``.clear()`` method.
+
+      Cache key = (args, sorted kwargs items). All args must be hashable.
+      """
+      if maxsize < 1:
+          raise ValueError("maxsize must be >= 1")
+
+      def decorator(fn: Callable) -> Callable:
+          cache: "OrderedDict[tuple, Any]" = OrderedDict()
+          stats = MemoizeStats()
+
+          @wraps(fn)
+          def wrapper(*args: Any, **kwargs: Any) -> Any:
+              key = (args, tuple(sorted(kwargs.items())))
+              if key in cache:
+                  cache.move_to_end(key)
+                  stats.hits += 1
+                  return cache[key]
+              stats.misses += 1
+              result = fn(*args, **kwargs)
+              cache[key] = result
+              if len(cache) > maxsize:
+                  cache.popitem(last=False)  # evict LRU
+              return result
+
+          def clear() -> None:
+              cache.clear()
+              stats.reset()
+
+          wrapper.stats = stats
+          wrapper.clear = clear
+          return wrapper
+
+      return decorator
