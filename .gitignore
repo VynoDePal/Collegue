@@ -265,4 +265,7 @@ docker-compose.override.yml
 # Rapports générés par la suite stress (runs, injection_audit, real_cases)
 tests/stress/reports/
 
+# Rapports générés par la suite golden evals (tests/evals/runner.py)
+tests/evals/reports/
+
 .claude

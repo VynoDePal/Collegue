@@ -48,6 +48,18 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
 
 ---
 
+## 🧪 Qualité des sorties LLM
+
+Au-delà des tests unitaires + stress (robustesse), une suite d'**évaluations golden** mesure la *correction* des tools qui appellent un LLM — par exemple : les tests générés par `test_generation` sont-ils réellement exécutables et corrects ? Voir [docs/llm_evals.md](docs/llm_evals.md).
+
+Baseline actuel sur 8 cas `test_generation` (Gemini 2.5 Flash) : **0.978 moyenne, 190/193 tests générés qui passent**.
+
+```bash
+LLM_API_KEY=... python -m tests.evals.runner --tool test_generation
+```
+
+---
+
 ## 🐳 Auto-hébergement (Docker)
 
 Deux modes sont supportés selon l'envie : **serveur long-running** (`docker compose`) accédé en HTTP, ou **container à la volée** (`docker run -i --rm`) que le client MCP spawne/tue à chaque session en stdio. Choisissez un mode ci-dessous.
