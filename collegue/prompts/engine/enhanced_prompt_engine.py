@@ -1,16 +1,17 @@
 """
 Enhanced Prompt Engine avec versioning, optimisation et tracking de performance
 """
-import os
-import json
+import datetime
 import logging
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
+import os
 import random
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from .prompt_engine import PromptEngine, PromptTemplate
-from .versioning import PromptVersionManager, PromptVersion
+from .models import PromptVariable
 from .optimizer import LanguageOptimizer
+from .prompt_engine import PromptEngine, PromptTemplate
+from .versioning import PromptVersion, PromptVersionManager
 
 logger = logging.getLogger(__name__)
 
@@ -25,51 +26,138 @@ class EnhancedPromptEngine(PromptEngine):
         self.exploration_rate = 0.1
         self.performance_cache: Dict[str, Dict[str, float]] = {}
         self.templates: Dict[str, PromptTemplate] = {}
-        self.tool_templates_dir = os.path.join(
+        self.tool_templates_dir = templates_dir or os.path.join(
             os.path.dirname(__file__), '..', 'templates', 'tools'
         )
         self._load_tool_templates()
 
     def _load_tool_templates(self) -> None:
+        """Load YAML seed templates from ``tool_templates_dir`` — idempotently.
 
+        Before #231 this method created a brand-new UUID for every YAML on
+        every server startup, accumulating 132× duplicates after 132 restarts.
+        The fix keyed on the template ``name`` (set in the YAML frontmatter) :
+
+        - **Same name, same content** → skip. The in-memory entry already
+          exists because ``PromptEngine._load_library()`` just read the JSON
+          from disk. Nothing to write.
+        - **Same name, content changed** → update the existing template in
+          place, preserving the UUID so any accumulated ``performance_score``
+          / ``usage_count`` survive the edit.
+        - **New name** → create as before.
+
+        Same logic applies to the version_manager via :meth:`_ensure_version`
+        — we don't append a new ``PromptVersion`` when the current content
+        is already represented.
+        """
         if not os.path.exists(self.tool_templates_dir):
             Path(self.tool_templates_dir).mkdir(parents=True, exist_ok=True)
             return
 
+        import yaml
+
+        # Build a name → canonical-template index from whatever was loaded
+        # from disk by the parent class. When legacy duplicates exist on
+        # disk (pre-#231), several templates share the same name — pick the
+        # first one; the purge script handles the cleanup separately.
+        existing_by_name: Dict[str, PromptTemplate] = {}
+        for template in self.library.templates.values():
+            existing_by_name.setdefault(template.name, template)
+
+        created = updated = skipped = 0
+
         for tool_dir in Path(self.tool_templates_dir).iterdir():
-            if tool_dir.is_dir():
-                tool_name = tool_dir.name
+            if not tool_dir.is_dir():
+                continue
+            tool_name = tool_dir.name
 
-                for yaml_file in tool_dir.glob("*.yaml"):
-                    try:
-                        import yaml
-                        with open(yaml_file, 'r', encoding='utf-8') as f:
-                            template_data = yaml.safe_load(f)
+            for yaml_file in tool_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        template_data = yaml.safe_load(f)
 
-                        template = self.create_template({
-                            "name": template_data.get("name"),
-                            "description": template_data.get("description", ""),
-                            "template": template_data.get("template"),
-                            "variables": template_data.get("variables", []),
-                            "category": f"tool/{tool_name}",
-                            "tags": template_data.get("tags", []),
-                            "provider_specific": template_data.get("provider_specific", {})
-                        })
-
-                        template_key = f"{tool_name}_{yaml_file.stem}"
-                        self.templates[template_key] = template
-
-                        self.version_manager.create_version(
-                            template_id=template.id,
-                            content=template_data.get("template"),
-                            variables=template_data.get("variables", []),
-                            version=template_data.get("version", "1.0.0")
+                    name = template_data.get("name")
+                    if not name:
+                        logger.warning(
+                            "Template YAML %s has no 'name' key, skipped", yaml_file
                         )
+                        continue
 
-                        logger.info(f"Template {template.name} chargé depuis {yaml_file}")
+                    yaml_content = template_data.get("template", "")
+                    key = f"{tool_name}_{yaml_file.stem}"
+                    existing = existing_by_name.get(name)
 
-                    except Exception as e:
-                        logger.error(f"Erreur lors du chargement de {yaml_file}: {e}")
+                    if existing and existing.template == yaml_content:
+                        # Already loaded and identical — nothing to persist.
+                        self.templates[key] = existing
+                        skipped += 1
+                        continue
+
+                    if existing:
+                        # Same name, content drifted → update in place.
+                        existing.template = yaml_content
+                        existing.description = template_data.get(
+                            "description", existing.description
+                        )
+                        existing.variables = [
+                            PromptVariable(**var) if isinstance(var, dict) else var
+                            for var in template_data.get("variables", [])
+                        ]
+                        existing.tags = template_data.get("tags", existing.tags)
+                        existing.updated_at = datetime.datetime.now()
+                        self._save_library()
+                        self.templates[key] = existing
+                        self._ensure_version(existing.id, yaml_content, template_data)
+                        updated += 1
+                        logger.info(
+                            "Template '%s' updated from %s (UUID preserved)",
+                            name, yaml_file,
+                        )
+                        continue
+
+                    # Brand-new template: create fresh.
+                    template = self.create_template({
+                        "name": name,
+                        "description": template_data.get("description", ""),
+                        "template": yaml_content,
+                        "variables": template_data.get("variables", []),
+                        "category": f"tool/{tool_name}",
+                        "tags": template_data.get("tags", []),
+                        "provider_specific": template_data.get("provider_specific", {}),
+                    })
+                    self.templates[key] = template
+                    existing_by_name[name] = template
+                    self._ensure_version(template.id, yaml_content, template_data)
+                    created += 1
+                    logger.info("Template '%s' created from %s", name, yaml_file)
+
+                except Exception as exc:
+                    logger.error("Erreur lors du chargement de %s: %s", yaml_file, exc)
+
+        logger.info(
+            "Tool templates loaded: %d created, %d updated, %d skipped (already loaded)",
+            created, updated, skipped,
+        )
+
+    def _ensure_version(
+        self,
+        template_id: str,
+        content: str,
+        template_data: Dict[str, Any],
+    ) -> None:
+        """Create a ``PromptVersion`` for this template only if no existing
+        version already has the same content. Called from the YAML loader
+        to keep ``versions.json`` idempotent across restarts.
+        """
+        existing = self.version_manager.get_all_versions(template_id)
+        if any(v.content == content for v in existing):
+            return
+        self.version_manager.create_version(
+            template_id=template_id,
+            content=content,
+            variables=template_data.get("variables", []),
+            version=template_data.get("version", "1.0.0"),
+        )
 
     async def get_optimized_prompt(
         self,
