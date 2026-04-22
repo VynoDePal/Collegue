@@ -48,6 +48,42 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
 
 ---
 
+## 🧪 Qualité des sorties LLM
+
+Au-delà des tests unitaires + stress (robustesse), une suite d'**évaluations golden** mesure la *correction* des tools qui appellent un LLM — par exemple : les tests générés par `test_generation` sont-ils réellement exécutables et corrects ? Voir [docs/llm_evals.md](docs/llm_evals.md).
+
+Matrice **5 modèles × 3 paths × 13 cas Python** (fonctions pures à decorators complexes en passant par async context managers) — **195 appels LLM, 0 crash**. Trois paths comparés : MCP Collègue, prompt "compétent" (utilisateur qui connaît pytest), prompt naïf.
+
+| Modèle | **MCP** | Competent | Raw | Δ MCP−Competent | Δ MCP−Raw |
+|---|---|---|---|---|---|
+| `gemini-2.5-flash` | **0.833** | 0.656 | 0.867 | **+0.177** | −0.034 |
+| `gemini-3-flash-preview` | 0.918 | **0.959** | 0.615 | **−0.041** | +0.303 |
+| `gemini-3.1-pro-preview` | **0.917** | 0.911 | 0.538 | +0.006 | +0.379 |
+| `gemma-4-26b-a4b-it` | **0.982** | 0.903 | 0.972 | +0.079 | +0.010 |
+| `gemma-4-31b-it` | 0.864 | **0.977** | 0.943 | **−0.113** | −0.079 |
+
+**Lecture honnête** :
+
+- Face à un utilisateur naïf, MCP délivre un **gros lift sur Gemini 3.x** (+0.30 à +0.38) ; marginal ou négatif ailleurs.
+- Face à un utilisateur qui écrit un prompt soigné, MCP **ne gagne que sur `gemini-2.5-flash`** (+0.177) ; sur 3 modèles sur 5 le prompt compétent égale ou bat le MCP.
+- `gemma-4-26b-a4b-it` est le meilleur baseline du corpus (0.982 en MCP, 0.972 en raw) — candidat prod sérieux.
+- La valeur réelle du MCP = **"éviter à l'utilisateur d'écrire un prompt soigné"** + gain net sur `gemini-2.5-flash`. Pas le game-changer universel qu'une mesure à 8 cas suggérait.
+
+Détails complets dans [docs/llm_evals.md](docs/llm_evals.md) · 13 cas × 5 modèles × 3 paths = 195 scores reproductibles.
+
+```bash
+# Matrice complète
+python -m tests.evals.runner \
+  --tool test_generation --tool test_generation_raw --tool test_generation_competent \
+  --model gemini-2.5-flash --model gemini-3-flash-preview \
+  --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it
+
+# Run simple (1 modèle, MCP seulement)
+python -m tests.evals.runner --tool test_generation
+```
+
+---
+
 ## 🐳 Auto-hébergement (Docker)
 
 Deux modes sont supportés selon l'envie : **serveur long-running** (`docker compose`) accédé en HTTP, ou **container à la volée** (`docker run -i --rm`) que le client MCP spawne/tue à chaque session en stdio. Choisissez un mode ci-dessous.

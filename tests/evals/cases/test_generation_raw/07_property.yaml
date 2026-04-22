@@ -1,0 +1,23 @@
+name: "Property with validation"
+description: "Exercises attribute-access + validator on setter"
+language: python
+framework: pytest
+min_expected_tests: 3
+code: |
+  class Temperature:
+      def __init__(self, celsius: float):
+          self.celsius = celsius  # uses the setter
+
+      @property
+      def celsius(self) -> float:
+          return self._celsius
+
+      @celsius.setter
+      def celsius(self, value: float) -> None:
+          if value < -273.15:
+              raise ValueError("below absolute zero")
+          self._celsius = float(value)
+
+      @property
+      def fahrenheit(self) -> float:
+          return self._celsius * 9 / 5 + 32

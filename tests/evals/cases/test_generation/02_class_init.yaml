@@ -1,0 +1,18 @@
+name: "Class with __init__ and mutation"
+description: "Exercise the LLM's ability to cover object state, not just free functions"
+language: python
+framework: pytest
+min_expected_tests: 3
+code: |
+  class Counter:
+      def __init__(self, start: int = 0):
+          if start < 0:
+              raise ValueError("start must be >= 0")
+          self.value = start
+
+      def increment(self, by: int = 1) -> int:
+          self.value += by
+          return self.value
+
+      def reset(self) -> None:
+          self.value = 0

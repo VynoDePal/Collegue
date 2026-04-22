@@ -1,0 +1,18 @@
+name: "Arithmetic utility"
+description: "Simple pure functions with known I/O including an error branch"
+language: python
+framework: pytest
+min_expected_tests: 3
+code: |
+  def add(a, b):
+      return a + b
+
+  def divide(a, b):
+      if b == 0:
+          raise ValueError("div by zero")
+      return a / b
+
+  def clamp(value, lo, hi):
+      if lo > hi:
+          raise ValueError("lo > hi")
+      return max(lo, min(value, hi))

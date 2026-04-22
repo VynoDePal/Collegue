@@ -1,0 +1,19 @@
+name: "Custom exception hierarchy"
+description: "LLM must realise that isinstance checks against the subclass are the interesting assertion"
+language: python
+framework: pytest
+min_expected_tests: 3
+code: |
+  class AppError(Exception):
+      """Base for every domain error."""
+
+  class NotFoundError(AppError):
+      def __init__(self, entity: str, entity_id: str):
+          self.entity = entity
+          self.entity_id = entity_id
+          super().__init__(f"{entity} {entity_id!r} not found")
+
+  def lookup(db: dict, entity: str, entity_id: str):
+      if entity_id not in db:
+          raise NotFoundError(entity, entity_id)
+      return db[entity_id]
