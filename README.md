@@ -52,10 +52,27 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
 
 Au-delà des tests unitaires + stress (robustesse), une suite d'**évaluations golden** mesure la *correction* des tools qui appellent un LLM — par exemple : les tests générés par `test_generation` sont-ils réellement exécutables et corrects ? Voir [docs/llm_evals.md](docs/llm_evals.md).
 
-Baseline actuel sur 8 cas `test_generation` (Gemini 2.5 Flash) : **0.978 moyenne, 190/193 tests générés qui passent**.
+Matrice 5 modèles × 2 paths (avec vs sans MCP Collègue) sur 8 cas Python — **80 appels LLM, 0 crash**. Snapshot :
+
+| Modèle | MCP `test_generation` | Raw LLM direct | **Δ MCP − raw** |
+|---|---|---|---|
+| `gemini-2.5-flash` | **1.000** | 0.875 | +0.125 |
+| `gemini-3-flash-preview` | 0.989 | 0.875 | +0.114 |
+| `gemini-3.1-pro-preview` | 0.868 | 0.344 | **+0.524** |
+| `gemma-4-26b-a4b-it` | 0.847 | 0.847 | +0.000 |
+| `gemma-4-31b-it` | **1.000** | **1.000** | +0.000 |
+
+**Lecture** : sur Gemini, le prompt engineering du tool MCP Collègue apporte entre +0.11 et +0.52 sur l'exactitude des tests générés. Sur Gemma, même score dans les deux cas — le gain est spécifique aux modèles qui suivent bien les instructions structurées.
 
 ```bash
-LLM_API_KEY=... python -m tests.evals.runner --tool test_generation
+# Run matrice complète
+python -m tests.evals.runner \
+  --tool test_generation --tool test_generation_raw \
+  --model gemini-2.5-flash --model gemini-3-flash-preview \
+  --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it
+
+# Run simple (1 modèle)
+python -m tests.evals.runner --tool test_generation
 ```
 
 ---

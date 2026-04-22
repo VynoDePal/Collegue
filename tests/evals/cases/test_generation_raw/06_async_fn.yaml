@@ -1,0 +1,13 @@
+name: "Async function"
+description: "LLM must either use pytest-asyncio or asyncio.run; both are acceptable"
+language: python
+framework: pytest
+min_expected_tests: 2
+code: |
+  import asyncio
+
+  async def gather_doubles(values):
+      async def double(x):
+          await asyncio.sleep(0)
+          return x * 2
+      return await asyncio.gather(*[double(v) for v in values])

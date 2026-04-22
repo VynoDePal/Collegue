@@ -6,10 +6,27 @@ scorer, and produce a per-run markdown + JSON report. Designed to run locally
 or from a nightly job — **never from a PR CI run** (too expensive, too
 non-deterministic).
 
+Supports two orthogonal axes :
+
+1. **Tool path** — either ``test_generation`` (goes through the MCP tool, with
+   its tuned prompt + element extraction) or ``test_generation_raw`` (sends a
+   minimal prompt straight to the LLM, no MCP in the loop). Having both lets
+   us quantify the value the MCP tool adds over calling Gemini directly.
+2. **Model** — any model name the Gemini API accepts. Pass one with ``--model``
+   or several with ``--model X --model Y`` to run a matrix. Results from a
+   matrix run include a comparison table.
+
 Usage::
 
-    LLM_API_KEY=... python -m tests.evals.runner --tool test_generation \
-        --out tests/evals/reports/$(date -u +%Y-%m-%dT%H-%M-%S)
+    # Single model, single tool (default: settings.LLM_MODEL, tool=MCP)
+    python -m tests.evals.runner --tool test_generation
+
+    # Matrix run: 5 models × 2 tools on the 8 cases (= 80 LLM calls)
+    python -m tests.evals.runner --tool test_generation --tool test_generation_raw \\
+        --model gemini-2.5-flash --model gemini-3-flash --model gemini-3.1-pro \\
+        --model gemma-4-26b --model gemma-3-1b
+
+    # Iterate quickly
     python -m tests.evals.runner --tool test_generation --case 01_arithmetic
     python -m tests.evals.runner --tool test_generation --limit 2
 """
@@ -23,11 +40,12 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
 from collegue.config import settings
+from collegue.resources.llm.providers import LLMConfig, generate_text
 from collegue.tools.test_generation import TestGenerationRequest, TestGenerationTool
 
 from tests.evals.eval_context import EvalContext
@@ -39,12 +57,12 @@ CASES_ROOT = Path(__file__).parent / "cases"
 
 
 # ---------------------------------------------------------------------------
-# Tool registry
+# Tool runners
 # ---------------------------------------------------------------------------
-# Each entry wires a tool name to (async runner, scorer). The runner takes
-# the parsed case dict and returns the tool output string that the scorer
-# understands. Adding a new tool = adding one entry here + one scorer module
-# + one cases/<name>/ directory. Nothing else needs to change.
+# Each entry wires a tool name to (async runner, scorer, cases dir). The
+# runner takes the parsed case dict and returns the tool output string that
+# the scorer understands. Adding a new tool = adding one entry here + one
+# scorer module + one cases/<name>/ directory.
 
 
 async def _run_test_generation(case: Dict[str, Any], ctx: EvalContext) -> str:
@@ -58,10 +76,54 @@ async def _run_test_generation(case: Dict[str, Any], ctx: EvalContext) -> str:
     return response.test_code
 
 
-TOOL_REGISTRY: Dict[str, Dict[str, Callable]] = {
+# Minimal prompt used by the raw-LLM path. Kept short intentionally — the
+# whole point of the comparison is "what you'd get if you just asked". No
+# element extraction, no coverage target, no framework preamble.
+_RAW_SYSTEM_PROMPT = (
+    "You are an expert Python developer. Generate a pytest test file for the "
+    "code you receive. Output the test file as a single Python code block."
+)
+
+
+async def _run_test_generation_raw(case: Dict[str, Any], ctx: EvalContext) -> str:
+    """Bypass the MCP tool entirely — just ask the LLM for tests.
+
+    Baseline for how much value the MCP ``test_generation`` tool's prompt
+    engineering actually adds on top of a plain "write tests" request.
+    """
+    config = LLMConfig(
+        model_name=ctx.model,
+        api_key=settings.LLM_API_KEY,
+        max_tokens=EvalContext.MIN_MAX_TOKENS,
+        temperature=0.5,
+    )
+    framework = case.get("framework", "pytest")
+    prompt = (
+        f"Write a {framework} test file for the following {case.get('language', 'python')} code.\n\n"
+        f"```python\n{case['code']}\n```\n"
+    )
+    response = await generate_text(config, prompt, system_prompt=_RAW_SYSTEM_PROMPT)
+    # Record the call so the JSON report matches what the MCP path does.
+    ctx.calls.append({
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "prompt_len": len(prompt),
+        "response_len": len(response.text or ""),
+        "path": "raw",
+    })
+    return response.text or ""
+
+
+TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "test_generation": {
         "run": _run_test_generation,
         "score": tg_scorer.score,
+        "cases_subdir": "test_generation",
+    },
+    "test_generation_raw": {
+        "run": _run_test_generation_raw,
+        "score": tg_scorer.score,
+        "cases_subdir": "test_generation_raw",
     },
 }
 
@@ -72,7 +134,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Callable]] = {
 
 
 def load_cases(tool: str, only: List[str] | None = None, limit: int | None = None) -> List[tuple[str, Dict[str, Any]]]:
-    cases_dir = CASES_ROOT / tool
+    subdir = TOOL_REGISTRY[tool]["cases_subdir"]
+    cases_dir = CASES_ROOT / subdir
     if not cases_dir.is_dir():
         raise FileNotFoundError(f"No cases directory for tool {tool!r}: {cases_dir}")
 
@@ -90,7 +153,7 @@ def load_cases(tool: str, only: List[str] | None = None, limit: int | None = Non
 
 
 # ---------------------------------------------------------------------------
-# Runner
+# Single-run primitives
 # ---------------------------------------------------------------------------
 
 
@@ -99,8 +162,9 @@ async def _run_single_case(
     case_id: str,
     case: Dict[str, Any],
     out_dir: Path,
+    model: str,
 ) -> Dict[str, Any]:
-    ctx = EvalContext()
+    ctx = EvalContext(model=model)
     entry = TOOL_REGISTRY[tool]
 
     started = _dt.datetime.now(_dt.timezone.utc)
@@ -131,7 +195,7 @@ async def _run_single_case(
         "case_id": case_id,
         "name": case.get("name", case_id),
         "description": case.get("description", ""),
-        "model": settings.LLM_MODEL,
+        "model": model,
         "started_at": started.isoformat(timespec="seconds"),
         "score": score_payload,
         "ctx_calls": ctx.calls,
@@ -139,15 +203,129 @@ async def _run_single_case(
         "raw_error": raw_error,
     }
 
-    (out_dir / "cases").mkdir(parents=True, exist_ok=True)
-    (out_dir / "cases" / f"{case_id}.json").write_text(
+    # One JSON file per (model, tool, case) triple. Keeps the on-disk layout
+    # flat enough to diff / grep without pre-processing.
+    cases_dir = out_dir / "cases"
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    safe_model = model.replace("/", "_").replace(":", "_")
+    (cases_dir / f"{tool}__{safe_model}__{case_id}.json").write_text(
         json.dumps(record, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     return record
 
 
-def _write_report(records: List[Dict[str, Any]], out_dir: Path) -> None:
+def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not records:
+        return {"avg": 0.0, "n": 0, "passed": 0, "collected": 0}
+    total_score = sum(r["score"]["score"] for r in records)
+    total_passed = sum(r["score"]["passed"] for r in records)
+    total_collected = sum(r["score"]["collected"] for r in records)
+    return {
+        "avg": round(total_score / len(records), 3),
+        "n": len(records),
+        "passed": total_passed,
+        "collected": total_collected,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Matrix report writer
+# ---------------------------------------------------------------------------
+
+
+def _fmt_score(record: Optional[Dict[str, Any]]) -> str:
+    if record is None:
+        return "—"
+    if record.get("raw_error"):
+        return "ERR"
+    return f"{record['score']['score']:.3f}"
+
+
+def _write_matrix_report(
+    records: List[Dict[str, Any]],
+    out_dir: Path,
+    case_ids: List[str],
+    tools: List[str],
+    models: List[str],
+) -> None:
+    lines: list[str] = []
+    started = records[0]["started_at"] if records else _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    lines.append(f"# Matrix eval run {started}")
+    lines.append("")
+    lines.append(f"- Cases: {len(case_ids)}")
+    lines.append(f"- Tools: {', '.join(tools)}")
+    lines.append(f"- Models: {', '.join(models)}")
+    lines.append(f"- Total runs: {len(records)}")
+    lines.append("")
+
+    # Index records by (tool, model, case) for fast lookup.
+    idx: Dict[tuple, Dict[str, Any]] = {
+        (r["tool"], r["model"], r["case_id"]): r for r in records
+    }
+
+    for tool in tools:
+        lines.append(f"## `{tool}`")
+        lines.append("")
+        header = "| Case | " + " | ".join(models) + " |"
+        sep = "|---|" + "|".join(["---"] * len(models)) + "|"
+        lines.append(header)
+        lines.append(sep)
+        for case_id in case_ids:
+            row = [case_id]
+            for model in models:
+                row.append(_fmt_score(idx.get((tool, model, case_id))))
+            lines.append("| " + " | ".join(row) + " |")
+
+        # Aggregate row.
+        agg_row = ["**Avg**"]
+        for model in models:
+            recs = [idx[(tool, model, c)] for c in case_ids if (tool, model, c) in idx and not idx[(tool, model, c)].get("raw_error")]
+            if recs:
+                agg = _aggregate(recs)
+                agg_row.append(f"**{agg['avg']:.3f}**")
+            else:
+                agg_row.append("**—**")
+        lines.append("| " + " | ".join(agg_row) + " |")
+        lines.append("")
+
+    # Δ MCP minus raw, per model (only meaningful when both tools are in the run).
+    if "test_generation" in tools and "test_generation_raw" in tools:
+        lines.append("## Δ `test_generation` − `test_generation_raw` (per model)")
+        lines.append("")
+        lines.append("Positive = MCP tool adds value over raw prompt. Negative = MCP tool is counter-productive.")
+        lines.append("")
+        lines.append("| Model | MCP avg | Raw avg | Δ |")
+        lines.append("|---|---|---|---|")
+        for model in models:
+            mcp_recs = [idx[("test_generation", model, c)] for c in case_ids if ("test_generation", model, c) in idx and not idx[("test_generation", model, c)].get("raw_error")]
+            raw_recs = [idx[("test_generation_raw", model, c)] for c in case_ids if ("test_generation_raw", model, c) in idx and not idx[("test_generation_raw", model, c)].get("raw_error")]
+            mcp_avg = _aggregate(mcp_recs)["avg"] if mcp_recs else None
+            raw_avg = _aggregate(raw_recs)["avg"] if raw_recs else None
+            mcp_s = f"{mcp_avg:.3f}" if mcp_avg is not None else "—"
+            raw_s = f"{raw_avg:.3f}" if raw_avg is not None else "—"
+            if mcp_avg is not None and raw_avg is not None:
+                delta = mcp_avg - raw_avg
+                delta_s = f"{'+' if delta >= 0 else ''}{delta:.3f}"
+            else:
+                delta_s = "—"
+            lines.append(f"| `{model}` | {mcp_s} | {raw_s} | {delta_s} |")
+        lines.append("")
+
+    # Errors section (if any).
+    errs = [r for r in records if r.get("raw_error")]
+    if errs:
+        lines.append("## Errors")
+        lines.append("")
+        for r in errs:
+            lines.append(f"- `{r['tool']}` · `{r['model']}` · `{r['case_id']}` — first line: `{r['raw_error'].splitlines()[0] if r['raw_error'] else ''}`")
+        lines.append("")
+
+    (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_single_report(records: List[Dict[str, Any]], out_dir: Path) -> None:
+    """Report for single-tool / single-model runs — stays compact."""
     lines: list[str] = []
     started = records[0]["started_at"] if records else _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     lines.append(f"# Eval run {started}")
@@ -165,73 +343,106 @@ def _write_report(records: List[Dict[str, Any]], out_dir: Path) -> None:
         lines.append("")
         lines.append("| Case | Score | Collected | Passed | Failed | Errors | Duration |")
         lines.append("|---|---|---|---|---|---|---|")
-        total_score = 0.0
-        total_collected = 0
-        total_passed = 0
         for r in tool_records:
             s = r["score"]
             lines.append(
                 f"| {r['case_id']} | {s['score']:.3f} | {s['collected']} | {s['passed']} | "
                 f"{s['failed']} | {s['errors']} | {s['duration_s']}s |"
             )
-            total_score += s["score"]
-            total_collected += s["collected"]
-            total_passed += s["passed"]
-
-        n = len(tool_records)
-        avg = total_score / n if n else 0.0
+        agg = _aggregate(tool_records)
         lines.append("")
         lines.append(
-            f"**Aggregate:** {avg:.3f} average, {total_passed}/{total_collected} generated tests passing."
+            f"**Aggregate:** {agg['avg']:.3f} average, {agg['passed']}/{agg['collected']} generated tests passing."
         )
         lines.append("")
 
-    report_path = out_dir / "report.md"
-    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Main runner
+# ---------------------------------------------------------------------------
 
 
 async def _run(
-    tool: str,
+    tools: List[str],
+    models: List[str],
     out_dir: Path,
     only: List[str] | None,
     limit: int | None,
 ) -> int:
-    if tool not in TOOL_REGISTRY:
-        print(f"[ERROR] Unknown tool {tool!r}. Available: {sorted(TOOL_REGISTRY)}", file=sys.stderr)
-        return 2
+    for tool in tools:
+        if tool not in TOOL_REGISTRY:
+            print(f"[ERROR] Unknown tool {tool!r}. Available: {sorted(TOOL_REGISTRY)}", file=sys.stderr)
+            return 2
 
     if not settings.LLM_API_KEY or settings.LLM_API_KEY == "votre_clé_api_gemini":
         print("[ERROR] LLM_API_KEY must be set (see .env)", file=sys.stderr)
         return 3
 
-    cases = load_cases(tool, only=only, limit=limit)
-    if not cases:
-        print(f"[ERROR] No cases matched (tool={tool}, only={only}, limit={limit})", file=sys.stderr)
+    # Load cases per tool (may differ if cases_subdir differs); we key by case_id
+    # so the matrix report can render missing cells as em-dash.
+    case_ids_set: set[str] = set()
+    per_tool_cases: Dict[str, List[tuple[str, Dict[str, Any]]]] = {}
+    for tool in tools:
+        cases = load_cases(tool, only=only, limit=limit)
+        per_tool_cases[tool] = cases
+        case_ids_set.update(cid for cid, _ in cases)
+    case_ids = sorted(case_ids_set)
+
+    if not case_ids:
+        print(f"[ERROR] No cases matched (tools={tools}, only={only}, limit={limit})", file=sys.stderr)
         return 4
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"=== Running {len(cases)} eval(s) for {tool} — model={settings.LLM_MODEL}")
-    records: list[Dict[str, Any]] = []
-    for i, (case_id, case) in enumerate(cases, 1):
-        print(f"[{i:>2}/{len(cases)}] {case_id} — {case.get('name', '')}")
-        try:
-            record = await _run_single_case(tool, case_id, case, out_dir)
-            s = record["score"]
-            marker = "✅" if s["score"] >= 0.6 else "⚠️ " if s["score"] >= 0.3 else "❌"
-            print(f"     {marker} score={s['score']:.3f} passed={s['passed']}/{s['collected']} in {s['duration_s']}s")
-            records.append(record)
-        except Exception as exc:
-            print(f"     ❌ runner failure: {exc}", file=sys.stderr)
-            traceback.print_exc()
+    total_runs = sum(len(per_tool_cases[t]) for t in tools) * len(models)
+    print(f"=== Matrix run: {total_runs} LLM calls ({len(case_ids)} cases × {len(tools)} tool(s) × {len(models)} model(s))")
+    print(f"=== Tools: {tools}")
+    print(f"=== Models: {models}")
+    print()
 
-    _write_report(records, out_dir)
-    print(f"=== Report: {out_dir / 'report.md'}")
+    records: list[Dict[str, Any]] = []
+    idx = 0
+    for model in models:
+        for tool in tools:
+            for case_id, case in per_tool_cases[tool]:
+                idx += 1
+                prefix = f"[{idx:>3}/{total_runs}] {tool:<22} · {model:<22} · {case_id}"
+                try:
+                    record = await _run_single_case(tool, case_id, case, out_dir, model)
+                    s = record["score"]
+                    marker = "✅" if s["score"] >= 0.6 else "⚠️ " if s["score"] >= 0.3 else "❌"
+                    print(f"{prefix} → {marker} score={s['score']:.3f} passed={s['passed']}/{s['collected']}")
+                    records.append(record)
+                except Exception as exc:
+                    print(f"{prefix} → ❌ runner failure: {exc}", file=sys.stderr)
+                    traceback.print_exc()
+
+    # Pick the right report shape. Single model + single tool = compact.
+    # Anything multi-axis = matrix.
+    if len(tools) == 1 and len(models) == 1:
+        _write_single_report(records, out_dir)
+    else:
+        _write_matrix_report(records, out_dir, case_ids, tools, models)
+    print(f"\n=== Report: {out_dir / 'report.md'}")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="tests.evals.runner")
-    ap.add_argument("--tool", required=True, choices=sorted(TOOL_REGISTRY), help="Tool to evaluate")
+    ap.add_argument(
+        "--tool",
+        action="append",
+        default=[],
+        choices=sorted(TOOL_REGISTRY),
+        help="Tool to evaluate. Can be passed multiple times for a matrix run.",
+    )
+    ap.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        help="Model name (e.g. gemini-2.5-flash). Can be passed multiple times.",
+    )
     ap.add_argument(
         "--out",
         type=Path,
@@ -242,17 +453,20 @@ def main() -> int:
         "--case",
         action="append",
         default=[],
-        help="Limit to specific case(s) by id (filename without extension). Can be passed multiple times.",
+        help="Limit to specific case id(s). Can be passed multiple times.",
     )
     ap.add_argument("--limit", type=int, default=None, help="Only run the first N cases")
     args = ap.parse_args()
+
+    tools = args.tool or ["test_generation"]
+    models = args.model or [settings.LLM_MODEL]
 
     out_dir = args.out or (
         Path(__file__).parent
         / "reports"
         / _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
     )
-    return asyncio.run(_run(args.tool, out_dir, args.case or None, args.limit))
+    return asyncio.run(_run(tools, models, out_dir, args.case or None, args.limit))
 
 
 if __name__ == "__main__":

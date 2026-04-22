@@ -45,12 +45,24 @@ class EvalContext:
     #: 8000 leaves enough headroom for reasoning + real output.
     MIN_MAX_TOKENS = 8000
 
-    def __init__(self, temperature: float = 0.5, max_tokens: int = MIN_MAX_TOKENS):
+    def __init__(
+        self,
+        temperature: float = 0.5,
+        max_tokens: int = MIN_MAX_TOKENS,
+        model: Optional[str] = None,
+    ):
         self.lifespan_context: Dict[str, Any] = {}
         self._default_temperature = temperature
         self._default_max_tokens = max_tokens
-        self._model = settings.LLM_MODEL
+        # ``model`` overrides the env default so the matrix runner can drive
+        # a sweep without touching settings. Falls back to LLM_MODEL for the
+        # common "run against whatever is configured" case.
+        self._model = model or settings.LLM_MODEL
         self.calls: list[Dict[str, Any]] = []
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     async def sample(
         self,

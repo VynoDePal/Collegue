@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
@@ -185,10 +186,10 @@ def _strip_fences(raw: str) -> str:
     python_blocks = [b for tag, b in blocks if tag in ("python", "py", "")]
     for block in python_blocks:
         if "def test_" in block:
-            return block
+            return textwrap.dedent(block)
     for tag, block in blocks:
         if "def test_" in block:
-            return block
+            return textwrap.dedent(block)
     if python_blocks:
-        return python_blocks[0]
-    return blocks[0][1]
+        return textwrap.dedent(python_blocks[0])
+    return textwrap.dedent(blocks[0][1])

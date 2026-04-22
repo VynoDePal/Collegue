@@ -9,13 +9,23 @@ Jamais exécutée en CI (trop coûteuse en LLM). Usage : local, ou nightly cron.
 ```
 tests/evals/
 ├── eval_context.py              # Shim ctx.sample() qui appelle generate_text directement
-├── runner.py                    # CLI, loader YAML, orchestrateur, writer rapport
+├── runner.py                    # CLI, loader YAML, orchestrateur, writer rapport/matrix
 ├── scorers/
 │   └── test_generation.py       # Exécute les tests générés dans pytest, score = passed/collected
 ├── cases/
-│   └── test_generation/         # 8 cas YAML (1 prompt → 1 score)
+│   ├── test_generation/         # 8 cas — chemin via le tool MCP Collègue
+│   └── test_generation_raw/     # Mêmes 8 cas — chemin LLM direct (prompt minimal)
 └── reports/                     # Runtime (gitignored)
 ```
+
+### Deux paths parallèles
+
+Le runner connaît deux "tools" :
+
+- **`test_generation`** — passe par la classe `TestGenerationTool` du MCP Collègue. Bénéficie du prompt engineering fignolé du tool (extraction d'éléments, coverage target, framework preamble).
+- **`test_generation_raw`** — bypasse complètement le tool. Appelle `generate_text()` avec un prompt minimal : *"Write a pytest test file for the following Python code"*. Représente le baseline "ce que tu aurais en demandant à l'IA toi-même".
+
+Le matrix report calcule un **Δ (MCP − raw) par modèle** qui quantifie la valeur ajoutée réelle du prompt engineering. Δ positif = le tool aide. Δ négatif = le tool fait empirer les choses (signal fort).
 
 - **Runner in-process** : n'utilise pas le harness HTTP MCP. Instancie directement le tool et lui passe un `EvalContext` qui implémente `ctx.sample()` en déléguant à `generate_text()` (même helper que le Watchdog). Pas besoin de lancer Docker — `LLM_API_KEY` dans l'env et c'est parti.
 - **Scorer rule-based** : pas de LLM-as-judge dans la v1. Pour `test_generation`, on écrit le code source + les tests générés dans un tempdir et on lance `pytest test_src.py`. Score = `passed / collected`.
@@ -23,7 +33,7 @@ tests/evals/
 ## Usage
 
 ```bash
-# Full run (8 cas)
+# Mode simple (1 tool, 1 modèle par défaut via settings.LLM_MODEL)
 LLM_API_KEY=<ta-clé> python -m tests.evals.runner --tool test_generation
 
 # Un cas précis (itération rapide)
@@ -32,8 +42,15 @@ python -m tests.evals.runner --tool test_generation --case 01_arithmetic
 # Limite aux N premiers cas (quand la quota Gemini est serrée)
 python -m tests.evals.runner --tool test_generation --limit 2
 
-# Sortie dans un dossier dédié (au lieu d'un timestamp auto)
-python -m tests.evals.runner --tool test_generation --out my-run/
+# Matrix: plusieurs modèles + MCP vs raw
+python -m tests.evals.runner \
+    --tool test_generation --tool test_generation_raw \
+    --model gemini-2.5-flash \
+    --model gemini-3-flash-preview \
+    --model gemini-3.1-pro-preview \
+    --model gemma-4-26b-a4b-it \
+    --model gemma-4-31b-it \
+    --out tests/evals/reports/matrix-$(date -u +%Y%m%d)
 ```
 
 Chaque run produit :
@@ -42,9 +59,54 @@ Chaque run produit :
 
 Le runner **n'est jamais gating** (`exit 0` toujours). L'utilisateur lit le rapport et juge.
 
-## Baseline actuel (Gemini 2.5 Flash)
+## Matrice 5 modèles × 2 paths (snapshot golden-evals-v1)
 
-Au moment de l'écriture (PR golden-evals-v1) :
+Run complet 80 appels (`python -m tests.evals.runner --tool test_generation --tool test_generation_raw --model gemini-2.5-flash --model gemini-3-flash-preview --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it`).
+
+### Scores moyens par path (agrégat sur 8 cas)
+
+| Modèle | MCP (`test_generation`) | Raw (`test_generation_raw`) | **Δ MCP − raw** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 1.000 | 0.875 | **+0.125** |
+| `gemini-3-flash-preview` | 0.989 | 0.875 | **+0.114** |
+| `gemini-3.1-pro-preview` | 0.868 | 0.344 | **+0.524** |
+| `gemma-4-26b-a4b-it` | 0.847 | 0.847 | +0.000 |
+| `gemma-4-31b-it` | 1.000 | 1.000 | +0.000 |
+
+### Lectures principales
+
+1. **Sur Gemini, l'outil MCP apporte +0.11 à +0.52 de qualité** par rapport à un prompt brut. Le cas le plus spectaculaire : `gemini-3.1-pro-preview` passe de **0.344 en raw à 0.868 en MCP** — sans le prompt engineering du tool, ce modèle génère des tests majoritairement non-exécutables.
+2. **Sur Gemma, aucune différence** — les deux paths produisent exactement le même score. Gemma semble parser notre prompt structuré comme du texte libre et tomber sur la même stratégie de génération dans les deux cas.
+3. **Le duo `gemini-2.5-flash` + MCP obtient un score parfait 1.000** (192 tests générés, tous passent) — c'est la configuration de référence pour la prod.
+4. **`gemma-4-31b-it` perfect sur les deux paths** — modèle remarquablement stable sur ce corpus Python simple ; à confirmer sur des cas plus tordus.
+
+### Scores par case × modèle (MCP path)
+
+| Case | 2.5-flash | 3-flash-prev | 3.1-pro-prev | gemma-4-26b | gemma-4-31b |
+|---|---|---|---|---|---|
+| 01_arithmetic | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 02_class_init | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 03_type_hints | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 04_exceptions | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| 05_generator | 1.000 | 1.000 | 0.000 | 1.000 | 1.000 |
+| 06_async_fn | 1.000 | 0.909 | 1.000 | 0.778 | 1.000 |
+| 07_property | 1.000 | 1.000 | 0.944 | 1.000 | 1.000 |
+| 08_inheritance | 1.000 | 1.000 | 1.000 | 0.000 | 1.000 |
+
+Deux zéros isolés sur la diagonale MCP :
+- `gemini-3.1-pro-preview · 05_generator` — LLM retourne du code, mais le scorer ne collecte aucun test (sortie probablement tronquée côté reasoning)
+- `gemma-4-26b-a4b-it · 08_inheritance` — même symptôme, classe spécifique à l'héritage
+
+À investiguer si on veut pousser la qualité — candidat pour une v2 avec retry ou prompt adjustment ciblé sur ces edge cases.
+
+### Seuils de régression
+
+- **MCP `gemini-2.5-flash` moyenne < 0.95** → investiguer avant merge (c'est le couple prod le plus stable)
+- **Δ MCP − raw < +0.05 sur Gemini** → le prompt engineering du tool régresse, red flag
+
+## Baseline historique (Gemini 2.5 Flash uniquement, v0)
+
+Au moment de l'écriture initiale du harness (8 cas, 1 modèle) :
 
 | Case | Score | Tests OK / Total |
 |---|---|---|

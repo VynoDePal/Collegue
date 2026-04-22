@@ -1,0 +1,19 @@
+name: "Type-hinted data transform"
+description: "Uses List / Optional / dict annotations; good coverage needs boundary cases"
+language: python
+framework: pytest
+min_expected_tests: 3
+code: |
+  from typing import List, Optional
+
+  def first_nonzero(values: List[int]) -> Optional[int]:
+      for v in values:
+          if v != 0:
+              return v
+      return None
+
+  def word_counts(text: str) -> dict[str, int]:
+      counts: dict[str, int] = {}
+      for word in text.split():
+          counts[word] = counts.get(word, 0) + 1
+      return counts
