@@ -2,7 +2,11 @@
 testpaths = ["tests"]
 norecursedirs = ["stress", "prompts", "__pycache__"]
 asyncio_mode = "auto"
-addopts = "-q"
+addopts = "-q -m 'not integration'"
+markers = [
+    "slow: tests exceeding ~1s (rate-limit reset windows, soak scenarios)",
+    "integration: live runs requiring real credentials (Sentry, GitHub, LLM, Postgres, K8s) — skipped in CI",
+]
 
 [tool.ruff]
 line-length = 120
