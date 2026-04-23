@@ -207,6 +207,55 @@ def test_code_documentation_fallback_when_no_engine():
     assert len(prompt) > 50
 
 
+@pytest.mark.asyncio
+async def test_code_documentation_rendered_prompt_has_no_ghost_placeholders():
+    """Regression for #244 — the old ``_enrich_context_with_elements`` wrote
+    to a ``context`` field that didn't exist on ``DocumentationRequest``,
+    and ``default.yaml`` referenced a non-existent ``{format}`` placeholder.
+    Both reached the LLM as literal strings. With the real engine + template
+    this test locks in that neither placeholder survives rendering.
+    """
+    from collegue.prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
+
+    engine = EnhancedPromptEngine()
+    tool = DocumentationTool()
+    tool.prompt_engine = engine
+
+    ctx = MagicMock()
+    ctx.info = AsyncMock()
+    ctx.warning = AsyncMock()
+    ctx.error = AsyncMock()
+    ctx.report_progress = AsyncMock()
+    captured = {}
+
+    async def fake_sample(**kwargs):
+        captured.update(kwargs)
+        result = MagicMock()
+        result.text = "# Stub"
+        return result
+
+    ctx.sample = fake_sample
+
+    request = DocumentationRequest(
+        code="def foo(): return 1",
+        language="python",
+        doc_format="markdown",
+    )
+    await tool.execute_async(request, ctx=ctx)
+
+    prompt = captured["messages"]
+    # Ghost placeholders that used to leak into the prompt:
+    assert "{context}" not in prompt
+    assert "{format}" not in prompt
+    assert "{audience}" not in prompt
+    assert "{depth_level}" not in prompt
+    # ``focus_on`` defaults to None — if the template ever re-adds it unguarded
+    # we'd see "None" as a literal word in a sentence. Pin against that.
+    assert " None " not in prompt
+    # Sanity: the real template's opening line is there.
+    assert "You generate developer-facing documentation" in prompt
+
+
 # ---------------------------------------------------------------------------
 # BaseTool tracking plumbing
 # ---------------------------------------------------------------------------

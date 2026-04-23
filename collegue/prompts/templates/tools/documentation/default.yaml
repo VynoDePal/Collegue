@@ -1,69 +1,55 @@
 name: documentation_default
 version: 1.0.0
-description: Template par défaut pour la génération de documentation
+description: |
+  Evidence-based documentation-generation prompt (see #244). Short, direct,
+  with an explicit output contract. Replaces the 69-line variant whose 9
+  numbered sections + unbound `{format}` / `{context}` placeholders reached
+  the LLM as literal text. Design rationale + citations in docs/llm_evals.md.
 tags:
   - documentation
   - default
 template: |
-  You are a technical documentation expert. Generate comprehensive documentation for the following {language} code.
-  
-  Code to document:
-  ```{language}
+  You generate developer-facing documentation. Output ONLY the documentation
+  content — no preamble, no meta-commentary, no wrapping code fence.
+
+  Write {doc_format} documentation for the {language} source below,
+  in "{doc_style}" style.
+
+  <source>
   {code}
-  ```
-  
-  Documentation Format: {format}
-  
-  Context: {context}
-  
-  Generate documentation that includes:
-  1. **Overview**: High-level description of the code's purpose
-  2. **Installation/Setup**: Required dependencies and setup instructions
-  3. **API Reference**: Detailed documentation of all public functions/classes
-  4. **Usage Examples**: Practical examples showing how to use the code
-  5. **Parameters**: Clear description of all parameters and their types
-  6. **Return Values**: What the functions/methods return
-  7. **Exceptions**: Possible exceptions and error conditions
-  8. **Best Practices**: Recommended usage patterns
-  9. **Performance Considerations**: Any performance implications
-  
-  Documentation style should be:
-  - Clear and concise
-  - Well-structured with proper headings
-  - Include code examples where helpful
-  - Follow {doc_format} conventions
-  - Suitable for both beginners and experienced developers
+  </source>
+
+  Rules (all mandatory):
+  - Document only symbols visible in <source>. Do not invent functions,
+    classes, parameters, or exceptions.
+  - For every public function / class / method: purpose in one sentence,
+    parameters (name, type, meaning), return value, exceptions raised.
+  - Include at least one runnable usage example per public entry point.
+  - Use {doc_format} conventions. No second-format leakage.
+
+  Output contract: emit {doc_format} content directly. Do NOT wrap the whole
+  response in an outer code fence. Code examples *inside* the doc MAY use
+  fences. Nothing before or after the documentation.
 variables:
   - name: code
-    description: "Code à documenter"
+    description: Source code to document
     type: string
     required: true
   - name: language
-    description: "Langage de programmation du code"
+    description: Programming language (e.g. `python`)
     type: string
     required: true
   - name: doc_format
-    description: "Format de documentation souhaité"
+    description: Output format (markdown | rst | html | docstring | json)
     type: string
     required: false
-    default: "markdown"
+    default: markdown
   - name: doc_style
-    description: "Style de documentation"
+    description: Tone / depth (standard | detailed | minimal | api | tutorial)
     type: string
     required: false
-    default: "standard"
-  - name: include_examples
-    description: "Inclure des exemples d'utilisation"
-    type: string
-    required: false
-    default: "false"
-  - name: context
-    type: string
-    required: false
-    default: ""
-    description: Additional context
+    default: standard
 optimization_hints:
-  - comprehensive_coverage
-  - clear_examples
-  - proper_formatting
-  - accessibility
+  - short_direct_prompt
+  - explicit_output_contract
+  - api_hallucination_guard
