@@ -21,8 +21,6 @@ template: |
   {code}
   </source>
 
-  {context}
-
   Rules (all mandatory):
   - Use only APIs visibly defined in <source>. Do not invent names,
     classes, methods, or modules.
@@ -58,11 +56,6 @@ variables:
     type: string
     required: false
     default: pytest
-  - name: context
-    description: Extra context injected by the tool (detected framework, AST-extracted elements)
-    type: string
-    required: false
-    default: ""
 optimization_hints:
   - short_direct_prompt
   - explicit_output_contract

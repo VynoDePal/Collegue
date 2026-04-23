@@ -198,37 +198,6 @@ class TestGenerationTool(BaseTool):
         chosen = test_shaped[0] if test_shaped else max(blocks, key=len)
         return chosen.rstrip()
 
-    def _enrich_context_with_elements(
-        self,
-        request: TestGenerationRequest,
-        framework: str,
-        elements: List[Dict[str, Any]],
-    ) -> TestGenerationRequest:
-        """Fold the AST-extracted ``elements`` list and the resolved
-        ``framework`` into the request's ``context`` field so the YAML
-        template's ``{context}`` placeholder carries the same information
-        the hardcoded prompt used to inject inline. Keeps the "MCP value
-        add" of element extraction alive even after wiring to templates.
-        """
-        lines: List[str] = []
-        if framework:
-            lines.append(f"Target test framework: {framework}")
-        if elements:
-            lines.append("Elements to cover:")
-            for e in elements[:10]:
-                if e.get("type") == "function":
-                    params = ", ".join(e.get("params", []))
-                    lines.append(f"- function {e['name']}({params})")
-                elif e.get("type") in ("class", "Class"):
-                    methods = ", ".join(e.get("methods", [])[:5])
-                    suffix = f" (methods: {methods})" if methods else ""
-                    lines.append(f"- class {e['name']}{suffix}")
-                else:
-                    lines.append(f"- {e.get('type', 'item')} {e.get('name')}")
-        existing = getattr(request, "context", None) or ""
-        merged = (existing + "\n" + "\n".join(lines)).strip() if lines else existing
-        return request.model_copy(update={"context": merged})
-
     def _execute_core_logic(
         self, request: TestGenerationRequest, **kwargs
     ) -> TestGenerationResponse:
@@ -245,10 +214,9 @@ class TestGenerationTool(BaseTool):
 
         if ctx:
             try:
-                # Préparer le prompt via le pipeline template + A/B (#233).
-                enriched = self._enrich_context_with_elements(request, framework, elements)
+                # Préparer le prompt via le pipeline template (#233).
                 prompt = run_async_from_sync(
-                    self.prepare_prompt(enriched, template_name="test_generation")
+                    self.prepare_prompt(request, template_name="test_generation")
                 )
 
                 started = time.monotonic()
@@ -321,9 +289,8 @@ class TestGenerationTool(BaseTool):
         # Extraire les éléments
         elements = self._engine.extract_code_elements(request.code, request.language)
 
-        # Préparer le prompt via le pipeline template + A/B (#233).
-        enriched = self._enrich_context_with_elements(request, framework, elements)
-        prompt = await self.prepare_prompt(enriched, template_name="test_generation")
+        # Préparer le prompt via le pipeline template (#233).
+        prompt = await self.prepare_prompt(request, template_name="test_generation")
 
         try:
             started = time.monotonic()
