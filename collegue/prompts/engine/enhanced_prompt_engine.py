@@ -4,7 +4,6 @@ Enhanced Prompt Engine avec versioning, optimisation et tracking de performance
 import datetime
 import logging
 import os
-import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,13 +20,14 @@ class EnhancedPromptEngine(PromptEngine):
     def __init__(self, templates_dir: str = None, storage_dir: str = None):
         """Construct the engine and load seed templates from ``templates_dir``.
 
-        A/B testing (``ab_testing_enabled=True``) runs a ε-greedy bandit on
-        the versions attached to each template. The bandit is only *actually*
-        exploratory when a template has **≥ 2 versions with distinct content**
-        (see :meth:`_select_version_ab_testing`) — otherwise the single
-        available version is returned deterministically. This safety guard
-        was added under #232 to stop the selection from faking randomness
-        over identical clones (which happened before #231 dedup).
+        Version selection is **deterministic**. The ε-greedy A/B bandit
+        that used to live here was removed under #240 because
+        ``track_performance`` only ever received a binary ``success``
+        signal (``bool(text)``), so no exploration could converge on
+        "better" — it just picked at random between indistinguishable
+        candidates. Re-introduce a selection policy only when (a) ≥ 2
+        hand-authored quality variants exist for a template AND (b) a
+        real quality oracle is wired into ``track_performance``.
 
         Parameters
         ----------
@@ -42,37 +42,25 @@ class EnhancedPromptEngine(PromptEngine):
         super().__init__(storage_path=storage_dir)
         self.version_manager = PromptVersionManager(storage_dir)
         self.language_optimizer = LanguageOptimizer()
-        self.ab_testing_enabled = True
-        self.exploration_rate = 0.1
         self.performance_cache: Dict[str, Dict[str, float]] = {}
         self.templates: Dict[str, PromptTemplate] = {}
         self.tool_templates_dir = templates_dir or os.path.join(
             os.path.dirname(__file__), '..', 'templates', 'tools'
         )
         self._load_tool_templates()
-        self._log_ab_readiness()
+        self._log_templates_loaded()
 
-    def _log_ab_readiness(self) -> None:
-        """Count templates with real variants vs clones and log the breakdown.
+    def _log_templates_loaded(self) -> None:
+        """Emit a single INFO line with how many templates the engine serves.
 
-        Gives operators a one-line signal at startup : if the count of
-        "A/B enabled" templates is 0, the fancy bandit is not doing anything —
-        someone needs to author variant YAMLs (v2, experimental, …) with
-        different content.
+        Previously counted "templates with ≥ 2 real variants" as an A/B
+        readiness signal — removed under #240 along with the bandit. The
+        count of loaded templates is still useful for operators to spot a
+        missing YAML after deploy.
         """
-        active = 0
-        single_variant = 0
-        for template in self.library.templates.values():
-            versions = self.version_manager.get_all_versions(template.id)
-            unique = {v.content for v in versions}
-            if len(unique) >= 2:
-                active += 1
-            else:
-                single_variant += 1
         logger.info(
-            "A/B testing status: %d template(s) with ≥ 2 real variants, "
-            "%d with a single variant (bandit returns deterministically for these)",
-            active, single_variant,
+            "Prompt templates loaded: %d (deterministic selection)",
+            len(self.library.templates),
         )
 
     def _load_tool_templates(self) -> None:
@@ -221,7 +209,7 @@ class EnhancedPromptEngine(PromptEngine):
             if versions:
                 prompt_version = (
                     self.version_manager.get_version(tool_name, version)
-                    if version else self._select_version_ab_testing(tool_name)
+                    if version else self._select_version(tool_name)
                 )
                 if prompt_version is None:
                     prompt_version = versions[-1]
@@ -255,7 +243,7 @@ class EnhancedPromptEngine(PromptEngine):
         if version:
             prompt_version = self.version_manager.get_version(template.id, version)
         else:
-            prompt_version = self._select_version_ab_testing(template.id)
+            prompt_version = self._select_version(template.id)
 
         if not prompt_version:
             prompt = self.format_prompt(template.id, context)
@@ -270,42 +258,27 @@ class EnhancedPromptEngine(PromptEngine):
 
         return prompt, prompt_version.id
 
-    def _select_version_ab_testing(self, template_id: str) -> Optional[PromptVersion]:
-        """Pick a :class:`PromptVersion` for ``template_id``.
+    def _select_version(self, template_id: str) -> Optional[PromptVersion]:
+        """Return the canonical :class:`PromptVersion` for ``template_id``.
 
-        A/B-safe selection policy (added under #232) :
+        Deterministic: prefers ``get_best_version`` (highest
+        ``performance_score`` — in practice tied at 0.0 for everyone,
+        so this is effectively "most recent with a score"), else falls
+        back to the last-inserted version.
 
-        1. Gather all versions attached to this template.
-        2. Compute the set of **distinct contents**. If there is only one
-           unique content, skip the bandit entirely and return the best
-           (or latest) version deterministically. No fake randomness over
-           clones.
-        3. Otherwise run the ε-greedy bandit : ``exploration_rate`` of the
-           time, pick a random version (explore); the rest of the time,
-           pick the current best (exploit).
-
-        Without step 2, before #231 fixed the loader, this function would
-        pick between 132 identical JSON copies — spending CPU on a coin
-        flip that couldn't change the output. After #231, templates are
-        distinct but most tools still have only 1 version, so the guard
-        keeps the path deterministic until someone authors real variants.
+        The ε-greedy bandit that used to gate this call was removed
+        under #240 because the learning signal feeding
+        ``performance_score`` was binary (`success=bool(text)`) and so
+        could never discriminate between variants — see the closed
+        #239 discussion. Re-introduce exploration only when (a) there
+        are real quality variants AND (b) a real pass/quality signal
+        is wired through ``track_performance``.
         """
         versions = self.version_manager.get_all_versions(template_id)
         if not versions:
             return None
-
-        unique_contents = {v.content for v in versions}
-        if len(unique_contents) < 2:
-            # No real variation to explore — return a stable choice.
-            best = self.version_manager.get_best_version(template_id)
-            return best or versions[-1]
-
-        if not self.ab_testing_enabled:
-            return self.version_manager.get_best_version(template_id)
-
-        if random.random() < self.exploration_rate:
-            return random.choice(versions)
-        return self.version_manager.get_best_version(template_id)
+        best = self.version_manager.get_best_version(template_id)
+        return best or versions[-1]
 
     def _format_version_prompt(self, version: PromptVersion, variables: Dict[str, Any]) -> str:
 
@@ -335,7 +308,17 @@ class EnhancedPromptEngine(PromptEngine):
         success: bool,
         user_feedback: Optional[float] = None
     ) -> None:
+        """Record an invocation for observability.
 
+        As of #240, the ``performance_score`` maintained here is **not**
+        consumed by any selection logic — the engine picks versions
+        deterministically. Keep this hook for operator-facing counters
+        (usage by template, average latency). When/if a real quality
+        oracle gets wired in (e.g. pytest pass-rate for
+        ``test_generation``), it will land as ``user_feedback`` and
+        flow into ``update_performance_metrics`` alongside the binary
+        ``success`` flag.
+        """
         self.version_manager.update_performance_metrics(
             template_id=template_id,
             version=version,

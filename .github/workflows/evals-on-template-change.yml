@@ -1,0 +1,110 @@
+name: Prompt template evals
+
+# Gate: when a PR edits a canonical prompt template, run the golden-evals
+# matrix against 2 representative models and fail if MCP avg drops below
+# 0.90. Designed as the structural replacement for the (removed) runtime
+# A/B bandit — see #240 for rationale.
+#
+# Cost: ~20 min wall time + ~$0.50 in LLM calls per triggered run. Only
+# fires when `collegue/prompts/templates/tools/*/default.yaml` changes,
+# so ~2× per month in steady state.
+#
+# Requires the repo secret `LLM_API_KEY` (Gemini/Gemma API key) to be
+# configured. Without it the job exits with a clear message.
+
+on:
+  pull_request:
+    paths:
+      - "collegue/prompts/templates/tools/*/default.yaml"
+
+jobs:
+  golden-evals:
+    name: Golden evals (MCP avg ≥ 0.90)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Check LLM_API_KEY is set
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "::error::LLM_API_KEY secret is not set — cannot run golden evals."
+            echo "Configure it in Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      - name: Run golden evals (test_generation, 2 models × 13 cases)
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          PYTHONPATH: .
+        run: |
+          mkdir -p tests/evals/reports/ci-gate
+          python -m tests.evals.runner \
+            --tool test_generation \
+            --model gemini-2.5-flash \
+            --model gemma-4-31b-it \
+            --out tests/evals/reports/ci-gate
+
+      - name: Enforce MCP avg threshold
+        env:
+          THRESHOLD: "0.90"
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          threshold = float(os.environ["THRESHOLD"])
+          report = Path("tests/evals/reports/ci-gate/report.md").read_text(encoding="utf-8")
+
+          # Parse the **Avg** row of the `test_generation` section.
+          section = re.search(
+              r"## `test_generation`\n.*?\| \*\*Avg\*\* \|([^\n]+)\n",
+              report,
+              flags=re.DOTALL,
+          )
+          if not section:
+              print("::error::Could not locate the test_generation Avg row in report.md")
+              sys.exit(1)
+
+          values = re.findall(r"\*\*([0-9.]+)\*\*", section.group(1))
+          if not values:
+              print("::error::No avg values parsed from Avg row")
+              sys.exit(1)
+
+          avgs = [float(v) for v in values]
+          below = [a for a in avgs if a < threshold]
+
+          print(f"Per-model MCP averages: {avgs}")
+          print(f"Threshold: {threshold}")
+
+          if below:
+              print(f"::error::MCP avg below threshold on {len(below)} model(s): {below}")
+              sys.exit(1)
+          print("All models meet the MCP avg threshold.")
+          PY
+
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-evals-report
+          path: tests/evals/reports/ci-gate/
+          retention-days: 14
