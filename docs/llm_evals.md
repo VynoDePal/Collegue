@@ -13,8 +13,9 @@ tests/evals/
 ├── scorers/
 │   └── test_generation.py       # Exécute les tests générés dans pytest, score = passed/collected
 ├── cases/
-│   ├── test_generation/         # 8 cas — chemin via le tool MCP Collègue
-│   └── test_generation_raw/     # Mêmes 8 cas — chemin LLM direct (prompt minimal)
+│   ├── test_generation/             # 13 cas — chemin via le tool MCP Collègue
+│   ├── test_generation_raw/         # Mêmes 13 cas — chemin LLM direct (prompt minimal)
+│   └── test_generation_competent/   # Mêmes 13 cas — chemin LLM avec prompt "utilisateur qui sait pytest"
 └── reports/                     # Runtime (gitignored)
 ```
 
@@ -59,7 +60,29 @@ Chaque run produit :
 
 Le runner **n'est jamais gating** (`exit 0` toujours). L'utilisateur lit le rapport et juge.
 
-## Matrice 5 modèles × 3 paths × 13 cas (golden-evals-v1, run final)
+## Workflow obligatoire : édition d'un `default.yaml`
+
+> Quand tu modifies un `collegue/prompts/templates/tools/*/default.yaml`, **run la matrice localement avant d'ouvrir la PR** et colle les chiffres dans le body.
+
+Commande minimale (2 modèles, 13 cas, ~20 min, ~$0.50) :
+
+```bash
+LLM_API_KEY=<ta-clé> python -m tests.evals.runner \
+    --tool test_generation \
+    --model gemini-2.5-flash \
+    --model gemma-4-31b-it \
+    --out tests/evals/reports/pre-merge-$(date -u +%Y%m%d-%H%M)
+```
+
+Critère de merge :
+- **MCP avg ≥ 0.90** sur chacun des 2 modèles
+- Si < 0.90 sur un modèle, investiguer avant merge (probablement une régression de template)
+
+Rationale : #240 a retiré le bandit A/B runtime qui prétendait détecter les régressions via `performance_score`. En pratique l'infra n'apprenait rien (signal `success=bool(text)` binaire). Le CI gate automatique a été envisagé puis rejeté — les templates changent ~2× par an, le coût/bénéfice ne justifie pas la complexité opérationnelle (secret GH, parsing regex, quota Gemini). **La discipline manuelle remplit le rôle.** Si le repo devient multi-contributeur, on réouvrira le débat CI.
+
+## Matrice historique — run pré-#237 (5 modèles × 3 paths × 13 cas, v3)
+
+> ⚠️ Les chiffres ci-dessous reflètent l'état **avant** les fixes #237/#238/#240. `test_generation` utilisait alors le fallback FR hardcodé (bypass du template engine, bug #233) OU — après #236 mais avant #237 — le mauvais YAML `test_generation_v2` à cause d'un bug de sélection par `templates[0]`. Conservé comme contexte historique ; pour l'état courant voir la section « Matrice v5 » plus bas.
 
 Run complet **195 appels LLM** (`python -m tests.evals.runner --tool test_generation --tool test_generation_raw --tool test_generation_competent --model gemini-2.5-flash --model gemini-3-flash-preview --model gemini-3.1-pro-preview --model gemma-4-26b-a4b-it --model gemma-4-31b-it`).
 
@@ -146,11 +169,66 @@ La v2 (8 cas simples, 2 paths) racontait une histoire uniforme — *"MCP délivr
 - **Utilisateur expérimenté (prompt soigné)** : MCP n'apporte rien sur `gemini-3-flash-preview` et `gemma-4-31b-it`. Valeur réelle uniquement sur `gemini-2.5-flash`.
 - **Robustesse des modèles** : `gemma-4-26b` et `gemma-4-31b` dominent en baseline raw, ce qui suggère une capacité "out of the box" solide sans prompt engineering dédié.
 
-### Seuils de régression mis à jour
+### Seuils de régression (v3, obsolètes)
 
-- **MCP `gemini-2.5-flash` avg < 0.75** (au lieu de 0.95) → investiguer, c'est le couple où le MCP apporte le plus
-- **Δ MCP − Competent < −0.15 sur 3 modèles sur 5** → le tool MCP devient nuisible, red flag produit
-- **Raw avg < 0.50 sur un Gemini** → plausiblement un bug de réponse LLM truncation, vérifier logs
+- **MCP `gemini-2.5-flash` avg < 0.75** → investiguer
+- **Δ MCP − Competent < −0.15 sur 3 modèles sur 5** → red flag produit
+- **Raw avg < 0.50 sur un Gemini** → plausiblement un bug de truncation
+
+## Matrice v5 — état courant après fixes #237/#238/#240
+
+Run complet **195 appels LLM** avec :
+- `default.yaml` réécrit evidence-based (PR #238, closes #237)
+- Sélection de template par nom canonique `{tool}_default` (PR #238)
+- Extracteur de fence intelligent (picks the one with `def test_` ou `import pytest`) (PR #238)
+- Bandit A/B runtime retiré, sélection déterministe (PR #241, closes #240)
+- Variants `v2.yaml` + `experimental.yaml` supprimés pour `test_generation` (PR #241)
+
+### Scores moyens par path (v5)
+
+| Modèle | MCP | Competent | Raw |
+|---|---|---|---|
+| `gemini-2.5-flash` | **0.982** | 0.667 | 0.827 |
+| `gemini-3-flash-preview` | **1.000** | 0.985 | 0.838 |
+| `gemini-3.1-pro-preview` | **0.987** | 0.910 | 0.308 |
+| `gemma-4-26b-a4b-it` | **1.000** | 0.976 | 0.989 |
+| `gemma-4-31b-it` | **1.000** | 0.971 | 0.916 |
+| **Global** | **0.994** | 0.902 | 0.776 |
+
+### Δ par modèle (v5, tous positifs)
+
+#### Δ MCP − Raw (vs utilisateur naïf)
+
+| Modèle | MCP | Raw | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.982 | 0.827 | **+0.155** |
+| `gemini-3-flash-preview` | 1.000 | 0.838 | **+0.162** |
+| `gemini-3.1-pro-preview` | 0.987 | 0.308 | **+0.679** |
+| `gemma-4-26b-a4b-it` | 1.000 | 0.989 | **+0.011** |
+| `gemma-4-31b-it` | 1.000 | 0.916 | **+0.084** |
+
+#### Δ MCP − Competent (vs utilisateur qui sait ce qu'il fait)
+
+| Modèle | MCP | Competent | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.982 | 0.667 | **+0.315** |
+| `gemini-3-flash-preview` | 1.000 | 0.985 | **+0.015** |
+| `gemini-3.1-pro-preview` | 0.987 | 0.910 | **+0.077** |
+| `gemma-4-26b-a4b-it` | 1.000 | 0.976 | **+0.024** |
+| `gemma-4-31b-it` | 1.000 | 0.971 | **+0.029** |
+
+### Lecture v5 (ce que le fix a changé)
+
+- **MCP avg global : 0.903 (v3) → 0.741 (v4 après bug de sélection) → 0.994 (v5)**. Le fix combiné (sélection par nom + réécriture du template + extracteur fence intelligent) restaure et dépasse la baseline v3.
+- **Δ MCP − Competent positif sur 5/5 modèles** pour la première fois — l'outil MCP apporte une valeur mesurable au-delà d'un prompt compétent, sur tous les couples modèle/cas.
+- **gemini-3.1-pro sans structure s'effondre** : raw avg 0.308. Ce modèle a besoin qu'on lui dise *quoi* générer. Signal fort : MCP est indispensable sur les modèles de reasoning lourds.
+- **`gemini-2.5-flash` competent 0.667** : anomalie héritée de v3, liée au reasoning qui consomme le max_tokens budget. Toujours pas résolue mais hors-scope tool MCP (c'est un comportement du prompt competent + modèle, pas du template MCP).
+
+### Seuils de régression v5
+
+- **MCP avg global < 0.95** sur une matrice 5 modèles → investiguer (v5 tient 0.994)
+- **Δ MCP − Competent négatif sur ≥ 2 modèles sur 5** → red flag, la régression ressemble à ce qui a déclenché l'arc #237
+- **Un case individuel à 0.000 sur ≥ 3 modèles** → template ou extracteur cassé
 
 ## Baseline historique (Gemini 2.5 Flash uniquement, v0)
 
