@@ -214,12 +214,6 @@ class EnhancedPromptEngine(PromptEngine):
                 if prompt_version is None:
                     prompt_version = versions[-1]
                 prompt = self._format_version_prompt(prompt_version, context)
-                if language:
-                    prompt = self.language_optimizer.optimize_prompt(
-                        prompt,
-                        language,
-                        context,
-                    )
                 return prompt, prompt_version.id
 
             default_template = self._get_default_template(tool_name)
@@ -247,15 +241,9 @@ class EnhancedPromptEngine(PromptEngine):
 
         if not prompt_version:
             prompt = self.format_prompt(template.id, context)
-            if language:
-                prompt = self.language_optimizer.optimize_prompt(prompt, language, context)
             return prompt, "base"
 
         prompt = self._format_version_prompt(prompt_version, context)
-
-        if language:
-            prompt = self.language_optimizer.optimize_prompt(prompt, language, context)
-
         return prompt, prompt_version.id
 
     def _select_version(self, template_id: str) -> Optional[PromptVersion]:
