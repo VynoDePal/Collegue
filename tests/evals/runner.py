@@ -374,7 +374,11 @@ async def _run_single_case(
             "stdout_tail": raw_error,
         }
     else:
-        eval_score = entry["score"](case, tool_output)
+        score_fn = entry["score"]
+        if asyncio.iscoroutinefunction(score_fn):
+            eval_score = await score_fn(case, tool_output)
+        else:
+            eval_score = score_fn(case, tool_output)
         score_payload = dataclasses.asdict(eval_score)
 
     record = {

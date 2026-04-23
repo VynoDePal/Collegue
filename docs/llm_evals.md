@@ -11,11 +11,15 @@ tests/evals/
 ├── eval_context.py              # Shim ctx.sample() qui appelle generate_text directement
 ├── runner.py                    # CLI, loader YAML, orchestrateur, writer rapport/matrix
 ├── scorers/
-│   └── test_generation.py       # Exécute les tests générés dans pytest, score = passed/collected
+│   ├── test_generation.py       # Rule-based — lance pytest, score = passed/collected
+│   └── code_documentation.py    # LLM-as-judge — 4-axis rubric, gemini-2.5-flash fixed
 ├── cases/
 │   ├── test_generation/             # 13 cas — chemin via le tool MCP Collègue
 │   ├── test_generation_raw/         # Mêmes 13 cas — chemin LLM direct (prompt minimal)
-│   └── test_generation_competent/   # Mêmes 13 cas — chemin LLM avec prompt "utilisateur qui sait pytest"
+│   ├── test_generation_competent/   # Mêmes 13 cas — chemin LLM avec prompt "utilisateur qui sait pytest"
+│   ├── code_documentation/          # 13 cas — chemin via le tool MCP code_documentation
+│   ├── code_documentation_raw/      # Mêmes 13 cas — chemin LLM direct
+│   └── code_documentation_competent/# Mêmes 13 cas — chemin LLM "dev qui connaît la doc ref"
 └── reports/                     # Runtime (gitignored)
 ```
 
@@ -37,7 +41,9 @@ Le matrix report calcule deux Δ qui sont les vraies mesures de valeur :
 ### Caractéristiques
 
 - **Runner in-process** : n'utilise pas le harness HTTP MCP. Instancie directement le tool et lui passe un `EvalContext` qui implémente `ctx.sample()` en déléguant à `generate_text()` (même helper que le Watchdog). Pas besoin de lancer Docker — `LLM_API_KEY` dans l'env et c'est parti.
-- **Scorer rule-based** pour `test_generation` : on écrit le code source + les tests générés dans un tempdir et on lance `pytest test_src.py`. Score = `passed / collected`. Pas de LLM-as-judge dans cette itération.
+- **Deux types de scorers** :
+  - **Rule-based** pour `test_generation` : on écrit le code source + les tests générés dans un tempdir et on lance `pytest test_src.py`. Score = `passed / collected`. Objectif et déterministe.
+  - **LLM-as-judge** pour `code_documentation` : un second appel LLM note la doc sur 4 axes (accuracy, completeness, clarity, usefulness) × 0-5. Score = `mean(axes) / 5`. Le judge est `gemini-2.5-flash` pinné à `temperature=0.0` pour stabilité. Nécessaire dès qu'on mesure un output subjectif (pas d'oracle).
 
 ## Usage
 
@@ -138,6 +144,77 @@ Run complet **195 appels LLM** sur 13 cas × 3 paths × 5 modèles.
 - **Δ MCP − Competent négatif sur ≥ 2 modèles sur 5** → red flag, l'outil n'ajoute plus de valeur par rapport à un utilisateur compétent
 - **Un case individuel à 0.000 sur ≥ 3 modèles** → template ou extracteur cassé
 
+## Matrice `code_documentation` v1
+
+Premier run LLM-as-judge du repo. 78 appels générateur + 78 appels judge = **156 LLM calls** sur 13 cas × 3 paths × 2 modèles (`gemini-2.5-flash` + `gemma-4-31b-it`).
+
+### Rubric LLM-as-judge
+
+Le judge (`gemini-2.5-flash` pinné, `temperature=0.0`) note chaque doc sur **4 axes × 0-5** :
+
+| Axe | 0 | 3 | 5 |
+|---|---|---|---|
+| **accuracy** | APIs inventées, signatures fausses | Mostly correct, 1 misrep mineur | Every claim verifiable contre le code |
+| **completeness** | Surface publique manquante | Main entities documentées, 1 symbole manque | Tous symboles + params + returns + exceptions |
+| **clarity** | Markdown cassé, structure confuse | Lisible mais inégal | Bien organisé, scannable, terminology consistant |
+| **usefulness** | Lecteur doit lire le code | Common case couvert, edge cases manquent | Dev utilise correctement la code depuis la doc seule |
+
+Score final = `mean(axes) / 5` → 0-1.
+
+Prompt du judge : G-Eval style, paragraphe `reasoning` ≤ 60 mots **avant** le JSON. `max_tokens=4000` (le reasoning interne de Gemini 2.5 consomme 1-2k tokens silencieusement).
+
+### Scores moyens par path
+
+| Modèle | MCP | Competent | Raw |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.985 | **1.000** | **1.000** |
+| `gemma-4-31b-it` | 0.931 | **0.969** | **0.977** |
+| **Global** | **0.958** | **0.985** | **0.988** |
+
+### Δ par modèle
+
+#### Δ MCP − Raw (vs utilisateur naïf)
+
+| Modèle | MCP | Raw | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.985 | 1.000 | **−0.015** |
+| `gemma-4-31b-it` | 0.931 | 0.977 | **−0.046** |
+
+#### Δ MCP − Competent (vs utilisateur qui sait)
+
+| Modèle | MCP | Competent | **Δ** |
+|---|---|---|---|
+| `gemini-2.5-flash` | 0.985 | 1.000 | **−0.015** |
+| `gemma-4-31b-it` | 0.931 | 0.969 | **−0.038** |
+
+### Lecture — MCP ne bat pas les baselines
+
+**Les deux Δ sont négatifs sur les 2 modèles.** Contrairement à `test_generation` où MCP apportait +0.15 à +0.68 sur Δ MCP−Raw, ici MCP **perd** de 1 à 5 points à tous les coups.
+
+Cause racine identifiée en inspectant un cas qui perd (`08_inheritance` sur gemini-2.5-flash, MCP=0.85 vs raw=1.00) :
+
+- Le template MCP actuel impose un *« Output ONLY the documentation content — no preamble »*. Le modèle obéit littéralement et commence directement par `### class Shape`, sans vue d'ensemble du module.
+- Le judge pénalise cette absence sur l'axe **Clarity** (3/5) et **Usefulness** (4/5) : *« no module-level overview, reader has to figure out intent »*.
+- Le path **raw** n'a pas cette contrainte, donc le modèle écrit naturellement un paragraphe d'intro (*« This module defines an abstract base class Shape... »*), que le judge note 5/5 partout.
+
+La contrainte « no preamble » qui marche pour `test_generation` (où le préambule en prose casse l'import pytest) **ne se transpose pas** à la documentation, où une vue d'ensemble EST une partie utile du livrable. Follow-up : reformuler le contrat de sortie du template documentation sans cette interdiction.
+
+### Autres observations
+
+- **Ceiling effect attendu** : 8/13 cas scorent 1.000 sur les 3 paths × 2 modèles. Les cas simples (arithmetic, class_init, type_hints) sont trop faciles pour différencier. Les 5 cas complexes (state_machine, async_context, decorator_retry, pipeline_compose, lru_memoize) portent le signal.
+- **Judge family-bias confirmé probable** : le judge `gemini-2.5-flash` note gemini-2.5-flash-generated docs à 0.985, gemma-4-31b-it à 0.931. Un écart de +0.054 pour le modèle de la même famille sans qu'il produise objectivement des docs meilleures. Mitigation : lire les **deltas** pas les absolus. Ici les deltas sont comparables (négatifs des deux côtés, magnitude similaire), donc le biais ne change pas la conclusion.
+- **0 errors sur 78 cases** : pipeline robuste, parsing JSON du judge marche, aucun call crashé.
+
+### Seuils de régression
+
+- **MCP avg global < 0.85** → investiguer (v1 tient 0.958)
+- **MCP avg < 0.85 sur un modèle individuel** → régression sur ce modèle (v1 : 0.931 gemma, 0.985 gemini)
+- **0 errors / 78** : si ce nombre monte sur un futur run, soit le judge est cassé, soit la rate limit Gemini a frappé
+
+### Follow-up ouvert : reformuler le template doc
+
+Suite directe de cette matrice v1 : issue séparée à ouvrir pour reformuler [collegue/prompts/templates/tools/documentation/default.yaml](../collegue/prompts/templates/tools/documentation/default.yaml) — retirer *« Output ONLY the documentation content — no preamble »* et autoriser (voire demander) une vue d'ensemble module-level. Attendre qu'une matrice v2 montre Δ MCP − Competent ≥ +0.05 sur au moins 1 modèle avant de considérer le tool documentation comme apportant de la valeur.
+
 ## Format d'un cas
 
 ```yaml
@@ -159,7 +236,7 @@ Contraintes :
 
 ## Scoring — détails
 
-Pour `test_generation` :
+### `test_generation` (rule-based pytest)
 
 1. Extraction du code de test depuis le `response.text` du tool
    - Cherche d'abord un fence ` ```python ... ``` ` contenant `def test_`
@@ -172,6 +249,21 @@ Pour `test_generation` :
    - `collected == 0` → **0.0** (aucun test collectable, syntax error généralement)
    - `collected < min_expected_tests` → `passed/collected × 0.7` (pénalité quantité)
    - Sinon → `passed / collected`
+
+### `code_documentation` (LLM-as-judge)
+
+1. Construit un prompt judge avec 3 blocs : `<code_under_test>`, `<must_document>` (symboles publics attendus), `<generated_documentation>`
+2. Appelle `gemini-2.5-flash` (pinné, `temperature=0.0`, `max_tokens=4000`)
+3. Parse la réponse : regex `\{[^{}]*\}` + `json.loads`, prend le dernier match valide (le judge émet souvent un paragraphe `reasoning` avant le JSON)
+4. Valide que les 4 axes (`accuracy`, `completeness`, `clarity`, `usefulness`) sont des int 0-5
+5. Score :
+   - JSON invalide / axe hors-bornes → **0.0** avec `errors=1`
+   - Doc output vide → **0.0** avec `errors=1`
+   - Sinon → `sum(axes) / 20.0` (normalisation en 0-1)
+
+Pourquoi pas ensemble (3 appels médiane) : coût × 3 pour une réduction de noise ~√3. On préfère re-runner la matrice 3 fois et comparer les moyennes par cellule si le noise floor devient un problème.
+
+Pourquoi pas un judge cross-family : `openai`/`anthropic` demanderaient une clé API + infra de provider supplémentaire. Known limitation ; mitigée en lisant les deltas, pas les absolus.
 
 ## Ajouter un nouveau tool
 
