@@ -56,6 +56,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CASES_ROOT = Path(__file__).parent / "cases"
 
 
+# Cached engine shared across cases in one run. The engine loads ~16 YAML
+# templates + rebuilds versions.json on init (~1-2s); doing that once per
+# tool-instance (i.e. per case × model = 65 times on the matrix) was wasting
+# seconds AND hammering the filesystem. Lazy so `--tool test_generation_raw`
+# runs with no API key for the engine dir still work.
+_SHARED_PROMPT_ENGINE = None
+
+
+def _get_shared_prompt_engine():
+    """Return a process-wide :class:`EnhancedPromptEngine`, building once.
+
+    Injected into every ``TestGenerationTool`` / ``DocumentationTool`` the
+    runner spins up so the MCP path exercises the real template + A/B
+    bandit stack (PR #236). Without this the tool takes the ``_build_prompt``
+    fallback and we'd be measuring the old FR hardcoded prompt again.
+    """
+    global _SHARED_PROMPT_ENGINE
+    if _SHARED_PROMPT_ENGINE is None:
+        from collegue.prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
+        _SHARED_PROMPT_ENGINE = EnhancedPromptEngine()
+    return _SHARED_PROMPT_ENGINE
+
+
 # ---------------------------------------------------------------------------
 # Tool runners
 # ---------------------------------------------------------------------------
@@ -67,6 +90,9 @@ CASES_ROOT = Path(__file__).parent / "cases"
 
 async def _run_test_generation(case: Dict[str, Any], ctx: EvalContext) -> str:
     tool = TestGenerationTool()
+    # Inject the shared engine so prepare_prompt() actually routes through
+    # YAML templates + A/B bandit instead of falling back to _build_prompt.
+    tool.prompt_engine = _get_shared_prompt_engine()
     request = TestGenerationRequest(
         code=case["code"],
         language=case.get("language", "python"),
