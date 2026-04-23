@@ -7,6 +7,7 @@ avec différents frameworks et options de personnalisation.
 Refactorisé: Le fichier original faisait 767 lignes, maintenant ~200 lignes.
 """
 
+import time
 from typing import List, Dict, Any, Optional
 import pathlib
 
@@ -151,6 +152,60 @@ class TestGenerationTool(BaseTool):
         """Indique si le tool est long à exécuter."""
         return True
 
+    def _build_prompt(self, request: TestGenerationRequest) -> str:
+        """Fallback prompt builder used when ``prompt_engine`` is unavailable.
+
+        Delegates to :class:`TestGenerationEngine.build_prompt` so the
+        offline path (unit tests, engine init error) preserves the exact
+        historical prompt shape — no behavioural regression for callers
+        that never had the engine wired in the first place.
+        """
+        framework = self._engine.detect_framework(
+            request.language, request.test_framework
+        )
+        elements = self._engine.extract_code_elements(
+            request.code, request.language
+        )
+        return self._engine.build_prompt(
+            request.code,
+            request.language,
+            framework,
+            request.include_mocks or False,
+            request.coverage_target or 0.8,
+            elements,
+        )
+
+    def _enrich_context_with_elements(
+        self,
+        request: TestGenerationRequest,
+        framework: str,
+        elements: List[Dict[str, Any]],
+    ) -> TestGenerationRequest:
+        """Fold the AST-extracted ``elements`` list and the resolved
+        ``framework`` into the request's ``context`` field so the YAML
+        template's ``{context}`` placeholder carries the same information
+        the hardcoded prompt used to inject inline. Keeps the "MCP value
+        add" of element extraction alive even after wiring to templates.
+        """
+        lines: List[str] = []
+        if framework:
+            lines.append(f"Target test framework: {framework}")
+        if elements:
+            lines.append("Elements to cover:")
+            for e in elements[:10]:
+                if e.get("type") == "function":
+                    params = ", ".join(e.get("params", []))
+                    lines.append(f"- function {e['name']}({params})")
+                elif e.get("type") in ("class", "Class"):
+                    methods = ", ".join(e.get("methods", [])[:5])
+                    suffix = f" (methods: {methods})" if methods else ""
+                    lines.append(f"- class {e['name']}{suffix}")
+                else:
+                    lines.append(f"- {e.get('type', 'item')} {e.get('name')}")
+        existing = getattr(request, "context", None) or ""
+        merged = (existing + "\n" + "\n".join(lines)).strip() if lines else existing
+        return request.model_copy(update={"context": merged})
+
     def _execute_core_logic(
         self, request: TestGenerationRequest, **kwargs
     ) -> TestGenerationResponse:
@@ -167,31 +222,27 @@ class TestGenerationTool(BaseTool):
 
         if ctx:
             try:
-                # Construire le prompt
-                prompt = self._engine.build_prompt(
-                    request.code,
-                    request.language,
-                    framework,
-                    request.include_mocks or False,
-                    request.coverage_target or 0.8,
-                    elements,
+                # Préparer le prompt via le pipeline template + A/B (#233).
+                enriched = self._enrich_context_with_elements(request, framework, elements)
+                prompt = run_async_from_sync(
+                    self.prepare_prompt(enriched, template_name="test_generation")
                 )
 
-                system_prompt = f"""Tu es un expert en tests unitaires {request.language}.
-Génère des tests complets, exécutables et bien structurés.
-Utilise le framework {framework}.
-Vise une couverture de {request.coverage_target or 0.8:.0%}."""
-
+                started = time.monotonic()
                 result = run_async_from_sync(
                     ctx.sample(
                         messages=prompt,
-                        system_prompt=system_prompt,
                         temperature=0.5,
                         max_tokens=2000,
                     )
                 )
-
-                test_code = result.text
+                elapsed = time.monotonic() - started
+                test_code = result.text or ""
+                self.track_last_prompt_performance(
+                    execution_time=elapsed,
+                    tokens_used=len(test_code) // 4,  # rough token proxy
+                    success=bool(test_code),
+                )
 
                 # Compter les tests générés
                 test_count = test_code.count("def test_") + test_code.count("@Test")
@@ -247,27 +298,24 @@ Vise une couverture de {request.coverage_target or 0.8:.0%}."""
         # Extraire les éléments
         elements = self._engine.extract_code_elements(request.code, request.language)
 
-        prompt = self._engine.build_prompt(
-            request.code,
-            request.language,
-            framework,
-            request.include_mocks or False,
-            request.coverage_target or 0.8,
-            elements,
-        )
-
-        system_prompt = f"""Tu es un expert en tests unitaires {request.language}.
-Génère des tests complets, exécutables et bien structurés.
-Utilise le framework {framework}."""
+        # Préparer le prompt via le pipeline template + A/B (#233).
+        enriched = self._enrich_context_with_elements(request, framework, elements)
+        prompt = await self.prepare_prompt(enriched, template_name="test_generation")
 
         try:
+            started = time.monotonic()
             result = await ctx.sample(
                 messages=prompt,
-                system_prompt=system_prompt,
                 temperature=0.5,
                 max_tokens=2000,
             )
-            test_code = result.text
+            elapsed = time.monotonic() - started
+            test_code = result.text or ""
+            self.track_last_prompt_performance(
+                execution_time=elapsed,
+                tokens_used=len(test_code) // 4,
+                success=bool(test_code),
+            )
 
             if ctx:
                 await ctx.info("Tests générés, calcul de la couverture...")
