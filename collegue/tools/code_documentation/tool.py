@@ -177,32 +177,26 @@ class DocumentationTool(BaseTool):
             code_elements,
         )
 
-    def _enrich_context_with_elements(
-        self,
-        request: DocumentationRequest,
-        code_elements: List[Dict[str, Any]],
-    ) -> DocumentationRequest:
-        """Fold AST-extracted ``code_elements`` into the request's
-        ``context`` field so the YAML template's ``{context}`` placeholder
-        carries the same element list the hardcoded prompt used to inject.
+    @staticmethod
+    def _strip_outer_fence(raw: str) -> str:
+        """Drop an outer ``` ```markdown ... ``` `` fence if the model wrapped
+        the whole response in one.
+
+        Docs are prose *with* embedded code fences. The model occasionally
+        wraps its entire output in an outer ```markdown ... ``` — which then
+        reaches the user with leading/trailing backticks. We only strip that
+        single outer fence; inner fences (runnable code examples) survive.
+        Anything else (stray preambles, trailing commentary) is left for the
+        LLM-as-judge to penalise via the Clarity axis — not hidden here.
         """
-        lines: List[str] = []
-        if request.doc_style:
-            lines.append(f"Doc style: {request.doc_style}")
-        if request.doc_format:
-            lines.append(f"Doc format: {request.doc_format}")
-        if request.focus_on:
-            lines.append(f"Focus: {request.focus_on}")
-        if code_elements:
-            lines.append("Elements to document:")
-            for e in code_elements[:10]:
-                lines.append(f"- {e.get('type', 'item')}: {e.get('name', '?')}")
-        existing = getattr(request, "context", None) or ""
-        merged = (existing + "\n" + "\n".join(lines)).strip() if lines else existing
-        try:
-            return request.model_copy(update={"context": merged})
-        except Exception:
-            return request
+        import re
+
+        match = re.match(
+            r"\s*```(?:markdown|md|rst|html)?\s*\n(.*)\n```\s*$",
+            raw,
+            flags=re.DOTALL,
+        )
+        return match.group(1) if match else raw
 
     def _execute_core_logic(
         self, request: DocumentationRequest, **kwargs
@@ -218,10 +212,9 @@ class DocumentationTool(BaseTool):
 
         if ctx:
             try:
-                # Préparer le prompt via le pipeline template + A/B (#233).
-                enriched = self._enrich_context_with_elements(request, code_elements)
+                # Préparer le prompt via le pipeline template (#233).
                 prompt = run_async_from_sync(
-                    self.prepare_prompt(enriched, template_name="documentation")
+                    self.prepare_prompt(request, template_name="documentation")
                 )
 
                 started = time.monotonic()
@@ -233,7 +226,7 @@ class DocumentationTool(BaseTool):
                     )
                 )
                 elapsed = time.monotonic() - started
-                generated_docs = result.text or ""
+                generated_docs = self._strip_outer_fence(result.text or "")
                 self.track_last_prompt_performance(
                     execution_time=elapsed,
                     tokens_used=len(generated_docs) // 4,
@@ -288,9 +281,8 @@ class DocumentationTool(BaseTool):
             request.code, request.language, parser
         )
 
-        # Préparer le prompt via le pipeline template + A/B (#233).
-        enriched = self._enrich_context_with_elements(request, code_elements)
-        prompt = await self.prepare_prompt(enriched, template_name="documentation")
+        # Préparer le prompt via le pipeline template (#233).
+        prompt = await self.prepare_prompt(request, template_name="documentation")
 
         if ctx:
             await ctx.info("Génération de la documentation via LLM...")
@@ -303,7 +295,7 @@ class DocumentationTool(BaseTool):
                 max_tokens=2000,
             )
             elapsed = time.monotonic() - started
-            generated_docs = result.text or ""
+            generated_docs = self._strip_outer_fence(result.text or "")
             self.track_last_prompt_performance(
                 execution_time=elapsed,
                 tokens_used=len(generated_docs) // 4,
