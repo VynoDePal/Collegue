@@ -285,6 +285,21 @@ class BaseTool(ABC):
             raise ToolQuotaError(str(e))
 
     async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
+        """Resolve a prompt for ``request`` via the template + A/B infrastructure.
+
+        Stores ``self._last_prompt_template_id`` and ``self._last_prompt_version``
+        on the instance when the prompt comes from :class:`EnhancedPromptEngine`.
+        Callers can then feed performance telemetry back via
+        :meth:`track_last_prompt_performance` after the LLM call completes.
+        Fallback paths (no engine configured, engine error) leave the
+        tracking attributes set to ``None`` — the helper is a no-op in that
+        case.
+        """
+        # Reset tracking state on every call so stale ids from a previous
+        # request never leak into the next track_last_prompt_performance().
+        self._last_prompt_template_id: Optional[str] = None
+        self._last_prompt_version: Optional[str] = None
+
         if not self.prompt_engine:
             if hasattr(self, '_build_prompt'):
                 self.logger.warning("Prompt engine non disponible, utilisation du fallback")
@@ -313,6 +328,14 @@ class BaseTool(ABC):
                         language=language
                     )
 
+                # Resolve the owning template id so track_performance can key
+                # it correctly. ``version`` here is the PromptVersion UUID,
+                # which only track_performance understands if we pass the
+                # version string (semver) instead — keep both.
+                self._last_prompt_template_id, self._last_prompt_version = (
+                    self._resolve_prompt_tracking(tool_name, version)
+                )
+
                 self.logger.info(f"Prompt préparé avec version {version} pour {tool_name}")
                 return prompt
             except Exception as e:
@@ -336,6 +359,72 @@ class BaseTool(ABC):
                 return self._build_prompt(request)
 
             raise ToolExecutionError(f"Aucun template trouvé pour l'outil {tool_name}")
+
+    def _resolve_prompt_tracking(
+        self,
+        tool_name: str,
+        version_id: Optional[str],
+    ) -> "tuple[Optional[str], Optional[str]]":
+        """Map a ``(tool_name, PromptVersion.id)`` pair to a
+        ``(template_id, version_string)`` pair ready for
+        :meth:`EnhancedPromptEngine.track_performance`.
+
+        ``EnhancedPromptEngine.get_optimized_prompt`` returns the version
+        *UUID* but ``track_performance`` expects the version *semver string*
+        (e.g. ``"1.0.0"``). This helper bridges the two. Returns ``(None, None)``
+        when any lookup fails so the tracking call becomes a no-op rather
+        than raising.
+        """
+        if not version_id or not self.prompt_engine:
+            return (None, None)
+
+        try:
+            category = f"tool/{tool_name.lower()}"
+            templates = self.prompt_engine.get_templates_by_category(category)
+            if not templates:
+                return (None, None)
+            template_id = templates[0].id
+            vm = getattr(self.prompt_engine, "version_manager", None)
+            if vm is None:
+                return (template_id, None)
+            for v in vm.get_all_versions(template_id):
+                if v.id == version_id:
+                    return (template_id, v.version)
+            return (template_id, None)
+        except Exception:
+            return (None, None)
+
+    def track_last_prompt_performance(
+        self,
+        execution_time: float,
+        tokens_used: int,
+        success: bool,
+        user_feedback: Optional[float] = None,
+    ) -> None:
+        """Feed telemetry for the last :meth:`prepare_prompt` call.
+
+        No-op when ``prepare_prompt`` took a fallback path (no engine, no
+        template found) — in that case the tracking attributes are ``None``
+        and there is nothing meaningful to attribute the metric to.
+        """
+        template_id = getattr(self, "_last_prompt_template_id", None)
+        version = getattr(self, "_last_prompt_version", None)
+        if not template_id or not version or not self.prompt_engine:
+            return
+        track = getattr(self.prompt_engine, "track_performance", None)
+        if track is None:
+            return
+        try:
+            track(
+                template_id=template_id,
+                version=version,
+                execution_time=execution_time,
+                tokens_used=tokens_used,
+                success=success,
+                user_feedback=user_feedback,
+            )
+        except Exception as exc:
+            self.logger.warning(f"track_performance failed (non-fatal): {exc}")
 
     def validate_language(self, language: str) -> bool:
         supported = self.get_supported_languages()

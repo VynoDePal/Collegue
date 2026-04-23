@@ -7,6 +7,7 @@ et styles : Markdown, RST, HTML, docstring, JSON.
 Refactorisé: Le fichier original faisait 668 lignes, maintenant ~180 lignes.
 """
 
+import time
 from typing import List, Dict, Any
 from ..base import BaseTool, ToolError
 from ...core.shared import run_async_from_sync
@@ -156,6 +157,53 @@ class DocumentationTool(BaseTool):
 
         return True
 
+    def _build_prompt(self, request: DocumentationRequest) -> str:
+        """Fallback prompt builder when the template engine is unavailable.
+
+        Preserves the exact historical prompt shape so offline callers
+        (unit tests without ``prompt_engine`` injected) keep producing the
+        same output they did before #233.
+        """
+        code_elements = self._engine.analyze_code_elements(
+            request.code, request.language, None
+        )
+        return self._engine.build_prompt(
+            request.code,
+            request.language,
+            request.doc_style or "standard",
+            request.doc_format or "markdown",
+            request.include_examples or False,
+            request.focus_on or "all",
+            code_elements,
+        )
+
+    def _enrich_context_with_elements(
+        self,
+        request: DocumentationRequest,
+        code_elements: List[Dict[str, Any]],
+    ) -> DocumentationRequest:
+        """Fold AST-extracted ``code_elements`` into the request's
+        ``context`` field so the YAML template's ``{context}`` placeholder
+        carries the same element list the hardcoded prompt used to inject.
+        """
+        lines: List[str] = []
+        if request.doc_style:
+            lines.append(f"Doc style: {request.doc_style}")
+        if request.doc_format:
+            lines.append(f"Doc format: {request.doc_format}")
+        if request.focus_on:
+            lines.append(f"Focus: {request.focus_on}")
+        if code_elements:
+            lines.append("Elements to document:")
+            for e in code_elements[:10]:
+                lines.append(f"- {e.get('type', 'item')}: {e.get('name', '?')}")
+        existing = getattr(request, "context", None) or ""
+        merged = (existing + "\n" + "\n".join(lines)).strip() if lines else existing
+        try:
+            return request.model_copy(update={"context": merged})
+        except Exception:
+            return request
+
     def _execute_core_logic(
         self, request: DocumentationRequest, **kwargs
     ) -> DocumentationResponse:
@@ -170,31 +218,27 @@ class DocumentationTool(BaseTool):
 
         if ctx:
             try:
-                # Construire et envoyer le prompt au LLM
-                prompt = self._engine.build_prompt(
-                    request.code,
-                    request.language,
-                    request.doc_style or "standard",
-                    request.doc_format or "markdown",
-                    request.include_examples or False,
-                    request.focus_on or "all",
-                    code_elements,
+                # Préparer le prompt via le pipeline template + A/B (#233).
+                enriched = self._enrich_context_with_elements(request, code_elements)
+                prompt = run_async_from_sync(
+                    self.prepare_prompt(enriched, template_name="documentation")
                 )
 
-                system_prompt = f"""Tu es un expert en documentation de code {request.language}.
-Génère une documentation claire, complète et bien structurée au format {request.doc_format or "markdown"}.
-Style de documentation: {request.doc_style or "standard"}."""
-
+                started = time.monotonic()
                 result = run_async_from_sync(
                     ctx.sample(
                         messages=prompt,
-                        system_prompt=system_prompt,
                         temperature=0.5,
                         max_tokens=2000,
                     )
                 )
-
-                generated_docs = result.text
+                elapsed = time.monotonic() - started
+                generated_docs = result.text or ""
+                self.track_last_prompt_performance(
+                    execution_time=elapsed,
+                    tokens_used=len(generated_docs) // 4,
+                    success=bool(generated_docs),
+                )
 
                 # Formater et finaliser la documentation
                 formatted_docs = self._engine.format_documentation(
@@ -244,32 +288,27 @@ Style de documentation: {request.doc_style or "standard"}."""
             request.code, request.language, parser
         )
 
-        # Construire le prompt
-        prompt = self._engine.build_prompt(
-            request.code,
-            request.language,
-            request.doc_style or "standard",
-            request.doc_format or "markdown",
-            request.include_examples or False,
-            request.focus_on or "all",
-            code_elements,
-        )
-
-        system_prompt = f"""Tu es un expert en documentation de code {request.language}.
-Génère une documentation claire, complète et bien structurée au format {request.doc_format or "markdown"}.
-Style de documentation: {request.doc_style or "standard"}."""
+        # Préparer le prompt via le pipeline template + A/B (#233).
+        enriched = self._enrich_context_with_elements(request, code_elements)
+        prompt = await self.prepare_prompt(enriched, template_name="documentation")
 
         if ctx:
             await ctx.info("Génération de la documentation via LLM...")
 
         try:
+            started = time.monotonic()
             result = await ctx.sample(
                 messages=prompt,
-                system_prompt=system_prompt,
                 temperature=0.5,
                 max_tokens=2000,
             )
-            generated_docs = result.text
+            elapsed = time.monotonic() - started
+            generated_docs = result.text or ""
+            self.track_last_prompt_performance(
+                execution_time=elapsed,
+                tokens_used=len(generated_docs) // 4,
+                success=bool(generated_docs),
+            )
 
             if ctx:
                 await ctx.info("Documentation générée, formatage...")
