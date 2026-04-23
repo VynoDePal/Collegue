@@ -46,9 +46,11 @@ import yaml
 
 from collegue.config import settings
 from collegue.resources.llm.providers import LLMConfig, generate_text
+from collegue.tools.code_documentation import DocumentationRequest, DocumentationTool
 from collegue.tools.test_generation import TestGenerationRequest, TestGenerationTool
 
 from tests.evals.eval_context import EvalContext
+from tests.evals.scorers import code_documentation as doc_scorer
 from tests.evals.scorers import test_generation as tg_scorer
 
 
@@ -190,6 +192,95 @@ async def _run_test_generation_competent(case: Dict[str, Any], ctx: EvalContext)
     return response.text or ""
 
 
+# ---------------------------------------------------------------------------
+# code_documentation runners (PR #246) — mirror the test_generation trio.
+# The scorer is currently a stub that returns 1.0 (PR B); PR C replaces it
+# with an LLM-as-judge on a 4-axis rubric.
+# ---------------------------------------------------------------------------
+
+
+async def _run_code_documentation(case: Dict[str, Any], ctx: EvalContext) -> str:
+    tool = DocumentationTool()
+    tool.prompt_engine = _get_shared_prompt_engine()
+    request = DocumentationRequest(
+        code=case["code"],
+        language=case.get("language", "python"),
+        doc_format=case.get("doc_format", "markdown"),
+    )
+    response = await tool.execute_async(request, ctx=ctx)
+    return response.documentation
+
+
+_DOC_RAW_SYSTEM_PROMPT = (
+    "You are an expert developer. Write documentation for the code you "
+    "receive. Output the documentation as markdown — nothing else."
+)
+
+_DOC_COMPETENT_SYSTEM_PROMPT = (
+    "You are an expert developer writing reference documentation. Always: "
+    "describe every public function/class/method with its purpose, "
+    "parameters (name + type + meaning), return value, and exceptions "
+    "raised; give at least one runnable usage example per public entry "
+    "point; use consistent terminology; output pure markdown, no prose "
+    "preamble."
+)
+
+
+async def _run_code_documentation_raw(case: Dict[str, Any], ctx: EvalContext) -> str:
+    """Bypass the MCP tool — just ask the LLM for markdown docs."""
+    config = LLMConfig(
+        model_name=ctx.model,
+        api_key=settings.LLM_API_KEY,
+        max_tokens=EvalContext.MIN_MAX_TOKENS,
+        temperature=0.5,
+    )
+    language = case.get("language", "python")
+    prompt = (
+        f"Write markdown documentation for the following {language} code.\n\n"
+        f"```{language}\n{case['code']}\n```\n"
+    )
+    response = await generate_text(config, prompt, system_prompt=_DOC_RAW_SYSTEM_PROMPT)
+    ctx.calls.append({
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "prompt_len": len(prompt),
+        "response_len": len(response.text or ""),
+        "path": "raw",
+    })
+    return response.text or ""
+
+
+async def _run_code_documentation_competent(case: Dict[str, Any], ctx: EvalContext) -> str:
+    """Bypass the MCP tool but use a careful 'competent user' prompt."""
+    config = LLMConfig(
+        model_name=ctx.model,
+        api_key=settings.LLM_API_KEY,
+        max_tokens=EvalContext.MIN_MAX_TOKENS,
+        temperature=0.5,
+    )
+    language = case.get("language", "python")
+    prompt = (
+        f"Write reference markdown documentation for the following {language} code.\n\n"
+        f"Requirements:\n"
+        f"- For every public symbol, document purpose, parameters (with types), "
+        f"return value, and exceptions raised.\n"
+        f"- Include at least one runnable usage example per public entry point.\n"
+        f"- Use descriptive section headers; keep terminology consistent.\n"
+        f"- Do not restate the source code; assume the reader has it.\n"
+        f"- Output pure markdown only.\n\n"
+        f"```{language}\n{case['code']}\n```\n"
+    )
+    response = await generate_text(config, prompt, system_prompt=_DOC_COMPETENT_SYSTEM_PROMPT)
+    ctx.calls.append({
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "prompt_len": len(prompt),
+        "response_len": len(response.text or ""),
+        "path": "competent",
+    })
+    return response.text or ""
+
+
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "test_generation": {
         "run": _run_test_generation,
@@ -205,6 +296,21 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "run": _run_test_generation_competent,
         "score": tg_scorer.score,
         "cases_subdir": "test_generation_competent",
+    },
+    "code_documentation": {
+        "run": _run_code_documentation,
+        "score": doc_scorer.score,
+        "cases_subdir": "code_documentation",
+    },
+    "code_documentation_raw": {
+        "run": _run_code_documentation_raw,
+        "score": doc_scorer.score,
+        "cases_subdir": "code_documentation_raw",
+    },
+    "code_documentation_competent": {
+        "run": _run_code_documentation_competent,
+        "score": doc_scorer.score,
+        "cases_subdir": "code_documentation_competent",
     },
 }
 

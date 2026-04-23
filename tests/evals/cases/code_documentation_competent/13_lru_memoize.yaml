@@ -1,0 +1,27 @@
+name: LRU memoize decorator
+description: Hand-rolled LRU cache tracking hit/miss stats and evicting on maxsize.
+  Tests must cover cache hits, misses, eviction order, and stats.
+language: python
+doc_format: markdown
+must_document:
+- MemoizeStats
+- memoize
+code: "from collections import OrderedDict\nfrom functools import wraps\nfrom typing\
+  \ import Any, Callable\n\n\nclass MemoizeStats:\n    def __init__(self) -> None:\n\
+  \        self.hits: int = 0\n        self.misses: int = 0\n\n    @property\n   \
+  \ def calls(self) -> int:\n        return self.hits + self.misses\n\n    def reset(self)\
+  \ -> None:\n        self.hits = 0\n        self.misses = 0\n\n\ndef memoize(maxsize:\
+  \ int = 128) -> Callable:\n    \"\"\"LRU memoize decorator. Exposes a ``.stats``\
+  \ attribute and a ``.clear()`` method.\n\n    Cache key = (args, sorted kwargs items).\
+  \ All args must be hashable.\n    \"\"\"\n    if maxsize < 1:\n        raise ValueError(\"\
+  maxsize must be >= 1\")\n\n    def decorator(fn: Callable) -> Callable:\n      \
+  \  cache: \"OrderedDict[tuple, Any]\" = OrderedDict()\n        stats = MemoizeStats()\n\
+  \n        @wraps(fn)\n        def wrapper(*args: Any, **kwargs: Any) -> Any:\n \
+  \           key = (args, tuple(sorted(kwargs.items())))\n            if key in cache:\n\
+  \                cache.move_to_end(key)\n                stats.hits += 1\n     \
+  \           return cache[key]\n            stats.misses += 1\n            result\
+  \ = fn(*args, **kwargs)\n            cache[key] = result\n            if len(cache)\
+  \ > maxsize:\n                cache.popitem(last=False)  # evict LRU\n         \
+  \   return result\n\n        def clear() -> None:\n            cache.clear()\n \
+  \           stats.reset()\n\n        wrapper.stats = stats\n        wrapper.clear\
+  \ = clear\n        return wrapper\n\n    return decorator\n"

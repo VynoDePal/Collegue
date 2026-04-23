@@ -1,0 +1,24 @@
+name: Order state machine
+description: Enforces a linear transition graph. Tests must cover valid transitions,
+  rejections, and terminal-state immutability.
+language: python
+doc_format: markdown
+must_document:
+- OrderStatus
+- Order
+code: "from enum import Enum\n\nclass OrderStatus(str, Enum):\n    PENDING = \"pending\"\
+  \n    PAID = \"paid\"\n    SHIPPED = \"shipped\"\n    DELIVERED = \"delivered\"\n\
+  \    CANCELLED = \"cancelled\"\n\n_TRANSITIONS = {\n    OrderStatus.PENDING: {OrderStatus.PAID,\
+  \ OrderStatus.CANCELLED},\n    OrderStatus.PAID: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},\n\
+  \    OrderStatus.SHIPPED: {OrderStatus.DELIVERED},\n    OrderStatus.DELIVERED: set(),\n\
+  \    OrderStatus.CANCELLED: set(),\n}\n\n\nclass Order:\n    def __init__(self,\
+  \ order_id: str):\n        if not order_id:\n            raise ValueError(\"order_id\
+  \ must be non-empty\")\n        self.order_id = order_id\n        self.status =\
+  \ OrderStatus.PENDING\n        self._history: list[OrderStatus] = [self.status]\n\
+  \n    def transition(self, new_status: OrderStatus) -> None:\n        allowed =\
+  \ _TRANSITIONS[self.status]\n        if new_status not in allowed:\n           \
+  \ raise ValueError(\n                f\"Cannot transition from {self.status.value}\
+  \ to {new_status.value}\"\n            )\n        self.status = new_status\n   \
+  \     self._history.append(new_status)\n\n    @property\n    def is_terminal(self)\
+  \ -> bool:\n        return not _TRANSITIONS[self.status]\n\n    @property\n    def\
+  \ history(self) -> list[OrderStatus]:\n        return list(self._history)\n"

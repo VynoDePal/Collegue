@@ -1,0 +1,10 @@
+name: Generator function
+description: Tests must consume the generator; common LLM failure mode is calling
+  it as a list-returning function
+language: python
+doc_format: markdown
+must_document:
+- fibonacci_up_to
+code: "def fibonacci_up_to(limit: int):\n    if limit < 0:\n        raise ValueError(\"\
+  limit must be non-negative\")\n    a, b = 0, 1\n    while a <= limit:\n        yield\
+  \ a\n        a, b = b, a + b\n"

@@ -1,0 +1,12 @@
+name: Arithmetic utility
+description: Simple pure functions with known I/O including an error branch
+language: python
+doc_format: markdown
+must_document:
+- add
+- divide
+- clamp
+code: "def add(a, b):\n    return a + b\n\ndef divide(a, b):\n    if b == 0:\n   \
+  \     raise ValueError(\"div by zero\")\n    return a / b\n\ndef clamp(value, lo,\
+  \ hi):\n    if lo > hi:\n        raise ValueError(\"lo > hi\")\n    return max(lo,\
+  \ min(value, hi))\n"

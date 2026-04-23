@@ -1,0 +1,21 @@
+name: Pipeline composition with validation
+description: Generic pipeline that chains callables with shape validation at each
+  step. Tests must cover normal flow, invalid step signatures, and early exit.
+language: python
+doc_format: markdown
+must_document:
+- PipelineError
+- Pipeline
+code: "from typing import Any, Callable, Iterable\n\nclass PipelineError(RuntimeError):\n\
+  \    pass\n\n\nclass Pipeline:\n    def __init__(self, steps: Iterable[Callable[[Any],\
+  \ Any]]):\n        steps_list = list(steps)\n        if not steps_list:\n      \
+  \      raise ValueError(\"pipeline needs at least one step\")\n        for i, step\
+  \ in enumerate(steps_list):\n            if not callable(step):\n              \
+  \  raise TypeError(f\"step {i} is not callable: {step!r}\")\n        self._steps\
+  \ = steps_list\n\n    def run(self, initial: Any) -> Any:\n        value = initial\n\
+  \        for i, step in enumerate(self._steps):\n            try:\n            \
+  \    value = step(value)\n            except Exception as exc:\n               \
+  \ raise PipelineError(f\"step {i} ({step.__name__}) failed: {exc}\") from exc\n\
+  \            if value is None:\n                # Convention: a step returning None\
+  \ means \"abort pipeline\".\n                break\n        return value\n\n   \
+  \ def __len__(self) -> int:\n        return len(self._steps)\n"

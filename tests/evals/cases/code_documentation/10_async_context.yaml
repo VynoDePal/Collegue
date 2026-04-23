@@ -1,0 +1,22 @@
+name: Async connection pool (context manager)
+description: Async context manager that tracks checkouts, raises on double-close,
+  and cleans up on exception paths.
+language: python
+doc_format: markdown
+must_document:
+- PoolClosedError
+- ConnectionPool
+code: "import asyncio\n\nclass PoolClosedError(RuntimeError):\n    pass\n\nclass ConnectionPool:\n\
+  \    def __init__(self, size: int):\n        if size <= 0:\n            raise ValueError(\"\
+  size must be > 0\")\n        self._size = size\n        self._checked_out: int =\
+  \ 0\n        self._closed: bool = False\n\n    async def __aenter__(self) -> \"\
+  ConnectionPool\":\n        if self._closed:\n            raise PoolClosedError(\"\
+  pool already closed\")\n        return self\n\n    async def __aexit__(self, exc_type,\
+  \ exc, tb) -> bool:\n        self._closed = True\n        # Return False so exceptions\
+  \ propagate — we're a cleanup, not a swallower.\n        return False\n\n    async\
+  \ def acquire(self) -> int:\n        if self._closed:\n            raise PoolClosedError(\"\
+  pool closed\")\n        if self._checked_out >= self._size:\n            raise RuntimeError(\"\
+  pool exhausted\")\n        self._checked_out += 1\n        await asyncio.sleep(0)\n\
+  \        return self._checked_out\n\n    async def release(self) -> None:\n    \
+  \    if self._checked_out == 0:\n            raise RuntimeError(\"nothing to release\"\
+  )\n        self._checked_out -= 1\n        await asyncio.sleep(0)\n"
