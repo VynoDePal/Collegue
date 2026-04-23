@@ -1,0 +1,19 @@
+name: Retry decorator with selective exception catching
+description: Configurable retry count + allowed exception types. Tests must cover
+  success-first-try, success-after-retry, exhaustion, and non-matching exception passthrough.
+language: python
+doc_format: markdown
+must_document:
+- retry
+code: "from functools import wraps\n\n\ndef retry(times: int = 3, exceptions: tuple[type[BaseException],\
+  \ ...] = (Exception,)):\n    \"\"\"Retry a callable up to `times` attempts when\
+  \ it raises one of `exceptions`.\n\n    Raises the last captured exception if all\
+  \ attempts fail. Exceptions NOT in\n    `exceptions` propagate immediately (no retry).\n\
+  \    \"\"\"\n    if times < 1:\n        raise ValueError(\"times must be >= 1\"\
+  )\n\n    def decorator(fn):\n        @wraps(fn)\n        def wrapper(*args, **kwargs):\n\
+  \            last_exc: BaseException | None = None\n            for attempt in range(times):\n\
+  \                try:\n                    return fn(*args, **kwargs)\n        \
+  \        except exceptions as exc:\n                    last_exc = exc\n       \
+  \             continue\n            assert last_exc is not None  # for type narrowing\n\
+  \            raise last_exc\n        wrapper.attempts_spec = times\n        return\
+  \ wrapper\n\n    return decorator\n"

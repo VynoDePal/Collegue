@@ -1,0 +1,12 @@
+name: Property with validation
+description: Exercises attribute-access + validator on setter
+language: python
+doc_format: markdown
+must_document:
+- Temperature
+code: "class Temperature:\n    def __init__(self, celsius: float):\n        self.celsius\
+  \ = celsius  # uses the setter\n\n    @property\n    def celsius(self) -> float:\n\
+  \        return self._celsius\n\n    @celsius.setter\n    def celsius(self, value:\
+  \ float) -> None:\n        if value < -273.15:\n            raise ValueError(\"\
+  below absolute zero\")\n        self._celsius = float(value)\n\n    @property\n\
+  \    def fahrenheit(self) -> float:\n        return self._celsius * 9 / 5 + 32\n"

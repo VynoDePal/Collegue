@@ -1,0 +1,13 @@
+name: Type-hinted data transform
+description: Uses List / Optional / dict annotations; good coverage needs boundary
+  cases
+language: python
+doc_format: markdown
+must_document:
+- first_nonzero
+- word_counts
+code: "from typing import List, Optional\n\ndef first_nonzero(values: List[int]) ->\
+  \ Optional[int]:\n    for v in values:\n        if v != 0:\n            return v\n\
+  \    return None\n\ndef word_counts(text: str) -> dict[str, int]:\n    counts: dict[str,\
+  \ int] = {}\n    for word in text.split():\n        counts[word] = counts.get(word,\
+  \ 0) + 1\n    return counts\n"

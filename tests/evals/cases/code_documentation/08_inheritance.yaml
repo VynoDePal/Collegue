@@ -1,0 +1,19 @@
+name: Inheritance + polymorphic dispatch
+description: Tests must cover both subclasses through a common interface
+language: python
+doc_format: markdown
+must_document:
+- Shape
+- Circle
+- Rectangle
+- total_area
+code: "from abc import ABC, abstractmethod\n\nclass Shape(ABC):\n    @abstractmethod\n\
+  \    def area(self) -> float: ...\n\nclass Circle(Shape):\n    def __init__(self,\
+  \ radius: float):\n        if radius < 0:\n            raise ValueError(\"radius\
+  \ must be >= 0\")\n        self.radius = radius\n\n    def area(self) -> float:\n\
+  \        from math import pi\n        return pi * self.radius * self.radius\n\n\
+  class Rectangle(Shape):\n    def __init__(self, width: float, height: float):\n\
+  \        if width < 0 or height < 0:\n            raise ValueError(\"dimensions\
+  \ must be >= 0\")\n        self.width = width\n        self.height = height\n\n\
+  \    def area(self) -> float:\n        return self.width * self.height\n\ndef total_area(shapes:\
+  \ list[Shape]) -> float:\n    return sum(s.area() for s in shapes)\n"

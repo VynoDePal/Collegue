@@ -1,0 +1,9 @@
+name: Async function
+description: LLM must either use pytest-asyncio or asyncio.run; both are acceptable
+language: python
+doc_format: markdown
+must_document:
+- gather_doubles
+code: "import asyncio\n\nasync def gather_doubles(values):\n    async def double(x):\n\
+  \        await asyncio.sleep(0)\n        return x * 2\n    return await asyncio.gather(*[double(v)\
+  \ for v in values])\n"
