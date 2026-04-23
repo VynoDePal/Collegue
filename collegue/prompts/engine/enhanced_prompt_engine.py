@@ -240,7 +240,17 @@ class EnhancedPromptEngine(PromptEngine):
                 return prompt, "default"
             raise ValueError(f"Aucun template trouvé pour l'outil {tool_name}")
 
-        template = templates[0]
+        # Prefer the canonical ``<tool>_default`` template when it exists.
+        # Without this, the engine picks whatever ``templates[0]`` happens
+        # to be — which was empirically ``test_generation_v2`` (the
+        # alphabetical first), silently masking any edit to the default
+        # YAML and making the "A/B between v2 / experimental / default"
+        # story fiction. Loading order is not a selection policy.
+        default_name = f"{tool_name.lower()}_default"
+        template = next(
+            (t for t in templates if t.name.lower() == default_name),
+            templates[0],
+        )
 
         if version:
             prompt_version = self.version_manager.get_version(template.id, version)

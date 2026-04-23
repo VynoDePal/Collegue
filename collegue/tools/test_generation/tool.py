@@ -175,6 +175,29 @@ class TestGenerationTool(BaseTool):
             elements,
         )
 
+    @staticmethod
+    def _extract_test_code_block(text: str) -> str:
+        """Return the body of the fenced block that actually contains tests.
+
+        Handles three failure modes seen on Gemini 2.5/3 and Gemma 4:
+        - Leading "thought channel" prose before any fence (Gemma 4 large
+          variants, per Google's prompt-formatting guide).
+        - A single fence wrapping tests — happy path.
+        - Two (or more) fences where the model restates the source first
+          and puts tests second; picking the first fence would miss the
+          actual tests. We therefore pick the fence whose body contains
+          ``def test_`` or ``import pytest``; if none match, fall back to
+          the longest fence; if no fence, return ``text`` unchanged.
+        """
+        import re
+
+        blocks = re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.DOTALL)
+        if not blocks:
+            return text
+        test_shaped = [b for b in blocks if "def test_" in b or "import pytest" in b]
+        chosen = test_shaped[0] if test_shaped else max(blocks, key=len)
+        return chosen.rstrip()
+
     def _enrich_context_with_elements(
         self,
         request: TestGenerationRequest,
@@ -237,7 +260,7 @@ class TestGenerationTool(BaseTool):
                     )
                 )
                 elapsed = time.monotonic() - started
-                test_code = result.text or ""
+                test_code = self._extract_test_code_block(result.text or "")
                 self.track_last_prompt_performance(
                     execution_time=elapsed,
                     tokens_used=len(test_code) // 4,  # rough token proxy
@@ -310,7 +333,7 @@ class TestGenerationTool(BaseTool):
                 max_tokens=2000,
             )
             elapsed = time.monotonic() - started
-            test_code = result.text or ""
+            test_code = self._extract_test_code_block(result.text or "")
             self.track_last_prompt_performance(
                 execution_time=elapsed,
                 tokens_used=len(test_code) // 4,
