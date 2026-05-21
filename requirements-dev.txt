@@ -1,4 +1,5 @@
 -r requirements.txt
 
 pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
 ruff>=0.15.0
