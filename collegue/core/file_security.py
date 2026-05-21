@@ -6,6 +6,7 @@ protégées contre les attaques TOCTOU, les symlinks et les traversées de chemi
 """
 import os
 import fcntl
+import stat
 from typing import Optional
 
 
@@ -58,8 +59,8 @@ def safe_read_file(filepath: str, max_size: int, base_dir: Optional[str] = None)
         # Vérifier les stats via le file descriptor (pas de race condition)
         stat_info = os.fstat(fd)
         
-        # Vérifier que c'est un fichier régulier
-        if not os.path.isfile(fd):
+        # Vérifier que c'est un fichier régulier via le file descriptor
+        if not stat.S_ISREG(stat_info.st_mode):
             raise FileSecurityError(f'Not a regular file: {filepath}')
         
         # Vérifier la taille via le file descriptor (TOCTOU-safe)
@@ -127,7 +128,7 @@ def safe_getsize(filepath: str, base_dir: Optional[str] = None) -> int:
     try:
         stat_info = os.fstat(fd)
         
-        if not os.path.isfile(fd):
+        if not stat.S_ISREG(stat_info.st_mode):
             raise FileSecurityError(f'Not a regular file: {filepath}')
         
         return stat_info.st_size
