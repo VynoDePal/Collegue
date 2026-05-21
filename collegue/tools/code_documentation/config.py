@@ -8,7 +8,7 @@ STYLE_INSTRUCTIONS = {
     "detailed": "Génère une documentation très détaillée avec exemples, cas d'usage et notes techniques",
     "minimal": "Génère une documentation minimale avec seulement les informations essentielles",
     "api": "Génère une documentation de style API avec format standardisé pour chaque fonction/classe",
-    "tutorial": "Génère une documentation de style tutoriel avec explications pédagogiques"
+    "tutorial": "Génère une documentation de style tutoriel avec explications pédagogiques",
 }
 
 # Instructions de format de sortie
@@ -17,7 +17,7 @@ FORMAT_INSTRUCTIONS = {
     "rst": "Utilise le format reStructuredText",
     "html": "Génère du HTML bien formaté",
     "docstring": "Génère des docstrings dans le style du langage",
-    "json": "Retourne la documentation structurée en JSON"
+    "json": "Retourne la documentation structurée en JSON",
 }
 
 # Instructions spécifiques par langage
@@ -29,7 +29,7 @@ LANGUAGE_INSTRUCTIONS = {
     "c#": "Utilise XML documentation format avec <summary>, <param>, <returns>",
     "go": "Utilise les conventions Go avec commentaires au-dessus des déclarations",
     "rust": "Utilise les doc comments avec /// et inclus les exemples avec ```",
-    "php": "Utilise le format PHPDoc (PSR-5/PSR-19) avec @param, @return, @throws et types explicites"
+    "php": "Utilise le format PHPDoc (PSR-5/PSR-19) avec @param, @return, @throws et types explicites",
 }
 
 # Descriptions des styles
@@ -38,7 +38,7 @@ STYLE_DESCRIPTIONS = {
     "detailed": "Documentation très détaillée avec explications approfondies, cas d'usage et exemples avancés",
     "minimal": "Documentation concise avec informations essentielles seulement",
     "api": "Documentation technique orientée API avec signatures, types et codes d'erreur",
-    "tutorial": "Documentation pédagogique avec explications pas-à-pas et exemples pratiques"
+    "tutorial": "Documentation pédagogique avec explications pas-à-pas et exemples pratiques",
 }
 
 # Descriptions des formats
@@ -47,5 +47,5 @@ FORMAT_DESCRIPTIONS = {
     "rst": "reStructuredText (.rst) utilisé par Sphinx et la documentation Python",
     "html": "HTML complet avec CSS pour documentation web interactive",
     "docstring": "Docstrings insérées directement dans le code source",
-    "json": "Format JSON structuré pour intégration avec d'autres outils"
+    "json": "Format JSON structuré pour intégration avec d'autres outils",
 }

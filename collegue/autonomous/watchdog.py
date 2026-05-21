@@ -6,6 +6,7 @@ Peut être exécuté:
 1. En standalone: python -m collegue.autonomous.watchdog
 2. Intégré dans l'app principale via start_background_watchdog()
 """
+
 import asyncio
 import difflib
 import logging
@@ -14,7 +15,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from collegue.config import settings
 from collegue.resources.llm.providers import LLMConfig, generate_text
@@ -28,7 +29,7 @@ try:
 except Exception:
     get_http_headers = None
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("watchdog")
 
 
@@ -40,8 +41,7 @@ _processed_issues: set = set()
 
 def _build_web_search_query(error_type: str, error_message: str, filepath: Optional[str] = None) -> str:
     clean_message = error_message[:100] if error_message else ""
-    clean_message = clean_message.replace('\n', ' ').strip()
-
+    clean_message = clean_message.replace("\n", " ").strip()
 
     parts = ["Python"]
     if error_type:
@@ -54,8 +54,8 @@ def _build_web_search_query(error_type: str, error_message: str, filepath: Optio
 
 
 def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tuple[Optional[str], float]:
-    search_lines = search.strip().split('\n')
-    content_lines = content.split('\n')
+    search_lines = search.strip().split("\n")
+    content_lines = content.split("\n")
     search_len = len(search_lines)
 
     if search_len == 0 or len(content_lines) == 0:
@@ -65,11 +65,9 @@ def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tupl
     best_score = 0.0
     best_start = -1
 
-
     for i in range(len(content_lines) - search_len + 1):
-        window = content_lines[i:i + search_len]
-        window_text = '\n'.join(window)
-
+        window = content_lines[i : i + search_len]
+        window_text = "\n".join(window)
 
         ratio = difflib.SequenceMatcher(None, search.strip(), window_text.strip()).ratio()
 
@@ -78,13 +76,12 @@ def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tupl
             best_start = i
             best_match = window_text
 
-
     if best_score < threshold:
-        normalized_search = ' '.join(search.split())
+        normalized_search = " ".join(search.split())
         for i in range(len(content_lines) - search_len + 1):
-            window = content_lines[i:i + search_len]
-            window_text = '\n'.join(window)
-            normalized_window = ' '.join(window_text.split())
+            window = content_lines[i : i + search_len]
+            window_text = "\n".join(window)
+            normalized_window = " ".join(window_text.split())
 
             ratio = difflib.SequenceMatcher(None, normalized_search, normalized_window).ratio()
             if ratio > best_score:
@@ -130,10 +127,7 @@ class AutoFixer:
     def _get_sentry_org(self) -> Optional[str]:
         if self.user_config:
             return self.user_config.sentry_org
-        return _get_config_value(
-            "SENTRY_ORG",
-            ["x-sentry-org", "x-collegue-sentry-org"]
-        )
+        return _get_config_value("SENTRY_ORG", ["x-sentry-org", "x-collegue-sentry-org"])
 
     def _get_sentry_token(self) -> Optional[str]:
         if self.user_config and self.user_config.sentry_token:
@@ -148,10 +142,7 @@ class AutoFixer:
     def _get_github_owner(self) -> Optional[str]:
         if self.user_config and self.user_config.github_owner:
             return self.user_config.github_owner
-        return _get_config_value(
-            "GITHUB_OWNER",
-            ["x-github-owner", "x-collegue-github-owner"]
-        )
+        return _get_config_value("GITHUB_OWNER", ["x-github-owner", "x-collegue-github-owner"])
 
     def _get_github_repo(self) -> Optional[str]:
         if self.user_config and self.user_config.github_repo:
@@ -169,18 +160,14 @@ class AutoFixer:
         logger.info(f"🔍 Scan de l'organisation: {org}")
 
         try:
-            projects_resp = self.sentry._execute_core_logic(SentryRequest(
-                command="list_projects",
-                organization=org,
-                token=token
-            ))
+            projects_resp = self.sentry._execute_core_logic(
+                SentryRequest(command="list_projects", organization=org, token=token)
+            )
             projects = projects_resp.projects or []
 
-            repos_resp = self.sentry._execute_core_logic(SentryRequest(
-                command="list_repos",
-                organization=org,
-                token=token
-            ))
+            repos_resp = self.sentry._execute_core_logic(
+                SentryRequest(command="list_repos", organization=org, token=token)
+            )
             repos = repos_resp.repos or []
 
             self.repo_map = {}
@@ -203,15 +190,16 @@ class AutoFixer:
         logger.info(f"📂 Scan du projet: {project.slug} (id: {project.id})")
 
         try:
-
-            sentry_response = self.sentry._execute_core_logic(SentryRequest(
-                command="list_issues",
-                organization=org,
-                project=project.id,
-                query="is:unresolved level:error",
-                limit=3,
-                token=token
-            ))
+            sentry_response = self.sentry._execute_core_logic(
+                SentryRequest(
+                    command="list_issues",
+                    organization=org,
+                    project=project.id,
+                    query="is:unresolved level:error",
+                    limit=3,
+                    token=token,
+                )
+            )
         except Exception as e:
             logger.error(f"Erreur lecture issues projet {project.slug}: {e}")
             return
@@ -222,10 +210,8 @@ class AutoFixer:
         for issue in sentry_response.issues:
             logger.info(f"🚨 [Projet: {project.slug}] Analyse issue: {issue.title} ({issue.short_id})")
 
-
             repo_owner = self._get_github_owner()
             repo_name = self._get_github_repo()
-
 
             if not repo_name:
                 mapped_repo = self.repo_map.get(project.slug)
@@ -248,7 +234,6 @@ class AutoFixer:
 
         issue_id = issue.id
 
-
         if issue_id in _processed_issues:
             logger.info(f"Issue {issue_id} déjà traitée, skip")
             return
@@ -260,22 +245,17 @@ class AutoFixer:
             repo_owner = override_owner
 
         if not repo_owner:
-             logger.warning("Impossible de déterminer le GitHub Owner (ni env, ni headers MCP).")
-             return
+            logger.warning("Impossible de déterminer le GitHub Owner (ni env, ni headers MCP).")
+            return
 
         if not github_token:
             logger.warning("Aucun token GitHub configuré - opérations GitHub impossibles.")
             return
 
-
         try:
-            events_resp = self.sentry._execute_core_logic(SentryRequest(
-                command="issue_events",
-                issue_id=issue_id,
-                organization=org,
-                token=sentry_token,
-                limit=1
-            ))
+            events_resp = self.sentry._execute_core_logic(
+                SentryRequest(command="issue_events", issue_id=issue_id, organization=org, token=sentry_token, limit=1)
+            )
             if not events_resp.events:
                 logger.warning(f"Pas d'événements pour l'issue {issue_id}")
                 return
@@ -286,7 +266,6 @@ class AutoFixer:
             logger.error(f"Impossible de lire les détails de l'issue {issue_id}: {e}")
             return
 
-
         logger.info("📦 Construction du Context Pack...")
 
         builder = ContextPackBuilder(
@@ -294,14 +273,14 @@ class AutoFixer:
             repo_owner=repo_owner,
             repo_name=repo_name,
             github_token=github_token,
-            project_prefixes=["collegue/", "src/", "app/", "lib/"]
+            project_prefixes=["collegue/", "src/", "app/", "lib/"],
         )
 
         context_pack = await builder.build(
             sentry_event=event,
             issue_title=issue.title,
-            error_message=getattr(issue, 'metadata', {}).get('value', '') if hasattr(issue, 'metadata') else '',
-            error_type=getattr(issue, 'metadata', {}).get('type', '') if hasattr(issue, 'metadata') else ''
+            error_message=getattr(issue, "metadata", {}).get("value", "") if hasattr(issue, "metadata") else "",
+            error_type=getattr(issue, "metadata", {}).get("type", "") if hasattr(issue, "metadata") else "",
         )
 
         if not context_pack.primary_file:
@@ -317,13 +296,11 @@ class AutoFixer:
             original_content = context_pack.primary_file.full_content
             logger.info(f"✅ Context Pack prêt: {filepath}")
 
-
-        error_type = getattr(issue, 'metadata', {}).get('type', '') if hasattr(issue, 'metadata') else ''
-        error_message = getattr(issue, 'metadata', {}).get('value', '') if hasattr(issue, 'metadata') else ''
-
+        error_type = getattr(issue, "metadata", {}).get("type", "") if hasattr(issue, "metadata") else ""
+        error_message = getattr(issue, "metadata", {}).get("value", "") if hasattr(issue, "metadata") else ""
 
         if not error_type and not error_message and issue.title:
-            title_match = re.match(r'^(\w+Error|\w+Exception):\s*(.+)$', issue.title)
+            title_match = re.match(r"^(\w+Error|\w+Exception):\s*(.+)$", issue.title)
             if title_match:
                 error_type = title_match.group(1)
                 error_message = title_match.group(2)
@@ -343,16 +320,15 @@ class AutoFixer:
                     api_key=settings.llm_api_key,
                     max_tokens=settings.MAX_TOKENS,
                     temperature=0.7,
-                    use_search_grounding=True
+                    use_search_grounding=True,
                 )
                 web_response_obj = await generate_text(
-                    web_config,
-                    f"Trouve des solutions pour cette erreur Python:\n{error_type}: {error_message}"
+                    web_config, f"Trouve des solutions pour cette erreur Python:\n{error_type}: {error_message}"
                 )
                 web_response = web_response_obj.text
                 web_citations = [
-                    annotation.get("url_citation", {}) 
-                    for annotation in web_response_obj.annotations 
+                    annotation.get("url_citation", {})
+                    for annotation in web_response_obj.annotations
                     if isinstance(annotation, dict) and annotation.get("type") == "url_citation"
                 ]
 
@@ -361,7 +337,7 @@ class AutoFixer:
                     for i, citation in enumerate(web_citations[:3], 1):
                         web_context += f"\n### Source {i}: {citation.get('title', 'N/A')}\n"
                         web_context += f"URL: {citation.get('url', '')}\n"
-                        content = citation.get('content', '')[:500]
+                        content = citation.get("content", "")[:500]
                         if content:
                             web_context += f"Extrait: {content}...\n"
 
@@ -372,9 +348,7 @@ class AutoFixer:
             except Exception as e:
                 logger.warning(f"Recherche web échouée (non bloquant): {e}")
 
-
         logger.info("🧠 Analyse de la cause racine avec le LLM...")
-
 
         raw_code = ""
         if context_pack.primary_file:
@@ -395,7 +369,7 @@ Analyse cette erreur et génère un correctif MINIMAL.
 
 ## FORMAT DE RÉPONSE (JSON strict)
 {{
-    "filepath": "{filepath or 'chemin/vers/fichier.py'}",
+    "filepath": "{filepath or "chemin/vers/fichier.py"}",
     "explanation": "Explication courte de la cause et du fix",
     "patches": [
         {{
@@ -418,8 +392,7 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
             llm_response = await generate_text(self._llm_config, prompt)
             analysis_json = llm_response.text
 
-
-            match = re.search(r'```json\s*(.*?)\s*```', analysis_json, re.DOTALL)
+            match = re.search(r"```json\s*(.*?)\s*```", analysis_json, re.DOTALL)
             if match:
                 json_str = match.group(1)
             else:
@@ -430,7 +403,6 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
         except Exception as e:
             logger.error(f"Echec de l'analyse LLM: {e}")
             return
-
 
         patches = fix_data.get("patches", [])
         target_filepath = fix_data.get("filepath", filepath)
@@ -447,22 +419,19 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
             logger.error("Pas de patchs dans la réponse LLM")
             return
 
-
         if original_content is None or target_filepath != filepath:
             try:
-                file_resp = self.github._execute_core_logic(GitHubRequest(
-                    command="get_file",
-                    owner=repo_owner,
-                    repo=repo_name,
-                    path=target_filepath,
-                    token=github_token
-                ))
+                file_resp = self.github._execute_core_logic(
+                    GitHubRequest(
+                        command="get_file", owner=repo_owner, repo=repo_name, path=target_filepath, token=github_token
+                    )
+                )
                 import base64
-                original_content = base64.b64decode(file_resp.content).decode('utf-8')
+
+                original_content = base64.b64decode(file_resp.content).decode("utf-8")
             except Exception as e:
                 logger.error(f"Impossible de récupérer {target_filepath}: {e}")
                 return
-
 
         patch_operations = []
 
@@ -471,34 +440,30 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
             replace = patch.get("replace", "")
 
             if not search:
-                logger.warning(f"Patch {i+1}: 'search' vide, ignoré")
+                logger.warning(f"Patch {i + 1}: 'search' vide, ignoré")
                 continue
-
 
             if search in original_content:
                 patch_operations.append((search, replace, "exact"))
-                logger.info(f"Patch {i+1}: match exact trouvé")
+                logger.info(f"Patch {i + 1}: match exact trouvé")
                 continue
 
-
-            logger.info(f"Patch {i+1}: tentative fuzzy matching...")
+            logger.info(f"Patch {i + 1}: tentative fuzzy matching...")
             fuzzy_match, score = _fuzzy_find_match(search, original_content, threshold=0.6)
 
             if fuzzy_match:
-                logger.info(f"Patch {i+1}: fuzzy match trouvé (score: {score:.2f})")
+                logger.info(f"Patch {i + 1}: fuzzy match trouvé (score: {score:.2f})")
                 patch_operations.append((fuzzy_match, replace, f"fuzzy:{score:.2f}"))
                 continue
 
-
-            logger.warning(f"Patch {i+1}: 'search' non trouvé (meilleur score: {score:.2f})")
+            logger.warning(f"Patch {i + 1}: 'search' non trouvé (meilleur score: {score:.2f})")
             logger.debug(f"Search attendu: {search[:200]}...")
-            logger.error(f"Patch {i+1}: impossible de trouver - abandon de tous les patchs")
+            logger.error(f"Patch {i + 1}: impossible de trouver - abandon de tous les patchs")
             return
 
         if not patch_operations:
             logger.error("Aucun patch valide à appliquer")
             return
-
 
         patched_content = original_content
         for search_found, replace, match_type in patch_operations:
@@ -511,8 +476,7 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
             logger.error("Aucun patch n'a pu être appliqué")
             return
 
-
-        if target_filepath.endswith('.py'):
+        if target_filepath.endswith(".py"):
             try:
                 ast.parse(patched_content)
                 logger.info("✅ Validation syntaxique OK")
@@ -520,11 +484,11 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
                 logger.error(f"❌ Code généré invalide: {e}")
                 return
 
-
         if len(patched_content) < len(original_content) * 0.5:
-            logger.error(f"❌ Le patch réduit le fichier de plus de 50% ({len(original_content)} -> {len(patched_content)})")
+            logger.error(
+                f"❌ Le patch réduit le fichier de plus de 50% ({len(original_content)} -> {len(patched_content)})"
+            )
             return
-
 
         branch_name = f"fix/sentry-{issue.short_id}"
         pr_title = f"Fix: {issue.title} (Sentry-{issue.short_id})"
@@ -532,50 +496,50 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
         logger.info(f"🛠️ Application du correctif sur {target_filepath} (Branche: {branch_name})")
 
         try:
-
             try:
-                self.github._execute_core_logic(GitHubRequest(
-                    command="create_branch",
-                    owner=repo_owner,
-                    repo=repo_name,
-                    branch=branch_name,
-                    token=github_token
-                ))
+                self.github._execute_core_logic(
+                    GitHubRequest(
+                        command="create_branch",
+                        owner=repo_owner,
+                        repo=repo_name,
+                        branch=branch_name,
+                        token=github_token,
+                    )
+                )
             except Exception as e:
                 if "already exists" in str(e).lower() or "422" in str(e):
                     logger.info(f"Branche {branch_name} existe déjà, réutilisation")
                 else:
                     raise
 
-
-            self.github._execute_core_logic(GitHubRequest(
-                command="update_file",
-                owner=repo_owner,
-                repo=repo_name,
-                path=target_filepath,
-                message=f"Fix {issue.title}\n\nAppliqué {patches_applied} patch(s) minimal(aux)",
-                content=patched_content,
-                branch=branch_name,
-                token=github_token
-            ))
-
+            self.github._execute_core_logic(
+                GitHubRequest(
+                    command="update_file",
+                    owner=repo_owner,
+                    repo=repo_name,
+                    path=target_filepath,
+                    message=f"Fix {issue.title}\n\nAppliqué {patches_applied} patch(s) minimal(aux)",
+                    content=patched_content,
+                    branch=branch_name,
+                    token=github_token,
+                )
+            )
 
             web_sources_section = ""
             if web_citations:
                 web_sources_section = "\n### Sources consultées\n"
                 for citation in web_citations[:3]:
-                    title = citation.get('title', 'Source')
-                    url = citation.get('url', '')
+                    title = citation.get("title", "Source")
+                    url = citation.get("url", "")
                     if url:
                         web_sources_section += f"- [{title}]({url})\n"
-
 
             pr_body = f"""## Fix automatique généré par Collegue Watchdog
 
 **Issue Sentry:** {issue.permalink}
 
 ### Explication
-{fix_data.get('explanation', 'N/A')}
+{fix_data.get("explanation", "N/A")}
 
 ### Patchs appliqués
 {patches_applied} modification(s) minimale(s) sur `{target_filepath}`
@@ -588,24 +552,26 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
 *Ce fix a été généré automatiquement. Veuillez le revoir avant de merger.*
 """
 
-            pr_resp = self.github._execute_core_logic(GitHubRequest(
-                command="create_pr",
-                owner=repo_owner,
-                repo=repo_name,
-                title=pr_title,
-                body=pr_body,
-                head=branch_name,
-                base="main",
-                token=github_token
-            ))
+            pr_resp = self.github._execute_core_logic(
+                GitHubRequest(
+                    command="create_pr",
+                    owner=repo_owner,
+                    repo=repo_name,
+                    title=pr_title,
+                    body=pr_body,
+                    head=branch_name,
+                    base="main",
+                    token=github_token,
+                )
+            )
 
             logger.info(f"🚀 PR Créée avec succès: {pr_resp.pr.html_url}")
-
 
             _processed_issues.add(issue_id)
 
         except Exception as e:
             logger.error(f"Echec de l'opération GitHub: {e}")
+
 
 async def _watchdog_loop(interval_seconds: int = 300):
     """Boucle principale du watchdog - multi-utilisateur."""
@@ -614,11 +580,9 @@ async def _watchdog_loop(interval_seconds: int = 300):
     while True:
         logger.info("🔍 Démarrage du cycle de Self-Healing Multi-Utilisateurs...")
 
-
         configs = registry.get_all_active(max_age_hours=24.0)
 
         if not configs:
-
             env_org = os.environ.get("SENTRY_ORG")
             if env_org:
                 logger.info(f"Mode mono-utilisateur (env): {env_org}")
@@ -628,8 +592,10 @@ async def _watchdog_loop(interval_seconds: int = 300):
                 except Exception as e:
                     logger.error(f"Erreur dans le cycle watchdog: {e}")
             else:
-                logger.warning("Aucune configuration utilisateur enregistrée. "
-                             "Effectuez une requête Sentry pour enregistrer vos credentials.")
+                logger.warning(
+                    "Aucune configuration utilisateur enregistrée. "
+                    "Effectuez une requête Sentry pour enregistrer vos credentials."
+                )
         else:
             logger.info(f"👥 {len(configs)} configuration(s) utilisateur active(s)")
             for config in configs:
@@ -638,7 +604,6 @@ async def _watchdog_loop(interval_seconds: int = 300):
                     await fixer.run_once()
                 except Exception as e:
                     logger.error(f"Erreur pour org {config.sentry_org}: {e}")
-
 
         removed = registry.cleanup_stale(max_age_hours=48.0)
         if removed > 0:

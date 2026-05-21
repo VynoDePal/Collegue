@@ -9,7 +9,7 @@ TEST_FRAMEWORKS = {
     "typescript": ["jest", "mocha", "jasmine", "vitest"],
     "java": ["junit", "testng", "spock"],
     "c#": ["nunit", "xunit", "mstest"],
-    "php": ["phpunit", "pest", "codeception", "behat", "phpspec", "kahlan"]
+    "php": ["phpunit", "pest", "codeception", "behat", "phpspec", "kahlan"],
 }
 
 # Framework par défaut pour chaque langage
@@ -19,7 +19,7 @@ DEFAULT_FRAMEWORKS = {
     "typescript": "jest",
     "java": "junit",
     "c#": "nunit",
-    "php": "phpunit"
+    "php": "phpunit",
 }
 
 # Templates d'imports par langage/framework
@@ -45,13 +45,13 @@ IMPORT_TEMPLATES = {
     "php": {
         "phpunit": "use PHPUnit\\Framework\\TestCase;",
         "pest": "",
-    }
+    },
 }
 
 # Templates de tests par langage/framework
 TEST_TEMPLATES = {
     "python": {
-        "pytest": '''
+        "pytest": """
 def test_{function_name}():
     # Arrange
     {arrange_code}
@@ -61,8 +61,8 @@ def test_{function_name}():
     
     # Assert
     {assert_code}
-''',
-        "unittest": '''
+""",
+        "unittest": """
 class Test{class_name}(unittest.TestCase):
     def test_{function_name}(self):
         # Arrange
@@ -73,10 +73,10 @@ class Test{class_name}(unittest.TestCase):
         
         # Assert
         {assert_code}
-''',
+""",
     },
     "javascript": {
-        "jest": '''
+        "jest": """
 describe('{class_name}', () => {{
     test('{function_name}', () => {{
         // Arrange
@@ -89,10 +89,10 @@ describe('{class_name}', () => {{
         {assert_code}
     }});
 }});
-''',
+""",
     },
     "typescript": {
-        "jest": '''
+        "jest": """
 describe('{class_name}', () => {{
     test('{function_name}', () => {{
         // Arrange
@@ -105,10 +105,10 @@ describe('{class_name}', () => {{
         {assert_code}
     }});
 }});
-''',
+""",
     },
     "php": {
-        "phpunit": '''
+        "phpunit": """
 class {class_name}Test extends TestCase
 {{
     public function test{function_name}(): void
@@ -123,8 +123,8 @@ class {class_name}Test extends TestCase
         {assert_code}
     }}
 }}
-''',
-        "pest": '''
+""",
+        "pest": """
 test('{function_name}', function () {{
     // Arrange
     {arrange_code}
@@ -135,8 +135,8 @@ test('{function_name}', function () {{
     // Assert
     {assert_code}
 }});
-''',
-    }
+""",
+    },
 }
 
 # Instructions de génération de tests par langage
@@ -180,5 +180,5 @@ LANGUAGE_TEST_INSTRUCTIONS = {
 - Pour Pest: syntaxe fonctionnelle test('nom', fn() {})
 - Inclus des tests pour cas normaux, exceptions et cas limites
 - Utilise les assertions appropriées (assertEquals, assertTrue, expect()->toBe())
-"""
+""",
 }

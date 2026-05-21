@@ -10,14 +10,15 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.test_generation import TestGenerationTool, TestGenerationRequest, TestGenerationResponse
 """
+
 from .tool import TestGenerationTool
 from .models import TestGenerationRequest, TestGenerationResponse, LLMTestGenerationResult
 from .engine import TestGenerationEngine
 
 __all__ = [
-    'TestGenerationTool',
-    'TestGenerationRequest',
-    'TestGenerationResponse',
-    'LLMTestGenerationResult',
-    'TestGenerationEngine'
+    "TestGenerationTool",
+    "TestGenerationRequest",
+    "TestGenerationResponse",
+    "LLMTestGenerationResult",
+    "TestGenerationEngine",
 ]

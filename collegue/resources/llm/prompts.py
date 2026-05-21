@@ -1,6 +1,7 @@
 """
 Prompts LLM - Gestion des prompts pour les différents modèles de langage
 """
+
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 import json
@@ -11,8 +12,10 @@ from enum import Enum
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class PromptTemplate(BaseModel):
     """Modèle pour un template de prompt."""
+
     name: str
     description: str
     template: str
@@ -21,8 +24,8 @@ class PromptTemplate(BaseModel):
     provider_specific: Dict[str, str] = {}
     examples: List[Dict[str, Any]] = []
 
-PROMPT_TEMPLATES = {
 
+PROMPT_TEMPLATES = {
     "code_documentation": {
         "name": "Documentation de code",
         "description": "Template pour générer de la documentation pour un extrait de code.",
@@ -47,13 +50,11 @@ La documentation doit inclure:
                 "variables": {
                     "language": "Python",
                     "code": "def merge_dicts(dict1, dict2, conflict_resolver=None):\n    result = dict1.copy()\n    for key, value in dict2.items():\n        if key in result and conflict_resolver:\n            result[key] = conflict_resolver(key, result[key], value)\n        else:\n            result[key] = value\n    return result",
-                    "format": "docstring"
+                    "format": "docstring",
                 }
             }
-        ]
+        ],
     },
-
-
     "test_generation": {
         "name": "Génération de tests",
         "description": "Template pour générer des tests pour un extrait de code.",
@@ -77,12 +78,11 @@ Les tests doivent:
                 "variables": {
                     "language": "Python",
                     "code": "def is_palindrome(s):\n    s = s.lower().replace(' ', '')\n    return s == s[::-1]",
-                    "framework": "pytest"
+                    "framework": "pytest",
                 }
             }
-        ]
+        ],
     },
-
     "code_refactoring": {
         "name": "Refactoring de code",
         "description": "Template pour refactoriser/améliorer un extrait de code.",
@@ -102,9 +102,8 @@ Paramètres additionnels (optionnels):
         "variables": ["language", "code", "refactoring_type", "parameters"],
         "category": "code_refactoring",
         "provider_specific": {},
-        "examples": []
+        "examples": [],
     },
-
     "impact_analysis": {
         "name": "Analyse d'impact",
         "description": "Template pour analyser l'impact d'un changement (risques, compat, sécurité).",
@@ -122,9 +121,8 @@ Attendus:
         "variables": ["change_description", "context"],
         "category": "impact_analysis",
         "provider_specific": {},
-        "examples": []
+        "examples": [],
     },
-
     "repo_consistency_check": {
         "name": "Contrôle de cohérence repo",
         "description": "Template pour analyser la cohérence du repo (duplication, dead code, style).",
@@ -139,9 +137,10 @@ Issues détectées (JSON ou texte):
         "variables": ["code_context", "issues"],
         "category": "repo_consistency_check",
         "provider_specific": {},
-        "examples": []
-    }
+        "examples": [],
+    },
 }
+
 
 def get_prompt_template(template_id: str) -> Optional[PromptTemplate]:
     """Récupère un template de prompt par son ID."""
@@ -149,14 +148,16 @@ def get_prompt_template(template_id: str) -> Optional[PromptTemplate]:
         return PromptTemplate(**PROMPT_TEMPLATES[template_id])
     return None
 
+
 def get_all_templates() -> List[str]:
     """Récupère la liste de tous les templates disponibles."""
     return list(PROMPT_TEMPLATES.keys())
 
+
 def get_templates_by_category(category: str) -> List[str]:
     """Récupère la liste des templates d'une catégorie spécifique."""
-    return [id for id, data in PROMPT_TEMPLATES.items()
-            if data.get("category") == category]
+    return [id for id, data in PROMPT_TEMPLATES.items() if data.get("category") == category]
+
 
 def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optional[str] = None) -> Optional[str]:
     """Formate un template de prompt avec les variables fournies."""
@@ -164,11 +165,9 @@ def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optiona
     if not template:
         return None
 
-
     prompt_text = template.template
     if provider and provider in template.provider_specific:
         prompt_text = template.provider_specific[provider]
-
 
     try:
         return prompt_text.format(**variables)
@@ -178,6 +177,7 @@ def format_prompt(template_id: str, variables: Dict[str, Any], provider: Optiona
     except Exception as e:
         logger.error(f"Error formatting prompt: {str(e)}")
         return None
+
 
 def register_prompts(app, app_state):
     """Enregistre les ressources des prompts LLM."""

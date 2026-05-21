@@ -6,6 +6,7 @@ from .standard_library import register_stdlib
 from .frameworks import register_frameworks
 from .best_practices import register_best_practices
 
+
 def register(app, app_state):
     """Enregistre les ressources JavaScript dans l'application FastMCP."""
     register_stdlib(app, app_state)

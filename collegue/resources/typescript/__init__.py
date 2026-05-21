@@ -6,6 +6,7 @@ Ce module fournit des ressources pour le langage TypeScript, notamment:
 - Frameworks populaires
 - Bonnes pratiques
 """
+
 from typing import Any
 
 try:
@@ -13,10 +14,11 @@ try:
 except ImportError:
     FastMCP = Any
 
+
 def register(app: FastMCP, app_state: dict):
     """
     Enregistre les ressources TypeScript dans l'application FastMCP.
-    
+
     Args:
         app: L'application FastMCP
         app_state: L'état de l'application
@@ -24,7 +26,7 @@ def register(app: FastMCP, app_state: dict):
     from . import types
     from . import frameworks
     from . import best_practices
-    
+
     types.register(app, app_state)
     frameworks.register(app, app_state)
     best_practices.register(app, app_state)

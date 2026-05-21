@@ -4,6 +4,7 @@ Auth utilities for Collegue tools.
 Centralise les fonctions d'authentification et de résolution de tokens
 pour éviter la duplication entre sentry_monitor.py et github_ops.py.
 """
+
 import os
 from typing import Optional, Dict, Any
 from .security_logger import security_logger
@@ -14,10 +15,10 @@ def get_token_from_http_headers(*header_names: str) -> Optional[str]:
         from fastmcp.server.dependencies import get_http_headers
     except Exception:
         return None
-    
+
     if get_http_headers is None:
         return None
-    
+
     headers = get_http_headers() or {}
     for name in header_names:
         value = headers.get(name)
@@ -30,21 +31,13 @@ def get_org_from_http_headers(*header_names: str) -> Optional[str]:
     return get_token_from_http_headers(*header_names)
 
 
-def resolve_token(
-    request_token: Optional[str],
-    env_var: str,
-    *header_names: str
-) -> Optional[str]:
+def resolve_token(request_token: Optional[str], env_var: str, *header_names: str) -> Optional[str]:
     """
     Résout un token depuis la requête, l'environnement ou les headers HTTP.
     Log les échecs d'authentification pour la sécurité.
     """
-    token = (
-        request_token
-        or os.environ.get(env_var)
-        or get_token_from_http_headers(*header_names)
-    )
-    
+    token = request_token or os.environ.get(env_var) or get_token_from_http_headers(*header_names)
+
     # Log les échecs d'authentification
     if not token:
         # Récupérer les infos de la requête si disponible
@@ -52,40 +45,37 @@ def resolve_token(
         user_agent = None
         try:
             from fastmcp.server.dependencies import get_http_headers
+
             headers = get_http_headers() or {}
-            client_ip = headers.get('x-forwarded-for') or headers.get('x-real-ip')
-            user_agent = headers.get('user-agent')
+            client_ip = headers.get("x-forwarded-for") or headers.get("x-real-ip")
+            user_agent = headers.get("user-agent")
         except Exception:
             pass
-        
+
         security_logger.log_auth_failure(
             reason="token_not_found",
             client_ip=client_ip,
             user_agent=user_agent,
-            extra={"source": "resolve_token", "env_var": env_var}
+            extra={"source": "resolve_token", "env_var": env_var},
         )
-    
+
     return token
 
 
-def resolve_org(
-    request_org: Optional[str],
-    env_var: str,
-    *header_names: str
-) -> Optional[str]:
+def resolve_org(request_org: Optional[str], env_var: str, *header_names: str) -> Optional[str]:
     return resolve_token(request_org, env_var, *header_names)
 
 
 def resolve_postgres_url(
-	request_url: Optional[str],
-	*header_names: str,
+    request_url: Optional[str],
+    *header_names: str,
 ) -> Optional[str]:
-	return (
-		request_url
-		or os.environ.get('POSTGRES_URL')
-		or os.environ.get('DATABASE_URL')
-		or get_token_from_http_headers(*header_names)
-	)
+    return (
+        request_url
+        or os.environ.get("POSTGRES_URL")
+        or os.environ.get("DATABASE_URL")
+        or get_token_from_http_headers(*header_names)
+    )
 
 
 def register_config_with_github(
@@ -93,27 +83,27 @@ def register_config_with_github(
     repo: Optional[str],
     github_token: Optional[str],
     sentry_org: Optional[str] = None,
-    sentry_token: Optional[str] = None
+    sentry_token: Optional[str] = None,
 ) -> None:
     try:
         from collegue.autonomous.config_registry import get_config_registry
     except ImportError:
         return
-    
+
     try:
         from fastmcp.server.dependencies import get_http_headers
     except Exception:
         get_http_headers = None
-    
+
     if sentry_org is None and get_http_headers:
         headers = get_http_headers() or {}
-        sentry_org = headers.get('x-sentry-org') or headers.get('x-collegue-sentry-org')
-    
+        sentry_org = headers.get("x-sentry-org") or headers.get("x-collegue-sentry-org")
+
     if sentry_org:
         get_config_registry().register(
             sentry_org=sentry_org,
             sentry_token=sentry_token,
             github_token=github_token,
             github_owner=owner,
-            github_repo=repo
+            github_repo=repo,
         )
