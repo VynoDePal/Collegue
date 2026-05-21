@@ -1,13 +1,5 @@
-
 from fastapi import FastAPI
 import uvicorn
-
-import sys
-import os
-from pathlib import Path
-
-parent_dir = str(Path(__file__).parent.parent.absolute())
-sys.path.insert(0, parent_dir)
 
 from collegue.config import settings
 

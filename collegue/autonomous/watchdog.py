@@ -11,10 +11,9 @@ import difflib
 import logging
 import os
 import re
-import sys
 from typing import List, Optional, Tuple
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 
 from collegue.config import settings
 from collegue.resources.llm.providers import LLMConfig, generate_text
