@@ -6,8 +6,8 @@ Provides read-only access to PostgreSQL databases with safe query execution.
 import os
 from typing import Optional
 
-from .base import APIResponse, APIError
 from ...core.auth import resolve_postgres_url
+from .base import APIError, APIResponse
 
 
 class PostgresClient:
@@ -42,11 +42,11 @@ class PostgresClient:
         self._driver = None
 
         try:
-            import psycopg2
+            import psycopg2  # noqa: F401
             self._driver = 'psycopg2'
         except ImportError:
             try:
-                import asyncpg
+                import asyncpg  # noqa: F401
                 self._driver = 'asyncpg'
             except ImportError:
                 self._driver = None
@@ -70,7 +70,7 @@ class PostgresClient:
 
     def _get_connection(self):
         if self._driver == 'psycopg2':
-            import psycopg2
+            import psycopg2  # noqa: F401
             return psycopg2.connect(self.connection_string)
         else:
             raise APIError("No PostgreSQL driver available. Install psycopg2 or asyncpg.")
@@ -251,7 +251,7 @@ class PostgresClient:
                     if cur.description:
                         columns = [desc[0] for desc in cur.description]
                         rows = cur.fetchall()
-                        data = [dict(zip(columns, row)) for row in rows]
+                        data = [dict(zip(columns, row, strict=False)) for row in rows]
                     else:
                         data = []
 

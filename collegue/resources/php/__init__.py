@@ -17,9 +17,9 @@ def register(app: FastMCP, app_state: dict):
 		app: L'application FastMCP
 		app_state: L'état de l'application
 	"""
-	from .standard_library import register_stdlib
-	from .frameworks import register_frameworks
 	from .best_practices import register_best_practices
+	from .frameworks import register_frameworks
+	from .standard_library import register_stdlib
 
 	register_stdlib(app, app_state)
 	register_frameworks(app, app_state)

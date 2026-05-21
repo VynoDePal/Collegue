@@ -3,8 +3,8 @@ Kubernetes Scanner for IaC Guardrails.
 
 Scans Kubernetes YAML manifests for security issues.
 """
-import re
-from typing import List, Dict, Any
+from typing import Dict, List
+
 from . import BaseScanner, IacFinding
 
 

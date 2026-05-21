@@ -1,7 +1,8 @@
 """
 Modèles Pydantic pour l'outil Code Documentation.
 """
-from typing import Optional, Dict, Any, List
+from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 

@@ -4,19 +4,15 @@ Moteur d'analyse des dépendances pour l'outil Dependency Guard.
 Contient la logique métier pure : parsing des fichiers, vérification
 d'existence, détection de vulnérabilités.
 """
-import re
 import json
-import urllib.request
+import re
 import urllib.error
 import urllib.parse
-from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor
-from .config import (
-    REGISTRY_URLS, OSV_BATCH_URL, OSV_VULN_URL,
-    OSV_CHUNK_SIZE, LANGUAGE_ECOSYSTEM
-)
-from .models import DependencyIssue
+import urllib.request
+from typing import Any, Dict, List
+
 from ..base import ToolValidationError
+from .config import OSV_BATCH_URL, OSV_CHUNK_SIZE, OSV_VULN_URL, REGISTRY_URLS
 
 
 class DependencyAnalysisEngine:
@@ -50,7 +46,7 @@ class DependencyAnalysisEngine:
             for name, version in all_deps.items():
                 dependencies.append({'name': name, 'version': version})
         except json.JSONDecodeError as e:
-            raise ToolValidationError(f"Erreur de parsing JSON: {e}")
+            raise ToolValidationError(f"Erreur de parsing JSON: {e}") from e
         return dependencies
     
     def parse_package_lock(self, content: str) -> List[Dict[str, str]]:
@@ -66,7 +62,7 @@ class DependencyAnalysisEngine:
                 version = info if isinstance(info, str) else info.get('version', '*')
                 deps.append({'name': name, 'version': version})
         except json.JSONDecodeError as e:
-            raise ToolValidationError(f"Erreur de parsing package-lock.json: {e}")
+            raise ToolValidationError(f"Erreur de parsing package-lock.json: {e}") from e
         return deps
     
     def parse_pyproject_toml(self, content: str) -> List[Dict[str, str]]:
@@ -105,7 +101,7 @@ class DependencyAnalysisEngine:
                     continue
                 dependencies.append({'name': name, 'version': version})
         except json.JSONDecodeError as e:
-            raise ToolValidationError(f"Erreur de parsing composer.json: {e}")
+            raise ToolValidationError(f"Erreur de parsing composer.json: {e}") from e
         return dependencies
     
     def parse_composer_lock(self, content: str) -> List[Dict[str, str]]:
@@ -116,7 +112,7 @@ class DependencyAnalysisEngine:
             for pkg in data.get('packages', []) + data.get('packages-dev', []):
                 dependencies.append({'name': pkg.get('name'), 'version': pkg.get('version')})
         except json.JSONDecodeError as e:
-            raise ToolValidationError(f"Erreur de parsing composer.lock: {e}")
+            raise ToolValidationError(f"Erreur de parsing composer.lock: {e}") from e
         return dependencies
     
     def detect_content_type(self, content: str, language: str) -> str:
@@ -257,7 +253,7 @@ class DependencyAnalysisEngine:
         queries = []
         dep_map = {}
         
-        for i, dep in enumerate(deps):
+        for _i, dep in enumerate(deps):
             name = dep['name']
             version = self.extract_version(dep.get('version', '*'))
             if not version or version == '*':

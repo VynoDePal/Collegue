@@ -1,10 +1,9 @@
 """
 Resources - Ressources de référence pour les langages et frameworks
 """
-import os
 import logging
+import os
 import sys
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

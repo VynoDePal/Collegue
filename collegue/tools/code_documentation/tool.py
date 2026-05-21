@@ -8,12 +8,13 @@ Refactorisé: Le fichier original faisait 668 lignes, maintenant ~180 lignes.
 """
 
 import time
-from typing import List, Dict, Any
-from ..base import BaseTool, ToolError
+from typing import Any, Dict, List
+
 from ...core.shared import run_async_from_sync
-from .models import DocumentationRequest, DocumentationResponse
+from ..base import BaseTool, ToolError
+from .config import FORMAT_DESCRIPTIONS, STYLE_DESCRIPTIONS
 from .engine import DocumentationEngine
-from .config import STYLE_DESCRIPTIONS, FORMAT_DESCRIPTIONS
+from .models import DocumentationRequest, DocumentationResponse
 
 
 class DocumentationTool(BaseTool):

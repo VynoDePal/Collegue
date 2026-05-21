@@ -1,10 +1,10 @@
 """
 Frameworks PHP - Ressources pour les frameworks PHP populaires
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
-
 import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
 
 
 class PHPFrameworkReference(BaseModel):

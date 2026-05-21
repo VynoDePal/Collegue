@@ -4,12 +4,13 @@ Moteur d'analyse de cohérence pour le Repo Consistency Check.
 Contient la logique métier pure : détection de duplication, analyse de symboles,
 calcul de scores, etc.
 """
-import re
 import ast
 import hashlib
-from typing import List, Dict, Any, Tuple, Set
+import re
+from typing import Dict, List, Set, Tuple
+
 from ...core.shared import ConsistencyIssue, detect_language_from_extension
-from .config import BUILTINS, REFACTORING_WEIGHTS, REFACTORING_THRESHOLDS, DUPLICATION_MIN_LINES
+from .config import BUILTINS, DUPLICATION_MIN_LINES, REFACTORING_THRESHOLDS, REFACTORING_WEIGHTS
 
 
 class ConsistencyAnalysisEngine:

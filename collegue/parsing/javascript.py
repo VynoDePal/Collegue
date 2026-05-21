@@ -1,9 +1,9 @@
 import re
-from typing import List, Dict, Any, Optional, Tuple
-from .base import (
-    Import, Declaration, ParseResult, BaseParser,
-    ImportType, DeclarationType
-)
+from typing import Dict, List, Optional, Tuple
+
+from .base import BaseParser, Declaration, DeclarationType, Import, ImportType
+
+
 class JSParser(BaseParser):
     RESERVED_KEYWORDS = {
         'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
@@ -21,7 +21,7 @@ class JSParser(BaseParser):
         'Parameters', 'ReturnType', 'InstanceType', 'ThisParameterType', 'OmitThisParameter',
         'ThisType', 'Uppercase', 'Lowercase', 'Capitalize', 'Uncapitalize',
         'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Date', 'RegExp', 'Error',
-        'Function', 'String', 'Number', 'Boolean', 'Object', 'Array', 'console',
+        'Function', 'String', 'Number', 'Boolean', 'Object', 'console',
         'window', 'document', 'process', 'Buffer', 'Math', 'JSON',
     }
     def __init__(self, content: str, filename: Optional[str] = None):

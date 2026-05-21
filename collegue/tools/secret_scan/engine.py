@@ -4,13 +4,14 @@ Moteur de détection des secrets pour l'outil Secret Scan.
 Contient la logique métier pure pour la détection, le masquage
 et la gestion des secrets.
 """
+import fnmatch
 import os
 import re
-import fnmatch
 from typing import List, Optional, Tuple
+
+from ...core.file_security import FileSecurityError, safe_read_file
+from .config import DEFAULT_EXCLUDES, DEFAULT_EXTENSIONS, SECRET_PATTERNS, SECRET_RECOMMENDATIONS, SEVERITY_LEVELS
 from .models import SecretFinding
-from .config import SECRET_PATTERNS, SEVERITY_LEVELS, SECRET_RECOMMENDATIONS, DEFAULT_EXTENSIONS, DEFAULT_EXCLUDES
-from ...core.file_security import safe_read_file, FileSecurityError
 
 
 class SecretDetectionEngine:

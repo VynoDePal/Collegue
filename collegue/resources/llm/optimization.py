@@ -1,12 +1,12 @@
 """
 Optimization LLM - Optimisation des prompts pour les différents modèles de langage
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
-import os
 import logging
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

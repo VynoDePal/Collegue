@@ -10,21 +10,22 @@ Cet outil analyse l'impact potentiel d'un changement de code avant son implémen
 Refactorisé: Le fichier original faisait 680 lignes, maintenant ~200 lignes.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
+
+from ...core.shared import parse_llm_json_response
 from ..base import BaseTool, ToolValidationError
-from ...core.shared import run_async_from_sync, parse_llm_json_response
+from .config import CONFIDENCE_THRESHOLDS
+from .engine import ImpactAnalysisEngine
 from .models import (
+    FollowupAction,
     ImpactAnalysisRequest,
     ImpactAnalysisResponse,
     ImpactedFile,
+    LLMInsight,
     RiskNote,
     SearchQuery,
     TestRecommendation,
-    FollowupAction,
-    LLMInsight,
 )
-from .engine import ImpactAnalysisEngine
-from .config import CONFIDENCE_THRESHOLDS
 
 
 class ImpactAnalysisTool(BaseTool):
@@ -146,10 +147,10 @@ class ImpactAnalysisTool(BaseTool):
     ) -> str:
         """Construit le prompt pour l'analyse deep avec LLM."""
         prompt_parts = [
-            f"Analyse en profondeur l'impact du changement suivant:",
-            f"",
+            "Analyse en profondeur l'impact du changement suivant:",
+            "",
             f"Intent: {request.change_intent}",
-            f"",
+            "",
             f"Fichiers impactés ({len(impacted_files)}):",
         ]
 
@@ -157,20 +158,20 @@ class ImpactAnalysisTool(BaseTool):
             prompt_parts.append(f"  - {f['path']} ({f.get('impact_type', 'unknown')})")
 
         if risk_notes:
-            prompt_parts.extend([f"", f"Risques identifiés:"])
+            prompt_parts.extend(["", "Risques identifiés:"])
             for r in risk_notes[:5]:
                 prompt_parts.append(f"  - [{r['category']}] {r['note']}")
 
         prompt_parts.extend(
             [
-                f"",
-                f"Fournis une analyse structurée au format JSON:",
-                f"{{",
-                f'  "semantic_summary": "Résumé sémantique du changement",',
-                f'  "insights": [',
-                f'    {{"category": "semantic|architectural|business", "insight": "...", "confidence": "high|medium|low"}}',
-                f"  ]",
-                f"}}",
+                "",
+                "Fournis une analyse structurée au format JSON:",
+                "{",
+                '  "semantic_summary": "Résumé sémantique du changement",',
+                '  "insights": [',
+                '    {"category": "semantic|architectural|business", "insight": "...", "confidence": "high|medium|low"}',
+                "  ]",
+                "}",
             ]
         )
 
@@ -180,7 +181,6 @@ class ImpactAnalysisTool(BaseTool):
         self, request: ImpactAnalysisRequest, **kwargs
     ) -> ImpactAnalysisResponse:
         """Exécute l'analyse d'impact (synchrone)."""
-        ctx = kwargs.get("ctx")
 
         # 1. Extraire les identifiants
         identifiers = self._engine.extract_identifiers(request.change_intent)

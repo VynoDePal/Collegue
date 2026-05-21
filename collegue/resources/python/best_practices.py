@@ -1,9 +1,11 @@
 """
 Best Practices Python - Ressources pour les bonnes pratiques en Python
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 class PythonBestPractice(BaseModel):
     """Modèle pour une bonne pratique Python."""

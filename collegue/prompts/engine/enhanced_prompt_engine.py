@@ -5,7 +5,7 @@ import datetime
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .models import PromptVariable
 from .optimizer import LanguageOptimizer

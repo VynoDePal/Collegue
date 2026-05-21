@@ -11,14 +11,14 @@ Cet outil vérifie la validité et la sécurité des dépendances d'un projet:
 Refactorisé: Le fichier original faisait 834 lignes, maintenant ~200 lignes.
 """
 
-from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List
 
-from ..base import BaseTool, ToolValidationError
 from ...core.shared import aggregate_severities
-from .models import DependencyGuardRequest, DependencyGuardResponse, DependencyIssue
+from ..base import BaseTool, ToolValidationError
+from .config import DEPRECATED_PACKAGES, KNOWN_MALICIOUS_PACKAGES, LANGUAGE_ECOSYSTEM
 from .engine import DependencyAnalysisEngine
-from .config import KNOWN_MALICIOUS_PACKAGES, DEPRECATED_PACKAGES, LANGUAGE_ECOSYSTEM
+from .models import DependencyGuardRequest, DependencyGuardResponse, DependencyIssue
 
 
 class DependencyGuardTool(BaseTool):

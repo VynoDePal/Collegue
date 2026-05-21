@@ -5,7 +5,8 @@ Versions Module - Gestion du versioning des prompts et métriques
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
+
 
 def get_versions_file() -> Path:
     """
