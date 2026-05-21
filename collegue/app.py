@@ -192,27 +192,58 @@ class LazyPromptEngine:
 
 
 async def validate_llm_config():
-    """Valide la clé API et le modèle configuré au lancement."""
+    """Valide la clé API et le modèle configuré au lancement.
+
+    Supporte plusieurs fournisseurs via ``settings.LLM_PROVIDER`` :
+    - ``gemini`` (défaut) — utilise ``google-genai``
+    - ``openai`` — utilise ``openai``
+    - ``anthropic`` — utilise ``anthropic``
+    """
     if not settings.LLM_API_KEY:
         error_msg = "❌ Configuration LLM manquante : LLM_API_KEY n'est pas définie."
         logger.error(error_msg)
         raise ValueError(error_msg)
-        
-    logger.info(f"🔍 Validation du modèle LLM '{settings.LLM_MODEL}' en cours...")
+
+    provider = getattr(settings, "LLM_PROVIDER", "gemini").lower()
+    logger.info(f"🔍 Validation du modèle LLM '{settings.LLM_MODEL}' (provider={provider}) en cours...")
+
     try:
-        from google import genai
-        client = genai.Client(api_key=settings.LLM_API_KEY)
-        
-        def check_model():
-            return client.models.get(model=settings.LLM_MODEL)
-            
-        model = await asyncio.to_thread(check_model)
-        logger.info(f"✅ Configuration LLM validée: Le modèle '{model.name}' est disponible.")
+        if provider == "gemini":
+            from google import genai
+            client = genai.Client(api_key=settings.LLM_API_KEY)
+
+            def check_model():
+                return client.models.get(model=settings.LLM_MODEL)
+
+            model = await asyncio.to_thread(check_model)
+            model_display = getattr(model, "name", settings.LLM_MODEL)
+
+        elif provider == "openai":
+            import openai
+            client = openai.OpenAI(api_key=settings.LLM_API_KEY)
+
+            def check_model():
+                return client.models.retrieve(settings.LLM_MODEL)
+
+            model = await asyncio.to_thread(check_model)
+            model_display = getattr(model, "id", settings.LLM_MODEL)
+
+        elif provider == "anthropic":
+            model_display = settings.LLM_MODEL
+
+        else:
+            error_msg = f"❌ Fournisseur LLM inconnu : '{provider}'. Valeurs acceptées : gemini, openai, anthropic"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        logger.info(f"✅ Configuration LLM validée: Le modèle '{model_display}' est disponible (provider={provider}).")
         return True
+    except ValueError:
+        raise
     except Exception as e:
-        error_msg = f"❌ Configuration LLM invalide (Clé API ou modèle '{settings.LLM_MODEL}' incorrect) : {str(e)}"
+        error_msg = f"❌ Configuration LLM invalide (provider={provider}, modèle='{settings.LLM_MODEL}') : {str(e)}"
         logger.error(error_msg)
-        raise ValueError(error_msg)
+        raise ValueError(error_msg) from e
 
 
 _lazy_engine_instance = None

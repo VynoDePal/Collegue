@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     
     LLM_API_KEY: Optional[str] = None
     LLM_MODEL: str = "gemini-3-flash-preview"
+    LLM_PROVIDER: str = "gemini"
 
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
