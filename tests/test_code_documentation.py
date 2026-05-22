@@ -1,14 +1,15 @@
 """
 Tests unitaires pour l'outil Code Documentation refactorisé.
 """
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+
 from collegue.tools.code_documentation import (
-    DocumentationTool,
+    DocumentationEngine,
     DocumentationRequest,
     DocumentationResponse,
-    DocumentationEngine
+    DocumentationTool,
 )
 
 

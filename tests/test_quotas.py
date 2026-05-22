@@ -2,20 +2,22 @@
 Tests unitaires pour le système de quotas.
 """
 import os
-import time
-import pytest
 import tempfile
+import time
 from unittest.mock import patch
+
+import pytest
+
 from collegue.tools.quotas import (
-    QuotaManager,
     GlobalQuotaManager,
     QuotaConfig,
     QuotaExceeded,
+    QuotaManager,
     QuotaType,
     ResourceUsage,
+    check_all_quotas,
     get_global_quota_manager,
     reset_global_quota_manager,
-    check_all_quotas,
 )
 
 

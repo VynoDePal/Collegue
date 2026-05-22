@@ -2,9 +2,10 @@
 Tests unitaires pour la configuration Docker Compose.
 Vérifie que le kc-provisioner est désactivé et que le healthcheck est correct.
 """
+import os
+
 import pytest
 import yaml
-import os
 
 
 class TestDockerComposeConfig:

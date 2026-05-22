@@ -24,7 +24,6 @@ import pytest
 from collegue.tools.code_documentation import DocumentationRequest, DocumentationTool
 from collegue.tools.test_generation import TestGenerationRequest, TestGenerationTool
 
-
 # ---------------------------------------------------------------------------
 # Shared fakes
 # ---------------------------------------------------------------------------

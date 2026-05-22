@@ -3,14 +3,15 @@ Tests unitaires pour les outils de sécurité utilisant les modules Python stdli
 
 Ces tests valident l'intégration avec les modules de la bibliothèque standard Python.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
 
-from unittest.mock import Mock, patch, MagicMock, mock_open
-import tempfile
-import shutil
 import json
+import shutil
+import tempfile
+from unittest.mock import MagicMock, Mock, mock_open, patch
 
 print("=" * 80)
 print("TESTS UNITAIRES - SÉCURITÉ + PYTHON STDLIB")
@@ -24,10 +25,11 @@ print("TEST 1: SECRET SCAN + Python stdlib")
 print("=" * 80)
 
 try:
-    from collegue.tools.secret_scan import SecretScanTool, SecretScanRequest
-    import re
     import base64
     import hashlib
+    import re
+
+    from collegue.tools.secret_scan import SecretScanRequest, SecretScanTool
     
     # Test 1.1: Détection avec regex (module re)
     print("\n1.1 Test détection avec regex (module re)...")
@@ -99,10 +101,11 @@ print("TEST 2: DEPENDENCY GUARD + Python stdlib")
 print("=" * 80)
 
 try:
-    from collegue.tools.dependency_guard import DependencyGuardTool, DependencyGuardRequest
-    import urllib.request
-    import urllib.parse
     import json
+    import urllib.parse
+    import urllib.request
+
+    from collegue.tools.dependency_guard import DependencyGuardRequest, DependencyGuardTool
     
     # Test 2.1: Parsing requirements.txt (module os, re)
     print("\n2.1 Test parsing requirements.txt...")
@@ -192,9 +195,11 @@ print("TEST 3: IAC GUARDRAINS + Python stdlib")
 print("=" * 80)
 
 try:
-    from collegue.tools.iac_guardrails_scan import IacGuardrailsScanTool, IacGuardrailsRequest
-    import yaml
     import json
+
+    import yaml
+
+    from collegue.tools.iac_guardrails_scan import IacGuardrailsRequest, IacGuardrailsScanTool
     
     # Test 3.1: Parsing YAML (module yaml)
     print("\n3.1 Test parsing YAML (module yaml)...")
@@ -279,9 +284,10 @@ print("TEST 4: REPO CONSISTENCY CHECK + Python stdlib")
 print("=" * 80)
 
 try:
-    from collegue.tools.repo_consistency_check import RepoConsistencyCheckTool, ConsistencyCheckRequest
     import ast
     import os
+
+    from collegue.tools.repo_consistency_check import ConsistencyCheckRequest, RepoConsistencyCheckTool
     
     # Test 4.1: Parsing AST Python (module ast)
     print("\n4.1 Test parsing AST Python...")
@@ -371,8 +377,9 @@ print("TEST 5: IMPACT ANALYSIS + Python stdlib")
 print("=" * 80)
 
 try:
-    from collegue.tools.impact_analysis import ImpactAnalysisTool, ImpactAnalysisRequest
     import re
+
+    from collegue.tools.impact_analysis import ImpactAnalysisRequest, ImpactAnalysisTool
     
     # Test 5.1: Analyse d'impact avec regex (module re)
     print("\n5.1 Test analyse d'impact (module re)...")

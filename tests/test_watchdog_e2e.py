@@ -30,15 +30,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from collegue.autonomous import watchdog as watchdog_mod
-from collegue.autonomous.watchdog import AutoFixer
 from collegue.autonomous.config_registry import UserConfigRegistry
+from collegue.autonomous.watchdog import AutoFixer
+from collegue.tools.github_ops import GitHubResponse, PRInfo
 from collegue.tools.sentry_monitor import (
     EventInfo,
     IssueInfo,
     SentryResponse,
 )
-from collegue.tools.github_ops import GitHubResponse, PRInfo
-
 
 FIXTURES = Path(__file__).parent / "fixtures" / "watchdog"
 

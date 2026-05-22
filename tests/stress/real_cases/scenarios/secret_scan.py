@@ -1,7 +1,7 @@
 """Real-world scenarios for secret_scan."""
 from __future__ import annotations
 
-from tests.stress.real_cases import fixture, findings_of, tool_content
+from tests.stress.real_cases import findings_of, fixture, tool_content
 
 TOOL_NAME = "secret_scan"
 

@@ -1,22 +1,21 @@
 """
 Tests unitaires pour le système de prompts amélioré
 """
-import sys
-import unittest
 import asyncio
-import tempfile
-import shutil
 import os
-from unittest.mock import Mock, patch
+import shutil
+import sys
+import tempfile
+import unittest
 from pathlib import Path
-
+from unittest.mock import Mock, patch
 
 parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
-from collegue.prompts.engine.versioning import PromptVersionManager
-from collegue.prompts.engine.optimizer import LanguageOptimizer
 from collegue.prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
+from collegue.prompts.engine.optimizer import LanguageOptimizer
+from collegue.prompts.engine.versioning import PromptVersionManager
 
 
 class TestPromptVersionManager(unittest.TestCase):

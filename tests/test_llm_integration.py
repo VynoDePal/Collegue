@@ -3,13 +3,14 @@ Tests d'intégration pour les LLM Models et Optimisations
 
 Ces tests valident l'utilisation des modèles Gemini et les techniques d'optimisation de prompts.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
 
-from unittest.mock import Mock, patch, MagicMock
 import json
 import time
+from unittest.mock import MagicMock, Mock, patch
 
 print("=" * 80)
 print("TESTS D'INTÉGRATION - LLM MODELS & OPTIMIZATIONS")

@@ -1,14 +1,14 @@
 """
 Optimiseur de prompts par langage de programmation
 """
-from typing import Dict, List, Any, Optional
+
 import logging
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class LanguageOptimizer:
-
     LANGUAGE_RULES = {
         "python": {
             "conventions": ["PEP 8", "Type hints", "Docstrings"],
@@ -19,9 +19,9 @@ class LanguageOptimizer:
                 "Follow PEP 8 style guide",
                 "Add type hints for better code clarity",
                 "Write comprehensive docstrings",
-                "Prefer list comprehensions over loops when appropriate"
+                "Prefer list comprehensions over loops when appropriate",
             ],
-            "context_hints": "Python emphasizes readability and simplicity."
+            "context_hints": "Python emphasizes readability and simplicity.",
         },
         "javascript": {
             "conventions": ["ES6+", "async/await", "const/let over var"],
@@ -32,9 +32,9 @@ class LanguageOptimizer:
                 "Prefer async/await over callbacks",
                 "Use arrow functions appropriately",
                 "Implement proper error handling",
-                "Use destructuring for cleaner code"
+                "Use destructuring for cleaner code",
             ],
-            "context_hints": "JavaScript is dynamic and event-driven."
+            "context_hints": "JavaScript is dynamic and event-driven.",
         },
         "typescript": {
             "conventions": ["Strong typing", "Interfaces", "Generics", "ES6+"],
@@ -45,9 +45,9 @@ class LanguageOptimizer:
                 "Use enums for constant values",
                 "Leverage generics for reusable code",
                 "Avoid using 'any' type",
-                "Use strict mode for better type checking"
+                "Use strict mode for better type checking",
             ],
-            "context_hints": "TypeScript adds static typing to JavaScript for better maintainability."
+            "context_hints": "TypeScript adds static typing to JavaScript for better maintainability.",
         },
         "java": {
             "conventions": ["CamelCase", "SOLID principles", "Design patterns"],
@@ -58,17 +58,16 @@ class LanguageOptimizer:
                 "Use appropriate design patterns",
                 "Write unit tests",
                 "Handle exceptions properly",
-                "Use meaningful class and method names"
+                "Use meaningful class and method names",
             ],
-            "context_hints": "Java is strongly typed and object-oriented."
-        }
+            "context_hints": "Java is strongly typed and object-oriented.",
+        },
     }
 
     def __init__(self):
         self.custom_rules: Dict[str, Dict[str, Any]] = {}
 
-    def optimize_prompt(self, base_prompt: str, language: str,
-                       context: Optional[Dict[str, Any]] = None) -> str:
+    def optimize_prompt(self, base_prompt: str, language: str, context: Optional[Dict[str, Any]] = None) -> str:
         language_lower = language.lower()
 
         rules = self.LANGUAGE_RULES.get(language_lower, {})

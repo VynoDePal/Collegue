@@ -8,17 +8,17 @@ pytest.skip(
 	allow_module_level=True,
 )
 
-import sys
-import os
-import unittest
 import asyncio
+import os
+import sys
+import unittest
 from pathlib import Path
-
 
 parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
 from collegue.core.orchestrator import ToolOrchestrator
+
 
 class TestToolOrchestrator(unittest.TestCase):
     """Tests unitaires pour la classe ToolOrchestrator"""

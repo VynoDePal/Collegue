@@ -4,18 +4,19 @@ PostgreSQL Database Tool - Inspection et requêtes de bases de données PostgreS
 Permet à Collègue d'inspecter le schéma, vérifier les données et debugger les requêtes SQL.
 """
 
-import logging
 import re
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolExecutionError
+
 from ..core.shared import validate_postgres_command
+from .base import BaseTool, ToolExecutionError
 from .clients import PostgresClient
 
 try:
-    import psycopg2
-    from psycopg2 import sql
-    from psycopg2.extras import RealDictCursor
+    import psycopg2  # noqa: F401
+    from psycopg2 import sql  # noqa: F401
+    from psycopg2.extras import RealDictCursor  # noqa: F401
 
     HAS_PSYCOPG2 = True
 except ImportError:
@@ -48,16 +49,12 @@ class PostgresRequest(BaseModel):
         None,
         description="REQUIS pour describe_table, indexes, foreign_keys, table_stats, sample_data. Nom de la table à inspecter",
     )
-    schema_name: Optional[str] = Field(
-        "public", description="Schéma PostgreSQL (défaut: 'public')"
-    )
+    schema_name: Optional[str] = Field("public", description="Schéma PostgreSQL (défaut: 'public')")
     query: Optional[str] = Field(
         None,
         description="REQUIS pour command='query'. Requête SQL SELECT uniquement (INSERT/UPDATE/DELETE interdits)",
     )
-    limit: int = Field(
-        100, description="Nombre max de lignes retournées (1-1000)", ge=1, le=1000
-    )
+    limit: int = Field(100, description="Nombre max de lignes retournées (1-1000)", ge=1, le=1000)
 
     @field_validator("command")
     @classmethod
@@ -196,13 +193,9 @@ class PostgresDBTool(BaseTool):
 
     def _get_postgres_client(self, request: PostgresRequest) -> PostgresClient:
         """Create and configure PostgresClient from request."""
-        return PostgresClient(
-            connection_string=request.connection_string, schema=request.schema_name
-        )
+        return PostgresClient(connection_string=request.connection_string, schema=request.schema_name)
 
-    def _transform_tables(
-        self, tables_data: List[Dict], schema_name: str
-    ) -> List[TableInfo]:
+    def _transform_tables(self, tables_data: List[Dict], schema_name: str) -> List[TableInfo]:
         """Transform raw table data into TableInfo objects."""
         result = []
         for row in tables_data:
@@ -298,18 +291,14 @@ class PostgresDBTool(BaseTool):
             truncated=len(data) >= limit,
         )
 
-    def _execute_core_logic(
-        self, request: PostgresRequest, **kwargs
-    ) -> PostgresResponse:
+    def _execute_core_logic(self, request: PostgresRequest, **kwargs) -> PostgresResponse:
         """Exécute la logique principale."""
         client = self._get_postgres_client(request)
 
         if request.command == "list_schemas":
             response = client.list_schemas()
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to list schemas"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to list schemas")
             schemas = [row.get("schema_name") for row in response.data]
             return PostgresResponse(
                 success=True,
@@ -321,9 +310,7 @@ class PostgresDBTool(BaseTool):
         elif request.command == "list_tables":
             response = client.list_tables(request.schema_name)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to list tables"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to list tables")
             tables_data = response.data or []
             tables = self._transform_tables(tables_data, request.schema_name)
             return PostgresResponse(
@@ -338,9 +325,7 @@ class PostgresDBTool(BaseTool):
                 raise ToolExecutionError("table_name requis pour describe_table")
             response = client.describe_table(request.table_name, request.schema_name)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to describe table"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to describe table")
             columns_data = response.data or []
             columns = self._transform_columns(columns_data)
             return PostgresResponse(
@@ -355,9 +340,7 @@ class PostgresDBTool(BaseTool):
                 raise ToolExecutionError("table_name requis pour indexes")
             response = client.get_indexes(request.table_name, request.schema_name)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get indexes"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get indexes")
             indexes_data = response.data or []
             indexes = self._transform_indexes(indexes_data)
             return PostgresResponse(
@@ -372,9 +355,7 @@ class PostgresDBTool(BaseTool):
                 raise ToolExecutionError("table_name requis pour foreign_keys")
             response = client.get_foreign_keys(request.table_name, request.schema_name)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get foreign keys"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get foreign keys")
             fks_data = response.data or []
             fks = self._transform_foreign_keys(fks_data)
             return PostgresResponse(
@@ -389,21 +370,13 @@ class PostgresDBTool(BaseTool):
                 raise ToolExecutionError("table_name requis pour table_stats")
             response = client.get_table_stats(request.table_name, request.schema_name)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get table stats"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get table stats")
             stats_list = response.data or []
             stats_data = stats_list[0] if stats_list else {}
             stats = {
-                "total_size": stats_data.get("total_size", "N/A")
-                if stats_data
-                else "N/A",
-                "table_size": stats_data.get("table_size", "N/A")
-                if stats_data
-                else "N/A",
-                "indexes_size": stats_data.get("indexes_size", "N/A")
-                if stats_data
-                else "N/A",
+                "total_size": stats_data.get("total_size", "N/A") if stats_data else "N/A",
+                "table_size": stats_data.get("table_size", "N/A") if stats_data else "N/A",
+                "indexes_size": stats_data.get("indexes_size", "N/A") if stats_data else "N/A",
                 "live_rows": stats_data.get("live_rows", 0) if stats_data else 0,
                 "dead_rows": stats_data.get("dead_rows", 0) if stats_data else 0,
                 "last_vacuum": stats_data.get("last_vacuum") if stats_data else None,
@@ -419,13 +392,9 @@ class PostgresDBTool(BaseTool):
         elif request.command == "sample_data":
             if not request.table_name:
                 raise ToolExecutionError("table_name requis pour sample_data")
-            response = client.sample_data(
-                request.table_name, request.schema_name, request.limit
-            )
+            response = client.sample_data(request.table_name, request.schema_name, request.limit)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to sample data"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to sample data")
             result = self._transform_query_result(response.data, request.limit)
             return PostgresResponse(
                 success=True,
@@ -439,9 +408,7 @@ class PostgresDBTool(BaseTool):
                 raise ToolExecutionError("query requis pour command=query")
             response = client.execute_query(request.query, request.limit)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to execute query"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to execute query")
             result = self._transform_query_result(response.data, request.limit)
             return PostgresResponse(
                 success=True,

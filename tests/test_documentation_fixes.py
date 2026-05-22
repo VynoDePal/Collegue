@@ -1,6 +1,9 @@
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
-from collegue.tools.code_documentation import DocumentationTool, DocumentationRequest
+
+from collegue.tools.code_documentation import DocumentationRequest, DocumentationTool
+
 
 @pytest.mark.asyncio
 async def test_documentation_tool_success():

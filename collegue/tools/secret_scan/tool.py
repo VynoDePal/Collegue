@@ -13,11 +13,12 @@ La logique métier a été déplacée dans engine.py, les modèles dans models.p
 """
 
 import os
-from typing import List, Dict, Any, Optional
-from ..base import BaseTool, ToolValidationError
+from typing import Any, Dict, List
+
 from ...core.shared import aggregate_severities
-from .models import SecretScanRequest, SecretScanResponse, SecretFinding
+from ..base import BaseTool, ToolValidationError
 from .engine import SecretDetectionEngine
+from .models import SecretFinding, SecretScanRequest, SecretScanResponse
 
 
 class SecretScanTool(BaseTool):
@@ -168,19 +169,13 @@ class SecretScanTool(BaseTool):
         ]
 
         if files_with_secrets:
-            summary_parts.append(
-                f"Fichiers affectés: {', '.join(files_with_secrets[:10])}"
-            )
+            summary_parts.append(f"Fichiers affectés: {', '.join(files_with_secrets[:10])}")
             if len(files_with_secrets) > 10:
-                summary_parts.append(
-                    f"... et {len(files_with_secrets) - 10} autres fichiers."
-                )
+                summary_parts.append(f"... et {len(files_with_secrets) - 10} autres fichiers.")
 
         return " ".join(summary_parts)
 
-    def _execute_core_logic(
-        self, request: SecretScanRequest, **kwargs
-    ) -> SecretScanResponse:
+    def _execute_core_logic(self, request: SecretScanRequest, **kwargs) -> SecretScanResponse:
         """Exécute le scan de secrets."""
         findings = []
         files_scanned = 0
@@ -196,9 +191,7 @@ class SecretScanTool(BaseTool):
         if request.files:
             self.logger.info(f"Scan batch de {len(request.files)} fichier(s)")
             for file_item in request.files:
-                if not self._engine.should_scan_file(
-                    file_item.path, include_patterns, exclude_patterns
-                ):
+                if not self._engine.should_scan_file(file_item.path, include_patterns, exclude_patterns):
                     self.logger.debug(f"Fichier ignoré (pattern): {file_item.path}")
                     continue
 
@@ -206,9 +199,7 @@ class SecretScanTool(BaseTool):
                     self.logger.debug(f"Fichier ignoré (trop grand): {file_item.path}")
                     continue
 
-                file_findings = self._engine.scan_content(
-                    file_item.content, file_item.path, request.severity_threshold
-                )
+                file_findings = self._engine.scan_content(file_item.content, file_item.path, request.severity_threshold)
 
                 if file_findings:
                     files_with_secrets.append(file_item.path)
@@ -220,9 +211,7 @@ class SecretScanTool(BaseTool):
 
         # Scan de contenu direct
         elif request.content:
-            findings = self._engine.scan_content(
-                request.content, "[content]", request.severity_threshold
-            )
+            findings = self._engine.scan_content(request.content, "[content]", request.severity_threshold)
             files_scanned = 1
             if findings:
                 files_with_secrets.append("[content]")
@@ -243,9 +232,7 @@ class SecretScanTool(BaseTool):
                     raise ToolValidationError(
                         f"Fichier '{request.target}' inexistant. Utilisez 'content' pour passer du code directement."
                     )
-                findings = self._engine.scan_file(
-                    request.target, request.severity_threshold, request.max_file_size
-                )
+                findings = self._engine.scan_file(request.target, request.severity_threshold, request.max_file_size)
                 files_scanned = 1
 
             elif scan_type == "directory":
@@ -262,9 +249,7 @@ class SecretScanTool(BaseTool):
                 )
 
             elif scan_type == "content":
-                findings = self._engine.scan_content(
-                    request.target, None, request.severity_threshold
-                )
+                findings = self._engine.scan_content(request.target, None, request.severity_threshold)
                 files_scanned = 1
 
             # Collecter les fichiers avec secrets
@@ -276,9 +261,7 @@ class SecretScanTool(BaseTool):
         severity_counts = aggregate_severities(findings)
 
         # Construire le résumé
-        summary = self._build_summary(
-            findings, files_scanned, files_with_secrets, severity_counts
-        )
+        summary = self._build_summary(findings, files_scanned, files_with_secrets, severity_counts)
 
         return SecretScanResponse(
             clean=len(findings) == 0,

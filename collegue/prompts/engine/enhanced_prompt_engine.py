@@ -1,11 +1,12 @@
 """
 Enhanced Prompt Engine avec versioning, optimisation et tracking de performance
 """
+
 import datetime
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .models import PromptVariable
 from .optimizer import LanguageOptimizer
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 class EnhancedPromptEngine(PromptEngine):
-
     def __init__(self, templates_dir: str = None, storage_dir: str = None):
         """Construct the engine and load seed templates from ``templates_dir``.
 
@@ -44,9 +44,7 @@ class EnhancedPromptEngine(PromptEngine):
         self.language_optimizer = LanguageOptimizer()
         self.performance_cache: Dict[str, Dict[str, float]] = {}
         self.templates: Dict[str, PromptTemplate] = {}
-        self.tool_templates_dir = templates_dir or os.path.join(
-            os.path.dirname(__file__), '..', 'templates', 'tools'
-        )
+        self.tool_templates_dir = templates_dir or os.path.join(os.path.dirname(__file__), "..", "templates", "tools")
         self._load_tool_templates()
         self._log_templates_loaded()
 
@@ -105,14 +103,12 @@ class EnhancedPromptEngine(PromptEngine):
 
             for yaml_file in tool_dir.glob("*.yaml"):
                 try:
-                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                    with open(yaml_file, "r", encoding="utf-8") as f:
                         template_data = yaml.safe_load(f)
 
                     name = template_data.get("name")
                     if not name:
-                        logger.warning(
-                            "Template YAML %s has no 'name' key, skipped", yaml_file
-                        )
+                        logger.warning("Template YAML %s has no 'name' key, skipped", yaml_file)
                         continue
 
                     yaml_content = template_data.get("template", "")
@@ -128,9 +124,7 @@ class EnhancedPromptEngine(PromptEngine):
                     if existing:
                         # Same name, content drifted → update in place.
                         existing.template = yaml_content
-                        existing.description = template_data.get(
-                            "description", existing.description
-                        )
+                        existing.description = template_data.get("description", existing.description)
                         existing.variables = [
                             PromptVariable(**var) if isinstance(var, dict) else var
                             for var in template_data.get("variables", [])
@@ -143,20 +137,23 @@ class EnhancedPromptEngine(PromptEngine):
                         updated += 1
                         logger.info(
                             "Template '%s' updated from %s (UUID preserved)",
-                            name, yaml_file,
+                            name,
+                            yaml_file,
                         )
                         continue
 
                     # Brand-new template: create fresh.
-                    template = self.create_template({
-                        "name": name,
-                        "description": template_data.get("description", ""),
-                        "template": yaml_content,
-                        "variables": template_data.get("variables", []),
-                        "category": f"tool/{tool_name}",
-                        "tags": template_data.get("tags", []),
-                        "provider_specific": template_data.get("provider_specific", {}),
-                    })
+                    template = self.create_template(
+                        {
+                            "name": name,
+                            "description": template_data.get("description", ""),
+                            "template": yaml_content,
+                            "variables": template_data.get("variables", []),
+                            "category": f"tool/{tool_name}",
+                            "tags": template_data.get("tags", []),
+                            "provider_specific": template_data.get("provider_specific", {}),
+                        }
+                    )
                     self.templates[key] = template
                     existing_by_name[name] = template
                     self._ensure_version(template.id, yaml_content, template_data)
@@ -168,7 +165,9 @@ class EnhancedPromptEngine(PromptEngine):
 
         logger.info(
             "Tool templates loaded: %d created, %d updated, %d skipped (already loaded)",
-            created, updated, skipped,
+            created,
+            updated,
+            skipped,
         )
 
     def _ensure_version(
@@ -192,11 +191,7 @@ class EnhancedPromptEngine(PromptEngine):
         )
 
     async def get_optimized_prompt(
-        self,
-        tool_name: str,
-        context: Dict[str, Any],
-        language: Optional[str] = None,
-        version: Optional[str] = None
+        self, tool_name: str, context: Dict[str, Any], language: Optional[str] = None, version: Optional[str] = None
     ) -> Tuple[str, str]:
 
         category = f"tool/{tool_name.lower()}"
@@ -208,8 +203,7 @@ class EnhancedPromptEngine(PromptEngine):
             versions = self.version_manager.get_all_versions(tool_name)
             if versions:
                 prompt_version = (
-                    self.version_manager.get_version(tool_name, version)
-                    if version else self._select_version(tool_name)
+                    self.version_manager.get_version(tool_name, version) if version else self._select_version(tool_name)
                 )
                 if prompt_version is None:
                     prompt_version = versions[-1]
@@ -294,7 +288,7 @@ class EnhancedPromptEngine(PromptEngine):
         execution_time: float,
         tokens_used: int,
         success: bool,
-        user_feedback: Optional[float] = None
+        user_feedback: Optional[float] = None,
     ) -> None:
         """Record an invocation for observability.
 
@@ -312,28 +306,27 @@ class EnhancedPromptEngine(PromptEngine):
             version=version,
             execution_time=execution_time,
             tokens_used=tokens_used,
-            success=success
+            success=success,
         )
 
         if template_id not in self.performance_cache:
             self.performance_cache[template_id] = []
 
         metric_entry = {
-            'version': version,
-            'execution_time': execution_time,
-            'tokens_used': tokens_used,
-            'success': success,
-            'timestamp': os.path.getmtime('.')
+            "version": version,
+            "execution_time": execution_time,
+            "tokens_used": tokens_used,
+            "success": success,
+            "timestamp": os.path.getmtime("."),
         }
 
         if user_feedback is not None:
-            metric_entry['user_feedback'] = user_feedback
+            metric_entry["user_feedback"] = user_feedback
 
         self.performance_cache[template_id].append(metric_entry)
 
         prompt_version = self.version_manager.get_version(template_id, version)
         if prompt_version:
-
             success_score = prompt_version.success_rate * 40
 
             time_score = max(0, (10 - prompt_version.average_generation_time) / 10) * 30
@@ -349,34 +342,34 @@ class EnhancedPromptEngine(PromptEngine):
         if template_id in self.performance_cache:
             metrics = self.performance_cache[template_id]
             total_count = len(metrics)
-            success_count = sum(1 for m in metrics if m.get('success', False))
+            success_count = sum(1 for m in metrics if m.get("success", False))
 
             self.performance_cache[f"{template_id}_stats"] = {
-                'total_executions': total_count,
-                'success_rate': success_count / total_count if total_count > 0 else 0,
-                'average_time': sum(m.get('execution_time', 0) for m in metrics) / total_count if total_count > 0 else 0,
-                'average_tokens': sum(m.get('tokens_used', 0) for m in metrics) / total_count if total_count > 0 else 0
+                "total_executions": total_count,
+                "success_rate": success_count / total_count if total_count > 0 else 0,
+                "average_time": sum(m.get("execution_time", 0) for m in metrics) / total_count
+                if total_count > 0
+                else 0,
+                "average_tokens": sum(m.get("tokens_used", 0) for m in metrics) / total_count if total_count > 0 else 0,
             }
 
     def get_performance_report(self, template_id: str) -> Dict[str, Any]:
         versions = self.version_manager.get_all_versions(template_id)
 
-        report = {
-            "template_id": template_id,
-            "total_versions": len(versions),
-            "versions": []
-        }
+        report = {"template_id": template_id, "total_versions": len(versions), "versions": []}
 
         for version in versions:
-            report["versions"].append({
-                "version": version.version,
-                "is_active": version.is_active,
-                "usage_count": version.usage_count,
-                "success_rate": version.success_rate,
-                "average_tokens": version.average_tokens,
-                "average_time": version.average_generation_time,
-                "performance_score": version.performance_score
-            })
+            report["versions"].append(
+                {
+                    "version": version.version,
+                    "is_active": version.is_active,
+                    "usage_count": version.usage_count,
+                    "success_rate": version.success_rate,
+                    "average_tokens": version.average_tokens,
+                    "average_time": version.average_generation_time,
+                    "performance_score": version.performance_score,
+                }
+            )
 
         report["versions"].sort(key=lambda v: v["performance_score"], reverse=True)
 

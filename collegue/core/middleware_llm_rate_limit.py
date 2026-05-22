@@ -16,11 +16,12 @@ On rejection the middleware raises ``mcp.shared.exceptions.McpError`` with
 JSON-RPC error code ``-32000`` and a body that mirrors the HTTP 429 convention
 (``retry_after`` seconds in the payload).
 """
+
 from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
@@ -113,19 +114,21 @@ class LLMRateLimitingMiddleware(Middleware):
             return await call_next(context)
 
         identity = _extract_identity(context)
-        allowed, retry_after, reason = await self.limiter.check_and_track(
-            identity, tool_name
-        )
+        allowed, retry_after, reason = await self.limiter.check_and_track(identity, tool_name)
 
         if allowed:
             return await call_next(context)
 
         logger.warning(
             "LLM rate limit hit: identity=%s tool=%s reason=%s retry_after=%ss",
-            identity, tool_name, reason, retry_after,
+            identity,
+            tool_name,
+            reason,
+            retry_after,
         )
         try:
             from collegue.core.security_logger import security_logger
+
             security_logger.log_security_event(
                 event_type="llm_rate_limit_exceeded",
                 metadata={
@@ -148,10 +151,7 @@ class LLMRateLimitingMiddleware(Middleware):
         raise McpError(
             ErrorData(
                 code=-32000,
-                message=(
-                    f"LLM rate limit exceeded for this client ({reason}). "
-                    f"Retry after {retry_after}s."
-                ),
+                message=(f"LLM rate limit exceeded for this client ({reason}). Retry after {retry_after}s."),
                 data={"retry_after": retry_after, "reason": reason},
             )
         )

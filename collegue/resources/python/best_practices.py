@@ -1,17 +1,22 @@
 """
 Best Practices Python - Ressources pour les bonnes pratiques en Python
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
+
 import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 class PythonBestPractice(BaseModel):
     """Modèle pour une bonne pratique Python."""
+
     title: str
     description: str
     category: str
     examples: Dict[str, Dict[str, str]] = {}
     references: List[str] = []
+
 
 PYTHON_BEST_PRACTICES = {
     "pep8": {
@@ -21,14 +26,14 @@ PYTHON_BEST_PRACTICES = {
         "examples": {
             "good": {
                 "title": "Bon style",
-                "code": "def calculate_total(items):\n    \"\"\"Calcule le total des prix des items.\"\"\"\n    return sum(item.price for item in items)"
+                "code": 'def calculate_total(items):\n    """Calcule le total des prix des items."""\n    return sum(item.price for item in items)',
             },
             "bad": {
                 "title": "Mauvais style",
-                "code": "def calculateTotal( items ):\n    return sum( item.price for item in items )"
-            }
+                "code": "def calculateTotal( items ):\n    return sum( item.price for item in items )",
+            },
         },
-        "references": ["https://peps.python.org/pep-0008/"]
+        "references": ["https://peps.python.org/pep-0008/"],
     },
     "docstrings": {
         "title": "Utiliser des docstrings",
@@ -37,14 +42,14 @@ PYTHON_BEST_PRACTICES = {
         "examples": {
             "good": {
                 "title": "Bonne documentation",
-                "code": "def calculate_area(radius):\n    \"\"\"Calcule l'aire d'un cercle.\n    \n    Args:\n        radius (float): Le rayon du cercle\n        \n    Returns:\n        float: L'aire du cercle\n    \"\"\"\n    import math\n    return math.pi * radius ** 2"
+                "code": 'def calculate_area(radius):\n    """Calcule l\'aire d\'un cercle.\n    \n    Args:\n        radius (float): Le rayon du cercle\n        \n    Returns:\n        float: L\'aire du cercle\n    """\n    import math\n    return math.pi * radius ** 2',
             },
             "bad": {
                 "title": "Mauvaise documentation",
-                "code": "def calculate_area(radius):\n    # calcule l'aire\n    import math\n    return math.pi * radius ** 2"
-            }
+                "code": "def calculate_area(radius):\n    # calcule l'aire\n    import math\n    return math.pi * radius ** 2",
+            },
         },
-        "references": ["https://peps.python.org/pep-0257/"]
+        "references": ["https://peps.python.org/pep-0257/"],
     },
     "type_hints": {
         "title": "Utiliser les annotations de type",
@@ -53,14 +58,11 @@ PYTHON_BEST_PRACTICES = {
         "examples": {
             "good": {
                 "title": "Avec annotations de type",
-                "code": "def greeting(name: str) -> str:\n    return f'Hello, {name}!'"
+                "code": "def greeting(name: str) -> str:\n    return f'Hello, {name}!'",
             },
-            "bad": {
-                "title": "Sans annotations de type",
-                "code": "def greeting(name):\n    return f'Hello, {name}!'"
-            }
+            "bad": {"title": "Sans annotations de type", "code": "def greeting(name):\n    return f'Hello, {name}!'"},
         },
-        "references": ["https://peps.python.org/pep-0484/"]
+        "references": ["https://peps.python.org/pep-0484/"],
     },
     "exceptions": {
         "title": "Gérer correctement les exceptions",
@@ -69,14 +71,14 @@ PYTHON_BEST_PRACTICES = {
         "examples": {
             "good": {
                 "title": "Bonne gestion d'exceptions",
-                "code": "try:\n    with open('file.txt', 'r') as file:\n        content = file.read()\nexcept FileNotFoundError:\n    print(\"Le fichier n'existe pas\")\nexcept PermissionError:\n    print(\"Pas d'autorisation pour lire le fichier\")"
+                "code": "try:\n    with open('file.txt', 'r') as file:\n        content = file.read()\nexcept FileNotFoundError:\n    print(\"Le fichier n'existe pas\")\nexcept PermissionError:\n    print(\"Pas d'autorisation pour lire le fichier\")",
             },
             "bad": {
                 "title": "Mauvaise gestion d'exceptions",
-                "code": "try:\n    with open('file.txt', 'r') as file:\n        content = file.read()\nexcept Exception as e:\n    print(e)"
-            }
+                "code": "try:\n    with open('file.txt', 'r') as file:\n        content = file.read()\nexcept Exception as e:\n    print(e)",
+            },
         },
-        "references": ["https://docs.python.org/3/tutorial/errors.html"]
+        "references": ["https://docs.python.org/3/tutorial/errors.html"],
     },
     "context_managers": {
         "title": "Utiliser les gestionnaires de contexte",
@@ -85,32 +87,30 @@ PYTHON_BEST_PRACTICES = {
         "examples": {
             "good": {
                 "title": "Avec gestionnaire de contexte",
-                "code": "with open('file.txt', 'r') as file:\n    content = file.read()"
+                "code": "with open('file.txt', 'r') as file:\n    content = file.read()",
             },
             "bad": {
                 "title": "Sans gestionnaire de contexte",
-                "code": "file = open('file.txt', 'r')\ncontent = file.read()\nfile.close()"
-            }
+                "code": "file = open('file.txt', 'r')\ncontent = file.read()\nfile.close()",
+            },
         },
-        "references": ["https://docs.python.org/3/reference/datamodel.html#context-managers"]
+        "references": ["https://docs.python.org/3/reference/datamodel.html#context-managers"],
     },
     "list_comprehensions": {
         "title": "Utiliser les compréhensions de liste",
         "description": "Les compréhensions de liste sont plus concises et souvent plus lisibles que les boucles traditionnelles.",
         "category": "idioms",
         "examples": {
-            "good": {
-                "title": "Avec compréhension de liste",
-                "code": "squares = [x**2 for x in range(10)]"
-            },
+            "good": {"title": "Avec compréhension de liste", "code": "squares = [x**2 for x in range(10)]"},
             "bad": {
                 "title": "Sans compréhension de liste",
-                "code": "squares = []\nfor x in range(10):\n    squares.append(x**2)"
-            }
+                "code": "squares = []\nfor x in range(10):\n    squares.append(x**2)",
+            },
         },
-        "references": ["https://docs.python.org/3/tutorial/datastructures.html#list-comprehensions"]
-    }
+        "references": ["https://docs.python.org/3/tutorial/datastructures.html#list-comprehensions"],
+    },
 }
+
 
 def get_best_practice(practice_id: str) -> Optional[PythonBestPractice]:
     """Récupère les informations d'une bonne pratique Python."""
@@ -118,14 +118,16 @@ def get_best_practice(practice_id: str) -> Optional[PythonBestPractice]:
         return PythonBestPractice(**PYTHON_BEST_PRACTICES[practice_id])
     return None
 
+
 def get_all_best_practices() -> List[str]:
     """Récupère la liste de toutes les bonnes pratiques disponibles."""
     return list(PYTHON_BEST_PRACTICES.keys())
 
+
 def get_best_practices_by_category(category: str) -> List[str]:
     """Récupère la liste des bonnes pratiques d'une catégorie spécifique."""
-    return [id for id, data in PYTHON_BEST_PRACTICES.items()
-            if data.get("category") == category]
+    return [id for id, data in PYTHON_BEST_PRACTICES.items() if data.get("category") == category]
+
 
 def register_best_practices(app, app_state):
     """Enregistre les ressources des bonnes pratiques Python."""

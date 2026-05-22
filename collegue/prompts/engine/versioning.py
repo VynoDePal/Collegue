@@ -1,14 +1,15 @@
 """
 Système de versioning des prompts avec gestion des versions et performances
 """
+
 import json
-import os
-from datetime import datetime
-from typing import Dict, List, Optional, Any
-from pathlib import Path
-import uuid
-from dataclasses import dataclass, asdict
 import logging
+import os
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -34,29 +35,25 @@ class PromptVersion:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'PromptVersion':
+    def from_dict(cls, data: Dict[str, Any]) -> "PromptVersion":
         return cls(**data)
 
-class PromptVersionManager:
 
+class PromptVersionManager:
     def __init__(self, storage_path: str = None):
-        self.storage_path = storage_path or os.path.join(
-            os.path.dirname(__file__), '..', 'versions'
-        )
+        self.storage_path = storage_path or os.path.join(os.path.dirname(__file__), "..", "versions")
         Path(self.storage_path).mkdir(parents=True, exist_ok=True)
-        self.versions_file = os.path.join(self.storage_path, 'versions.json')
+        self.versions_file = os.path.join(self.storage_path, "versions.json")
         self.versions_cache: Dict[str, List[PromptVersion]] = {}
         self._load_versions()
 
     def _load_versions(self) -> None:
         if os.path.exists(self.versions_file):
             try:
-                with open(self.versions_file, 'r', encoding='utf-8') as f:
+                with open(self.versions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for template_id, versions in data.items():
-                        self.versions_cache[template_id] = [
-                            PromptVersion.from_dict(v) for v in versions
-                        ]
+                        self.versions_cache[template_id] = [PromptVersion.from_dict(v) for v in versions]
             except Exception as e:
                 logger.error(f"Erreur lors du chargement des versions: {e}")
                 self.versions_cache = {}
@@ -67,13 +64,14 @@ class PromptVersionManager:
             for template_id, versions in self.versions_cache.items():
                 data[template_id] = [v.to_dict() for v in versions]
 
-            with open(self.versions_file, 'w', encoding='utf-8') as f:
+            with open(self.versions_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Erreur lors de la sauvegarde des versions: {e}")
 
-    def create_version(self, template_id: str, content: str,
-                      variables: List[Dict[str, Any]], version: str = None) -> PromptVersion:
+    def create_version(
+        self, template_id: str, content: str, variables: List[Dict[str, Any]], version: str = None
+    ) -> PromptVersion:
         if version is None:
             version = self._get_next_version(template_id)
 
@@ -86,7 +84,7 @@ class PromptVersionManager:
             variables=variables,
             created_at=now,
             updated_at=now,
-            metadata={}
+            metadata={},
         )
 
         if template_id not in self.versions_cache:
@@ -116,9 +114,9 @@ class PromptVersionManager:
             return "1.0.0"
 
         latest = max(versions, key=lambda v: v.created_at)
-        parts = latest.version.split('.')
+        parts = latest.version.split(".")
         parts[-1] = str(int(parts[-1]) + 1)
-        return '.'.join(parts)
+        return ".".join(parts)
 
     def get_version(self, template_id: str, version: str) -> Optional[PromptVersion]:
 
@@ -128,7 +126,7 @@ class PromptVersionManager:
             if v.version == version:
                 return v
 
-        if version in ['default', 'v2', 'experimental', 'python']:
+        if version in ["default", "v2", "experimental", "python"]:
             return self._create_virtual_version(template_id, version)
 
         return None
@@ -144,7 +142,7 @@ class PromptVersionManager:
             created_at=now,
             updated_at=now,
             is_active=True,
-            metadata={"source": "yaml", "name": version_name}
+            metadata={"source": "yaml", "name": version_name},
         )
 
     def get_all_versions(self, template_id: str) -> List[PromptVersion]:
@@ -156,25 +154,25 @@ class PromptVersionManager:
 
         for v in versions:
             if v.version == version:
-                if 'success_rate' in metrics:
-                    v.success_rate = metrics['success_rate']
-                if 'avg_execution_time' in metrics:
-                    v.average_generation_time = metrics['avg_execution_time']
-                if 'avg_tokens' in metrics:
-                    v.average_tokens = metrics['avg_tokens']
-                if 'executions' in metrics:
-                    v.usage_count = metrics['executions']
-                if 'performance_score' in metrics:
-                    v.performance_score = metrics['performance_score']
+                if "success_rate" in metrics:
+                    v.success_rate = metrics["success_rate"]
+                if "avg_execution_time" in metrics:
+                    v.average_generation_time = metrics["avg_execution_time"]
+                if "avg_tokens" in metrics:
+                    v.average_tokens = metrics["avg_tokens"]
+                if "executions" in metrics:
+                    v.usage_count = metrics["executions"]
+                if "performance_score" in metrics:
+                    v.performance_score = metrics["performance_score"]
 
-                if 'performance_score' not in metrics:
+                if "performance_score" not in metrics:
                     v.performance_score = self._calculate_performance_score(v)
 
                 v.updated_at = datetime.now().isoformat()
                 self._save_versions()
                 return
 
-        if version in ['default', 'v2', 'experimental', 'python']:
+        if version in ["default", "v2", "experimental", "python"]:
             prompt_version = self._create_virtual_version(template_id, version)
             self.update_metrics_for_version(prompt_version, metrics)
 
@@ -185,16 +183,16 @@ class PromptVersionManager:
 
     def update_metrics_for_version(self, version: PromptVersion, metrics: Dict[str, Any]) -> None:
 
-        if 'success_rate' in metrics:
-            version.success_rate = metrics['success_rate']
-        if 'avg_execution_time' in metrics:
-            version.average_generation_time = metrics['avg_execution_time']
-        if 'avg_tokens' in metrics:
-            version.average_tokens = metrics['avg_tokens']
-        if 'executions' in metrics:
-            version.usage_count = metrics['executions']
-        if 'performance_score' in metrics:
-            version.performance_score = metrics['performance_score']
+        if "success_rate" in metrics:
+            version.success_rate = metrics["success_rate"]
+        if "avg_execution_time" in metrics:
+            version.average_generation_time = metrics["avg_execution_time"]
+        if "avg_tokens" in metrics:
+            version.average_tokens = metrics["avg_tokens"]
+        if "executions" in metrics:
+            version.usage_count = metrics["executions"]
+        if "performance_score" in metrics:
+            version.performance_score = metrics["performance_score"]
         else:
             version.performance_score = self._calculate_performance_score(version)
 
@@ -213,9 +211,15 @@ class PromptVersionManager:
 
         return min(1.0, max(0.0, score))
 
-    def update_performance_metrics(self, template_id: str, version: str,
-                                  success: bool, execution_time: float,
-                                  tokens_used: int, user_satisfaction: float = None) -> None:
+    def update_performance_metrics(
+        self,
+        template_id: str,
+        version: str,
+        success: bool,
+        execution_time: float,
+        tokens_used: int,
+        user_satisfaction: float = None,
+    ) -> None:
 
         versions = self.versions_cache.get(template_id, [])
 
@@ -226,18 +230,22 @@ class PromptVersionManager:
                 success_value = 1.0 if success else 0.0
                 v.success_rate = ((v.success_rate * (v.usage_count - 1)) + success_value) / v.usage_count
 
-                v.average_generation_time = ((v.average_generation_time * (v.usage_count - 1)) + execution_time) / v.usage_count
+                v.average_generation_time = (
+                    (v.average_generation_time * (v.usage_count - 1)) + execution_time
+                ) / v.usage_count
 
                 v.average_tokens = int(((v.average_tokens * (v.usage_count - 1)) + tokens_used) / v.usage_count)
 
                 v.performance_score = self._calculate_performance_score(v)
 
                 if user_satisfaction is not None and v.metadata is not None:
-                    if 'user_satisfaction_scores' not in v.metadata:
-                        v.metadata['user_satisfaction_scores'] = []
-                    v.metadata['user_satisfaction_scores'].append(user_satisfaction)
+                    if "user_satisfaction_scores" not in v.metadata:
+                        v.metadata["user_satisfaction_scores"] = []
+                    v.metadata["user_satisfaction_scores"].append(user_satisfaction)
 
-                    v.metadata['avg_user_satisfaction'] = sum(v.metadata['user_satisfaction_scores']) / len(v.metadata['user_satisfaction_scores'])
+                    v.metadata["avg_user_satisfaction"] = sum(v.metadata["user_satisfaction_scores"]) / len(
+                        v.metadata["user_satisfaction_scores"]
+                    )
 
                 v.updated_at = datetime.now().isoformat()
                 self._save_versions()

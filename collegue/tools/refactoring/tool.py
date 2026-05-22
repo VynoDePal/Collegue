@@ -12,12 +12,13 @@ Cet outil refactorise et améliore le code selon différents types de transforma
 Refactorisé: Le fichier original faisait 687 lignes, maintenant ~200 lignes.
 """
 
-from typing import List, Dict, Any, Optional
-from ..base import BaseTool, ToolError
+from typing import Any, Dict, List
+
 from ...core.shared import run_async_from_sync
-from .models import RefactoringRequest, RefactoringResponse, LLMRefactoringResult
+from ..base import BaseTool, ToolError
+from .config import REFACTORING_LANGUAGE_INSTRUCTIONS
 from .engine import RefactoringEngine
-from .config import REFACTORING_TYPES, REFACTORING_LANGUAGE_INSTRUCTIONS
+from .models import LLMRefactoringResult, RefactoringRequest, RefactoringResponse
 
 
 class RefactoringTool(BaseTool):
@@ -140,8 +141,7 @@ class RefactoringTool(BaseTool):
             supported_types = self.get_supported_refactoring_types()
             if request.refactoring_type not in supported_types:
                 raise ToolError(
-                    f"Type de refactoring '{request.refactoring_type}' non supporté. "
-                    f"Types supportés: {supported_types}"
+                    f"Type de refactoring '{request.refactoring_type}' non supporté. Types supportés: {supported_types}"
                 )
 
         return True
@@ -156,54 +156,36 @@ class RefactoringTool(BaseTool):
         refactoring_type = request.refactoring_type
         code = request.code
 
-        refactoring_desc = self._engine.get_refactoring_type_description(
-            refactoring_type
-        )
+        refactoring_desc = self._engine.get_refactoring_type_description(refactoring_type)
 
         prompt_parts = [
             f"Effectue un refactoring de type '{refactoring_type}'",
             f"Description: {refactoring_desc}",
-            f"IMPORTANT: Préserve exactement le comportement du code original",
+            "IMPORTANT: Préserve exactement le comportement du code original",
             f"Langage: {language}",
-            f"",
+            "",
         ]
 
-        prompt_parts.extend([f"```{language}", code, f"```", f""])
+        prompt_parts.extend([f"```{language}", code, "```", ""])
 
         lang_instructions = REFACTORING_LANGUAGE_INSTRUCTIONS.get(language.lower(), {})
         if refactoring_type in lang_instructions:
-            prompt_parts.append(
-                f"Conventions {language}: {lang_instructions[refactoring_type]}"
-            )
+            prompt_parts.append(f"Conventions {language}: {lang_instructions[refactoring_type]}")
 
         return "\n".join(prompt_parts)
 
-    def _perform_local_refactoring(
-        self, request: RefactoringRequest
-    ) -> RefactoringResponse:
+    def _perform_local_refactoring(self, request: RefactoringRequest) -> RefactoringResponse:
         """Effectue un refactoring local basique (fallback si LLM indisponible)."""
         if request.refactoring_type == "clean":
-            refactored_code = self._engine.clean_code_basic(
-                request.code, request.language
-            )
+            refactored_code = self._engine.clean_code_basic(request.code, request.language)
         elif request.refactoring_type == "simplify":
-            refactored_code = self._engine.simplify_code_basic(
-                request.code, request.language
-            )
+            refactored_code = self._engine.simplify_code_basic(request.code, request.language)
         else:
-            refactored_code = self._engine.clean_code_basic(
-                request.code, request.language
-            )
+            refactored_code = self._engine.clean_code_basic(request.code, request.language)
 
-        original_metrics = self._engine.analyze_code_metrics(
-            request.code, request.language
-        )
-        new_metrics = self._engine.analyze_code_metrics(
-            refactored_code, request.language
-        )
-        improvement_metrics = self._engine.calculate_improvements(
-            original_metrics, new_metrics
-        )
+        original_metrics = self._engine.analyze_code_metrics(request.code, request.language)
+        new_metrics = self._engine.analyze_code_metrics(refactored_code, request.language)
+        improvement_metrics = self._engine.calculate_improvements(original_metrics, new_metrics)
 
         changes = [
             {
@@ -213,7 +195,9 @@ class RefactoringTool(BaseTool):
             }
         ]
 
-        explanation = "Refactoring local basique appliqué. Recommandation: utiliser un LLM pour un refactoring plus avancé."
+        explanation = (
+            "Refactoring local basique appliqué. Recommandation: utiliser un LLM pour un refactoring plus avancé."
+        )
 
         return RefactoringResponse(
             refactored_code=refactored_code,
@@ -224,23 +208,15 @@ class RefactoringTool(BaseTool):
             improvement_metrics=improvement_metrics,
         )
 
-    def _execute_core_logic(
-        self, request: RefactoringRequest, **kwargs
-    ) -> RefactoringResponse:
+    def _execute_core_logic(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         """Exécute le refactoring (synchrone)."""
         ctx = kwargs.get("ctx")
 
-        original_metrics = self._engine.analyze_code_metrics(
-            request.code, request.language
-        )
+        original_metrics = self._engine.analyze_code_metrics(request.code, request.language)
 
         if ctx:
             try:
-                prompt = run_async_from_sync(
-                    self.prepare_prompt(
-                        request, f"refactoring_{request.refactoring_type}"
-                    )
-                )
+                prompt = run_async_from_sync(self.prepare_prompt(request, f"refactoring_{request.refactoring_type}"))
                 system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.
 Réponds UNIQUEMENT avec le code refactoré, sans explications."""
@@ -255,21 +231,15 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
                 )
 
                 refactored_code = result.text
-                new_metrics = self._engine.analyze_code_metrics(
-                    refactored_code, request.language
-                )
-                improvement_metrics = self._engine.calculate_improvements(
-                    original_metrics, new_metrics
-                )
+                new_metrics = self._engine.analyze_code_metrics(refactored_code, request.language)
+                improvement_metrics = self._engine.calculate_improvements(original_metrics, new_metrics)
                 changes = self._engine.identify_changes(
                     request.refactoring_type,
                     request.code,
                     refactored_code,
                     request.parameters,
                 )
-                explanation = self._engine.generate_explanation(
-                    request.refactoring_type, changes, improvement_metrics
-                )
+                explanation = self._engine.generate_explanation(request.refactoring_type, changes, improvement_metrics)
 
                 return RefactoringResponse(
                     refactored_code=refactored_code,
@@ -281,16 +251,12 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
                 )
 
             except Exception as e:
-                self.logger.warning(
-                    f"Erreur avec ctx.sample(), utilisation du fallback: {e}"
-                )
+                self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
                 return self._perform_local_refactoring(request)
         else:
             return self._perform_local_refactoring(request)
 
-    async def _execute_core_logic_async(
-        self, request: RefactoringRequest, **kwargs
-    ) -> RefactoringResponse:
+    async def _execute_core_logic_async(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         """Version asynchrone avec support structured output."""
         ctx = kwargs.get("ctx")
         use_structured_output = kwargs.get("use_structured_output", True)
@@ -298,13 +264,9 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
         if ctx:
             await ctx.info("Analyse du code original...")
 
-        original_metrics = self._engine.analyze_code_metrics(
-            request.code, request.language
-        )
+        original_metrics = self._engine.analyze_code_metrics(request.code, request.language)
 
-        prompt = await self.prepare_prompt(
-            request, f"refactoring_{request.refactoring_type}"
-        )
+        prompt = await self.prepare_prompt(request, f"refactoring_{request.refactoring_type}")
         system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'."""
 
@@ -315,9 +277,7 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
             # Essayer structured output d'abord
             if ctx is not None and use_structured_output:
                 try:
-                    self.logger.debug(
-                        "Utilisation du structured output avec LLMRefactoringResult"
-                    )
+                    self.logger.debug("Utilisation du structured output avec LLMRefactoringResult")
                     llm_result = await ctx.sample(
                         messages=prompt,
                         system_prompt=system_prompt,
@@ -329,17 +289,11 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                     if isinstance(llm_result.result, LLMRefactoringResult):
                         result_data = llm_result.result
                         if ctx:
-                            await ctx.info(
-                                f"Structured output: {result_data.changes_count} modifications"
-                            )
+                            await ctx.info(f"Structured output: {result_data.changes_count} modifications")
 
-                        cleaned_code = self._engine.extract_code_block(
-                            result_data.refactored_code, request.language
-                        )
+                        cleaned_code = self._engine.extract_code_block(result_data.refactored_code, request.language)
 
-                        is_valid, error_msg = self._engine.validate_code_syntax(
-                            cleaned_code, request.language
-                        )
+                        is_valid, error_msg = self._engine.validate_code_syntax(cleaned_code, request.language)
                         if not is_valid:
                             self.logger.warning(f"Code structuré invalide: {error_msg}")
 
@@ -363,51 +317,36 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                             improvement_metrics=improvement_metrics,
                         )
                 except Exception as e:
-                    self.logger.warning(
-                        f"Structured output a échoué, fallback vers texte brut: {e}"
-                    )
+                    self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
 
             # Fallback vers texte brut
             result = await ctx.sample(
                 messages=prompt,
-                system_prompt=system_prompt
-                + "\nRéponds UNIQUEMENT avec le code refactoré.",
+                system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code refactoré.",
                 temperature=0.5,
                 max_tokens=2000,
             )
 
-            refactored_code = self._engine.extract_code_block(
-                result.text, request.language
-            )
+            refactored_code = self._engine.extract_code_block(result.text, request.language)
 
-            is_valid, error_msg = self._engine.validate_code_syntax(
-                refactored_code, request.language
-            )
+            is_valid, error_msg = self._engine.validate_code_syntax(refactored_code, request.language)
             if not is_valid:
                 self.logger.warning(f"Code généré syntaxiquement invalide: {error_msg}")
                 if ctx:
-                    await ctx.warning(
-                        f"Attention: Le code généré semble contenir des erreurs de syntaxe: {error_msg}"
-                    )
+                    await ctx.warning(f"Attention: Le code généré semble contenir des erreurs de syntaxe: {error_msg}")
 
             if ctx:
                 await ctx.info("Analyse des améliorations...")
 
-            new_metrics = self._engine.analyze_code_metrics(
-                refactored_code, request.language
-            )
-            improvement_metrics = self._engine.calculate_improvements(
-                original_metrics, new_metrics
-            )
+            new_metrics = self._engine.analyze_code_metrics(refactored_code, request.language)
+            improvement_metrics = self._engine.calculate_improvements(original_metrics, new_metrics)
             changes = self._engine.identify_changes(
                 request.refactoring_type,
                 request.code,
                 refactored_code,
                 request.parameters,
             )
-            explanation = self._engine.generate_explanation(
-                request.refactoring_type, changes, improvement_metrics
-            )
+            explanation = self._engine.generate_explanation(request.refactoring_type, changes, improvement_metrics)
 
             return RefactoringResponse(
                 refactored_code=refactored_code,

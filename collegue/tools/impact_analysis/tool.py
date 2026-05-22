@@ -10,21 +10,22 @@ Cet outil analyse l'impact potentiel d'un changement de code avant son implémen
 Refactorisé: Le fichier original faisait 680 lignes, maintenant ~200 lignes.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
+
+from ...core.shared import parse_llm_json_response
 from ..base import BaseTool, ToolValidationError
-from ...core.shared import run_async_from_sync, parse_llm_json_response
+from .config import CONFIDENCE_THRESHOLDS
+from .engine import ImpactAnalysisEngine
 from .models import (
+    FollowupAction,
     ImpactAnalysisRequest,
     ImpactAnalysisResponse,
     ImpactedFile,
+    LLMInsight,
     RiskNote,
     SearchQuery,
     TestRecommendation,
-    FollowupAction,
-    LLMInsight,
 )
-from .engine import ImpactAnalysisEngine
-from .config import CONFIDENCE_THRESHOLDS
 
 
 class ImpactAnalysisTool(BaseTool):
@@ -146,10 +147,10 @@ class ImpactAnalysisTool(BaseTool):
     ) -> str:
         """Construit le prompt pour l'analyse deep avec LLM."""
         prompt_parts = [
-            f"Analyse en profondeur l'impact du changement suivant:",
-            f"",
+            "Analyse en profondeur l'impact du changement suivant:",
+            "",
             f"Intent: {request.change_intent}",
-            f"",
+            "",
             f"Fichiers impactés ({len(impacted_files)}):",
         ]
 
@@ -157,30 +158,27 @@ class ImpactAnalysisTool(BaseTool):
             prompt_parts.append(f"  - {f['path']} ({f.get('impact_type', 'unknown')})")
 
         if risk_notes:
-            prompt_parts.extend([f"", f"Risques identifiés:"])
+            prompt_parts.extend(["", "Risques identifiés:"])
             for r in risk_notes[:5]:
                 prompt_parts.append(f"  - [{r['category']}] {r['note']}")
 
         prompt_parts.extend(
             [
-                f"",
-                f"Fournis une analyse structurée au format JSON:",
-                f"{{",
-                f'  "semantic_summary": "Résumé sémantique du changement",',
-                f'  "insights": [',
-                f'    {{"category": "semantic|architectural|business", "insight": "...", "confidence": "high|medium|low"}}',
-                f"  ]",
-                f"}}",
+                "",
+                "Fournis une analyse structurée au format JSON:",
+                "{",
+                '  "semantic_summary": "Résumé sémantique du changement",',
+                '  "insights": [',
+                '    {"category": "semantic|architectural|business", "insight": "...", "confidence": "high|medium|low"}',
+                "  ]",
+                "}",
             ]
         )
 
         return "\n".join(prompt_parts)
 
-    def _execute_core_logic(
-        self, request: ImpactAnalysisRequest, **kwargs
-    ) -> ImpactAnalysisResponse:
+    def _execute_core_logic(self, request: ImpactAnalysisRequest, **kwargs) -> ImpactAnalysisResponse:
         """Exécute l'analyse d'impact (synchrone)."""
-        ctx = kwargs.get("ctx")
 
         # 1. Extraire les identifiants
         identifiers = self._engine.extract_identifiers(request.change_intent)
@@ -193,9 +191,7 @@ class ImpactAnalysisTool(BaseTool):
         all_impacts = []
 
         for file in request.files:
-            impacts = self._engine.analyze_single_file(
-                file, identifiers, confidence_threshold, request.entry_points
-            )
+            impacts = self._engine.analyze_single_file(file, identifiers, confidence_threshold, request.entry_points)
             all_impacts.extend(impacts)
 
         # 3. Dédoublonner et filtrer
@@ -208,17 +204,13 @@ class ImpactAnalysisTool(BaseTool):
                 unique_impacts.append(impact)
 
         # 4. Filtrer par confiance
-        filtered_impacts = self._engine.filter_by_confidence(
-            unique_impacts, request.confidence_mode
-        )
+        filtered_impacts = self._engine.filter_by_confidence(unique_impacts, request.confidence_mode)
 
         # 5. Analyser les risques
         risk_notes = self._engine.analyze_risks(request.change_intent, identifiers)
 
         # 6. Générer les requêtes de recherche
-        search_queries = self._engine.generate_search_queries(
-            identifiers, request.change_intent
-        )
+        search_queries = self._engine.generate_search_queries(identifiers, request.change_intent)
 
         # 7. Recommander les tests
         tests_to_run = self._engine.recommend_tests(filtered_impacts, "python")
@@ -227,9 +219,7 @@ class ImpactAnalysisTool(BaseTool):
         followups = self._engine.generate_followup_actions(filtered_impacts, risk_notes)
 
         # 9. Construire le résumé
-        analysis_summary = self._engine.build_analysis_summary(
-            request.change_intent, filtered_impacts, risk_notes
-        )
+        analysis_summary = self._engine.build_analysis_summary(request.change_intent, filtered_impacts, risk_notes)
 
         # Convertir en modèles Pydantic
         impacted_files = [ImpactedFile(**impact) for impact in filtered_impacts[:50]]
@@ -249,9 +239,7 @@ class ImpactAnalysisTool(BaseTool):
             analysis_depth_used="fast",
         )
 
-    async def _execute_core_logic_async(
-        self, request: ImpactAnalysisRequest, **kwargs
-    ) -> ImpactAnalysisResponse:
+    async def _execute_core_logic_async(self, request: ImpactAnalysisRequest, **kwargs) -> ImpactAnalysisResponse:
         """Version asynchrone avec support deep analysis."""
         ctx = kwargs.get("ctx")
 
@@ -269,9 +257,7 @@ class ImpactAnalysisTool(BaseTool):
                     [r.model_dump() for r in response.risk_notes],
                 )
 
-                result = await ctx.sample(
-                    messages=prompt, temperature=0.5, max_tokens=1500
-                )
+                result = await ctx.sample(messages=prompt, temperature=0.5, max_tokens=1500)
 
                 # Parser la réponse JSON
                 try:

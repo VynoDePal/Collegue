@@ -1,12 +1,15 @@
 """
 Modèles Pydantic pour l'outil Dependency Guard.
 """
-from typing import Optional, List
+
+from typing import List, Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
 class DependencyIssue(BaseModel):
     """Un problème détecté sur une dépendance."""
+
     package: str = Field(..., description="Nom du package")
     version: Optional[str] = Field(None, description="Version concernée")
     issue_type: str = Field(..., description="Type: not_found, vulnerable, deprecated, blocked, version_conflict")
@@ -18,43 +21,32 @@ class DependencyIssue(BaseModel):
 
 class DependencyGuardRequest(BaseModel):
     """Requête pour la validation des dépendances."""
+
     content: str = Field(
         ...,
-        description="Contenu du fichier de dépendances (package-lock.json, requirements.txt, pyproject.toml). Le type est auto-détecté."
+        description="Contenu du fichier de dépendances (package-lock.json, requirements.txt, pyproject.toml). Le type est auto-détecté.",
     )
-    language: str = Field(
-        ...,
-        description="Langage: python ou typescript/javascript"
-    )
+    language: str = Field(..., description="Langage: python ou typescript/javascript")
     check_vulnerabilities: Optional[bool] = Field(
-        True,
-        description="Vérifier les vulnérabilités connues (CVEs) via l'API OSV de Google"
+        True, description="Vérifier les vulnérabilités connues (CVEs) via l'API OSV de Google"
     )
-    check_existence: Optional[bool] = Field(
-        True,
-        description="Vérifier que les packages existent sur le registre"
-    )
-    allowlist: Optional[List[str]] = Field(
-        None,
-        description="Liste blanche de packages autorisés"
-    )
-    blocklist: Optional[List[str]] = Field(
-        None,
-        description="Liste noire de packages interdits"
-    )
+    check_existence: Optional[bool] = Field(True, description="Vérifier que les packages existent sur le registre")
+    allowlist: Optional[List[str]] = Field(None, description="Liste blanche de packages autorisés")
+    blocklist: Optional[List[str]] = Field(None, description="Liste noire de packages interdits")
 
-    @field_validator('language')
+    @field_validator("language")
     def validate_language(cls, v):
         v = v.strip().lower()
-        if v in ['typescript', 'javascript', 'js', 'ts']:
-            return 'javascript'
-        if v not in ['python', 'javascript', 'php']:
+        if v in ["typescript", "javascript", "js", "ts"]:
+            return "javascript"
+        if v not in ["python", "javascript", "php"]:
             raise ValueError(f"Langage '{v}' non supporté. Utilisez: python, typescript, javascript, php")
         return v
 
 
 class DependencyGuardResponse(BaseModel):
     """Réponse de la validation des dépendances."""
+
     valid: bool = Field(..., description="True si aucune vulnérabilité critique/haute")
     summary: str = Field(..., description="Résumé de l'analyse")
     total_dependencies: int = Field(..., description="Nombre total de dépendances analysées")
@@ -64,6 +56,5 @@ class DependencyGuardResponse(BaseModel):
     medium: int = Field(0, description="Vulnérabilités moyennes")
     low: int = Field(0, description="Vulnérabilités basses")
     issues: List[DependencyIssue] = Field(
-        default_factory=list,
-        description="Liste des problèmes détectés (vulnérabilités, packages bloqués, etc.)"
+        default_factory=list, description="Liste des problèmes détectés (vulnérabilités, packages bloqués, etc.)"
     )

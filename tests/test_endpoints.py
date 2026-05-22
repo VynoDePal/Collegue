@@ -8,18 +8,18 @@ pytest.skip(
 	allow_module_level=True,
 )
 
+import asyncio
+import json
 import os
 import sys
-import json
-import asyncio
-from typing import Dict, Any
-
+from typing import Any, Dict
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
 
 
 from fastmcp import Client
+
 
 def safe_json_print(obj):
     """Affiche un objet de manière sécurisée, même s'il n'est pas JSON sérialisable."""

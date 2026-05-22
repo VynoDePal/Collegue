@@ -8,17 +8,15 @@ Refactorisé: Le fichier original faisait 767 lignes, maintenant ~200 lignes.
 """
 
 import time
-from typing import List, Dict, Any, Optional
-import pathlib
+from typing import Any, Dict, List
 
-from ..base import BaseTool, ToolError, ToolValidationError
 from ...core.shared import run_async_from_sync
+from ..base import BaseTool, ToolValidationError
+from .engine import TestGenerationEngine
 from .models import (
     TestGenerationRequest,
     TestGenerationResponse,
-    LLMTestGenerationResult,
 )
-from .engine import TestGenerationEngine
 
 
 class TestGenerationTool(BaseTool):
@@ -160,12 +158,8 @@ class TestGenerationTool(BaseTool):
         historical prompt shape — no behavioural regression for callers
         that never had the engine wired in the first place.
         """
-        framework = self._engine.detect_framework(
-            request.language, request.test_framework
-        )
-        elements = self._engine.extract_code_elements(
-            request.code, request.language
-        )
+        framework = self._engine.detect_framework(request.language, request.test_framework)
+        elements = self._engine.extract_code_elements(request.code, request.language)
         return self._engine.build_prompt(
             request.code,
             request.language,
@@ -198,16 +192,12 @@ class TestGenerationTool(BaseTool):
         chosen = test_shaped[0] if test_shaped else max(blocks, key=len)
         return chosen.rstrip()
 
-    def _execute_core_logic(
-        self, request: TestGenerationRequest, **kwargs
-    ) -> TestGenerationResponse:
+    def _execute_core_logic(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
         """Exécute la génération de tests (synchrone)."""
         ctx = kwargs.get("ctx")
 
         # Détecter le framework
-        framework = self._engine.detect_framework(
-            request.language, request.test_framework
-        )
+        framework = self._engine.detect_framework(request.language, request.test_framework)
 
         # Extraire les éléments du code
         elements = self._engine.extract_code_elements(request.code, request.language)
@@ -215,9 +205,7 @@ class TestGenerationTool(BaseTool):
         if ctx:
             try:
                 # Préparer le prompt via le pipeline template (#233).
-                prompt = run_async_from_sync(
-                    self.prepare_prompt(request, template_name="test_generation")
-                )
+                prompt = run_async_from_sync(self.prepare_prompt(request, template_name="test_generation"))
 
                 started = time.monotonic()
                 result = run_async_from_sync(
@@ -239,19 +227,13 @@ class TestGenerationTool(BaseTool):
                 test_count = test_code.count("def test_") + test_code.count("@Test")
 
                 # Estimer la couverture
-                estimated_coverage = self._engine.estimate_coverage(
-                    elements, test_count
-                )
+                estimated_coverage = self._engine.estimate_coverage(elements, test_count)
 
                 # Générer le chemin du fichier de test
-                test_file_path = self._engine.generate_test_file_path(
-                    request.file_path, request.language, framework
-                )
+                test_file_path = self._engine.generate_test_file_path(request.file_path, request.language, framework)
 
                 # Convertir les éléments pour la réponse
-                tested_elements = [
-                    {"name": e["name"], "type": e["type"]} for e in elements
-                ]
+                tested_elements = [{"name": e["name"], "type": e["type"]} for e in elements]
 
                 return TestGenerationResponse(
                     test_code=test_code,
@@ -263,28 +245,20 @@ class TestGenerationTool(BaseTool):
                 )
 
             except Exception as e:
-                self.logger.warning(
-                    f"Erreur avec ctx.sample(), utilisation du fallback: {e}"
-                )
+                self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
                 return self._generate_fallback_response(request, framework, elements)
         else:
             return self._generate_fallback_response(request, framework, elements)
 
-    async def _execute_core_logic_async(
-        self, request: TestGenerationRequest, **kwargs
-    ) -> TestGenerationResponse:
+    async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
         """Version asynchrone de la génération de tests."""
         ctx = kwargs.get("ctx")
 
         # Détecter le framework
-        framework = self._engine.detect_framework(
-            request.language, request.test_framework
-        )
+        framework = self._engine.detect_framework(request.language, request.test_framework)
 
         if ctx:
-            await ctx.info(
-                f"Génération de tests {framework} pour {request.language}..."
-            )
+            await ctx.info(f"Génération de tests {framework} pour {request.language}...")
 
         # Extraire les éléments
         elements = self._engine.extract_code_elements(request.code, request.language)
@@ -315,9 +289,7 @@ class TestGenerationTool(BaseTool):
             estimated_coverage = self._engine.estimate_coverage(elements, test_count)
 
             # Générer le chemin
-            test_file_path = self._engine.generate_test_file_path(
-                request.file_path, request.language, framework
-            )
+            test_file_path = self._engine.generate_test_file_path(request.file_path, request.language, framework)
 
             tested_elements = [{"name": e["name"], "type": e["type"]} for e in elements]
 
@@ -345,9 +317,7 @@ class TestGenerationTool(BaseTool):
             request.code, request.language, framework, elements
         )
 
-        test_file_path = self._engine.generate_test_file_path(
-            request.file_path, request.language, framework
-        )
+        test_file_path = self._engine.generate_test_file_path(request.file_path, request.language, framework)
 
         estimated_coverage = self._engine.estimate_coverage(elements, test_count)
 

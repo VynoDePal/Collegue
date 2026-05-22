@@ -57,10 +57,12 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-# Narrow initial rule set: only real bugs (undefined names, duplicate
-# definitions). Style rules (unused imports, f-string-no-placeholder, etc.)
-# will be enabled in follow-up PRs once the codebase is cleaned up.
-select = ["F811", "F821", "F822", "F823"]
+select = [
+    "F",     # Pyflakes — all error detection rules
+    "I",     # isort — import sorting
+    "B",     # flake8-bugbear — common bug patterns
+]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["F811", "F821", "F822", "F823"]
+"tests/**" = ["F", "B"]
+"collegue/**/__init__.py" = ["F401"]  # Re-exports in __init__.py are intentional

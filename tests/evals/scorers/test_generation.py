@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-
 _SUMMARY_RE = re.compile(
     r"(?P<count>\d+)\s+(?P<outcome>passed|failed|error[s]?|skipped)",
     re.IGNORECASE,

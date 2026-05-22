@@ -4,25 +4,25 @@ Sentry Monitor Tool - Récupération des erreurs et monitoring depuis Sentry
 Permet à Collègue de récupérer les stacktraces réelles et prioriser le refactoring.
 """
 
-import logging
-import os
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolExecutionError
+
+from ..core.auth import register_config_with_github, resolve_org, resolve_token
 from ..core.shared import validate_sentry_command
+from .base import BaseTool, ToolExecutionError
 from .clients import SentryClient
 from .transformers import (
-    transform_projects,
-    transform_project,
-    transform_issues,
     transform_issue,
-    transform_sentry_events,
+    transform_issues,
+    transform_project,
+    transform_project_stats,
+    transform_projects,
     transform_releases,
     transform_repos,
+    transform_sentry_events,
     transform_tags,
-    transform_project_stats,
 )
-from ..core.auth import resolve_token, resolve_org, register_config_with_github
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -30,14 +30,14 @@ except Exception:
     get_http_headers = None
 
 try:
-    import requests
+    import requests  # noqa: F401
 
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
 
 try:
-    from collegue.autonomous.config_registry import get_config_registry
+    from collegue.autonomous.config_registry import get_config_registry  # noqa: F401
 
     HAS_CONFIG_REGISTRY = True
 except ImportError:
@@ -78,21 +78,15 @@ class SentryRequest(BaseModel):
         None,
         description="Filtres de recherche Sentry (ex: 'is:unresolved', 'level:error')",
     )
-    time_range: str = Field(
-        "24h", description="Période d'analyse: '1h', '24h', '7d', '14d', '30d'"
-    )
+    time_range: str = Field("24h", description="Période d'analyse: '1h', '24h', '7d', '14d', '30d'")
     limit: int = Field(25, description="Nombre max de résultats (1-100)", ge=1, le=100)
     token: Optional[str] = Field(
         None,
         description="Token Sentry (utilise automatiquement SENTRY_AUTH_TOKEN de l'environnement si non fourni)",
     )
-    sentry_url: Optional[str] = Field(
-        None, description="URL Sentry self-hosted (défaut: https://sentry.io)"
-    )
+    sentry_url: Optional[str] = Field(None, description="URL Sentry self-hosted (défaut: https://sentry.io)")
 
-    content: Optional[str] = Field(
-        None, description="Contenu du fichier de configuration pour parse_config"
-    )
+    content: Optional[str] = Field(None, description="Contenu du fichier de configuration pour parse_config")
     format: Optional[str] = Field(
         "ini",
         description="Format du fichier: 'ini' (.sentryclirc) ou 'properties' (sentry.properties)",
@@ -263,13 +257,12 @@ class SentryMonitorTool(BaseTool):
     def _parse_sentryclirc(self, content: str) -> ConfigInfo:
         """Parse un contenu style INI (.sentryclirc)."""
         import configparser
-        import io
 
         config = configparser.ConfigParser()
         try:
             config.read_string(content)
         except configparser.Error as e:
-            raise ToolExecutionError(f"Erreur de parsing .sentryclirc: {e}")
+            raise ToolExecutionError(f"Erreur de parsing .sentryclirc: {e}") from e
 
         info = ConfigInfo()
 
@@ -323,9 +316,7 @@ class SentryMonitorTool(BaseTool):
 
     def _execute_core_logic(self, request: SentryRequest, **kwargs) -> SentryResponse:
         """Exécute la logique principale."""
-        org = resolve_org(
-            request.organization, "SENTRY_ORG", "x-sentry-org", "x-collegue-sentry-org"
-        )
+        org = resolve_org(request.organization, "SENTRY_ORG", "x-sentry-org", "x-collegue-sentry-org")
         token = resolve_token(
             request.token,
             "SENTRY_AUTH_TOKEN",
@@ -335,9 +326,7 @@ class SentryMonitorTool(BaseTool):
 
         if org and HAS_CONFIG_REGISTRY:
             try:
-                github_token = resolve_token(
-                    None, "GITHUB_TOKEN", "x-github-token", "x-collegue-github-token"
-                )
+                github_token = resolve_token(None, "GITHUB_TOKEN", "x-github-token", "x-collegue-github-token")
                 register_config_with_github(
                     owner=org,
                     repo=None,
@@ -349,9 +338,7 @@ class SentryMonitorTool(BaseTool):
                 pass
 
         if not org and request.command not in ["get_issue", "parse_config"]:
-            raise ToolExecutionError(
-                "Organisation Sentry requise. Fournissez organization ou définissez SENTRY_ORG."
-            )
+            raise ToolExecutionError("Organisation Sentry requise. Fournissez organization ou définissez SENTRY_ORG.")
 
         if request.command == "parse_config":
             if not request.content:
@@ -373,9 +360,7 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_projects()
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to list projects"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to list projects")
             projects_data = response.data or []
             projects = transform_projects(projects_data)
             return SentryResponse(
@@ -389,9 +374,7 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.list_repos()
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to list repos"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to list repos")
             repos_data = response.data or []
             repos = transform_repos(repos_data)
             return SentryResponse(
@@ -407,9 +390,7 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_project(request.project)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get project"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get project")
             data = response.data or {}
             project_info = transform_project(data)
             return SentryResponse(
@@ -427,9 +408,7 @@ class SentryMonitorTool(BaseTool):
                 limit=request.limit,
             )
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to list issues"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to list issues")
             issues_data = response.data or []
             issues = transform_issues(issues_data, request.limit)
             return SentryResponse(
@@ -445,9 +424,7 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue(request.issue_id)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get issue"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get issue")
             data = response.data or {}
             issue = transform_issue(data)
             return SentryResponse(
@@ -463,9 +440,7 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue_events(request.issue_id, limit=request.limit)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get issue events"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get issue events")
             events_data = response.data or []
             # Transform events data to EventInfo objects
             events = transform_sentry_events(events_data, request.limit)
@@ -482,9 +457,7 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_issue_tags(request.issue_id)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get issue tags"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get issue tags")
             tags_data = response.data or []
             tags = transform_tags(tags_data)
             return SentryResponse(
@@ -500,13 +473,8 @@ class SentryMonitorTool(BaseTool):
             client = self._get_sentry_client(request, token=token, org=org)
             response = client.get_project_stats(request.project, request.time_range)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to get project stats"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to get project stats")
             stats_data = response.data or {}
-            # Extract stats from response
-            total_events = stats_data.get("total", 0)
-            unresolved = stats_data.get("unresolved", 0)
             stats = transform_project_stats(stats_data, request.project)
             return SentryResponse(
                 success=True,
@@ -517,13 +485,9 @@ class SentryMonitorTool(BaseTool):
 
         elif request.command == "list_releases":
             client = self._get_sentry_client(request, token=token, org=org)
-            response = client.list_releases(
-                project=request.project, limit=request.limit
-            )
+            response = client.list_releases(project=request.project, limit=request.limit)
             if not response.success:
-                raise ToolExecutionError(
-                    response.error_message or "Failed to list releases"
-                )
+                raise ToolExecutionError(response.error_message or "Failed to list releases")
             releases_data = response.data or []
             releases = transform_releases(releases_data, request.limit)
             return SentryResponse(

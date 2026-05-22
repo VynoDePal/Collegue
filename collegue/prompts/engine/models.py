@@ -1,11 +1,13 @@
 """
 Models - Modèles de données pour le système de prompts personnalisés
 """
-from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any, Union
-from enum import Enum
+
 import datetime
 import uuid
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class PromptVariableType(str, Enum):
@@ -17,6 +19,7 @@ class PromptVariableType(str, Enum):
     LIST = "list"
     OBJECT = "object"
 
+
 class PromptVariable(BaseModel):
     name: str
     description: str
@@ -25,6 +28,7 @@ class PromptVariable(BaseModel):
     default: Optional[Any] = None
     options: Optional[List[Any]] = None
     example: Optional[Any] = None
+
 
 class PromptTemplate(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -42,12 +46,14 @@ class PromptTemplate(BaseModel):
     is_public: bool = False
     version: str = "1.0.0"
 
+
 class PromptCategory(BaseModel):
     id: str
     name: str
     description: str
     parent_id: Optional[str] = None
     icon: Optional[str] = None
+
 
 class PromptExecution(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -60,6 +66,7 @@ class PromptExecution(BaseModel):
     timestamp: datetime.datetime = Field(default_factory=datetime.datetime.now)
     user_id: Optional[str] = None
     feedback: Optional[Dict[str, Any]] = None
+
 
 class PromptLibrary(BaseModel):
     templates: Dict[str, PromptTemplate] = {}

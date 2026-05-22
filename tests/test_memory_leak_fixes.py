@@ -3,14 +3,15 @@ Tests pour les corrections de fuites mémoire (issue #141).
 """
 import gc
 from unittest.mock import Mock, patch
+
 from pydantic import BaseModel
 
 from collegue.core.memory_manager import (
-    MemoryManager,
     LimitedSizeHistory,
+    MemoryManager,
     TTLCache,
-    get_memory_manager,
     cleanup_all,
+    get_memory_manager,
 )
 from collegue.tools.base import BaseTool
 

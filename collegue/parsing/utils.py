@@ -1,6 +1,7 @@
 import os
-from typing import Optional, Dict, List, Tuple
-from .base import ParseResult, Import
+from typing import Dict, List, Optional
+
+from .base import Import, ParseResult
 from .javascript import JSParser
 from .python import PythonParser
 
@@ -8,12 +9,12 @@ from .python import PythonParser
 def detect_language(content: str, filename: Optional[str] = None) -> str:
     if filename:
         ext = os.path.splitext(filename)[1].lower()
-        if ext == '.py':
-            return 'python'
-        elif ext in ('.ts', '.tsx'):
-            return 'typescript'
-        elif ext in ('.js', '.jsx', '.mjs', '.cjs'):
-            return 'javascript'
+        if ext == ".py":
+            return "python"
+        elif ext in (".ts", ".tsx"):
+            return "typescript"
+        elif ext in (".js", ".jsx", ".mjs", ".cjs"):
+            return "javascript"
 
     python_score = 0
     js_score = 0
@@ -49,27 +50,29 @@ def detect_language(content: str, filename: Optional[str] = None) -> str:
     ts_score += js_score
 
     scores = {
-        'python': python_score,
-        'typescript': ts_score,
-        'javascript': js_score,
+        "python": python_score,
+        "typescript": ts_score,
+        "javascript": js_score,
     }
 
     best = max(scores, key=scores.get)
     if scores[best] == 0:
-        return 'any'
+        return "any"
     return best
+
 
 def parse_file(content: str, filename: Optional[str] = None) -> ParseResult:
     language = detect_language(content, filename)
 
-    if language == 'python':
+    if language == "python":
         parser = PythonParser(content, filename)
-    elif language in ('javascript', 'typescript'):
+    elif language in ("javascript", "typescript"):
         parser = JSParser(content, filename)
     else:
         return ParseResult(language=language, raw=content)
 
     return parser.parse()
+
 
 def resolve_relative_import(
     source: str,
@@ -77,7 +80,7 @@ def resolve_relative_import(
     file_modules: Dict[str, str],
 ) -> Optional[str]:
 
-    if not source.startswith('.'):
+    if not source.startswith("."):
         return None
 
     current_dir = os.path.dirname(current_file)
@@ -89,14 +92,14 @@ def resolve_relative_import(
         if normalized == resolved or base_no_ext == resolved:
             return path
 
-    extensions = ['.py', '.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs']
+    extensions = [".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"]
     for ext in extensions:
         candidate = resolved + ext
         for path in file_modules:
             if os.path.normpath(path) == candidate:
                 return path
 
-    index_names = ['index.js', 'index.ts', 'index.tsx', '__init__.py']
+    index_names = ["index.js", "index.ts", "index.tsx", "__init__.py"]
     for idx in index_names:
         candidate = os.path.join(resolved, idx)
         for path in file_modules:
@@ -105,17 +108,18 @@ def resolve_relative_import(
 
     return None
 
+
 def resolve_module_to_file(
     module: str,
     file_modules: Dict[str, str],
     current_file: Optional[str] = None,
 ) -> Optional[str]:
-    if module.startswith('.'):
+    if module.startswith("."):
         if current_file:
             return resolve_relative_import(module, current_file, file_modules)
         return None
 
-    module_path = module.replace('.', os.sep)
+    module_path = module.replace(".", os.sep)
 
     for path in file_modules:
         normalized = os.path.normpath(path)
@@ -124,6 +128,7 @@ def resolve_module_to_file(
             return path
 
     return None
+
 
 def get_unused_imports(parse_result: ParseResult) -> List[Import]:
     if not parse_result.imports:
@@ -145,6 +150,7 @@ def get_unused_imports(parse_result: ParseResult) -> List[Import]:
 
     return unused
 
+
 def get_unused_declarations(parse_result: ParseResult) -> List[str]:
     if not parse_result.declarations:
         return []
@@ -152,7 +158,7 @@ def get_unused_declarations(parse_result: ParseResult) -> List[str]:
     used_names = set(name for _, name in parse_result.identifiers)
 
     unused = []
-    for name, decl in parse_result.declarations.items():
+    for name, _decl in parse_result.declarations.items():
         if name not in used_names:
             unused.append(name)
 

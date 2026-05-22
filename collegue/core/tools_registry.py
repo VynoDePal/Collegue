@@ -26,6 +26,7 @@ This module exposes two pieces of public API:
 The orchestrator reads the registry via ``ctx.lifespan_context['tools_registry']``
 — the old ``_TOOLS_CACHE`` global is gone.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -107,15 +108,15 @@ def discover_tools() -> ToolsRegistryDict:
                 registry[tool_name] = {
                     "class": obj,
                     "description": instance.get_description(),
-                    "prompt_desc": _build_prompt_desc(
-                        tool_name, instance.get_description(), schema
-                    ),
+                    "prompt_desc": _build_prompt_desc(tool_name, instance.get_description(), schema),
                     "schema": schema,
                 }
             except Exception as exc:
                 logger.warning(
                     "Skipping tool class %s in module %s: %s",
-                    obj.__name__, name, exc,
+                    obj.__name__,
+                    name,
+                    exc,
                 )
             finally:
                 # Release any resources held by the temporary instance so we
@@ -126,8 +127,7 @@ def discover_tools() -> ToolsRegistryDict:
                     except Exception:
                         pass
 
-    logger.info("Tools registry discovered %d tool(s): %s",
-                 len(registry), sorted(registry.keys()))
+    logger.info("Tools registry discovered %d tool(s): %s", len(registry), sorted(registry.keys()))
     return registry
 
 
