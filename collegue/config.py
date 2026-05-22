@@ -1,10 +1,11 @@
 """
 Configuration - Paramètres de configuration pour le MCP Collègue
 """
-from pydantic_settings import BaseSettings
-from pydantic import field_validator, model_validator, AnyHttpUrl
-from typing import Optional, List, Union, Any
 import logging
+from typing import List, Optional, Union
+
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 

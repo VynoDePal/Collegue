@@ -1,16 +1,18 @@
 """
 Collègue MCP - Un assistant de développement intelligent inspiré par Junie
 """
-import sys
-import os
-import logging
 import asyncio
+import logging
+import os
+import sys
 import time
+
 from fastmcp.server.lifespan import lifespan
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fastmcp import FastMCP
+
 from collegue.config import settings
 
 logger = logging.getLogger(__name__)
@@ -281,7 +283,6 @@ async def core_lifespan(server):
     }
 
     # Initialisation rapide des composants essentiels
-    parser_init = time.time()
     logger.info(f"✅ CodeParser initialisé en {time.time() - startup_start:.3f}s")
     
     # Initialisation lazy du PromptEngine pour ne pas bloquer le démarrage
@@ -293,9 +294,9 @@ async def core_lifespan(server):
 
     startup_elapsed = time.time() - startup_start
     logger.info(f"✅ Composants initialisés en {startup_elapsed:.2f}s")
-    logger.info(f"   - Parser: disponible")
-    logger.info(f"   - ResourceManager: disponible")
-    logger.info(f"   - PromptEngine: initialisation en cours (lazy)")
+    logger.info("   - Parser: disponible")
+    logger.info("   - ResourceManager: disponible")
+    logger.info("   - PromptEngine: initialisation en cours (lazy)")
     logger.info(f"   - ToolsRegistry: pré-chargé ({len(await tools_registry.get())} outils)")
     
     print(f"✅ Composants initialisés via lifespan context: {list(state.keys())}", file=sys.stderr)
@@ -316,7 +317,7 @@ async def core_lifespan(server):
         logger.debug(f"Erreur lors de la fermeture des connexions K8s: {e}")
         
     try:
-        import psycopg2.pool
+        import psycopg2.pool  # noqa: F401
         # Si un pool global PostgreSQL est utilisé (ex: psycopg2.pool), on le ferme ici
         logger.info("🛑 Connexions PostgreSQL nettoyées.")
     except ImportError:
@@ -325,8 +326,8 @@ async def core_lifespan(server):
 sampling_handler = None
 if settings.LLM_API_KEY:
     try:
-        from openai import AsyncOpenAI
         from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
+        from openai import AsyncOpenAI
         llm_api_key = settings.LLM_API_KEY
         gemini_client = AsyncOpenAI(
             api_key=llm_api_key,
@@ -349,14 +350,14 @@ app = FastMCP(
     sampling_handler_behavior="fallback",
 )
 
+from fastmcp.server.middleware.caching import (
+	CallToolSettings,
+	ResponseCachingMiddleware,
+)
 from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
 from fastmcp.server.middleware.logging import StructuredLoggingMiddleware
-from fastmcp.server.middleware.timing import TimingMiddleware
 from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
-from fastmcp.server.middleware.caching import (
-    ResponseCachingMiddleware,
-    CallToolSettings,
-)
+from fastmcp.server.middleware.timing import TimingMiddleware
 
 app.add_middleware(ErrorHandlingMiddleware(
     include_traceback=settings.DEBUG,
@@ -388,8 +389,8 @@ logger.info(
 )
 
 from collegue.core import register_core
-from collegue.tools import register_tools
 from collegue.resources import register_resources
+from collegue.tools import register_tools
 
 register_core(app)
 register_tools(app)

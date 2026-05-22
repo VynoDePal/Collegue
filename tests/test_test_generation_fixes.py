@@ -1,6 +1,9 @@
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock
-from collegue.tools.test_generation import TestGenerationTool, TestGenerationRequest, TestGenerationResponse
+
+from collegue.tools.test_generation import TestGenerationRequest, TestGenerationResponse, TestGenerationTool
+
 
 @pytest.mark.asyncio
 async def test_test_generation_success():

@@ -4,12 +4,15 @@ Moteur d'analyse d'impact pour l'outil Impact Analysis.
 Contient la logique métier pure : extraction d'identifiants, analyse de fichiers,
 détection de risques, génération de recommandations.
 """
-import re
 import ast
-from typing import List, Dict, Any, Optional, Set, Tuple
+import re
+from typing import Dict, List, Optional, Set
+
 from .config import (
-    IDENTIFIER_PATTERNS, RISK_PATTERNS, RISK_CATEGORIES,
-    CONFIDENCE_THRESHOLDS, TEST_FILE_EXTENSIONS, TEST_COMMANDS
+    IDENTIFIER_PATTERNS,
+    RISK_CATEGORIES,
+    RISK_PATTERNS,
+    TEST_FILE_EXTENSIONS,
 )
 
 

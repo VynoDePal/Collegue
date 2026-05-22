@@ -1,10 +1,11 @@
 """
 Providers LLM - Intégration avec Google Gemini uniquement
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
 import logging
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _extract_google_citations(response) -> List[Dict[str, Any]]:
 	metadata = candidate.grounding_metadata
 	chunks = getattr(metadata, 'grounding_chunks', None) or []
 	
-	for i, chunk in enumerate(chunks):
+	for _i, chunk in enumerate(chunks):
 		if hasattr(chunk, 'web') and chunk.web:
 			annotations.append({
 				'type': 'url_citation',

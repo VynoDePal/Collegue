@@ -16,12 +16,12 @@ from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+from collegue.autonomous.config_registry import UserConfig, get_config_registry
+from collegue.autonomous.context_pack import ContextPackBuilder
 from collegue.config import settings
 from collegue.resources.llm.providers import LLMConfig, generate_text
-from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
 from collegue.tools.github_ops import GitHubOpsTool, GitHubRequest
-from collegue.autonomous.config_registry import get_config_registry, UserConfig
-from collegue.autonomous.context_pack import ContextPackBuilder, ContextPack
+from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -63,7 +63,6 @@ def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tupl
 
     best_match = None
     best_score = 0.0
-    best_start = -1
 
 
     for i in range(len(content_lines) - search_len + 1):
@@ -75,7 +74,6 @@ def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tupl
 
         if ratio > best_score:
             best_score = ratio
-            best_start = i
             best_match = window_text
 
 
@@ -89,7 +87,6 @@ def _fuzzy_find_match(search: str, content: str, threshold: float = 0.6) -> Tupl
             ratio = difflib.SequenceMatcher(None, normalized_search, normalized_window).ratio()
             if ratio > best_score:
                 best_score = ratio
-                best_start = i
                 best_match = window_text
 
     if best_score >= threshold:
@@ -349,7 +346,6 @@ class AutoFixer:
                     web_config,
                     f"Trouve des solutions pour cette erreur Python:\n{error_type}: {error_message}"
                 )
-                web_response = web_response_obj.text
                 web_citations = [
                     annotation.get("url_citation", {}) 
                     for annotation in web_response_obj.annotations 
@@ -501,7 +497,7 @@ Réponds UNIQUEMENT avec le JSON valide, sans markdown ni explication."""
 
 
         patched_content = original_content
-        for search_found, replace, match_type in patch_operations:
+        for search_found, replace, _match_type in patch_operations:
             patched_content = patched_content.replace(search_found, replace, 1)
 
         patches_applied = len(patch_operations)

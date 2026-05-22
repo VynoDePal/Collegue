@@ -3,12 +3,13 @@ Tests unitaires pour les outils TypeScript/JavaScript avec les types et patterns
 
 Ces tests valident l'utilisation des types TypeScript, patterns modernes et bonnes pratiques.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
 
-from unittest.mock import Mock, patch, MagicMock
 import json
+from unittest.mock import MagicMock, Mock, patch
 
 print("=" * 80)
 print("TESTS UNITAIRES - TYPESCRIPT/JAVASCRIPT MODERNES")
@@ -72,7 +73,7 @@ print("TEST 2: PATTERNS MODERNES JS/TS")
 print("=" * 80)
 
 try:
-    from collegue.tools.repo_consistency_check import RepoConsistencyCheckTool, ConsistencyCheckRequest
+    from collegue.tools.repo_consistency_check import ConsistencyCheckRequest, RepoConsistencyCheckTool
     
     # Test 2.1: Détection var vs const/let
     print("\n2.1 Test détection var vs const/let...")
@@ -295,7 +296,7 @@ print("TEST 4: MODERNISATION DE CODE")
 print("=" * 80)
 
 try:
-    from collegue.tools.refactoring import RefactoringTool, RefactoringRequest
+    from collegue.tools.refactoring import RefactoringRequest, RefactoringTool
     
     # Test 4.1: Moderniser var en const/let
     print("\n4.1 Test modernisation var → const/let...")

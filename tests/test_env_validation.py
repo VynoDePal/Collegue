@@ -1,6 +1,8 @@
 import pytest
 from pydantic import ValidationError
+
 from collegue.config import Settings
+
 
 def test_sentry_dsn_validation():
     # Valid DSN

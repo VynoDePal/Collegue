@@ -3,9 +3,9 @@ Ressources pour les frameworks TypeScript.
 
 Ce module fournit des informations sur les frameworks et bibliothèques populaires pour TypeScript.
 """
-from fastmcp import FastMCP
-from typing import Dict, Any, List
 import json
+
+from fastmcp import FastMCP
 
 FRONTEND_FRAMEWORKS = {
     "Angular": {

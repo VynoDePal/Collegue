@@ -5,8 +5,11 @@ Permet à Collègue d'interagir avec GitHub sans changer de fenêtre.
 """
 
 from typing import List, Optional
+
 from pydantic import BaseModel, Field, field_validator
+
 from ..core.auth import register_config_with_github, resolve_token
+from ..core.shared import validate_github_command
 from .base import BaseTool, ToolExecutionError
 from .github_commands.branches import BranchCommands, BranchInfo, CommitInfo
 from .github_commands.files import FileCommands
@@ -15,7 +18,6 @@ from .github_commands.prs import Comment, FileChange, PRCommands, PRInfo
 from .github_commands.repos import RepoCommands, RepoInfo
 from .github_commands.search import SearchCommands, SearchResult
 from .github_commands.workflows import WorkflowCommands, WorkflowRun
-from ..core.shared import validate_github_command
 
 
 class GitHubRequest(BaseModel):
@@ -391,7 +393,7 @@ class GitHubOpsTool(BaseTool):
                 raise ToolExecutionError(
                     "owner, repo, path, message, content requis pour update_file"
                 )
-            result = files_cmd.update_file(
+            files_cmd.update_file(
                 request.owner,
                 request.repo,
                 request.path,

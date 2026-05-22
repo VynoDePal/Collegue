@@ -4,7 +4,8 @@ Dockerfile Scanner for IaC Guardrails.
 Scans Dockerfiles for security issues.
 """
 import re
-from typing import List, Dict, Any
+from typing import List
+
 from . import BaseScanner, IacFinding
 
 
@@ -71,7 +72,7 @@ class DockerfileScanner(BaseScanner):
 		has_user = False
 		runs_as_root = True
 
-		for i, line in enumerate(lines, 1):
+		for _i, line in enumerate(lines, 1):
 			if re.match(r'^USER\s+', line, re.IGNORECASE):
 				has_user = True
 				user_match = re.match(r'^USER\s+(\S+)', line, re.IGNORECASE)

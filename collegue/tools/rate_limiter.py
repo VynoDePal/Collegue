@@ -6,13 +6,13 @@ Implémente plusieurs algorithmes de rate limiting:
 - Fixed Window: Simple et efficace
 - Sliding Window Log: Précis mais plus coûteux en mémoire
 """
-import time
-import threading
-from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple, Any
-from dataclasses import dataclass, field
-from enum import Enum
 import logging
+import threading
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, Optional, Tuple
 
 
 class RateLimitExceeded(Exception):

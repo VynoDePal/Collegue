@@ -100,7 +100,7 @@ class GitHubClient(APIClient):
 		except ToolExecutionError:
 			raise
 		except Exception as e:
-			raise ToolExecutionError(f"Erreur API GitHub: {e}")
+			raise ToolExecutionError(f"Erreur API GitHub: {e}") from e
 
 	def _api_get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
 		return self._request_json('GET', endpoint, params=params)

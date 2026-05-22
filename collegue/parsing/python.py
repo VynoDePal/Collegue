@@ -1,10 +1,10 @@
 import ast
 import re
-from typing import List, Dict, Any, Optional, Tuple
-from .base import (
-    Import, Declaration, ParseResult, BaseParser,
-    ImportType, DeclarationType
-)
+from typing import Dict, List, Optional, Tuple
+
+from .base import BaseParser, Declaration, DeclarationType, Import, ImportType, ParseResult
+
+
 class PythonParser(BaseParser):
     def __init__(self, content: str, filename: Optional[str] = None):
         super().__init__(content, filename)
@@ -18,7 +18,7 @@ class PythonParser(BaseParser):
         try:
             self._tree = ast.parse(self.content)
             self._ast_valid = True
-        except SyntaxError as e:
+        except SyntaxError:
             self._tree = None
             self._ast_valid = False
     def find_imports(self) -> List[Import]:

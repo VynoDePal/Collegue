@@ -82,11 +82,11 @@ def test_sentry_dsn_invalid_string_still_rejected(monkeypatch):
 
 import collegue.core.meta_orchestrator as mo  # noqa: E402
 from collegue.core.meta_orchestrator import (  # noqa: E402
+    MAX_ORCHESTRATION_STEPS,
+    MAX_QUERY_CHARS,
     OrchestratorPlan,
     OrchestratorRequest,
     OrchestratorStep,
-    MAX_ORCHESTRATION_STEPS,
-    MAX_QUERY_CHARS,
     register_meta_orchestrator,
 )
 
@@ -299,7 +299,6 @@ def test_custom_regex_policy_caps_are_exposed():
 # ---------------------------------------------------------------------------
 
 from collegue.tools.scanners.kubernetes import KubernetesScanner  # noqa: E402
-
 
 DEPLOYMENT_PRIVILEGED = """\
 apiVersion: apps/v1
