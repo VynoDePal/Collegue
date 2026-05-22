@@ -4,15 +4,21 @@ Kubernetes Transformers - Fonctions de transformation des données Kubernetes.
 Transforme les données brutes de l'API Kubernetes en modèles Pydantic typés.
 """
 from datetime import datetime, timezone
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from ...core.shared import normalize_keys
 
 if TYPE_CHECKING:
 	from ..kubernetes_ops import (
-		PodInfo, PodDetail, ContainerStatus, DeploymentInfo,
-		ServiceInfo, NamespaceInfo, EventInfo, NodeInfo,
-		ConfigMapInfo, SecretInfo
+		ConfigMapInfo,
+		DeploymentInfo,
+		EventInfo,
+		NamespaceInfo,
+		NodeInfo,
+		PodDetail,
+		PodInfo,
+		SecretInfo,
+		ServiceInfo,
 	)
 
 
@@ -81,7 +87,7 @@ def transform_pods(pods_data: List[Dict[str, Any]]) -> List['PodInfo']:
 
 def transform_pod_detail(pod_data: Dict[str, Any]) -> 'PodDetail':
 	"""Transform raw pod data into PodDetail object."""
-	from ..kubernetes_ops import PodDetail, ContainerStatus
+	from ..kubernetes_ops import ContainerStatus, PodDetail
 	pod_data = normalize_keys(pod_data) or {}
 	metadata = pod_data.get('metadata', {})
 	spec = pod_data.get('spec', {})
@@ -292,7 +298,7 @@ def transform_nodes(nodes_data: List[Dict[str, Any]]) -> List['NodeInfo']:
 
 		# Extract roles
 		roles = []
-		for label, value in metadata.get('labels', {}).items():
+		for label, _value in metadata.get('labels', {}).items():
 			if label.startswith("node-role.kubernetes.io/"):
 				roles.append(label.split("/")[1])
 
@@ -327,7 +333,7 @@ def transform_node(node_data: Dict[str, Any]) -> 'NodeInfo':
 	status = node_data.get('status', {})
 
 	roles = []
-	for label, value in metadata.get('labels', {}).items():
+	for label, _value in metadata.get('labels', {}).items():
 		if label.startswith("node-role.kubernetes.io/"):
 			roles.append(label.split("/")[1])
 

@@ -10,13 +10,14 @@ when the handler is invoked outside of a proper lifespan context (tests,
 ad-hoc scripts).
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 from .tools_registry import ToolsRegistry
 
 try:
-    from fastmcp import FastMCP, Context
+    from fastmcp import Context, FastMCP
 except ImportError:
     FastMCP = Any
     Context = Any
@@ -96,8 +97,8 @@ def register_meta_orchestrator(app: FastMCP):
         Orchestrateur intelligent utilisant une approche Plan -> Exécute -> Synthétise.
         Plus robuste pour les tâches complexes et évite les erreurs de protocole natif.
         """
-        import time
         import json
+        import time
 
         start_time = time.time()
         await ctx.info(

@@ -1,28 +1,20 @@
 """
 Tests unitaires pour les ressources Python
 """
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import sys
-import os
-from fastapi.testclient import TestClient
-from fastapi import FastAPI
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from collegue.resources.python.standard_library import (
-    get_module_reference, get_all_modules,
-    PythonModuleReference
-)
-from collegue.resources.python.frameworks import (
-    get_framework_reference, get_all_frameworks,
-    PythonFrameworkReference
-)
-from collegue.resources.python.best_practices import (
-    get_best_practice, get_all_best_practices,
-    PythonBestPractice
-)
+from collegue.resources.python.best_practices import PythonBestPractice, get_all_best_practices, get_best_practice
+from collegue.resources.python.frameworks import PythonFrameworkReference, get_all_frameworks, get_framework_reference
+from collegue.resources.python.standard_library import PythonModuleReference, get_all_modules, get_module_reference
+
 
 class TestPythonStandardLibrary(unittest.TestCase):
     """Tests pour le module standard_library des ressources Python."""
@@ -88,9 +80,9 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         self.app_state = {"resource_manager": MagicMock()}
 
 
-        from collegue.resources.python.standard_library import register_stdlib
-        from collegue.resources.python.frameworks import register_frameworks
         from collegue.resources.python.best_practices import register_best_practices
+        from collegue.resources.python.frameworks import register_frameworks
+        from collegue.resources.python.standard_library import register_stdlib
 
         register_stdlib(self.app, self.app_state)
         register_frameworks(self.app, self.app_state)

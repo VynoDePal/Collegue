@@ -1,10 +1,11 @@
 """
 Standard Library Python - Ressources pour la bibliothèque standard Python
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
-import os
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 class PythonModuleReference(BaseModel):
     """Modèle pour une référence de module Python."""

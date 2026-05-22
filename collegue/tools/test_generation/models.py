@@ -1,7 +1,8 @@
 """
 Modèles Pydantic pour l'outil Test Generation.
 """
-from typing import Optional, Dict, Any, List
+from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 

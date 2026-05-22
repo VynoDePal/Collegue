@@ -2,8 +2,10 @@
 Modèles Pydantic pour l'outil Repo Consistency Check.
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
+
 from ...core.shared import validate_fast_deep
 
 

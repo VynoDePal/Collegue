@@ -1,14 +1,7 @@
 """
 Engine - Module du moteur de prompts personnalisés
 """
-from .models import (
-    PromptTemplate, 
-    PromptCategory, 
-    PromptExecution, 
-    PromptLibrary,
-    PromptVariable,
-    PromptVariableType
-)
+from .models import PromptCategory, PromptExecution, PromptLibrary, PromptTemplate, PromptVariable, PromptVariableType
 from .prompt_engine import PromptEngine
 
 __all__ = [

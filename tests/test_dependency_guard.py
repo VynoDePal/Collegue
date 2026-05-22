@@ -1,15 +1,12 @@
 """
 Tests unitaires pour l'outil Dependency Guard refactorisé.
 """
-import pytest
-from unittest.mock import MagicMock, patch
 import json
+from unittest.mock import MagicMock, patch
 
-from collegue.tools.dependency_guard import (
-    DependencyGuardTool,
-    DependencyGuardRequest,
-    DependencyIssue
-)
+import pytest
+
+from collegue.tools.dependency_guard import DependencyGuardRequest, DependencyGuardTool, DependencyIssue
 from collegue.tools.dependency_guard.engine import DependencyAnalysisEngine
 
 

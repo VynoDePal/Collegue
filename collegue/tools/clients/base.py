@@ -3,12 +3,13 @@ Base API client with retry logic and standardized error handling.
 
 Provides a foundation for all external API clients in the tools package.
 """
-import time
 import logging
+import time
 from abc import ABC
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Callable, TypeVar, Generic
 from enum import Enum
+from typing import Any, Callable, Dict, Optional, TypeVar
+
 from ...core.header_security import sanitize_header_value
 from ...core.security_logger import security_logger
 
@@ -53,7 +54,7 @@ class APIError(Exception):
 T = TypeVar('T')
 
 
-class APIClient(ABC):
+class APIClient(ABC):  # noqa: B024
 
 	def __init__(
 		self,

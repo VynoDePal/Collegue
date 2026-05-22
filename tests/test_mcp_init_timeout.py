@@ -1,10 +1,11 @@
 """
 Tests unitaires pour le LazyPromptEngine et le fix du timeout d'initialisation.
 """
-import pytest
 import asyncio
 import time
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
 
 from collegue.app import LazyPromptEngine
 
@@ -176,8 +177,9 @@ class TestBaseToolIntegration:
     @pytest.mark.asyncio
     async def test_execute_async_awaits_lazy_engine(self):
         """Test que execute_async attend le LazyPromptEngine."""
-        from collegue.tools.base import BaseTool
         from pydantic import BaseModel
+
+        from collegue.tools.base import BaseTool
         
         class DummyRequest(BaseModel):
             code: str
@@ -222,8 +224,9 @@ class TestBaseToolIntegration:
     @pytest.mark.asyncio
     async def test_execute_async_handles_none_engine(self):
         """Test que execute_async gère un engine None (fallback)."""
-        from collegue.tools.base import BaseTool
         from pydantic import BaseModel
+
+        from collegue.tools.base import BaseTool
         
         class DummyRequest(BaseModel):
             code: str

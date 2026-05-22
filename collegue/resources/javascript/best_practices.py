@@ -1,10 +1,11 @@
 """
 Best Practices JavaScript - Ressources pour les bonnes pratiques en JavaScript
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
-
 import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 class JavaScriptBestPractice(BaseModel):
     """Modèle pour une bonne pratique JavaScript."""

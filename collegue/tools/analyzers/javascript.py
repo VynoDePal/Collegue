@@ -7,8 +7,9 @@ Analyzes JS/TS code for:
 """
 import re
 from typing import List
-from .base import BaseAnalyzer
+
 from ...core.shared import ConsistencyIssue
+from .base import BaseAnalyzer
 
 
 class JavaScriptAnalyzer(BaseAnalyzer):
@@ -40,7 +41,7 @@ class JavaScriptAnalyzer(BaseAnalyzer):
 						if name and re.match(r'^\w+$', name):
 							imports[name] = (i, match.group(0))
 
-		for name, (line, import_stmt) in imports.items():
+		for name, (line, _import_stmt) in imports.items():
 			pattern = rf'\b{re.escape(name)}\b'
 			matches = list(re.finditer(pattern, code))
 

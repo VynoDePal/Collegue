@@ -8,24 +8,19 @@ pytest.skip(
 	allow_module_level=True,
 )
 
-import unittest
 import json
-import tempfile
-import shutil
 import os
-from unittest.mock import patch, MagicMock
+import shutil
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
 
-from fastapi.testclient import TestClient
+from collegue.prompts.interface.api import get_prompt_engine, register_prompt_interface
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from collegue.prompts.engine import PromptEngine
-from collegue.prompts.interface.api import register_prompt_interface, get_prompt_engine
-from collegue.prompts.engine.models import (
-    PromptTemplate, 
-    PromptCategory,
-    PromptVariable,
-    PromptVariableType
-)
+from collegue.prompts.engine.models import PromptCategory, PromptTemplate, PromptVariable, PromptVariableType
 
 
 class TestPromptAPI(unittest.TestCase):

@@ -1,15 +1,14 @@
 """
 Prompt Engine - Moteur de gestion des prompts personnalisés
 """
-import json
-import os
-import logging
-from typing import Dict, List, Optional, Any, Union
 import datetime
+import json
+import logging
+import os
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from .models import PromptTemplate, PromptCategory, PromptExecution, PromptLibrary, PromptVariable
-
+from .models import PromptCategory, PromptExecution, PromptLibrary, PromptTemplate, PromptVariable
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

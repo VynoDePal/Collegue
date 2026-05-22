@@ -4,10 +4,10 @@ Security Logger - Journalisation des événements de sécurité
 Ce module fournit des fonctions de logging dédiées aux événements de sécurité
 pour faciliter la détection et l'investigation d'incidents.
 """
-import logging
 import json
+import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 
 class SecurityLogger:

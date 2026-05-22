@@ -1,21 +1,21 @@
 """
 Tests unitaires pour le moteur de prompts personnalisés
 """
-import unittest
-import os
 import json
-import tempfile
+import os
 import shutil
-from unittest.mock import patch, MagicMock
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
 
-from collegue.prompts.engine.prompt_engine import PromptEngine
 from collegue.prompts.engine.models import (
-    PromptTemplate, 
     PromptCategory,
+    PromptExecution,
+    PromptTemplate,
     PromptVariable,
     PromptVariableType,
-    PromptExecution
 )
+from collegue.prompts.engine.prompt_engine import PromptEngine
 
 
 class TestPromptEngine(unittest.TestCase):

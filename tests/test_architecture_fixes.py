@@ -1,11 +1,13 @@
-import pytest
 import asyncio
-from unittest.mock import patch, MagicMock
 from typing import Optional
+from unittest.mock import MagicMock, patch
+
+import pytest
 from pydantic import BaseModel
 
 from collegue.tools.base import BaseTool
 from collegue.tools.github_ops import GitHubOpsTool, GitHubRequest, GitHubResponse
+
 
 class DummyPromptEngine:
     pass

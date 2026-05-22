@@ -1,10 +1,11 @@
 """
 Standard Library JavaScript - Ressources pour les fonctionnalités standard de JavaScript
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
-import os
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 class JavaScriptAPIReference(BaseModel):
     """Modèle pour une référence d'API JavaScript."""
