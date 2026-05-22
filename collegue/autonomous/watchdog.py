@@ -12,10 +12,7 @@ import difflib
 import logging
 import os
 import re
-import sys
 from typing import List, Optional, Tuple
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from collegue.autonomous.config_registry import UserConfig, get_config_registry
 from collegue.autonomous.context_pack import ContextPackBuilder

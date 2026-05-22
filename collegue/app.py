@@ -8,11 +8,8 @@ import os
 import sys
 import time
 
-from fastmcp.server.lifespan import lifespan
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from fastmcp import FastMCP
+from fastmcp.server.lifespan import lifespan
 
 from collegue.config import settings
 
@@ -28,10 +25,6 @@ if settings.SENTRY_DSN:
         instrumenter="otel",
     )
     logger.info(f"Sentry initialisé avec OTEL (env: {settings.SENTRY_ENVIRONMENT})")
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
 
 auth_provider = None
 if settings.OAUTH_ENABLED:
