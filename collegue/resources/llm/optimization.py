@@ -1,31 +1,26 @@
 """
 Optimization LLM - Optimisation des prompts pour les différents modèles de langage
 """
-
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
-import os
 import logging
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 class OptimizationStrategy(str, Enum):
     """Stratégies d'optimisation de prompts."""
-
     CHAIN_OF_THOUGHT = "chain_of_thought"
     FEW_SHOT = "few_shot"
     ZERO_SHOT = "zero_shot"
     TREE_OF_THOUGHT = "tree_of_thought"
     SELF_CONSISTENCY = "self_consistency"
 
-
 class PromptOptimization(BaseModel):
     """Modèle pour une optimisation de prompt."""
-
     name: str
     description: str
     strategy: OptimizationStrategy
@@ -33,25 +28,28 @@ class PromptOptimization(BaseModel):
     provider_specific: Dict[str, Dict[str, str]] = {}
     examples: List[Dict[str, Any]] = []
 
-
 PROMPT_OPTIMIZATIONS = {
     "chain_of_thought": {
         "name": "Chain of Thought",
         "description": "Encourage le modèle à décomposer son raisonnement étape par étape.",
         "strategy": OptimizationStrategy.CHAIN_OF_THOUGHT,
-        "template_modifiers": {"suffix": "\n\nRésous ce problème étape par étape en expliquant ton raisonnement."},
+        "template_modifiers": {
+            "suffix": "\n\nRésous ce problème étape par étape en expliquant ton raisonnement."
+        },
         "provider_specific": {
-            "openai": {"suffix": "\n\nRésous ce problème étape par étape en expliquant ton raisonnement."},
+            "openai": {
+                "suffix": "\n\nRésous ce problème étape par étape en expliquant ton raisonnement."
+            },
             "anthropic": {
                 "suffix": "\n\nPour résoudre ce problème, je vais procéder étape par étape et expliquer mon raisonnement à chaque étape."
-            },
+            }
         },
         "examples": [
             {
                 "original_prompt": "Calcule 17 × 24.",
-                "optimized_prompt": "Calcule 17 × 24.\n\nRésous ce problème étape par étape en expliquant ton raisonnement.",
+                "optimized_prompt": "Calcule 17 × 24.\n\nRésous ce problème étape par étape en expliquant ton raisonnement."
             }
-        ],
+        ]
     },
     "few_shot": {
         "name": "Few-Shot Learning",
@@ -63,24 +61,26 @@ PROMPT_OPTIMIZATIONS = {
         "provider_specific": {},
         "examples": [
             {
-                "original_prompt": 'Classe cette critique de film comme positive ou négative: "J\'ai trouvé ce film ennuyeux et prévisible."',
-                "examples": 'Critique: "Ce film était fantastique, j\'ai adoré chaque minute!"\nSentiment: Positif\n\nCritique: "Quelle perte de temps, l\'histoire n\'avait aucun sens."\nSentiment: Négatif\n\nCritique: "Les acteurs étaient excellents mais le scénario était faible."\nSentiment: Mixte',
-                "optimized_prompt": 'Voici quelques exemples:\nCritique: "Ce film était fantastique, j\'ai adoré chaque minute!"\nSentiment: Positif\n\nCritique: "Quelle perte de temps, l\'histoire n\'avait aucun sens."\nSentiment: Négatif\n\nCritique: "Les acteurs étaient excellents mais le scénario était faible."\nSentiment: Mixte\n\nMaintenant, résous le problème suivant de la même manière:\nClasse cette critique de film comme positive ou négative: "J\'ai trouvé ce film ennuyeux et prévisible."',
+                "original_prompt": "Classe cette critique de film comme positive ou négative: \"J'ai trouvé ce film ennuyeux et prévisible.\"",
+                "examples": "Critique: \"Ce film était fantastique, j'ai adoré chaque minute!\"\nSentiment: Positif\n\nCritique: \"Quelle perte de temps, l'histoire n'avait aucun sens.\"\nSentiment: Négatif\n\nCritique: \"Les acteurs étaient excellents mais le scénario était faible.\"\nSentiment: Mixte",
+                "optimized_prompt": "Voici quelques exemples:\nCritique: \"Ce film était fantastique, j'ai adoré chaque minute!\"\nSentiment: Positif\n\nCritique: \"Quelle perte de temps, l'histoire n'avait aucun sens.\"\nSentiment: Négatif\n\nCritique: \"Les acteurs étaient excellents mais le scénario était faible.\"\nSentiment: Mixte\n\nMaintenant, résous le problème suivant de la même manière:\nClasse cette critique de film comme positive ou négative: \"J'ai trouvé ce film ennuyeux et prévisible.\""
             }
-        ],
+        ]
     },
     "zero_shot": {
         "name": "Zero-Shot Learning",
         "description": "Demande au modèle de résoudre un problème sans exemples préalables.",
         "strategy": OptimizationStrategy.ZERO_SHOT,
-        "template_modifiers": {"prefix": "Sans utiliser d'exemples, "},
+        "template_modifiers": {
+            "prefix": "Sans utiliser d'exemples, "
+        },
         "provider_specific": {},
         "examples": [
             {
                 "original_prompt": "Traduis cette phrase en français: 'The weather is nice today.'",
-                "optimized_prompt": "Sans utiliser d'exemples, traduis cette phrase en français: 'The weather is nice today.'",
+                "optimized_prompt": "Sans utiliser d'exemples, traduis cette phrase en français: 'The weather is nice today.'"
             }
-        ],
+        ]
     },
     "tree_of_thought": {
         "name": "Tree of Thought",
@@ -93,9 +93,9 @@ PROMPT_OPTIMIZATIONS = {
         "examples": [
             {
                 "original_prompt": "Comment pourrais-je optimiser une fonction récursive de calcul de la suite de Fibonacci?",
-                "optimized_prompt": "Comment pourrais-je optimiser une fonction récursive de calcul de la suite de Fibonacci?\n\nExplore plusieurs approches pour résoudre ce problème:\n1. Première approche: ...\n2. Deuxième approche: ...\n3. Troisième approche: ...\n\nMaintenant, choisis la meilleure approche et résous le problème.",
+                "optimized_prompt": "Comment pourrais-je optimiser une fonction récursive de calcul de la suite de Fibonacci?\n\nExplore plusieurs approches pour résoudre ce problème:\n1. Première approche: ...\n2. Deuxième approche: ...\n3. Troisième approche: ...\n\nMaintenant, choisis la meilleure approche et résous le problème."
             }
-        ],
+        ]
     },
     "self_consistency": {
         "name": "Self-Consistency",
@@ -108,12 +108,11 @@ PROMPT_OPTIMIZATIONS = {
         "examples": [
             {
                 "original_prompt": "Résous cette équation: 3x + 7 = 22",
-                "optimized_prompt": "Résous cette équation: 3x + 7 = 22\n\nAprès avoir fourni ta réponse, vérifie-la pour t'assurer qu'elle est correcte et cohérente. Si tu trouves des erreurs, corrige-les.",
+                "optimized_prompt": "Résous cette équation: 3x + 7 = 22\n\nAprès avoir fourni ta réponse, vérifie-la pour t'assurer qu'elle est correcte et cohérente. Si tu trouves des erreurs, corrige-les."
             }
-        ],
-    },
+        ]
+    }
 }
-
 
 def get_optimization(optimization_id: str) -> Optional[PromptOptimization]:
     """Récupère une optimisation de prompt par son ID."""
@@ -121,23 +120,21 @@ def get_optimization(optimization_id: str) -> Optional[PromptOptimization]:
         return PromptOptimization(**PROMPT_OPTIMIZATIONS[optimization_id])
     return None
 
-
 def get_all_optimizations() -> List[str]:
     """Récupère la liste de toutes les optimisations disponibles."""
     return list(PROMPT_OPTIMIZATIONS.keys())
 
-
-def optimize_prompt(
-    prompt: str, optimization_id: str, provider: Optional[str] = None, examples: Optional[str] = None
-) -> Optional[str]:
+def optimize_prompt(prompt: str, optimization_id: str, provider: Optional[str] = None, examples: Optional[str] = None) -> Optional[str]:
     """Optimise un prompt en utilisant la stratégie spécifiée."""
     optimization = get_optimization(optimization_id)
     if not optimization:
         return None
 
+
     modifiers = optimization.template_modifiers
     if provider and provider in optimization.provider_specific:
         modifiers = optimization.provider_specific[provider]
+
 
     optimized_prompt = prompt
 
@@ -151,7 +148,6 @@ def optimize_prompt(
         optimized_prompt = optimized_prompt + " " + modifiers["suffix"]
 
     return optimized_prompt
-
 
 def register_optimization(app, app_state):
     """Enregistre les ressources d'optimisation des prompts LLM."""

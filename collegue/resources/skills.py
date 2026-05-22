@@ -163,7 +163,7 @@ def _register_skills_fallback(app: Any, app_state: dict):
         skill_md = skill_path / "SKILL.md"
 
         @app.resource(uri=f"collegue://skills/{skill_name}")
-        def get_skill():
+        def get_skill(skill_md=skill_md):
             try:
                 with open(skill_md, "r", encoding="utf-8") as f:
                     return f.read()

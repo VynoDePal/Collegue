@@ -8,17 +8,15 @@ Refactorisé: Le fichier original faisait 767 lignes, maintenant ~200 lignes.
 """
 
 import time
-from typing import List, Dict, Any, Optional
-import pathlib
+from typing import Any, Dict, List
 
-from ..base import BaseTool, ToolError, ToolValidationError
 from ...core.shared import run_async_from_sync
+from ..base import BaseTool, ToolValidationError
+from .engine import TestGenerationEngine
 from .models import (
     TestGenerationRequest,
     TestGenerationResponse,
-    LLMTestGenerationResult,
 )
-from .engine import TestGenerationEngine
 
 
 class TestGenerationTool(BaseTool):

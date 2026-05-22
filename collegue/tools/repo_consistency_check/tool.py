@@ -13,22 +13,21 @@ Refactorisé: Le fichier original faisait 813 lignes, maintenant ~180 lignes.
 """
 
 import asyncio
-import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..base import BaseTool
 from ...core.shared import aggregate_severities, parse_llm_json_response
+from ..analyzers.javascript import JavaScriptAnalyzer
+from ..analyzers.php import PHPAnalyzer
+from ..analyzers.python import PythonAnalyzer
+from ..base import BaseTool
+from .config import ALL_CHECKS
+from .engine import ConsistencyAnalysisEngine
 from .models import (
     ConsistencyCheckRequest,
     ConsistencyCheckResponse,
     LLMInsight,
     SuggestedAction,
 )
-from .engine import ConsistencyAnalysisEngine
-from .config import ALL_CHECKS, SEVERITY_MAP
-from ..analyzers.python import PythonAnalyzer
-from ..analyzers.javascript import JavaScriptAnalyzer
-from ..analyzers.php import PHPAnalyzer
 
 
 class RepoConsistencyCheckTool(BaseTool):
@@ -228,7 +227,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
     ) -> Optional[Dict[str, Any]]:
         """Exécute le refactoring automatique si activé."""
         try:
-            from ..refactoring import RefactoringTool, RefactoringRequest
+            from ..refactoring import RefactoringRequest, RefactoringTool
 
             if not suggested_actions:
                 return None

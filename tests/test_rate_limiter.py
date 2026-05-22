@@ -1,18 +1,20 @@
 """
 Tests unitaires pour le système de rate limiting.
 """
-import pytest
-import time
 import threading
+import time
+
+import pytest
+
 from collegue.tools.rate_limiter import (
-    TokenBucketLimiter,
     FixedWindowLimiter,
-    SlidingWindowLimiter,
-    RateLimiterManager,
     RateLimitConfig,
-    RateLimitStrategy,
-    RateLimitExceeded,
     RateLimiterFactory,
+    RateLimiterManager,
+    RateLimitExceeded,
+    RateLimitStrategy,
+    SlidingWindowLimiter,
+    TokenBucketLimiter,
     get_rate_limiter_manager,
     reset_rate_limiter_manager,
 )

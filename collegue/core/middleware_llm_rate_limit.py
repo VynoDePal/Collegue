@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 

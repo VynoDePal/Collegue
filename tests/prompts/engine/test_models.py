@@ -6,12 +6,12 @@ import uuid
 from datetime import datetime
 
 from collegue.prompts.engine.models import (
-    PromptVariable,
-    PromptVariableType,
-    PromptTemplate,
     PromptCategory,
     PromptExecution,
-    PromptLibrary
+    PromptLibrary,
+    PromptTemplate,
+    PromptVariable,
+    PromptVariableType,
 )
 
 

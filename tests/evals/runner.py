@@ -48,11 +48,9 @@ from collegue.config import settings
 from collegue.resources.llm.providers import LLMConfig, generate_text
 from collegue.tools.code_documentation import DocumentationRequest, DocumentationTool
 from collegue.tools.test_generation import TestGenerationRequest, TestGenerationTool
-
 from tests.evals.eval_context import EvalContext
 from tests.evals.scorers import code_documentation as doc_scorer
 from tests.evals.scorers import test_generation as tg_scorer
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CASES_ROOT = Path(__file__).parent / "cases"

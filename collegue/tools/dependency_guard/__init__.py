@@ -10,8 +10,12 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.dependency_guard import DependencyGuardTool
 """
-
-from .tool import DependencyGuardTool
 from .models import DependencyGuardRequest, DependencyGuardResponse, DependencyIssue
+from .tool import DependencyGuardTool
 
-__all__ = ["DependencyGuardTool", "DependencyGuardRequest", "DependencyGuardResponse", "DependencyIssue"]
+__all__ = [
+    'DependencyGuardTool',
+    'DependencyGuardRequest',
+    'DependencyGuardResponse',
+    'DependencyIssue'
+]

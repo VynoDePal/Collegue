@@ -5,7 +5,6 @@ Provides functions to sanitize HTTP headers and prevent injection attacks.
 """
 
 import re
-from typing import Optional
 
 
 class HeaderSecurityError(Exception):

@@ -11,26 +11,25 @@ Refactorisé: Le fichier original faisait 956 lignes, maintenant ~200 lignes.
 La logique métier a été déplacée dans engine.py, les modèles dans models.py.
 """
 
-from typing import List, Dict, Any, Optional
 import asyncio
-import json
+from typing import Any, Dict, List
 
+from ...core.shared import aggregate_severities, load_rules
 from ..base import BaseTool
-from ...core.shared import load_rules, aggregate_severities
-from .models import (
-    IacGuardrailsRequest,
-    IacGuardrailsResponse,
-    IacFinding,
-    RemediationAction,
-    LLMSecurityInsight,
-    FileInput,
-    CustomPolicy,
-)
-from .engine import IacAnalysisEngine
-from .config import DEEP_ANALYSIS_PROMPT_TEMPLATE, FALLBACK_PROMPT_TEMPLATE
+from ..scanners.dockerfile import DockerfileScanner
 from ..scanners.kubernetes import KubernetesScanner
 from ..scanners.terraform import TerraformScanner
-from ..scanners.dockerfile import DockerfileScanner
+from .config import DEEP_ANALYSIS_PROMPT_TEMPLATE
+from .engine import IacAnalysisEngine
+from .models import (
+    CustomPolicy,
+    FileInput,
+    IacFinding,
+    IacGuardrailsRequest,
+    IacGuardrailsResponse,
+    LLMSecurityInsight,
+    RemediationAction,
+)
 
 
 class IacGuardrailsScanTool(BaseTool):
@@ -160,6 +159,7 @@ class IacGuardrailsScanTool(BaseTool):
     def _apply_custom_policies(self, content: str, filepath: str, policies: List[CustomPolicy]) -> List[IacFinding]:
         """Applique les policies personnalisées sur un fichier."""
         import re
+
         import yaml
 
         findings = []

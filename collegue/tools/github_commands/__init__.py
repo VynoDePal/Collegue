@@ -10,13 +10,13 @@ Organizes GitHub API operations by domain:
 """
 
 from ..clients import GitHubClient
-from .repos import RepoCommands, RepoInfo
-from .prs import PRCommands, PRInfo, FileChange, Comment
-from .issues import IssueCommands, IssueInfo
 from .branches import BranchCommands, BranchInfo, CommitInfo
 from .files import FileCommands
-from .workflows import WorkflowCommands, WorkflowRun
+from .issues import IssueCommands, IssueInfo
+from .prs import Comment, FileChange, PRCommands, PRInfo
+from .repos import RepoCommands, RepoInfo
 from .search import SearchCommands, SearchResult
+from .workflows import WorkflowCommands, WorkflowRun
 
 __all__ = [
     "GitHubClient",

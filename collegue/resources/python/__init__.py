@@ -2,9 +2,10 @@
 Ressources Python - Module pour les références et la documentation Python
 """
 
-from .standard_library import register_stdlib
-from .frameworks import register_frameworks
 from .best_practices import register_best_practices
+from .frameworks import register_frameworks
+from .standard_library import register_stdlib
+
 
 
 def register(app, app_state):

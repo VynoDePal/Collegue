@@ -10,23 +10,22 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.iac_guardrails_scan import IacGuardrailsScanTool
 """
-
-from .tool import IacGuardrailsScanTool
 from .models import (
+    CustomPolicy,
+    IacFinding,
     IacGuardrailsRequest,
     IacGuardrailsResponse,
-    IacFinding,
-    CustomPolicy,
-    RemediationAction,
     LLMSecurityInsight,
+    RemediationAction,
 )
+from .tool import IacGuardrailsScanTool
 
 __all__ = [
-    "IacGuardrailsScanTool",
-    "IacGuardrailsRequest",
-    "IacGuardrailsResponse",
-    "IacFinding",
-    "CustomPolicy",
-    "RemediationAction",
-    "LLMSecurityInsight",
+    'IacGuardrailsScanTool',
+    'IacGuardrailsRequest',
+    'IacGuardrailsResponse',
+    'IacFinding',
+    'CustomPolicy',
+    'RemediationAction',
+    'LLMSecurityInsight'
 ]

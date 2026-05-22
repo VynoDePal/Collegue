@@ -12,12 +12,13 @@ Cet outil refactorise et améliore le code selon différents types de transforma
 Refactorisé: Le fichier original faisait 687 lignes, maintenant ~200 lignes.
 """
 
-from typing import List, Dict, Any, Optional
-from ..base import BaseTool, ToolError
+from typing import Any, Dict, List
+
 from ...core.shared import run_async_from_sync
-from .models import RefactoringRequest, RefactoringResponse, LLMRefactoringResult
+from ..base import BaseTool, ToolError
+from .config import REFACTORING_LANGUAGE_INSTRUCTIONS
 from .engine import RefactoringEngine
-from .config import REFACTORING_TYPES, REFACTORING_LANGUAGE_INSTRUCTIONS
+from .models import LLMRefactoringResult, RefactoringRequest, RefactoringResponse
 
 
 class RefactoringTool(BaseTool):
@@ -160,12 +161,12 @@ class RefactoringTool(BaseTool):
         prompt_parts = [
             f"Effectue un refactoring de type '{refactoring_type}'",
             f"Description: {refactoring_desc}",
-            f"IMPORTANT: Préserve exactement le comportement du code original",
+            "IMPORTANT: Préserve exactement le comportement du code original",
             f"Langage: {language}",
-            f"",
+            "",
         ]
 
-        prompt_parts.extend([f"```{language}", code, f"```", f""])
+        prompt_parts.extend([f"```{language}", code, "```", ""])
 
         lang_instructions = REFACTORING_LANGUAGE_INSTRUCTIONS.get(language.lower(), {})
         if refactoring_type in lang_instructions:

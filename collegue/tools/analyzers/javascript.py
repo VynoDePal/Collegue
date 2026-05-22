@@ -5,106 +5,103 @@ Analyzes JS/TS code for:
 - Unused imports
 - Unused variables
 """
-
 import re
 from typing import List
-from .base import BaseAnalyzer
+
 from ...core.shared import ConsistencyIssue
+from .base import BaseAnalyzer
 
 
 class JavaScriptAnalyzer(BaseAnalyzer):
-    def analyze_unused_imports(self, code: str, filepath: str) -> List[ConsistencyIssue]:
-        issues = []
 
-        import_patterns = [
-            r"import\s*\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]",
-            r"import\s+(\w+)\s+from\s*['\"]([^'\"]+)['\"]",
-            r"import\s*\*\s*as\s+(\w+)\s+from\s*['\"]([^'\"]+)['\"]",
-        ]
+	def analyze_unused_imports(self, code: str, filepath: str) -> List[ConsistencyIssue]:
+		issues = []
 
-        imports = {}
-        lines = code.split("\n")
+		import_patterns = [
+			r"import\s*\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]",
+			r"import\s+(\w+)\s+from\s*['\"]([^'\"]+)['\"]",
+			r"import\s*\*\s*as\s+(\w+)\s+from\s*['\"]([^'\"]+)['\"]",
+		]
 
-        for i, line in enumerate(lines, 1):
-            for pattern in import_patterns:
-                match = re.search(pattern, line)
-                if match:
-                    names_str = match.group(1)
+		imports = {}
+		lines = code.split('\n')
 
-                    for name_part in names_str.split(","):
-                        name_part = name_part.strip()
-                        if " as " in name_part:
-                            name = name_part.split(" as ")[1].strip()
-                        else:
-                            name = name_part.strip()
-                        if name and re.match(r"^\w+$", name):
-                            imports[name] = (i, match.group(0))
+		for i, line in enumerate(lines, 1):
+			for pattern in import_patterns:
+				match = re.search(pattern, line)
+				if match:
+					names_str = match.group(1)
 
-        for name, (line, import_stmt) in imports.items():
-            pattern = rf"\b{re.escape(name)}\b"
-            matches = list(re.finditer(pattern, code))
+					for name_part in names_str.split(','):
+						name_part = name_part.strip()
+						if ' as ' in name_part:
+							name = name_part.split(' as ')[1].strip()
+						else:
+							name = name_part.strip()
+						if name and re.match(r'^\w+$', name):
+							imports[name] = (i, match.group(0))
 
-            usage_count = 0
-            for m in matches:
-                match_line = code[: m.start()].count("\n") + 1
-                if match_line != line:
-                    usage_count += 1
+		for name, (line, _import_stmt) in imports.items():
+			pattern = rf'\b{re.escape(name)}\b'
+			matches = list(re.finditer(pattern, code))
 
-            if usage_count == 0:
-                issues.append(
-                    ConsistencyIssue(
-                        kind="unused_import",
-                        severity="low",
-                        path=filepath,
-                        line=line,
-                        message=f"Import '{name}' non utilisé",
-                        confidence=85,
-                        suggested_fix=f"Supprimer '{name}' de l'import",
-                        engine="regex-analyzer",
-                    )
-                )
+			usage_count = 0
+			for m in matches:
+				match_line = code[:m.start()].count('\n') + 1
+				if match_line != line:
+					usage_count += 1
 
-        return issues
+			if usage_count == 0:
+				issues.append(ConsistencyIssue(
+					kind="unused_import",
+					severity="low",
+					path=filepath,
+					line=line,
+					message=f"Import '{name}' non utilisé",
+					confidence=85,
+					suggested_fix=f"Supprimer '{name}' de l'import",
+					engine="regex-analyzer"
+				))
 
-    def analyze_unused_vars(self, code: str, filepath: str) -> List[ConsistencyIssue]:
-        issues = []
+		return issues
 
-        decl_patterns = [
-            r"(?:const|let|var)\s+(\w+)\s*=",
-            r"(?:const|let|var)\s+\{([^}]+)\}\s*=",
-        ]
+	def analyze_unused_vars(self, code: str, filepath: str) -> List[ConsistencyIssue]:
+		issues = []
 
-        declarations = {}
-        lines = code.split("\n")
+		decl_patterns = [
+			r"(?:const|let|var)\s+(\w+)\s*=",
+			r"(?:const|let|var)\s+\{([^}]+)\}\s*=",
+		]
 
-        for i, line in enumerate(lines, 1):
-            for pattern in decl_patterns:
-                matches = re.finditer(pattern, line)
-                for match in matches:
-                    names_str = match.group(1)
+		declarations = {}
+		lines = code.split('\n')
 
-                    for name in re.findall(r"\b(\w+)\b", names_str):
-                        if not name.startswith("_") and name not in ("const", "let", "var"):
-                            declarations[name] = i
+		for i, line in enumerate(lines, 1):
+			for pattern in decl_patterns:
+				matches = re.finditer(pattern, line)
+				for match in matches:
+					names_str = match.group(1)
 
-        for name, line in declarations.items():
-            pattern = rf"\b{re.escape(name)}\b"
-            matches = list(re.finditer(pattern, code))
+					for name in re.findall(r'\b(\w+)\b', names_str):
+						if not name.startswith('_') and name not in ('const', 'let', 'var'):
+							declarations[name] = i
 
-            usage_count = sum(1 for m in matches if code[: m.start()].count("\n") + 1 != line)
+		for name, line in declarations.items():
+			pattern = rf'\b{re.escape(name)}\b'
+			matches = list(re.finditer(pattern, code))
 
-            if usage_count == 0:
-                issues.append(
-                    ConsistencyIssue(
-                        kind="unused_var",
-                        severity="medium",
-                        path=filepath,
-                        line=line,
-                        message=f"Variable '{name}' déclarée mais jamais utilisée",
-                        confidence=75,
-                        suggested_fix=f"Supprimer ou préfixer avec _ : _{name}",
-                        engine="regex-analyzer",
-                    )
-                )
+			usage_count = sum(1 for m in matches if code[:m.start()].count('\n') + 1 != line)
 
-        return issues
+			if usage_count == 0:
+				issues.append(ConsistencyIssue(
+					kind="unused_var",
+					severity="medium",
+					path=filepath,
+					line=line,
+					message=f"Variable '{name}' déclarée mais jamais utilisée",
+					confidence=75,
+					suggested_fix=f"Supprimer ou préfixer avec _ : _{name}",
+					engine="regex-analyzer"
+				))
+
+		return issues

@@ -1,16 +1,14 @@
 """
 Standard Library Python - Ressources pour la bibliothèque standard Python
 """
+import json
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
-import json
-import os
 
 
 class PythonModuleReference(BaseModel):
     """Modèle pour une référence de module Python."""
-
     name: str
     description: str
     version: Optional[str] = None
@@ -20,16 +18,16 @@ class PythonModuleReference(BaseModel):
     examples: List[Dict[str, str]] = []
     url: Optional[str] = None
 
-
 STDLIB_MODULES = {
+
     "os": {
         "name": "os",
         "description": "Interface portable avec le système d'exploitation",
         "url": "https://docs.python.org/3/library/os.html",
         "examples": [
             {"title": "Liste des fichiers", "code": "import os\nfiles = os.listdir('.')"},
-            {"title": "Chemin absolu", "code": "import os\npath = os.path.abspath('file.txt')"},
-        ],
+            {"title": "Chemin absolu", "code": "import os\npath = os.path.abspath('file.txt')"}
+        ]
     },
     "sys": {
         "name": "sys",
@@ -37,8 +35,8 @@ STDLIB_MODULES = {
         "url": "https://docs.python.org/3/library/sys.html",
         "examples": [
             {"title": "Arguments de ligne de commande", "code": "import sys\nargs = sys.argv"},
-            {"title": "Sortie standard", "code": "import sys\nsys.stdout.write('Hello')"},
-        ],
+            {"title": "Sortie standard", "code": "import sys\nsys.stdout.write('Hello')"}
+        ]
     },
     "datetime": {
         "name": "datetime",
@@ -46,11 +44,8 @@ STDLIB_MODULES = {
         "url": "https://docs.python.org/3/library/datetime.html",
         "examples": [
             {"title": "Date actuelle", "code": "from datetime import datetime\nnow = datetime.now()"},
-            {
-                "title": "Formatage de date",
-                "code": "from datetime import datetime\nformatted = datetime.now().strftime('%Y-%m-%d')",
-            },
-        ],
+            {"title": "Formatage de date", "code": "from datetime import datetime\nformatted = datetime.now().strftime('%Y-%m-%d')"}
+        ]
     },
     "json": {
         "name": "json",
@@ -58,8 +53,8 @@ STDLIB_MODULES = {
         "url": "https://docs.python.org/3/library/json.html",
         "examples": [
             {"title": "Sérialisation", "code": "import json\ndata = json.dumps({'key': 'value'})"},
-            {"title": "Désérialisation", "code": 'import json\nobj = json.loads(\'{"key": "value"}\')'},
-        ],
+            {"title": "Désérialisation", "code": "import json\nobj = json.loads('{\"key\": \"value\"}')"}
+        ]
     },
     "re": {
         "name": "re",
@@ -67,47 +62,39 @@ STDLIB_MODULES = {
         "url": "https://docs.python.org/3/library/re.html",
         "examples": [
             {"title": "Recherche de motif", "code": "import re\nmatch = re.search(r'\\d+', 'abc123')"},
-            {"title": "Remplacement", "code": "import re\nresult = re.sub(r'\\d+', 'X', 'abc123')"},
-        ],
+            {"title": "Remplacement", "code": "import re\nresult = re.sub(r'\\d+', 'X', 'abc123')"}
+        ]
     },
+
     "collections": {
         "name": "collections",
         "description": "Types de conteneurs spécialisés",
         "url": "https://docs.python.org/3/library/collections.html",
         "examples": [
             {"title": "Counter", "code": "from collections import Counter\nc = Counter(['a', 'b', 'a'])"},
-            {"title": "defaultdict", "code": "from collections import defaultdict\nd = defaultdict(list)"},
-        ],
+            {"title": "defaultdict", "code": "from collections import defaultdict\nd = defaultdict(list)"}
+        ]
     },
+
     "threading": {
         "name": "threading",
         "description": "Exécution de code en parallèle via des threads",
         "url": "https://docs.python.org/3/library/threading.html",
         "examples": [
-            {
-                "title": "Création de thread",
-                "code": "import threading\nt = threading.Thread(target=lambda: print('Hello'))",
-            },
-            {
-                "title": "Synchronisation",
-                "code": "import threading\nlock = threading.Lock()\nwith lock:\n    print('Thread-safe')",
-            },
-        ],
+            {"title": "Création de thread", "code": "import threading\nt = threading.Thread(target=lambda: print('Hello'))"},
+            {"title": "Synchronisation", "code": "import threading\nlock = threading.Lock()\nwith lock:\n    print('Thread-safe')"}
+        ]
     },
     "asyncio": {
         "name": "asyncio",
         "description": "Programmation asynchrone avec async/await",
         "url": "https://docs.python.org/3/library/asyncio.html",
         "examples": [
-            {
-                "title": "Coroutine simple",
-                "code": "import asyncio\nasync def main():\n    await asyncio.sleep(1)\n    return 'done'",
-            },
-            {"title": "Exécution de tâches", "code": "import asyncio\nasyncio.run(main())"},
-        ],
-    },
+            {"title": "Coroutine simple", "code": "import asyncio\nasync def main():\n    await asyncio.sleep(1)\n    return 'done'"},
+            {"title": "Exécution de tâches", "code": "import asyncio\nasyncio.run(main())"}
+        ]
+    }
 }
-
 
 def get_module_reference(module_name: str) -> Optional[PythonModuleReference]:
     """Récupère les informations d'un module de la bibliothèque standard."""
@@ -115,11 +102,9 @@ def get_module_reference(module_name: str) -> Optional[PythonModuleReference]:
         return PythonModuleReference(**STDLIB_MODULES[module_name])
     return None
 
-
 def get_all_modules() -> List[str]:
     """Récupère la liste de tous les modules disponibles."""
     return list(STDLIB_MODULES.keys())
-
 
 def register_stdlib(app, app_state):
     """Enregistre les ressources de la bibliothèque standard Python."""

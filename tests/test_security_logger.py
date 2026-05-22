@@ -1,10 +1,12 @@
 """
 Tests unitaires pour le SecurityLogger
 """
-import pytest
 import json
 import logging
 from unittest.mock import MagicMock, patch
+
+import pytest
+
 from collegue.core.security_logger import SecurityLogger, security_logger
 
 

@@ -5,12 +5,10 @@ Contient la logique métier pure, séparée de l'orchestration du Tool.
 """
 
 import re
-import yaml
-import json
-from typing import List, Tuple, Optional, Dict, Any
-from ...core.shared import aggregate_severities, parse_llm_json_response
-from .models import IacFinding, IacGuardrailsRequest, FileInput
-from .config import SEVERITY_WEIGHTS, RISK_THRESHOLDS
+from typing import Dict, List, Tuple
+
+from .config import SEVERITY_WEIGHTS
+from .models import IacFinding
 
 
 class IacAnalysisEngine:
@@ -138,7 +136,7 @@ class IacAnalysisEngine:
         has_user_instruction = False
         last_user_is_root = True
 
-        for i, line in enumerate(lines, 1):
+        for _i, line in enumerate(lines, 1):
             line_stripped = line.strip()
             if line_stripped.startswith("USER "):
                 has_user_instruction = True

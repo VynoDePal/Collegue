@@ -3,12 +3,13 @@ Tests unitaires pour les LLM Helpers du package collegue.tools.llm_helpers
 
 Ces tests utilisent des mocks pour tester les builders et formatters sans faire d'appels réels aux LLMs.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
 
-from unittest.mock import Mock, patch, MagicMock
 import json
+from unittest.mock import MagicMock, Mock, patch
 
 print("=" * 80)
 print("TESTS UNITAIRES - LLM HELPERS")
@@ -22,7 +23,11 @@ print("TEST 1: LLM REQUEST BUILDER")
 print("=" * 80)
 
 try:
-    from collegue.tools.llm_helpers.builders import LLMRequestBuilder, DocumentationRequestBuilder, RefactoringRequestBuilder
+    from collegue.tools.llm_helpers.builders import (
+        DocumentationRequestBuilder,
+        LLMRequestBuilder,
+        RefactoringRequestBuilder,
+    )
     
     # Test 1.1: Initialisation LLMRequestBuilder
     print("\n1.1 Test initialisation LLMRequestBuilder...")
@@ -217,7 +222,13 @@ print("TEST 3: TEST GENERATORS")
 print("=" * 80)
 
 try:
-    from collegue.tools.test_generators import TestGenerator, PytestGenerator, JestGenerator, MochaGenerator, UnittestGenerator
+    from collegue.tools.test_generators import (
+        JestGenerator,
+        MochaGenerator,
+        PytestGenerator,
+        TestGenerator,
+        UnittestGenerator,
+    )
     
     # Test 3.1: TestGenerator de base
     print("\n3.1 Test TestGenerator de base...")
@@ -321,12 +332,7 @@ print("TEST 4: VALIDATEURS SHARED")
 print("=" * 80)
 
 try:
-    from collegue.tools.shared import (
-        validate_fast_deep, 
-        detect_language_from_extension,
-        FileInput,
-        SeverityLevel
-    )
+    from collegue.tools.shared import FileInput, SeverityLevel, detect_language_from_extension, validate_fast_deep
     
     # Test 4.1: validate_fast_deep
     print("\n4.1 Test validate_fast_deep...")

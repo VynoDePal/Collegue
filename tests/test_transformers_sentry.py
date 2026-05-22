@@ -2,18 +2,19 @@
 Tests pour le module transformers/sentry.py
 """
 import sys
+
 sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
 
 from collegue.tools.transformers.sentry import (
-    transform_projects,
-    transform_project,
-    transform_issues,
-    transform_issue,
     transform_events,
+    transform_issue,
+    transform_issues,
+    transform_project,
+    transform_project_stats,
+    transform_projects,
     transform_releases,
     transform_repos,
     transform_tags,
-    transform_project_stats,
 )
 
 

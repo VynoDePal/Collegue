@@ -1,6 +1,7 @@
 import os
-from typing import Optional, Dict, List, Tuple
-from .base import ParseResult, Import
+from typing import Dict, List, Optional
+
+from .base import Import, ParseResult
 from .javascript import JSParser
 from .python import PythonParser
 
@@ -157,7 +158,7 @@ def get_unused_declarations(parse_result: ParseResult) -> List[str]:
     used_names = set(name for _, name in parse_result.identifiers)
 
     unused = []
-    for name, decl in parse_result.declarations.items():
+    for name, _decl in parse_result.declarations.items():
         if name not in used_names:
             unused.append(name)
 

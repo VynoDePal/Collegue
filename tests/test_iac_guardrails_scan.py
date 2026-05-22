@@ -1,17 +1,13 @@
 """
 Tests unitaires pour l'outil IaC Guardrails Scan refactorisé.
 """
-import pytest
 from unittest.mock import MagicMock, patch
 
-from collegue.tools.iac_guardrails_scan import (
-    IacGuardrailsScanTool,
-    IacGuardrailsRequest,
-    IacFinding,
-    CustomPolicy
-)
-from collegue.tools.iac_guardrails_scan.engine import IacAnalysisEngine
+import pytest
+
 from collegue.core.shared import FileInput
+from collegue.tools.iac_guardrails_scan import CustomPolicy, IacFinding, IacGuardrailsRequest, IacGuardrailsScanTool
+from collegue.tools.iac_guardrails_scan.engine import IacAnalysisEngine
 
 
 class TestIacAnalysisEngine:

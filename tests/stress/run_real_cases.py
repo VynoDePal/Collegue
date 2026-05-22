@@ -23,6 +23,7 @@ sys.path.insert(0, str(_HERE.parent.parent))   # repo root → enables `tests.st
 sys.path.insert(0, str(_HERE))                  # stress dir → enables `runner`
 
 from runner import MCPSession, run_case  # noqa: E402
+
 from tests.stress.real_cases import is_error_response, is_quota_inconclusive, response_text  # noqa: E402
 
 SCENARIO_MODULES = [

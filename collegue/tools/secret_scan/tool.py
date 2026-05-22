@@ -13,11 +13,12 @@ La logique métier a été déplacée dans engine.py, les modèles dans models.p
 """
 
 import os
-from typing import List, Dict, Any, Optional
-from ..base import BaseTool, ToolValidationError
+from typing import Any, Dict, List
+
 from ...core.shared import aggregate_severities
-from .models import SecretScanRequest, SecretScanResponse, SecretFinding
+from ..base import BaseTool, ToolValidationError
 from .engine import SecretDetectionEngine
+from .models import SecretFinding, SecretScanRequest, SecretScanResponse
 
 
 class SecretScanTool(BaseTool):

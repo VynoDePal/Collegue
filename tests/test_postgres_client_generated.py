@@ -5,14 +5,15 @@ Couverture cible: 0.9
 Framework: pytest
 Mocks: unittest.mock
 """
-import pytest
 import os
 import re
-from unittest.mock import MagicMock, patch
 from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Assuming the module is named postgres_client.py
-from collegue.tools.clients.postgres import PostgresClient, APIResponse, APIError
+from collegue.tools.clients.postgres import APIError, APIResponse, PostgresClient
 
 
 @pytest.fixture

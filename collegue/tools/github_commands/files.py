@@ -5,9 +5,10 @@ Handles file content operations (read/update).
 """
 
 import base64
-from typing import Optional, Dict, Any
-from ..clients import GitHubClient
+from typing import Any, Dict, Optional
+
 from ..base import ToolExecutionError
+from ..clients import GitHubClient
 
 
 class FileCommands(GitHubClient):

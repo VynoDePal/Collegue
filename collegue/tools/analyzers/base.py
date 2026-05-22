@@ -5,7 +5,8 @@ Provides common functionality for language-specific analyzers.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 from ..base import ToolError
 
 

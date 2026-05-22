@@ -2,9 +2,10 @@
 Module LLM - Intégration et configuration des modèles de langage
 """
 
-from .providers import register_providers
-from .prompts import register_prompts
 from .optimization import register_optimization
+from .prompts import register_prompts
+from .providers import register_providers
+
 
 
 def register(app, app_state):

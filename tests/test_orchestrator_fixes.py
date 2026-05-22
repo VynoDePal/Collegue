@@ -1,10 +1,17 @@
-import pytest
-import sys
 import json
-from unittest.mock import MagicMock, AsyncMock, patch
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from collegue.core.meta_orchestrator import register_meta_orchestrator, OrchestratorRequest, OrchestratorPlan, OrchestratorStep
+import pytest
+
 import collegue.core.meta_orchestrator as mo
+from collegue.core.meta_orchestrator import (
+    OrchestratorPlan,
+    OrchestratorRequest,
+    OrchestratorStep,
+    register_meta_orchestrator,
+)
+
 
 class MockContext:
     def __init__(self):

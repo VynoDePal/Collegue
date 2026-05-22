@@ -10,8 +10,9 @@ Analyzes Python code for:
 import ast
 import re
 from typing import List
-from .base import BaseAnalyzer
+
 from ...core.shared import ConsistencyIssue
+from .base import BaseAnalyzer
 
 
 class PythonAnalyzer(BaseAnalyzer):
