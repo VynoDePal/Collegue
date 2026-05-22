@@ -4,24 +4,26 @@ Base Tool - Classe de base pour tous les outils du projet Collègue
 Le timing, logging, error handling et caching sont gérés par les
 middleware FastMCP natifs configurés dans app.py.
 """
+import asyncio
+import logging
 import os
 import time
-import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type, Union
+
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
-import asyncio
+
 from ..core.security_logger import security_logger
-from .rate_limiter import (
-    get_rate_limiter_manager,
-    RateLimitExceeded,
-    RateLimitConfig,
-)
 from .quotas import (
-    get_global_quota_manager,
     QuotaExceeded,
     QuotaManager,
+    get_global_quota_manager,
+)
+from .rate_limiter import (
+    RateLimitConfig,
+    RateLimitExceeded,
+    get_rate_limiter_manager,
 )
 
 
@@ -161,7 +163,7 @@ class BaseTool(ABC):
             manager.check_rate_limit(self.tool_name)
         except RateLimitExceeded as e:
             self.logger.warning(f"Rate limit exceeded for {self.tool_name}: {e}")
-            raise ToolRateLimitError(str(e))
+            raise ToolRateLimitError(str(e)) from e
     
     def cleanup(self, force_gc: bool = False) -> None:
         """
@@ -254,7 +256,7 @@ class BaseTool(ABC):
                     
         except QuotaExceeded as e:
             self.logger.warning(f"Quota exceeded for {self.tool_name}: {e}")
-            raise ToolQuotaError(str(e))
+            raise ToolQuotaError(str(e)) from e
     
     def _record_llm_tokens(self, tokens: int, **kwargs):
         """Enregistre l'utilisation de tokens LLM."""
@@ -263,7 +265,7 @@ class BaseTool(ABC):
                 self._quota_manager.record_llm_tokens(tokens)
             except QuotaExceeded as e:
                 self.logger.warning(f"LLM token quota exceeded: {e}")
-                raise ToolQuotaError(str(e))
+                raise ToolQuotaError(str(e)) from e
     
     def _check_execution_time(self, **kwargs) -> float:
         """
@@ -282,7 +284,7 @@ class BaseTool(ABC):
             return self._quota_manager.check_execution_time()
         except QuotaExceeded as e:
             self.logger.warning(f"Execution time quota exceeded: {e}")
-            raise ToolQuotaError(str(e))
+            raise ToolQuotaError(str(e)) from e
 
     async def prepare_prompt(self, request: BaseModel, template_name: Optional[str] = None) -> str:
         """Resolve a prompt for ``request`` via the template + A/B infrastructure.
@@ -474,7 +476,7 @@ class BaseTool(ABC):
             return True
 
         except ValidationError as e:
-            raise ToolValidationError(f"Validation de la requête échouée: {e}")
+            raise ToolValidationError(f"Validation de la requête échouée: {e}") from e
 
     def normalize_request(self, request: Union[BaseModel, Dict[str, Any]]) -> BaseModel:
         """
@@ -508,7 +510,7 @@ class BaseTool(ABC):
                 )
 
         except ValidationError as e:
-            raise ToolValidationError(f"Normalisation de la requête échouée: {e}")
+            raise ToolValidationError(f"Normalisation de la requête échouée: {e}") from e
 
     @abstractmethod
     def _execute_core_logic(self, request: BaseModel, **kwargs) -> BaseModel:

@@ -7,18 +7,18 @@ Architecture actuelle:
 - Les tools sont enregistrés via register_tools(app) sans app_state.
 - L'orchestration utilise le meta_orchestrator FastMCP natif.
 """
-import sys
 import os
+import sys
 import unittest
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from collegue.core import CodeParser
-from collegue.core import register_core
-from collegue.tools import register_tools, _discover_tools
-from collegue.config import Settings
 from fastmcp import FastMCP
+
+from collegue.config import Settings
+from collegue.core import CodeParser, register_core
+from collegue.tools import _discover_tools, register_tools
 
 
 class TestCoreRegistration(unittest.TestCase):
@@ -96,7 +96,7 @@ class TestToolExecution(unittest.TestCase):
 
     def test_refactoring_tool_local_fallback(self):
         """Le RefactoringTool fonctionne en mode local (sans LLM)."""
-        from collegue.tools.refactoring import RefactoringTool, RefactoringRequest
+        from collegue.tools.refactoring import RefactoringRequest, RefactoringTool
 
         tool = RefactoringTool({})
         request = RefactoringRequest(
@@ -109,7 +109,7 @@ class TestToolExecution(unittest.TestCase):
 
     def test_secret_scan_tool(self):
         """Le SecretScanTool détecte les secrets."""
-        from collegue.tools.secret_scan import SecretScanTool, SecretScanRequest
+        from collegue.tools.secret_scan import SecretScanRequest, SecretScanTool
 
         tool = SecretScanTool({})
         request = SecretScanRequest(

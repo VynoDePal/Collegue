@@ -5,10 +5,9 @@ L'authentification JWT est configurée directement dans app.py
 via FastMCP(auth=JWTVerifier(...)). Les tests de OAuthManager
 ont été supprimés car la classe n'existe plus.
 """
-import unittest
-import sys
 import os
-
+import sys
+import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

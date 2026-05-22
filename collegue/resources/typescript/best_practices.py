@@ -3,9 +3,9 @@ Ressources pour les bonnes pratiques TypeScript.
 
 Ce module fournit des recommandations et bonnes pratiques pour le développement TypeScript.
 """
-from fastmcp import FastMCP
-from typing import Dict, Any, List
 import json
+
+from fastmcp import FastMCP
 
 GENERAL_BEST_PRACTICES = {
     "strict_null_checks": {

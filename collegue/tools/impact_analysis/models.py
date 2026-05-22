@@ -2,9 +2,11 @@
 Modèles Pydantic pour l'outil Impact Analysis.
 """
 
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel, Field, field_validator
-from ...core.shared import validate_fast_deep, validate_confidence_mode
+
+from ...core.shared import validate_confidence_mode, validate_fast_deep
 
 
 class ImpactFile(BaseModel):

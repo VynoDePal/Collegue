@@ -1,14 +1,11 @@
 """
 Tests unitaires pour l'outil Secret Scan refactorisé.
 """
-import pytest
 from unittest.mock import MagicMock
 
-from collegue.tools.secret_scan import (
-    SecretScanTool,
-    SecretScanRequest,
-    SecretFinding
-)
+import pytest
+
+from collegue.tools.secret_scan import SecretFinding, SecretScanRequest, SecretScanTool
 from collegue.tools.secret_scan.engine import SecretDetectionEngine
 
 

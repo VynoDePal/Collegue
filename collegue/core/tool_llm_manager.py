@@ -1,10 +1,12 @@
 """
 ToolLLMManager - Gestionnaire centralisé des appels LLM pour tous les outils
 """
-from typing import Optional, List, Dict, Tuple, Any
-from collegue.config import Settings, settings as global_settings
-from collegue.resources.llm.providers import LLMConfig, generate_text
 import asyncio
+from typing import Any, Dict, List, Optional, Tuple
+
+from collegue.config import Settings
+from collegue.config import settings as global_settings
+from collegue.resources.llm.providers import LLMConfig, generate_text
 
 
 class ToolLLMManager:

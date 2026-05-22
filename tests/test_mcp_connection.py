@@ -8,12 +8,12 @@ correctement généré côté serveur lors de l'initialisation, mais la transmis
 dans les requêtes suivantes ne fonctionne pas correctement. Ce problème est mentionné comme
 "Partiellement résolu" et nécessite une correction au niveau du serveur.
 """
-import requests
 import json
 import re
 from typing import Optional
 
 import pytest
+import requests
 
 pytest.skip(
     "Test d’intégration (nécessite un serveur MCP local) – non déterministe en CI",

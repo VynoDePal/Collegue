@@ -1,7 +1,10 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
+
 from collegue.tools.clients.base import APIResponse
+from collegue.tools.sentry_monitor import SentryMonitorTool, SentryRequest
+
 
 @pytest.fixture
 def mock_sentry_client():

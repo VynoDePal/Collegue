@@ -1,8 +1,10 @@
 """
 Modèles Pydantic pour l'outil IaC Guardrails Scan.
 """
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
+
 from ...core.shared import FileInput, validate_fast_deep
 
 

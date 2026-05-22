@@ -1,15 +1,11 @@
 """
 Tests unitaires pour l'outil Refactoring refactorisé.
 """
-import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from collegue.tools.refactoring import (
-    RefactoringTool,
-    RefactoringRequest,
-    RefactoringResponse,
-    RefactoringEngine
-)
+import pytest
+
+from collegue.tools.refactoring import RefactoringEngine, RefactoringRequest, RefactoringResponse, RefactoringTool
 
 
 class TestRefactoringEngine:

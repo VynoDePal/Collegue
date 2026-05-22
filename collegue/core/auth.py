@@ -5,7 +5,8 @@ Centralise les fonctions d'authentification et de résolution de tokens
 pour éviter la duplication entre sentry_monitor.py et github_ops.py.
 """
 import os
-from typing import Optional, Dict, Any
+from typing import Optional
+
 from .security_logger import security_logger
 
 

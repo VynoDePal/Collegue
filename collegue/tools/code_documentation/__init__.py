@@ -10,9 +10,9 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.code_documentation import DocumentationTool, DocumentationRequest, DocumentationResponse
 """
-from .tool import DocumentationTool
-from .models import DocumentationRequest, DocumentationResponse
 from .engine import DocumentationEngine
+from .models import DocumentationRequest, DocumentationResponse
+from .tool import DocumentationTool
 
 __all__ = [
     'DocumentationTool',

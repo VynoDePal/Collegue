@@ -1,10 +1,11 @@
 """
 Frameworks Python - Ressources pour les frameworks Python populaires
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
-
 import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
+
 
 class PythonFrameworkReference(BaseModel):
     """Modèle pour une référence de framework Python."""

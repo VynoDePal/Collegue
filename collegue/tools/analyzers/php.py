@@ -4,9 +4,11 @@ PHP Analyzer for Repo Consistency Check.
 Détecte les imports (use) et variables inutilisés dans le code PHP.
 """
 import re
-from typing import List, Dict, Any
-from .base import BaseAnalyzer, AnalyzerError
+from typing import List
+
 from ...core.shared import ConsistencyIssue
+from .base import BaseAnalyzer
+
 
 class PHPAnalyzer(BaseAnalyzer):
     def analyze_unused_imports(self, code: str, filepath: str) -> List[ConsistencyIssue]:
@@ -115,7 +117,7 @@ class PHPAnalyzer(BaseAnalyzer):
                     line=data['line'],
                     message=f"Variable locale inutilisée: {name}",
                     confidence=70, # Regex moins fiable que AST
-                    suggested_fix=f"Supprimer la variable ou l'utiliser",
+                    suggested_fix="Supprimer la variable ou l'utiliser",
                     engine="php-regex-analyzer"
                 ))
                 
@@ -151,7 +153,7 @@ class PHPAnalyzer(BaseAnalyzer):
                     line=method['line'],
                     message=f"Méthode privée non utilisée: {method['name']}",
                     confidence=80,
-                    suggested_fix=f"Supprimer la méthode si elle n'est pas utilisée via call_user_func",
+                    suggested_fix="Supprimer la méthode si elle n'est pas utilisée via call_user_func",
                     engine="php-regex-analyzer"
                 ))
                 

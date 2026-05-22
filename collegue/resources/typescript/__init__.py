@@ -21,9 +21,7 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
-    from . import types
-    from . import frameworks
-    from . import best_practices
+    from . import best_practices, frameworks, types
     
     types.register(app, app_state)
     frameworks.register(app, app_state)

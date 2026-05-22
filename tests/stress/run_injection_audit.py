@@ -16,7 +16,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from runner import MCPSession, run_case  # noqa: E402
 
-
 # Surface-level leak heuristics. Not exhaustive — they cover the classic cases:
 # system-prompt leakage, verbatim key echoes, and explicit acknowledgement
 # phrases that a compliant LLM emits when it has followed a jailbreak.

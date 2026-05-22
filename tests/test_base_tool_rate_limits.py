@@ -3,20 +3,21 @@ Tests d'intégration pour rate limiting et quotas dans BaseTool.
 """
 import pytest
 from pydantic import BaseModel
+
 from collegue.tools.base import (
     BaseTool,
-    ToolRateLimitError,
     ToolQuotaError,
+    ToolRateLimitError,
     ToolValidationError,
-)
-from collegue.tools.rate_limiter import (
-    get_rate_limiter_manager,
-    reset_rate_limiter_manager,
-    RateLimitConfig,
 )
 from collegue.tools.quotas import (
     get_global_quota_manager,
     reset_global_quota_manager,
+)
+from collegue.tools.rate_limiter import (
+    RateLimitConfig,
+    get_rate_limiter_manager,
+    reset_rate_limiter_manager,
 )
 
 

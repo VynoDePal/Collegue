@@ -1,7 +1,10 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from collegue.tools.kubernetes_ops import KubernetesOpsTool, KubernetesRequest
+
 from collegue.tools.clients.base import APIResponse
+from collegue.tools.kubernetes_ops import KubernetesOpsTool, KubernetesRequest
+
 
 @pytest.fixture
 def mock_k8s_client():

@@ -11,19 +11,17 @@ pytest.skip(
 	allow_module_level=True,
 )
 
-import os
-import sys
 import json
 import logging
+import os
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
-
+from typing import Any, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from collegue.config import Settings
 from collegue.core.tool_llm_manager import ToolLLMManager
-
 
 logging.basicConfig(
     level=logging.INFO,

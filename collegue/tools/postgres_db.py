@@ -4,18 +4,19 @@ PostgreSQL Database Tool - Inspection et requêtes de bases de données PostgreS
 Permet à Collègue d'inspecter le schéma, vérifier les données et debugger les requêtes SQL.
 """
 
-import logging
 import re
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolExecutionError
+
 from ..core.shared import validate_postgres_command
+from .base import BaseTool, ToolExecutionError
 from .clients import PostgresClient
 
 try:
-    import psycopg2
-    from psycopg2 import sql
-    from psycopg2.extras import RealDictCursor
+    import psycopg2  # noqa: F401
+    from psycopg2 import sql  # noqa: F401
+    from psycopg2.extras import RealDictCursor  # noqa: F401
 
     HAS_PSYCOPG2 = True
 except ImportError:

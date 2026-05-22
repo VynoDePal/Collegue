@@ -1,28 +1,28 @@
 """
 Tests unitaires pour les ressources JavaScript
 """
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import sys
-import os
-from fastapi.testclient import TestClient
-from fastapi import FastAPI
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from collegue.resources.javascript.standard_library import (
-    get_api_reference, get_all_apis,
-    JavaScriptAPIReference
+from collegue.resources.javascript.best_practices import (
+    JavaScriptBestPractice,
+    get_all_best_practices,
+    get_best_practice,
 )
 from collegue.resources.javascript.frameworks import (
-    get_framework_reference, get_all_frameworks,
-    JavaScriptFrameworkReference
+    JavaScriptFrameworkReference,
+    get_all_frameworks,
+    get_framework_reference,
 )
-from collegue.resources.javascript.best_practices import (
-    get_best_practice, get_all_best_practices,
-    JavaScriptBestPractice
-)
+from collegue.resources.javascript.standard_library import JavaScriptAPIReference, get_all_apis, get_api_reference
+
 
 class TestJavaScriptStandardLibrary(unittest.TestCase):
     """Tests pour le module standard_library des ressources JavaScript."""
@@ -94,9 +94,9 @@ class TestJavaScriptResourcesEndpoints(unittest.TestCase):
         self.app_state = {"resource_manager": MagicMock()}
 
 
-        from collegue.resources.javascript.standard_library import register_stdlib
-        from collegue.resources.javascript.frameworks import register_frameworks
         from collegue.resources.javascript.best_practices import register_best_practices
+        from collegue.resources.javascript.frameworks import register_frameworks
+        from collegue.resources.javascript.standard_library import register_stdlib
 
         register_stdlib(self.app, self.app_state)
         register_frameworks(self.app, self.app_state)

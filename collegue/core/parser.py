@@ -3,7 +3,8 @@ Code Parser - Analyse syntaxique du code pour différents langages
 """
 import ast
 import re
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Dict, List
+
 
 class CodeParser:
     def __init__(self):
@@ -784,7 +785,7 @@ class CodeParser:
                 params = []
                 defaults = [None] * (len(node.args.args) - len(node.args.defaults)) + list(node.args.defaults)
 
-                for arg, default in zip(node.args.args, defaults):
+                for arg, default in zip(node.args.args, defaults, strict=False):
                     param_info = {
                         "name": arg.arg,
                         "type": None,
@@ -851,7 +852,7 @@ class CodeParser:
                         params = []
                         defaults = [None] * (len(child.args.args) - len(child.args.defaults)) + list(child.args.defaults)
 
-                        for i, (arg, default) in enumerate(zip(child.args.args, defaults)):
+                        for i, (arg, default) in enumerate(zip(child.args.args, defaults, strict=False)):
                             if i == 0 and arg.arg == 'self':
                                 continue
 

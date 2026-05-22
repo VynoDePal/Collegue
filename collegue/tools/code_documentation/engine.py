@@ -4,8 +4,9 @@ Moteur d'analyse et de génération de documentation.
 Contient la logique métier pure : analyse d'éléments de code, formatage,
 calcul de couverture, génération de suggestions.
 """
-from typing import List, Dict, Any, Optional
-from .config import STYLE_INSTRUCTIONS, FORMAT_INSTRUCTIONS, LANGUAGE_INSTRUCTIONS
+from typing import Any, Dict, List
+
+from .config import FORMAT_INSTRUCTIONS, LANGUAGE_INSTRUCTIONS, STYLE_INSTRUCTIONS
 
 
 class DocumentationEngine:
@@ -182,17 +183,17 @@ class DocumentationEngine:
         """Construit le prompt pour le LLM."""
         prompt_parts = [
             f"Génère une documentation pour le code {language} suivant",
-            f"",
+            "",
             f"Style: {STYLE_INSTRUCTIONS.get(style, STYLE_INSTRUCTIONS['standard'])}",
             f"Format: {FORMAT_INSTRUCTIONS.get(format_type, FORMAT_INSTRUCTIONS['markdown'])}",
-            f""
+            ""
         ]
         
         prompt_parts.extend([
             f"```{language}",
             code,
-            f"```",
-            f""
+            "```",
+            ""
         ])
         
         if elements:

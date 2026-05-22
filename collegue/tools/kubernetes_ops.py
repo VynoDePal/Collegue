@@ -4,32 +4,30 @@ Kubernetes Operations Tool - Gestion et inspection des clusters Kubernetes
 Permet à Collègue de lister les pods, lire les logs et décrire les ressources.
 """
 
-import logging
-import os
-import json
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolExecutionError
+
 from ..core.shared import validate_k8s_command
+from .base import BaseTool, ToolExecutionError
 from .clients import KubernetesClient
 from .transformers import (
-    transform_pods,
-    transform_pod_detail,
-    transform_deployments,
-    transform_deployment,
-    transform_services,
-    transform_namespaces,
-    transform_events,
-    transform_nodes,
-    transform_node,
     transform_configmaps,
+    transform_deployment,
+    transform_deployments,
+    transform_events,
+    transform_namespaces,
+    transform_node,
+    transform_nodes,
+    transform_pod_detail,
+    transform_pods,
     transform_secrets,
-    _format_age,
+    transform_services,
 )
 
 try:
-    from kubernetes import client, config
-    from kubernetes.client.rest import ApiException
+    from kubernetes import client, config  # noqa: F401
+    from kubernetes.client.rest import ApiException  # noqa: F401
 
     HAS_K8S = True
 except ImportError:
@@ -277,7 +275,7 @@ class KubernetesOpsTool(BaseTool):
                 except config.ConfigException:
                     config.load_kube_config(context=context)
         except Exception as e:
-            raise ToolExecutionError(f"Erreur de configuration Kubernetes: {e}")
+            raise ToolExecutionError(f"Erreur de configuration Kubernetes: {e}") from e
 
     def _get_kubernetes_client(self, request: KubernetesRequest) -> KubernetesClient:
         return KubernetesClient(

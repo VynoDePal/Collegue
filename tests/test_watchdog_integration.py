@@ -1,11 +1,14 @@
-import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from collegue.autonomous.watchdog import AutoFixer
-from collegue.tools.sentry_monitor import SentryResponse, ProjectInfo, IssueInfo, RepoInfo as SentryRepoInfo, EventInfo
-from collegue.tools.github_ops import GitHubResponse, PRInfo
 from collegue.tools.github_commands.search import SearchResult
+from collegue.tools.github_ops import GitHubResponse, PRInfo
+from collegue.tools.sentry_monitor import EventInfo, IssueInfo, ProjectInfo, SentryResponse
+from collegue.tools.sentry_monitor import RepoInfo as SentryRepoInfo
+
 
 @pytest.fixture
 def mock_sentry():

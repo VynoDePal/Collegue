@@ -4,7 +4,8 @@ Base Analyzer for Repo Consistency Check.
 Provides common functionality for language-specific analyzers.
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from ..base import ToolError
 
 
