@@ -10,6 +10,7 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.impact_analysis import ImpactAnalysisTool, ImpactAnalysisRequest, ImpactAnalysisResponse
 """
+
 from .engine import ImpactAnalysisEngine
 from .models import (
     FollowupAction,
@@ -24,14 +25,14 @@ from .models import (
 from .tool import ImpactAnalysisTool
 
 __all__ = [
-    'ImpactAnalysisTool',
-    'ImpactAnalysisEngine',
-    'ImpactAnalysisRequest',
-    'ImpactAnalysisResponse',
-    'ImpactedFile',
-    'RiskNote',
-    'SearchQuery',
-    'TestRecommendation',
-    'FollowupAction',
-    'LLMInsight'
+    "ImpactAnalysisTool",
+    "ImpactAnalysisEngine",
+    "ImpactAnalysisRequest",
+    "ImpactAnalysisResponse",
+    "ImpactedFile",
+    "RiskNote",
+    "SearchQuery",
+    "TestRecommendation",
+    "FollowupAction",
+    "LLMInsight",
 ]

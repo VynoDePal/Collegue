@@ -1,4 +1,5 @@
 """Real-world scenarios for test_generation (LLM)."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import response_text, tool_content
@@ -17,12 +18,9 @@ SCENARIOS = [
         },
         "llm_dependent": True,
         "assertions": [
-            ("Output non vide",
-             lambda r: len(tool_content(r).get("test_code") or "") > 30),
-            ("Contient 'def test_'",
-             lambda r: "def test_" in response_text(r)),
-            ("Mentionne la fonction 'add'",
-             lambda r: "add" in response_text(r)),
+            ("Output non vide", lambda r: len(tool_content(r).get("test_code") or "") > 30),
+            ("Contient 'def test_'", lambda r: "def test_" in response_text(r)),
+            ("Mentionne la fonction 'add'", lambda r: "add" in response_text(r)),
         ],
     },
     {
@@ -41,10 +39,8 @@ SCENARIOS = [
         },
         "llm_dependent": True,
         "assertions": [
-            ("Output non vide",
-             lambda r: len(tool_content(r).get("test_code") or "") > 30),
-            ("Mentionne User ou save",
-             lambda r: "User" in response_text(r) or "save" in response_text(r)),
+            ("Output non vide", lambda r: len(tool_content(r).get("test_code") or "") > 30),
+            ("Mentionne User ou save", lambda r: "User" in response_text(r) or "save" in response_text(r)),
         ],
     },
 ]

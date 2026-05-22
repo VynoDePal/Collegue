@@ -1,4 +1,5 @@
 """Module with fake-but-realistic secrets for secret_scan testing."""
+
 import os
 
 AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"

@@ -1,12 +1,13 @@
 """
 Tests unitaires pour le gestionnaire de ressources
 """
+
 import os
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from collegue.core.resource_manager import ResourceManager
 
@@ -22,11 +23,7 @@ class TestResourceManager(unittest.TestCase):
         self.assertEqual(self.resource_manager._resources, {})
 
     def test_register_resource(self):
-        test_resource = {
-            "description": "Ressource de test",
-            "data": [1, 2, 3],
-            "function": lambda x: x * 2
-        }
+        test_resource = {"description": "Ressource de test", "data": [1, 2, 3], "function": lambda x: x * 2}
 
         self.resource_manager.register_resource("test_resource", test_resource)
 
@@ -77,10 +74,7 @@ class TestResourceManager(unittest.TestCase):
         self.assertEqual(info["resource2"]["description"], "Ressource 2")
 
     def test_call_resource_method(self):
-        test_resource = {
-            "description": "Ressource avec méthode",
-            "add": lambda a, b: a + b
-        }
+        test_resource = {"description": "Ressource avec méthode", "add": lambda a, b: a + b}
         self.resource_manager.register_resource("math", test_resource)
 
         result = self.resource_manager.call_resource_method("math", "add", 2, 3)
@@ -101,14 +95,12 @@ class TestResourceManager(unittest.TestCase):
         def failing_method():
             raise ValueError("Erreur de test")
 
-        test_resource = {
-            "description": "Ressource avec méthode qui échoue",
-            "failing": failing_method
-        }
+        test_resource = {"description": "Ressource avec méthode qui échoue", "failing": failing_method}
         self.resource_manager.register_resource("test", test_resource)
 
         result = self.resource_manager.call_resource_method("test", "failing")
         self.assertIsNone(result)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

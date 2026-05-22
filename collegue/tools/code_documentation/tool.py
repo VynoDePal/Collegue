@@ -143,18 +143,12 @@ class DocumentationTool(BaseTool):
         if hasattr(request, "doc_format") and request.doc_format:
             supported_formats = self.get_supported_formats()
             if request.doc_format not in supported_formats:
-                raise ToolError(
-                    f"Format '{request.doc_format}' non supporté. "
-                    f"Formats supportés: {supported_formats}"
-                )
+                raise ToolError(f"Format '{request.doc_format}' non supporté. Formats supportés: {supported_formats}")
 
         if hasattr(request, "doc_style") and request.doc_style:
             supported_styles = self.get_supported_styles()
             if request.doc_style not in supported_styles:
-                raise ToolError(
-                    f"Style '{request.doc_style}' non supporté. "
-                    f"Styles supportés: {supported_styles}"
-                )
+                raise ToolError(f"Style '{request.doc_style}' non supporté. Styles supportés: {supported_styles}")
 
         return True
 
@@ -165,9 +159,7 @@ class DocumentationTool(BaseTool):
         (unit tests without ``prompt_engine`` injected) keep producing the
         same output they did before #233.
         """
-        code_elements = self._engine.analyze_code_elements(
-            request.code, request.language, None
-        )
+        code_elements = self._engine.analyze_code_elements(request.code, request.language, None)
         return self._engine.build_prompt(
             request.code,
             request.language,
@@ -199,24 +191,18 @@ class DocumentationTool(BaseTool):
         )
         return match.group(1) if match else raw
 
-    def _execute_core_logic(
-        self, request: DocumentationRequest, **kwargs
-    ) -> DocumentationResponse:
+    def _execute_core_logic(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
         """Exécute la génération de documentation (synchrone)."""
         ctx = kwargs.get("ctx")
         parser = kwargs.get("parser")
 
         # Analyser les éléments du code
-        code_elements = self._engine.analyze_code_elements(
-            request.code, request.language, parser
-        )
+        code_elements = self._engine.analyze_code_elements(request.code, request.language, parser)
 
         if ctx:
             try:
                 # Préparer le prompt via le pipeline template (#233).
-                prompt = run_async_from_sync(
-                    self.prepare_prompt(request, template_name="documentation")
-                )
+                prompt = run_async_from_sync(self.prepare_prompt(request, template_name="documentation"))
 
                 started = time.monotonic()
                 result = run_async_from_sync(
@@ -239,9 +225,7 @@ class DocumentationTool(BaseTool):
                     generated_docs, request.doc_format or "markdown", request.language
                 )
 
-                coverage = self._engine.calculate_coverage(
-                    code_elements, formatted_docs
-                )
+                coverage = self._engine.calculate_coverage(code_elements, formatted_docs)
                 suggestions = self._engine.generate_suggestions(
                     code_elements,
                     coverage,
@@ -260,16 +244,12 @@ class DocumentationTool(BaseTool):
                 )
 
             except Exception as e:
-                self.logger.warning(
-                    f"Erreur avec ctx.sample(), utilisation du fallback: {e}"
-                )
+                self.logger.warning(f"Erreur avec ctx.sample(), utilisation du fallback: {e}")
                 return self._generate_fallback_response(request, code_elements)
         else:
             return self._generate_fallback_response(request, code_elements)
 
-    async def _execute_core_logic_async(
-        self, request: DocumentationRequest, **kwargs
-    ) -> DocumentationResponse:
+    async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
         """Version asynchrone de la génération de documentation."""
         ctx = kwargs.get("ctx")
         parser = kwargs.get("parser")
@@ -278,9 +258,7 @@ class DocumentationTool(BaseTool):
             await ctx.info("Analyse du code...")
 
         # Analyser les éléments du code
-        code_elements = self._engine.analyze_code_elements(
-            request.code, request.language, parser
-        )
+        code_elements = self._engine.analyze_code_elements(request.code, request.language, parser)
 
         # Préparer le prompt via le pipeline template (#233).
         prompt = await self.prepare_prompt(request, template_name="documentation")
@@ -359,9 +337,7 @@ class DocumentationTool(BaseTool):
         )
 
 
-def generate_documentation(
-    request: DocumentationRequest, parser=None
-) -> DocumentationResponse:
+def generate_documentation(request: DocumentationRequest, parser=None) -> DocumentationResponse:
     """Fonction utilitaire pour générer de la documentation."""
     tool = DocumentationTool()
     return tool.execute(request, parser=parser)

@@ -12,6 +12,7 @@ bypassing the whole template system. The tests here verify :
 - After ``ctx.sample``, ``track_performance`` is called on the engine
   with a plausible template_id / version pair.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -66,17 +67,13 @@ def _make_fake_engine(tool_name: str, rendered_prompt: str):
         def __init__(self) -> None:  # noqa: D401 — intentional no-op
             self._tool_name = tool_name
             self._rendered = rendered_prompt
-            self._template = _FakeTemplate(
-                f"tpl-{tool_name}", f"{tool_name}_default"
-            )
+            self._template = _FakeTemplate(f"tpl-{tool_name}", f"{tool_name}_default")
             self._version = _FakeVersion(
                 id=f"ver-{tool_name}",
                 version="1.0.0",
                 content=rendered_prompt,
             )
-            self.version_manager = _FakeVersionManager(
-                self._template.id, self._version
-            )
+            self.version_manager = _FakeVersionManager(self._template.id, self._version)
             self.track_performance = MagicMock()
 
         async def get_optimized_prompt(
@@ -271,7 +268,5 @@ def test_track_last_prompt_noop_when_ids_missing():
     tool._last_prompt_template_id = None
     tool._last_prompt_version = None
 
-    tool.track_last_prompt_performance(
-        execution_time=0.1, tokens_used=42, success=True
-    )
+    tool.track_last_prompt_performance(execution_time=0.1, tokens_used=42, success=True)
     tool.prompt_engine.track_performance.assert_not_called()

@@ -1,4 +1,5 @@
 """Real-world scenarios for iac_guardrails_scan."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import fixture, has_rule, tool_content
@@ -15,16 +16,21 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("Détecte TF-002 (S3 public ACL)",
-             lambda r: has_rule(r, "TF-002")),
-            ("Détecte TF-004 (SSH port open to world)",
-             lambda r: has_rule(r, "TF-004")),
-            ("Détecte TF-003 (RDS publicly accessible)",
-             lambda r: has_rule(r, "TF-003")),
-            ("security_score dégradé (< 0.5)",
-             lambda r: (tool_content(r).get("security_score") if tool_content(r).get("security_score") is not None else 1.0) < 0.5),
-            ("passed=false",
-             lambda r: tool_content(r).get("passed") is False),
+            ("Détecte TF-002 (S3 public ACL)", lambda r: has_rule(r, "TF-002")),
+            ("Détecte TF-004 (SSH port open to world)", lambda r: has_rule(r, "TF-004")),
+            ("Détecte TF-003 (RDS publicly accessible)", lambda r: has_rule(r, "TF-003")),
+            (
+                "security_score dégradé (< 0.5)",
+                lambda r: (
+                    (
+                        tool_content(r).get("security_score")
+                        if tool_content(r).get("security_score") is not None
+                        else 1.0
+                    )
+                    < 0.5
+                ),
+            ),
+            ("passed=false", lambda r: tool_content(r).get("passed") is False),
         ],
     },
     {
@@ -35,11 +41,21 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("0 finding critical",
-             lambda r: all(f.get("severity") != "critical"
-                            for f in (tool_content(r).get("findings") or []))),
-            ("security_score ≥ 0.7",
-             lambda r: (tool_content(r).get("security_score") if tool_content(r).get("security_score") is not None else 0.0) >= 0.7),
+            (
+                "0 finding critical",
+                lambda r: all(f.get("severity") != "critical" for f in (tool_content(r).get("findings") or [])),
+            ),
+            (
+                "security_score ≥ 0.7",
+                lambda r: (
+                    (
+                        tool_content(r).get("security_score")
+                        if tool_content(r).get("security_score") is not None
+                        else 0.0
+                    )
+                    >= 0.7
+                ),
+            ),
         ],
     },
     {
@@ -50,8 +66,7 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 1 finding non vide",
-             lambda r: len(tool_content(r).get("findings") or []) >= 1),
+            ("≥ 1 finding non vide", lambda r: len(tool_content(r).get("findings") or []) >= 1),
         ],
     },
     {
@@ -62,8 +77,7 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 1 finding non vide",
-             lambda r: len(tool_content(r).get("findings") or []) >= 1),
+            ("≥ 1 finding non vide", lambda r: len(tool_content(r).get("findings") or []) >= 1),
         ],
     },
 ]

@@ -25,6 +25,7 @@ Design choices
 * The set of LLM-dependent tool names is hardcoded here so that adding a new
   LLM-using tool is an explicit opt-in.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,20 +36,23 @@ from typing import Tuple
 # The tools that actually hit the LLM. Kept as a module-level frozenset so
 # adding a new LLM-using tool requires an explicit edit here (defence against
 # silent quota leakage).
-LLM_DEPENDENT_TOOLS: frozenset[str] = frozenset({
-    "code_documentation",
-    "test_generation",
-    "code_refactoring",
-    "impact_analysis",
-    "repo_consistency_check",
-    "iac_guardrails_scan",
-    "smart_orchestrator",
-})
+LLM_DEPENDENT_TOOLS: frozenset[str] = frozenset(
+    {
+        "code_documentation",
+        "test_generation",
+        "code_refactoring",
+        "impact_analysis",
+        "repo_consistency_check",
+        "iac_guardrails_scan",
+        "smart_orchestrator",
+    }
+)
 
 
 @dataclass
 class _Window:
     """A single fixed time-window counter."""
+
     count: int = 0
     started_at: float = 0.0
 
@@ -56,6 +60,7 @@ class _Window:
 @dataclass
 class _IdentityState:
     """Per-identity state: minute + day windows + a lock to make updates atomic."""
+
     minute: _Window = field(default_factory=_Window)
     day: _Window = field(default_factory=_Window)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)

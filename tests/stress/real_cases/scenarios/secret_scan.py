@@ -1,4 +1,5 @@
 """Real-world scenarios for secret_scan."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import findings_of, fixture, tool_content
@@ -20,20 +21,29 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 4 findings détectés (la fixture contient 4 types de secrets)",
-             lambda r: len(findings_of(r)) >= 4),
-            ("AWS access key détectée",
-             lambda r: any("aws" in (t or "").lower() for t in _types(r))),
-            ("OpenAI-style key détectée (type spécifique OU via env_secret/password)",
-             lambda r: any(t and ("openai" in t.lower() or "api_key" in t.lower()
-                                   or "bearer" in t.lower() or "env_secret" in t.lower()
-                                   or "password" in t.lower())
-                            for t in _types(r))),
-            ("GitHub token (ghp_) détecté",
-             lambda r: any("github" in (t or "").lower() for t in _types(r))),
-            ("Postgres URI détecté",
-             lambda r: any(("postgres" in (t or "").lower() or "password_in_url" in (t or "").lower())
-                            for t in _types(r))),
+            ("≥ 4 findings détectés (la fixture contient 4 types de secrets)", lambda r: len(findings_of(r)) >= 4),
+            ("AWS access key détectée", lambda r: any("aws" in (t or "").lower() for t in _types(r))),
+            (
+                "OpenAI-style key détectée (type spécifique OU via env_secret/password)",
+                lambda r: any(
+                    t
+                    and (
+                        "openai" in t.lower()
+                        or "api_key" in t.lower()
+                        or "bearer" in t.lower()
+                        or "env_secret" in t.lower()
+                        or "password" in t.lower()
+                    )
+                    for t in _types(r)
+                ),
+            ),
+            ("GitHub token (ghp_) détecté", lambda r: any("github" in (t or "").lower() for t in _types(r))),
+            (
+                "Postgres URI détecté",
+                lambda r: any(
+                    ("postgres" in (t or "").lower() or "password_in_url" in (t or "").lower()) for t in _types(r)
+                ),
+            ),
         ],
     },
     {
@@ -45,11 +55,11 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("Aucun finding critical/high (pas de faux positif)",
-             lambda r: all(f.get("severity") not in ("critical", "high")
-                            for f in findings_of(r))),
-            ("Réponse structurée avec champ clean / total_findings",
-             lambda r: "total_findings" in tool_content(r)),
+            (
+                "Aucun finding critical/high (pas de faux positif)",
+                lambda r: all(f.get("severity") not in ("critical", "high") for f in findings_of(r)),
+            ),
+            ("Réponse structurée avec champ clean / total_findings", lambda r: "total_findings" in tool_content(r)),
         ],
     },
     {
@@ -64,8 +74,7 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 1 finding",
-             lambda r: len(findings_of(r)) >= 1),
+            ("≥ 1 finding", lambda r: len(findings_of(r)) >= 1),
         ],
     },
 ]

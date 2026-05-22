@@ -45,16 +45,12 @@ class OrchestratorStep(BaseModel):
 
 
 class OrchestratorPlan(BaseModel):
-    steps: List[OrchestratorStep] = Field(
-        ..., description="Liste séquentielle des étapes à exécuter"
-    )
+    steps: List[OrchestratorStep] = Field(..., description="Liste séquentielle des étapes à exécuter")
 
 
 class OrchestratorRequest(BaseModel):
     query: str = Field(..., description="Requête utilisateur à traiter")
-    tools: Optional[List[str]] = Field(
-        None, description="Liste des tools à utiliser (vide = auto-détection)"
-    )
+    tools: Optional[List[str]] = Field(None, description="Liste des tools à utiliser (vide = auto-détection)")
     context: Optional[Dict[str, Any]] = Field(None, description="Contexte additionnel")
 
 
@@ -90,9 +86,7 @@ def register_meta_orchestrator(app: FastMCP):
         tags={"meta"},
         task=True,
     )
-    async def smart_orchestrator(
-        request: OrchestratorRequest, ctx: Context
-    ) -> OrchestratorResponse:
+    async def smart_orchestrator(request: OrchestratorRequest, ctx: Context) -> OrchestratorResponse:
         """
         Orchestrateur intelligent utilisant une approche Plan -> Exécute -> Synthétise.
         Plus robuste pour les tâches complexes et évite les erreurs de protocole natif.
@@ -101,9 +95,7 @@ def register_meta_orchestrator(app: FastMCP):
         import time
 
         start_time = time.time()
-        await ctx.info(
-            f"Démarrage orchestration (mode v4 robust): {request.query[:100]}..."
-        )
+        await ctx.info(f"Démarrage orchestration (mode v4 robust): {request.query[:100]}...")
 
         # 1. Tool registry — populated once by core_lifespan at startup and
         # injected via ``ctx.lifespan_context``. When the handler is called
@@ -130,9 +122,7 @@ def register_meta_orchestrator(app: FastMCP):
             available_tools = injected
         else:
             available_tools = await _FALLBACK_REGISTRY.get()
-        tools_desc = "\\n".join(
-            [info["prompt_desc"] for name, info in available_tools.items()]
-        )
+        tools_desc = "\\n".join([info["prompt_desc"] for name, info in available_tools.items()])
 
         # 2. Étape PLANIFICATION (avec Structured Output)
         await ctx.info("Phase 1: Planification...")
@@ -141,9 +131,7 @@ def register_meta_orchestrator(app: FastMCP):
         prompt_engine = lc.get("prompt_engine")
 
         # Construction du prompt
-        context_str = (
-            json.dumps(request.context, default=str) if request.context else "Aucun"
-        )
+        context_str = json.dumps(request.context, default=str) if request.context else "Aucun"
 
         # Truncate user query before it reaches the LLM. Applied after Pydantic
         # validation so we still surface a proper response even on oversize inputs.
@@ -209,9 +197,7 @@ RÈGLES :
                 await ctx.info(f"Plan généré: {len(steps)} étapes")
             else:
                 # Fallback texte si le modèle ne supporte pas structured output
-                await ctx.warning(
-                    "Structured output non supporté, fallback parsing manuel"
-                )
+                await ctx.warning("Structured output non supporté, fallback parsing manuel")
                 # ... (code parsing simplifié si besoin, mais on suppose un modèle capable ici)
                 raise ValueError("Le modèle n'a pas retourné un plan structuré")
 
@@ -238,9 +224,7 @@ RÈGLES :
         # Cap the number of steps the LLM is allowed to execute. A hallucinated or
         # adversarial plan must not be able to chain dozens of tool calls.
         if len(steps) > MAX_ORCHESTRATION_STEPS:
-            await ctx.warning(
-                f"Plan tronqué: {len(steps)} étapes proposées, max autorisé = {MAX_ORCHESTRATION_STEPS}"
-            )
+            await ctx.warning(f"Plan tronqué: {len(steps)} étapes proposées, max autorisé = {MAX_ORCHESTRATION_STEPS}")
             steps = steps[:MAX_ORCHESTRATION_STEPS]
 
         for i, step in enumerate(steps):
@@ -250,11 +234,13 @@ RÈGLES :
             # Special "refuse" sentinel the system prompt tells the LLM to use when it
             # declines to follow the user's request (e.g. secret exfiltration attempts).
             if tool_name == "__refuse__":
-                execution_results.append({
-                    "step": i + 1,
-                    "refused": True,
-                    "reason": step.reason,
-                })
+                execution_results.append(
+                    {
+                        "step": i + 1,
+                        "refused": True,
+                        "reason": step.reason,
+                    }
+                )
                 continue
 
             if tool_name not in available_tools:
@@ -280,9 +266,7 @@ RÈGLES :
                 result = await tool_instance.execute_async(req_obj, **tool_kwargs)
 
                 res_dict = result.dict() if hasattr(result, "dict") else str(result)
-                execution_results.append(
-                    {"step": i + 1, "tool": tool_name, "result": res_dict}
-                )
+                execution_results.append({"step": i + 1, "tool": tool_name, "result": res_dict})
                 tools_used_list.append(tool_name)
 
             except Exception as e:
@@ -293,7 +277,7 @@ RÈGLES :
                 # Nettoyer explicitement l'instance après usage
                 if tool_instance is not None:
                     try:
-                        if hasattr(tool_instance, 'cleanup'):
+                        if hasattr(tool_instance, "cleanup"):
                             tool_instance.cleanup()
                         del tool_instance
                     except Exception:

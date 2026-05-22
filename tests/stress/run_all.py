@@ -2,6 +2,7 @@
 
 Writes one JSON file per case into the output dir and a `stress_summary.md` aggregate.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,12 +59,13 @@ def load_payloads() -> list[tuple[str, str, str, dict]]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="Output directory for run")
-    ap.add_argument("--only", action="append", default=[],
-                    help="Filter: only run tool(s). Can be passed multiple times.")
-    ap.add_argument("--skip-llm", action="store_true",
-                    help="Skip cases marked as llm_heavy=True in the payload dict")
-    ap.add_argument("--rate-limit-sec", type=float, default=0.0,
-                    help="Sleep this many seconds between cases (avoids LLM 429)")
+    ap.add_argument(
+        "--only", action="append", default=[], help="Filter: only run tool(s). Can be passed multiple times."
+    )
+    ap.add_argument("--skip-llm", action="store_true", help="Skip cases marked as llm_heavy=True in the payload dict")
+    ap.add_argument(
+        "--rate-limit-sec", type=float, default=0.0, help="Sleep this many seconds between cases (avoids LLM 429)"
+    )
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -128,8 +130,9 @@ def main() -> int:
                 category="RUNNER-ERR",
             )
         # Reset session on container restart or timeout (pending HTTP requests may linger)
-        restarted = (result.container_after or {}).get("restart_count", 0) > \
-                    (result.container_before or {}).get("restart_count", 0)
+        restarted = (result.container_after or {}).get("restart_count", 0) > (result.container_before or {}).get(
+            "restart_count", 0
+        )
 
         # Track consecutive HANGs; the MCP server may be stuck on a prior request
         if result.category == "HANG":
@@ -141,7 +144,8 @@ def main() -> int:
             print(f"  [!] {hangs_in_a_row} HANG(s) in a row — restarting container")
             subprocess.run(
                 ["docker", "compose", "restart", "collegue-app"],
-                capture_output=True, timeout=60,
+                capture_output=True,
+                timeout=60,
             )
             time.sleep(5)
             ensure_container_healthy(60)
@@ -168,9 +172,7 @@ def main() -> int:
                     trimmed[k] = {"_truncated": True, "_size": len(dumped), "_preview": dumped[:5000]}
             elif isinstance(v, str) and len(v) > 50_000:
                 trimmed[k] = v[:5000] + f"…[+{len(v) - 5000} chars]"
-        (cases_dir / f"{case_id}.json").write_text(
-            json.dumps(trimmed, ensure_ascii=False, indent=2)
-        )
+        (cases_dir / f"{case_id}.json").write_text(json.dumps(trimmed, ensure_ascii=False, indent=2))
         results.append(result)
         category_counter[result.category] += 1
         per_tool[tool][result.category] += 1
@@ -208,7 +210,9 @@ def main() -> int:
     else:
         for r in problems:
             err_snip = json.dumps(r.response, ensure_ascii=False)[:500] if r.response else (r.error or "")
-            summary.append(f"### {r.case_id} ({r.category})\n- **Description**: {r.description}\n- **HTTP**: {r.http_status}  **Latency**: {r.latency_ms:.0f}ms")
+            summary.append(
+                f"### {r.case_id} ({r.category})\n- **Description**: {r.description}\n- **HTTP**: {r.http_status}  **Latency**: {r.latency_ms:.0f}ms"
+            )
             summary.append(f"- **Response snippet**: `{err_snip[:400]}`\n")
 
     (out_dir / "stress_summary.md").write_text("\n".join(summary))

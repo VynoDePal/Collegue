@@ -3,6 +3,7 @@ Sentry API client for error tracking operations.
 
 Provides access to Sentry API for listing projects, issues, and releases.
 """
+
 import os
 import re
 from typing import Dict, Optional
@@ -11,27 +12,22 @@ from .base import APIClient, APIError, APIResponse
 
 
 class SentryClient(APIClient):
-
     def __init__(
         self,
         token: Optional[str] = None,
         organization: Optional[str] = None,
         base_url: str = "https://sentry.io",
-        **kwargs
+        **kwargs,
     ):
-        auth_token = token or os.environ.get('SENTRY_AUTH_TOKEN')
+        auth_token = token or os.environ.get("SENTRY_AUTH_TOKEN")
         if not auth_token:
             raise APIError("Sentry token required. Provide token or set SENTRY_AUTH_TOKEN env var.")
 
-        self.organization = organization or os.environ.get('SENTRY_ORG', '')
+        self.organization = organization or os.environ.get("SENTRY_ORG", "")
         if self.organization:
             self._validate_slug(self.organization, "organization")
 
-        super().__init__(
-            base_url=f"{base_url}/api/0",
-            auth_token=auth_token,
-            **kwargs
-        )
+        super().__init__(base_url=f"{base_url}/api/0", auth_token=auth_token, **kwargs)
 
     def _validate_slug(self, value: str, param_name: str) -> None:
         """
@@ -40,12 +36,12 @@ class SentryClient(APIClient):
         """
         if not value:
             return
-            
-        # Sentry slugs are typically lowercase alphanumeric + dashes. 
+
+        # Sentry slugs are typically lowercase alphanumeric + dashes.
         # Issue IDs are numeric but treated as strings.
         # We allow a bit more flexibility but forbid dangerous chars.
         # STRICT ALLOWLIST: ^[a-zA-Z0-9_\-]+$
-        if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", value):
             raise APIError(f"Invalid characters in {param_name}: '{value}'. Suspected path traversal attack.")
 
     def _get_auth_header(self) -> Dict[str, str]:
@@ -53,26 +49,15 @@ class SentryClient(APIClient):
 
     def list_projects(self) -> APIResponse:
         if not self.organization:
-            return APIResponse(
-                success=False,
-                error_message="Organization slug required"
-            )
+            return APIResponse(success=False, error_message="Organization slug required")
 
         endpoint = f"organizations/{self.organization}/projects/"
         return self._get(endpoint)
 
-    def list_issues(
-        self,
-        project: Optional[str] = None,
-        query: Optional[str] = None,
-        limit: int = 25
-    ) -> APIResponse:
+    def list_issues(self, project: Optional[str] = None, query: Optional[str] = None, limit: int = 25) -> APIResponse:
 
         if not self.organization:
-            return APIResponse(
-                success=False,
-                error_message="Organization slug required"
-            )
+            return APIResponse(success=False, error_message="Organization slug required")
 
         if project:
             self._validate_slug(project, "project")
@@ -96,16 +81,9 @@ class SentryClient(APIClient):
         endpoint = f"issues/{issue_id}/events/"
         return self._get(endpoint, params={"limit": limit, "full": "true"})
 
-    def list_releases(
-        self,
-        project: Optional[str] = None,
-        limit: int = 25
-    ) -> APIResponse:
+    def list_releases(self, project: Optional[str] = None, limit: int = 25) -> APIResponse:
         if not self.organization:
-            return APIResponse(
-                success=False,
-                error_message="Organization slug required"
-            )
+            return APIResponse(success=False, error_message="Organization slug required")
 
         if project:
             self._validate_slug(project, "project")
@@ -118,17 +96,12 @@ class SentryClient(APIClient):
     def _get(self, endpoint: str, params: Optional[Dict] = None) -> APIResponse:
         try:
             import requests
-            
+
             url = self._build_url(endpoint)
             headers = self._build_headers()
 
             def do_request():
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=self.timeout
-                )
+                response = requests.get(url, headers=headers, params=params, timeout=self.timeout)
                 response.raise_for_status()
                 return response
 
@@ -136,10 +109,7 @@ class SentryClient(APIClient):
             return self.handle_response(response, endpoint)
 
         except Exception as e:
-            return APIResponse(
-                success=False,
-                error_message=str(e)
-            )
+            return APIResponse(success=False, error_message=str(e))
 
     def get_issue_tags(self, issue_id: str) -> APIResponse:
         self._validate_slug(issue_id, "issue_id")
@@ -148,40 +118,25 @@ class SentryClient(APIClient):
 
     def get_project(self, project_slug: str) -> APIResponse:
         if not self.organization:
-            return APIResponse(
-                success=False,
-                error_message="Organization slug required"
-            )
+            return APIResponse(success=False, error_message="Organization slug required")
         self._validate_slug(project_slug, "project_slug")
         endpoint = f"projects/{self.organization}/{project_slug}/"
         return self._get(endpoint)
 
     def list_repos(self) -> APIResponse:
         if not self.organization:
-            return APIResponse(
-                success=False,
-                error_message="Organization slug required"
-            )
+            return APIResponse(success=False, error_message="Organization slug required")
         endpoint = f"organizations/{self.organization}/repos/"
         return self._get(endpoint)
 
-    def get_project_stats(
-        self,
-        project: str,
-        time_range: str = "24h"
-    ) -> APIResponse:
+    def get_project_stats(self, project: str, time_range: str = "24h") -> APIResponse:
         if not self.organization:
-            return APIResponse(
-                success=False,
-                error_message="Organization slug required"
-            )
-        
+            return APIResponse(success=False, error_message="Organization slug required")
+
         self._validate_slug(project, "project")
-            
-        stat_periods = {
-            '1h': '1h', '24h': '1d', '7d': '1d', '14d': '1d', '30d': '1d'
-        }
-        resolution = stat_periods.get(time_range, '1d')
+
+        stat_periods = {"1h": "1h", "24h": "1d", "7d": "1d", "14d": "1d", "30d": "1d"}
+        resolution = stat_periods.get(time_range, "1d")
 
         endpoint = f"projects/{self.organization}/{project}/stats/"
         params = {"stat": "received", "resolution": resolution}

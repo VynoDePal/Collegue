@@ -1,4 +1,5 @@
 """Real-world scenarios for smart_orchestrator (LLM)."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import tool_content, tools_used
@@ -21,10 +22,8 @@ SCENARIOS = [
         },
         "llm_dependent": True,
         "assertions": [
-            ("Plan exécuté (tools_used non vide)",
-             lambda r: len(tools_used(r)) >= 1),
-            ("code_documentation invoqué",
-             lambda r: "code_documentation" in tools_used(r)),
+            ("Plan exécuté (tools_used non vide)", lambda r: len(tools_used(r)) >= 1),
+            ("code_documentation invoqué", lambda r: "code_documentation" in tools_used(r)),
         ],
     },
     {
@@ -42,10 +41,8 @@ SCENARIOS = [
         },
         "llm_dependent": True,
         "assertions": [
-            ("≥ 2 tools dans le plan",
-             lambda r: len(set(tools_used(r))) >= 2),
-            ("secret_scan invoqué",
-             lambda r: "secret_scan" in tools_used(r)),
+            ("≥ 2 tools dans le plan", lambda r: len(set(tools_used(r))) >= 2),
+            ("secret_scan invoqué", lambda r: "secret_scan" in tools_used(r)),
         ],
     },
 ]

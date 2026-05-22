@@ -5,6 +5,7 @@ Couverture cible: 0.9
 Framework: pytest
 Mocks: unittest.mock
 """
+
 import os
 import re
 from typing import Any
@@ -28,13 +29,7 @@ def mock_psycopg2():
 
 @pytest.fixture
 def client():
-    return PostgresClient(
-        host="localhost",
-        port=5432,
-        database="testdb",
-        username="user",
-        password="password"
-    )
+    return PostgresClient(host="localhost", port=5432, database="testdb", username="user", password="password")
 
 
 class TestPostgresClientInit:
@@ -57,23 +52,28 @@ class TestPostgresClientInit:
             "POSTGRES_HOST": "env_host",
             "POSTGRES_DB": "env_db",
             "POSTGRES_USER": "env_user",
-            "POSTGRES_PASSWORD": "env_password"
+            "POSTGRES_PASSWORD": "env_password",
         }
         with patch.dict(os.environ, env_vars):
             client = PostgresClient(port=9999)
             assert client.connection_string == "postgresql://env_user:env_password@env_host:9999/env_db"
 
     def test_driver_detection_psycopg2(self):
-        with patch("builtins.__import__", side_effect=lambda name, *args, **kwargs: MagicMock() if name == "psycopg2" else exec("raise ImportError")):
+        with patch(
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: MagicMock() if name == "psycopg2" else exec("raise ImportError"),
+        ):
             client = PostgresClient()
             assert client._driver == "psycopg2"
 
     def test_driver_detection_asyncpg(self):
         def side_effect(name, *args, **kwargs):
-            if name == "psycopg2": raise ImportError
-            if name == "asyncpg": return MagicMock()
+            if name == "psycopg2":
+                raise ImportError
+            if name == "asyncpg":
+                return MagicMock()
             raise ImportError
-        
+
         with patch("builtins.__import__", side_effect=side_effect):
             client = PostgresClient()
             assert client._driver == "asyncpg"
@@ -97,7 +97,7 @@ class TestPostgresClientSafety:
         _, _, mock_cursor = mock_psycopg2
         mock_cursor.description = [("col",)]
         mock_cursor.fetchall.return_value = []
-        
+
         client.execute_query("SELECT * FROM users")
         mock_cursor.execute.assert_called_with("SELECT * FROM users LIMIT 1000", None)
 
@@ -113,7 +113,7 @@ class TestPostgresClientOperations:
         _, _, mock_cursor = mock_psycopg2
         mock_cursor.description = [("schema_name",)]
         mock_cursor.fetchall.return_value = [("public",), ("auth",)]
-        
+
         res = client.list_schemas()
         assert res.success is True
         assert res.data == [{"schema_name": "public"}, {"schema_name": "auth"}]
@@ -143,14 +143,14 @@ class TestPostgresClientOperations:
         # Le query fait 3 sous-requêtes avec (schema, table_name), d'où 6 params.
         # Ce qui compte : toutes les paires sont (public, users).
         assert len(args[1]) % 2 == 0 and len(args[1]) >= 2
-        pairs = [args[1][i:i + 2] for i in range(0, len(args[1]), 2)]
+        pairs = [args[1][i : i + 2] for i in range(0, len(args[1]), 2)]
         for pair in pairs:
             assert pair == ("public", "users")
 
     def test_sample_data_valid(self, mock_psycopg2, client):
         _, _, mock_cursor = mock_psycopg2
         mock_cursor.description = [("id",)]
-        
+
         res = client.sample_data("users", limit=50)
         assert res.success is True
         mock_cursor.execute.assert_called_with('SELECT * FROM "public"."users" LIMIT %s', (50,))
@@ -190,7 +190,7 @@ class TestPostgresClientErrorHandling:
     def test_connection_failure(self, mock_psycopg2, client):
         mock_connect, _, _ = mock_psycopg2
         mock_connect.side_effect = Exception("Connection timeout")
-        
+
         res = client.list_schemas()
         assert res.success is False
         assert "Connection timeout" in res.error_message
@@ -198,21 +198,21 @@ class TestPostgresClientErrorHandling:
     def test_query_execution_error(self, mock_psycopg2, client):
         _, _, mock_cursor = mock_psycopg2
         mock_cursor.execute.side_effect = Exception("Syntax error near SELECT")
-        
+
         res = client.execute_query("SELECT * FROM invalid_table")
         assert res.success is False
         assert "Syntax error" in res.error_message
 
     def test_get_connection_unsupported_driver(self):
         client = PostgresClient()
-        client._driver = 'asyncpg'  # asyncpg is detected but _get_connection only handles psycopg2
+        client._driver = "asyncpg"  # asyncpg is detected but _get_connection only handles psycopg2
         with pytest.raises(APIError, match="No PostgreSQL driver available. Install psycopg2"):
             client._get_connection()
 
     def test_execute_query_no_results(self, mock_psycopg2, client):
         _, _, mock_cursor = mock_psycopg2
-        mock_cursor.description = None # Simulate non-SELECT or no-result metadata
-        
+        mock_cursor.description = None  # Simulate non-SELECT or no-result metadata
+
         res = client._execute_query("COMMIT")
         assert res.success is True
         assert res.data == []

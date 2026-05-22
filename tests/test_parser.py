@@ -1,6 +1,7 @@
 """
 Tests unitaires pour le CodeParser
 """
+
 import os
 import sys
 import unittest
@@ -144,6 +145,7 @@ def broken_function(
 
         self.assertIn("error", result)
         self.assertIn("non supporté", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

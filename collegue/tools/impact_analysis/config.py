@@ -25,7 +25,7 @@ RISK_CATEGORIES = {
     "security": "Risque de sécurité potentiel",
     "data_migration": "Nécessite une migration de données",
     "performance": "Impact sur les performances",
-    "compat": "Problème de compatibilité"
+    "compat": "Problème de compatibilité",
 }
 
 # Patterns de risques par catégorie
@@ -52,11 +52,7 @@ RISK_PATTERNS = {
 }
 
 # Seuils de confiance par mode
-CONFIDENCE_THRESHOLDS = {
-    "conservative": 0.8,
-    "balanced": 0.6,
-    "aggressive": 0.4
-}
+CONFIDENCE_THRESHOLDS = {"conservative": 0.8, "balanced": 0.6, "aggressive": 0.4}
 
 # Extensions de fichiers de test par langage
 TEST_FILE_EXTENSIONS = {

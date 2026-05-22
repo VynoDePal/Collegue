@@ -3,6 +3,7 @@ tests through pytest in a throwaway tempdir. The contract is objective:
 ``passed / collected``. No LLM-as-judge, no heuristics — if pytest says the
 test passed, it did.
 """
+
 from __future__ import annotations
 
 import re
@@ -94,8 +95,14 @@ def score(case: Dict[str, Any], test_code: str) -> EvalScore:
         except subprocess.TimeoutExpired:
             duration = time.time() - started
             return EvalScore(
-                score=0.0, collected=0, passed=0, failed=0, errors=1, skipped=0,
-                duration_s=duration, stdout_tail="TIMEOUT after 30s",
+                score=0.0,
+                collected=0,
+                passed=0,
+                failed=0,
+                errors=1,
+                skipped=0,
+                duration_s=duration,
+                stdout_tail="TIMEOUT after 30s",
             )
         duration = time.time() - started
 
@@ -123,15 +130,42 @@ def score(case: Dict[str, Any], test_code: str) -> EvalScore:
     )
 
 
-_STDLIB_OR_COMMON = frozenset({
-    # stdlib (partial — enough for the case corpus)
-    "abc", "argparse", "ast", "asyncio", "base64", "collections", "contextlib",
-    "dataclasses", "datetime", "enum", "functools", "io", "itertools", "json",
-    "math", "os", "pathlib", "random", "re", "string", "sys", "tempfile",
-    "threading", "time", "typing", "unittest", "uuid",
-    # common test deps
-    "pytest", "pytest_asyncio", "mock",
-})
+_STDLIB_OR_COMMON = frozenset(
+    {
+        # stdlib (partial — enough for the case corpus)
+        "abc",
+        "argparse",
+        "ast",
+        "asyncio",
+        "base64",
+        "collections",
+        "contextlib",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "functools",
+        "io",
+        "itertools",
+        "json",
+        "math",
+        "os",
+        "pathlib",
+        "random",
+        "re",
+        "string",
+        "sys",
+        "tempfile",
+        "threading",
+        "time",
+        "typing",
+        "unittest",
+        "uuid",
+        # common test deps
+        "pytest",
+        "pytest_asyncio",
+        "mock",
+    }
+)
 
 
 def _discover_local_imports(test_code: str) -> set[str]:
@@ -152,6 +186,7 @@ def _discover_local_imports(test_code: str) -> set[str]:
         # Not walking deeper; any top-level import matters, imports inside
         # functions can pay their own aliasing cost.
         import ast
+
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]

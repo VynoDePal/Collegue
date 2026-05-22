@@ -13,6 +13,7 @@ The MCP server returns tool results wrapped several layers deep:
 These helpers flatten that into the real tool payload so assertions can be
 written as if the tool had been called in-process.
 """
+
 from __future__ import annotations
 
 import json
@@ -89,10 +90,7 @@ def findings_of(response: Any, key: str = "findings") -> list:
 
 
 def has_rule(response: Any, rule_id: str) -> bool:
-    return any(
-        isinstance(f, dict) and f.get("rule_id") == rule_id
-        for f in findings_of(response)
-    )
+    return any(isinstance(f, dict) and f.get("rule_id") == rule_id for f in findings_of(response))
 
 
 def severity_counts(response: Any) -> dict[str, int]:

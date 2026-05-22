@@ -29,15 +29,11 @@ class ImpactAnalysisRequest(BaseModel):
         description="Liste des fichiers à analyser [{path, content, language?}, ...]",
         min_length=1,
     )
-    diff: Optional[str] = Field(
-        None, description="Diff unifié optionnel du changement proposé"
-    )
+    diff: Optional[str] = Field(None, description="Diff unifié optionnel du changement proposé")
     entry_points: Optional[List[str]] = Field(
         None, description="Points d'entrée importants (ex: 'main.py', 'api/router.ts')"
     )
-    assumptions: Optional[List[str]] = Field(
-        None, description="Contraintes ou hypothèses du projet"
-    )
+    assumptions: Optional[List[str]] = Field(None, description="Contraintes ou hypothèses du projet")
     confidence_mode: str = Field(
         "balanced",
         description="Mode de confiance: 'conservative', 'balanced', 'aggressive'",
@@ -104,9 +100,7 @@ class FollowupAction(BaseModel):
 class LLMInsight(BaseModel):
     """Insight généré par le LLM en mode deep."""
 
-    category: str = Field(
-        ..., description="Catégorie: semantic, architectural, business, suggestion"
-    )
+    category: str = Field(..., description="Catégorie: semantic, architectural, business, suggestion")
     insight: str = Field(..., description="L'insight détaillé")
     confidence: str = Field("medium", description="Confiance: low, medium, high")
 
@@ -115,28 +109,12 @@ class ImpactAnalysisResponse(BaseModel):
     """Réponse de l'analyse d'impact."""
 
     change_summary: str = Field(..., description="Résumé du changement analysé")
-    impacted_files: List[ImpactedFile] = Field(
-        default_factory=list, description="Fichiers impactés"
-    )
-    risk_notes: List[RiskNote] = Field(
-        default_factory=list, description="Risques identifiés"
-    )
-    search_queries: List[SearchQuery] = Field(
-        default_factory=list, description="Requêtes de recherche"
-    )
-    tests_to_run: List[TestRecommendation] = Field(
-        default_factory=list, description="Tests recommandés"
-    )
-    followups: List[FollowupAction] = Field(
-        default_factory=list, description="Actions de suivi"
-    )
+    impacted_files: List[ImpactedFile] = Field(default_factory=list, description="Fichiers impactés")
+    risk_notes: List[RiskNote] = Field(default_factory=list, description="Risques identifiés")
+    search_queries: List[SearchQuery] = Field(default_factory=list, description="Requêtes de recherche")
+    tests_to_run: List[TestRecommendation] = Field(default_factory=list, description="Tests recommandés")
+    followups: List[FollowupAction] = Field(default_factory=list, description="Actions de suivi")
     analysis_summary: str = Field(..., description="Résumé de l'analyse")
-    llm_insights: Optional[List[LLMInsight]] = Field(
-        None, description="Insights IA (mode deep)"
-    )
-    semantic_summary: Optional[str] = Field(
-        None, description="Résumé sémantique (mode deep)"
-    )
-    analysis_depth_used: str = Field(
-        "fast", description="Profondeur d'analyse utilisée"
-    )
+    llm_insights: Optional[List[LLMInsight]] = Field(None, description="Insights IA (mode deep)")
+    semantic_summary: Optional[str] = Field(None, description="Résumé sémantique (mode deep)")
+    analysis_depth_used: str = Field("fast", description="Profondeur d'analyse utilisée")

@@ -5,6 +5,7 @@ Ce module permet de stocker les configurations des utilisateurs (tokens, org)
 lorsqu'ils font des requêtes MCP, afin que le watchdog puisse les utiliser
 pour scanner tous les projets de tous les utilisateurs.
 """
+
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -43,8 +44,13 @@ class UserConfigRegistry:
         return cls._instance
 
     PLACEHOLDER_ORGS = {
-        "your-org", "my-organization", "your-organization",
-        "my-org", "example-org", "test-org", "placeholder"
+        "your-org",
+        "my-organization",
+        "your-organization",
+        "my-org",
+        "example-org",
+        "test-org",
+        "placeholder",
     }
 
     def register(
@@ -53,12 +59,11 @@ class UserConfigRegistry:
         sentry_token: Optional[str] = None,
         github_token: Optional[str] = None,
         github_owner: Optional[str] = None,
-        github_repo: Optional[str] = None
+        github_repo: Optional[str] = None,
     ) -> Optional[str]:
 
         if sentry_org.lower() in self.PLACEHOLDER_ORGS:
             return None
-
 
         normalized_org = sentry_org.lower()
 
@@ -67,13 +72,12 @@ class UserConfigRegistry:
             sentry_token=sentry_token,
             github_token=github_token,
             github_owner=github_owner,
-            github_repo=github_repo
+            github_repo=github_repo,
         )
 
         with self._config_lock:
             existing = self._configs.get(config.config_id)
             if existing:
-
                 if sentry_token:
                     existing.sentry_token = sentry_token
                 if github_token:
@@ -92,10 +96,7 @@ class UserConfigRegistry:
         cutoff = time.time() - (max_age_hours * 3600)
 
         with self._config_lock:
-            return [
-                config for config in self._configs.values()
-                if config.last_seen >= cutoff
-            ]
+            return [config for config in self._configs.values() if config.last_seen >= cutoff]
 
     def get_config(self, config_id: str) -> Optional[UserConfig]:
         with self._config_lock:
@@ -106,10 +107,7 @@ class UserConfigRegistry:
         removed = 0
 
         with self._config_lock:
-            stale_ids = [
-                cid for cid, config in self._configs.items()
-                if config.last_seen < cutoff
-            ]
+            stale_ids = [cid for cid, config in self._configs.items() if config.last_seen < cutoff]
             for cid in stale_ids:
                 del self._configs[cid]
                 removed += 1
@@ -129,10 +127,7 @@ class UserConfigRegistry:
     def remove_by_org(self, sentry_org: str) -> bool:
         org_lower = sentry_org.lower()
         with self._config_lock:
-            to_remove = [
-                cid for cid, config in self._configs.items()
-                if config.sentry_org.lower() == org_lower
-            ]
+            to_remove = [cid for cid, config in self._configs.items() if config.sentry_org.lower() == org_lower]
             for cid in to_remove:
                 del self._configs[cid]
             return len(to_remove) > 0

@@ -12,6 +12,7 @@ Three things we need to guarantee:
    ``ctx.lifespan_context["tools_registry"]`` and no longer depends on any
    module-level global.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,6 +38,7 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 # discover_tools
 # ---------------------------------------------------------------------------
+
 
 def test_discover_tools_returns_all_registered_tools():
     """Every shipping tool must be discoverable through the public API.
@@ -103,6 +105,7 @@ def test_discover_does_not_include_smart_orchestrator():
 # ToolsRegistry — concurrency + caching
 # ---------------------------------------------------------------------------
 
+
 def test_registry_returns_injected_dict_without_calling_discovery(monkeypatch):
     """An initial dict is returned as-is; discover_tools is NOT called."""
     called = {"n": 0}
@@ -111,9 +114,7 @@ def test_registry_returns_injected_dict_without_calling_discovery(monkeypatch):
         called["n"] += 1
         return {}
 
-    monkeypatch.setattr(
-        "collegue.core.tools_registry.discover_tools", _fail_if_called
-    )
+    monkeypatch.setattr("collegue.core.tools_registry.discover_tools", _fail_if_called)
 
     registry = ToolsRegistry(initial={"fake": {"prompt_desc": "fake desc"}})
     result = _run(registry.get())
@@ -130,9 +131,7 @@ def test_registry_cold_start_triggers_discovery_exactly_once(monkeypatch):
         # Returning a predictable shape so we can assert callers see it.
         return {"probe_tool": {"prompt_desc": "probe"}}
 
-    monkeypatch.setattr(
-        "collegue.core.tools_registry.discover_tools", _count_discovery
-    )
+    monkeypatch.setattr("collegue.core.tools_registry.discover_tools", _count_discovery)
 
     registry = ToolsRegistry()
 
@@ -157,15 +156,13 @@ def test_registry_clear_forces_fresh_discovery(monkeypatch):
         calls.append(None)
         return {"snap": {"prompt_desc": f"tick-{len(calls)}"}}
 
-    monkeypatch.setattr(
-        "collegue.core.tools_registry.discover_tools", _tick
-    )
+    monkeypatch.setattr("collegue.core.tools_registry.discover_tools", _tick)
 
     registry = ToolsRegistry()
-    _run(registry.get())   # first discovery
-    _run(registry.get())   # cached
+    _run(registry.get())  # first discovery
+    _run(registry.get())  # cached
     registry.clear()
-    _run(registry.get())   # second discovery
+    _run(registry.get())  # second discovery
 
     assert len(calls) == 2
 
@@ -173,6 +170,7 @@ def test_registry_clear_forces_fresh_discovery(monkeypatch):
 # ---------------------------------------------------------------------------
 # meta_orchestrator uses the lifespan-injected registry
 # ---------------------------------------------------------------------------
+
 
 def test_orchestrator_reads_registry_from_lifespan_context():
     """The handler must NOT fall back to discovery when ``ctx.lifespan_context``
@@ -189,14 +187,17 @@ def test_orchestrator_reads_registry_from_lifespan_context():
 
         def get_request_model(self):
             from pydantic import BaseModel
+
             class _R(BaseModel):
                 model_config = {"extra": "allow"}
+
             return _R
 
         async def execute_async(self, request, **kwargs):
             class _Res:
                 def dict(self_inner):
                     return {"ok": True}
+
             return _Res()
 
     injected = {
@@ -216,10 +217,9 @@ def test_orchestrator_reads_registry_from_lifespan_context():
     ctx.sample = AsyncMock()
 
     plan_resp = MagicMock()
-    plan_resp.result = mo.OrchestratorPlan(steps=[
-        mo.OrchestratorStep(tool="fake_tool", reason="t", params={})
-    ])
-    synth_resp = MagicMock(); synth_resp.text = "done"
+    plan_resp.result = mo.OrchestratorPlan(steps=[mo.OrchestratorStep(tool="fake_tool", reason="t", params={})])
+    synth_resp = MagicMock()
+    synth_resp.text = "done"
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
     response = _run(handler(mo.OrchestratorRequest(query="hello"), ctx))

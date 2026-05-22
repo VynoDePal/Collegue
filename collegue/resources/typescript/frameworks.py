@@ -3,6 +3,7 @@ Ressources pour les frameworks TypeScript.
 
 Ce module fournit des informations sur les frameworks et bibliothèques populaires pour TypeScript.
 """
+
 import json
 
 from fastmcp import FastMCP
@@ -19,7 +20,7 @@ FRONTEND_FRAMEWORKS = {
             "Composants réutilisables",
             "Routage intégré",
             "Formulaires réactifs",
-            "RxJS intégré"
+            "RxJS intégré",
         ],
         "example": """
 import { Component } from '@angular/core';
@@ -31,20 +32,14 @@ import { Component } from '@angular/core';
 export class HelloComponent {
   name: string = 'Angular';
 }
-"""
+""",
     },
     "React (avec TypeScript)": {
         "description": "Bibliothèque UI développée par Facebook, utilisable avec TypeScript",
         "version": "18+",
         "site": "https://reactjs.org/",
         "typescript_integration": "Via TSX",
-        "key_features": [
-            "Composants fonctionnels",
-            "Hooks",
-            "JSX/TSX",
-            "Virtual DOM",
-            "Écosystème riche"
-        ],
+        "key_features": ["Composants fonctionnels", "Hooks", "JSX/TSX", "Virtual DOM", "Écosystème riche"],
         "example": """
 import React, { useState } from 'react';
 
@@ -59,7 +54,7 @@ const Hello: React.FC<HelloProps> = ({ initialName }) => {
 };
 
 export default Hello;
-"""
+""",
     },
     "Vue (avec TypeScript)": {
         "description": "Framework progressif pour interfaces utilisateur",
@@ -71,7 +66,7 @@ export default Hello;
             "Réactivité",
             "Directives",
             "Composition API",
-            "Single-File Components"
+            "Single-File Components",
         ],
         "example": """
 <script lang="ts">
@@ -93,7 +88,7 @@ export default defineComponent({
 <template>
   <h1>Hello, {{ name }}!</h1>
 </template>
-"""
+""",
     },
     "Svelte (avec TypeScript)": {
         "description": "Compilateur qui génère du code JavaScript optimisé",
@@ -104,7 +99,7 @@ export default defineComponent({
             "Pas de Virtual DOM",
             "Réactivité déclarative",
             "Moins de code boilerplate",
-            "Transitions et animations intégrées"
+            "Transitions et animations intégrées",
         ],
         "example": """
 <script lang="ts">
@@ -118,8 +113,8 @@ export default defineComponent({
     color: #ff3e00;
   }
 </style>
-"""
-    }
+""",
+    },
 }
 
 BACKEND_FRAMEWORKS = {
@@ -134,7 +129,7 @@ BACKEND_FRAMEWORKS = {
             "Décorateurs",
             "Modules",
             "Middleware",
-            "Support GraphQL, REST, WebSockets"
+            "Support GraphQL, REST, WebSockets",
         ],
         "example": """
 import { Controller, Get, Param } from '@nestjs/common';
@@ -146,19 +141,14 @@ export class UsersController {
     return `User with ID ${id}`;
   }
 }
-"""
+""",
     },
     "Express (avec TypeScript)": {
         "description": "Framework web minimaliste pour Node.js",
         "version": "4+",
         "site": "https://expressjs.com/",
         "typescript_integration": "Via @types/express",
-        "key_features": [
-            "Routage",
-            "Middleware",
-            "Léger et flexible",
-            "Grande communauté"
-        ],
+        "key_features": ["Routage", "Middleware", "Léger et flexible", "Grande communauté"],
         "example": """
 import express, { Request, Response } from 'express';
 
@@ -173,7 +163,7 @@ app.get('/users/:id', (req: Request, res: Response) => {
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
-"""
+""",
     },
     "Deno": {
         "description": "Runtime JavaScript/TypeScript sécurisé par défaut",
@@ -185,7 +175,7 @@ app.listen(port, () => {
             "Support TypeScript intégré",
             "Modules ES",
             "API Web standard",
-            "Outils intégrés (linter, formatter)"
+            "Outils intégrés (linter, formatter)",
         ],
         "example": """
 // server.ts
@@ -208,8 +198,8 @@ const handler = (req: Request): Response => {
 };
 
 serve(handler, { port: 8000 });
-"""
-    }
+""",
+    },
 }
 
 STATE_MANAGEMENT = {
@@ -217,12 +207,7 @@ STATE_MANAGEMENT = {
         "description": "Boîte à outils officielle pour Redux avec TypeScript",
         "site": "https://redux-toolkit.js.org/",
         "typescript_integration": "Excellent",
-        "key_features": [
-            "createSlice",
-            "configureStore",
-            "createAsyncThunk",
-            "RTK Query"
-        ],
+        "key_features": ["createSlice", "configureStore", "createAsyncThunk", "RTK Query"],
         "example": """
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 
@@ -252,18 +237,13 @@ export const counterSlice = createSlice({
 
 export const { increment, decrement, incrementByAmount } = counterSlice.actions;
 export default counterSlice.reducer;
-"""
+""",
     },
     "MobX": {
         "description": "Bibliothèque de gestion d'état simple et évolutive",
         "site": "https://mobx.js.org/",
         "typescript_integration": "Excellent",
-        "key_features": [
-            "Observable",
-            "Computed values",
-            "Reactions",
-            "Actions"
-        ],
+        "key_features": ["Observable", "Computed values", "Reactions", "Actions"],
         "example": """
 import { makeAutoObservable } from "mobx";
 
@@ -284,7 +264,7 @@ class TodoStore {
 }
 
 export const todoStore = new TodoStore();
-"""
+""",
     },
     "Zustand": {
         "description": "Bibliothèque de gestion d'état minimaliste avec hooks",
@@ -294,7 +274,7 @@ export const todoStore = new TodoStore();
             "API simple basée sur hooks",
             "Pas de Provider nécessaire",
             "Sélecteurs optimisés",
-            "Middleware"
+            "Middleware",
         ],
         "example": """
 import create from 'zustand';
@@ -311,8 +291,8 @@ const useBearStore = create<BearState>((set) => ({
 
 // Dans un composant:
 // const { bears, increase } = useBearStore();
-"""
-    }
+""",
+    },
 }
 
 TESTING_LIBRARIES = {
@@ -320,12 +300,7 @@ TESTING_LIBRARIES = {
         "description": "Framework de test JavaScript avec support TypeScript",
         "site": "https://jestjs.io/",
         "typescript_integration": "Via ts-jest",
-        "key_features": [
-            "Tests unitaires",
-            "Snapshots",
-            "Mocks",
-            "Code coverage"
-        ],
+        "key_features": ["Tests unitaires", "Snapshots", "Mocks", "Code coverage"],
         "example": """
 import { sum } from '../math';
 
@@ -338,18 +313,13 @@ describe('sum function', () => {
     expect(sum(-1, -2)).toBe(-3);
   });
 });
-"""
+""",
     },
     "Vitest": {
         "description": "Framework de test ultra-rapide pour Vite",
         "site": "https://vitest.dev/",
         "typescript_integration": "Native",
-        "key_features": [
-            "Compatible avec l'API Jest",
-            "Exécution rapide",
-            "Support ESM",
-            "Intégration Vite"
-        ],
+        "key_features": ["Compatible avec l'API Jest", "Exécution rapide", "Support ESM", "Intégration Vite"],
         "example": """
 import { describe, it, expect } from 'vitest';
 import { sum } from '../math';
@@ -363,19 +333,13 @@ describe('sum function', () => {
     expect(sum(-1, -2)).toBe(-3);
   });
 });
-"""
+""",
     },
     "Cypress": {
         "description": "Framework de test end-to-end avec support TypeScript",
         "site": "https://www.cypress.io/",
         "typescript_integration": "Excellent",
-        "key_features": [
-            "Tests E2E",
-            "Tests de composants",
-            "Capture d'écran",
-            "Vidéos",
-            "Mocks et stubs"
-        ],
+        "key_features": ["Tests E2E", "Tests de composants", "Capture d'écran", "Vidéos", "Mocks et stubs"],
         "example": """
 describe('Login Page', () => {
   it('successfully logs in', () => {
@@ -389,19 +353,13 @@ describe('Login Page', () => {
     cy.get('[data-cy=welcome-message]').should('contain', 'Welcome, Test User');
   });
 });
-"""
+""",
     },
     "Playwright": {
         "description": "Framework de test end-to-end multi-navigateurs",
         "site": "https://playwright.dev/",
         "typescript_integration": "Native",
-        "key_features": [
-            "Multi-navigateurs",
-            "API moderne",
-            "Auto-waiting",
-            "Génération de code",
-            "Traces"
-        ],
+        "key_features": ["Multi-navigateurs", "API moderne", "Auto-waiting", "Génération de code", "Traces"],
         "example": """
 import { test, expect } from '@playwright/test';
 
@@ -415,9 +373,10 @@ test('login flow', async ({ page }) => {
   await expect(page).toHaveURL(/.*dashboard/);
   await expect(page.locator('[data-testid="welcome"]')).toContainText('Welcome, Test User');
 });
-"""
-    }
+""",
+    },
 }
+
 
 def register(app: FastMCP, app_state: dict):
     """
@@ -427,6 +386,7 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
+
     @app.resource("collegue://typescript/frameworks/frontend")
     def typescript_frontend_frameworks() -> str:
         """Fournit des informations sur les frameworks frontend TypeScript."""
@@ -458,21 +418,17 @@ def register(app: FastMCP, app_state: dict):
         if not framework_name:
             return json.dumps({"error": "Framework name is required"})
 
-
         for name, info in FRONTEND_FRAMEWORKS.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
-
 
         for name, info in BACKEND_FRAMEWORKS.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
 
-
         for name, info in STATE_MANAGEMENT.items():
             if framework_name.lower() in name.lower():
                 return json.dumps(info)
-
 
         for name, info in TESTING_LIBRARIES.items():
             if framework_name.lower() in name.lower():

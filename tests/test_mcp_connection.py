@@ -8,6 +8,7 @@ correctement généré côté serveur lors de l'initialisation, mais la transmis
 dans les requêtes suivantes ne fonctionne pas correctement. Ce problème est mentionné comme
 "Partiellement résolu" et nécessite une correction au niveau du serveur.
 """
+
 import json
 import re
 from typing import Optional
@@ -20,10 +21,11 @@ pytest.skip(
     allow_module_level=True,
 )
 
+
 def extract_session_id(response_text: str) -> Optional[str]:
     """Extrait l'ID de session de la réponse"""
     session_match = re.search(
-        r'session[_\s]?ID[:\s]+([a-f0-9-]+)',
+        r"session[_\s]?ID[:\s]+([a-f0-9-]+)",
         response_text,
         re.IGNORECASE,
     )
@@ -31,15 +33,16 @@ def extract_session_id(response_text: str) -> Optional[str]:
         return session_match.group(1)
 
     try:
-        for line in response_text.split('\n'):
-            if line.startswith('data: '):
+        for line in response_text.split("\n"):
+            if line.startswith("data: "):
                 json_data = json.loads(line[6:])
-                if 'result' in json_data and 'sessionId' in json_data['result']:
-                    return json_data['result']['sessionId']
+                if "result" in json_data and "sessionId" in json_data["result"]:
+                    return json_data["result"]["sessionId"]
     except (json.JSONDecodeError, KeyError):
         pass
 
     return None
+
 
 def test_mcp_connection():
     """Test la connexion au serveur MCP"""
@@ -66,23 +69,13 @@ def test_mcp_connection():
                 "method": "initialize",
                 "params": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {}
-                    },
-                    "clientInfo": {
-                        "name": "Test Client",
-                        "version": "1.0.0"
-                    },
-                    "transport": "http"
-                }
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                    "clientInfo": {"name": "Test Client", "version": "1.0.0"},
+                    "transport": "http",
+                },
             },
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream"
-            },
-            timeout=10
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+            timeout=10,
         )
         print(f"✅ Test MCP initialize: {init_response.status_code}")
         print(f"Response: {init_response.text[:300]}...")
@@ -92,11 +85,11 @@ def test_mcp_connection():
             print(f"✅ Cookies trouvés dans la réponse: {dict(cookies)}")
 
         session_id = None
-        if 'X-Session-ID' in init_response.headers:
-            session_id = init_response.headers['X-Session-ID']
+        if "X-Session-ID" in init_response.headers:
+            session_id = init_response.headers["X-Session-ID"]
             print(f"✅ Session ID trouvé dans les headers: {session_id}")
-        elif 'MCP-Session-ID' in init_response.headers:
-            session_id = init_response.headers['MCP-Session-ID']
+        elif "MCP-Session-ID" in init_response.headers:
+            session_id = init_response.headers["MCP-Session-ID"]
             print(f"✅ Session ID trouvé dans les headers: {session_id}")
         else:
             session_id = extract_session_id(init_response.text)
@@ -109,7 +102,7 @@ def test_mcp_connection():
                 "Accept": "application/json, text/event-stream",
                 "X-Session-ID": session_id,
                 "MCP-Session-ID": session_id,
-                "x-session-id": session_id
+                "x-session-id": session_id,
             }
 
             url_with_session = f"http://localhost:8088/mcp/?session_id={session_id}"
@@ -117,17 +110,10 @@ def test_mcp_connection():
 
             tools_response = requests.post(
                 url_with_session,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/list",
-                    "params": {
-                        "sessionId": session_id
-                    }
-                },
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"sessionId": session_id}},
                 headers=tools_headers,
                 cookies=cookies,
-                timeout=10
+                timeout=10,
             )
             print(f"✅ Test liste outils: {tools_response.status_code}")
             print(f"Tools Response: {tools_response.text[:300]}...")
@@ -141,6 +127,7 @@ def test_mcp_connection():
     print("  Transport: http")
     print("  Content-Type: application/json")
     print("  Accept: application/json, text/event-stream")
+
 
 if __name__ == "__main__":
     test_mcp_connection()

@@ -186,16 +186,12 @@ class DependencyGuardTool(BaseTool):
 
         return issues
 
-    def _execute_core_logic(
-        self, request: DependencyGuardRequest, **kwargs
-    ) -> DependencyGuardResponse:
+    def _execute_core_logic(self, request: DependencyGuardRequest, **kwargs) -> DependencyGuardResponse:
         """Exécute la validation des dépendances."""
         issues = []
 
         # Détecter le type de fichier
-        content_type = self._engine.detect_content_type(
-            request.content, request.language
-        )
+        content_type = self._engine.detect_content_type(request.content, request.language)
         self.logger.info(f"Type de fichier détecté: {content_type}")
 
         # Parser les dépendances
@@ -247,9 +243,7 @@ class DependencyGuardTool(BaseTool):
                         severity=severity,
                         message=vuln.get("description", "Vulnérabilité connue"),
                         recommendation=f"Mettez à jour vers: {vuln.get('fix_versions', ['dernière version'])}",
-                        cve_ids=[vuln.get("vulnerability_id")]
-                        if vuln.get("vulnerability_id")
-                        else None,
+                        cve_ids=[vuln.get("vulnerability_id")] if vuln.get("vulnerability_id") else None,
                     )
                 )
 
@@ -260,9 +254,7 @@ class DependencyGuardTool(BaseTool):
 
         # Construire le résumé
         if total_issues == 0:
-            summary = (
-                f"✅ {total_deps} dépendance(s) analysée(s), aucun problème détecté."
-            )
+            summary = f"✅ {total_deps} dépendance(s) analysée(s), aucun problème détecté."
         else:
             summary = (
                 f"⚠️ {total_deps} dépendance(s) analysée(s), {total_issues} problème(s) détecté(s). "
@@ -271,8 +263,7 @@ class DependencyGuardTool(BaseTool):
             )
 
         return DependencyGuardResponse(
-            valid=total_issues == 0
-            or (severity_counts["critical"] == 0 and severity_counts["high"] == 0),
+            valid=total_issues == 0 or (severity_counts["critical"] == 0 and severity_counts["high"] == 0),
             summary=summary,
             total_dependencies=total_deps,
             vulnerabilities=total_issues,

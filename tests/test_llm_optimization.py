@@ -1,6 +1,7 @@
 """
 Tests unitaires pour le module optimization des ressources LLM
 """
+
 import os
 import sys
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from collegue.resources.llm.optimization import (
     OptimizationStrategy,
@@ -87,6 +88,7 @@ class TestLLMOptimization(unittest.TestCase):
 
         self.assertIsNone(optimized_prompt)
 
+
 @unittest.skip("Endpoints FastAPI legacy supprimés (resources via FastMCP)")
 class TestLLMOptimizationEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI d'optimisation des prompts LLM."""
@@ -96,8 +98,8 @@ class TestLLMOptimizationEndpoints(unittest.TestCase):
         self.app = FastAPI()
         self.app_state = {"resource_manager": MagicMock()}
 
-
         from collegue.resources.llm.optimization import register_optimization
+
         register_optimization(self.app, self.app_state)
 
         self.client = TestClient(self.app)
@@ -125,10 +127,7 @@ class TestLLMOptimizationEndpoints(unittest.TestCase):
         """Teste l'endpoint d'application d'une stratégie d'optimisation."""
         response = self.client.post(
             "/resources/llm/optimize",
-            params={
-                "prompt": "Résoudre ce problème mathématique: 5 + 7 * 2",
-                "optimization_id": "chain_of_thought"
-            }
+            params={"prompt": "Résoudre ce problème mathématique: 5 + 7 * 2", "optimization_id": "chain_of_thought"},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -141,8 +140,8 @@ class TestLLMOptimizationEndpoints(unittest.TestCase):
             "/resources/llm/optimize",
             params={
                 "prompt": "Résoudre ce problème mathématique: 5 + 7 * 2",
-                "optimization_id": "nonexistent_strategy"
-            }
+                "optimization_id": "nonexistent_strategy",
+            },
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -150,19 +149,22 @@ class TestLLMOptimizationEndpoints(unittest.TestCase):
 
     def test_apply_optimization_strategy_endpoint_few_shot(self):
         """Teste l'endpoint d'application de la stratégie Few-Shot."""
-        examples_str = "Exemple 1: Ce film était terrible -> Négatif\nExemple 2: J'ai beaucoup aimé cette série -> Positif"
+        examples_str = (
+            "Exemple 1: Ce film était terrible -> Négatif\nExemple 2: J'ai beaucoup aimé cette série -> Positif"
+        )
         response = self.client.post(
             "/resources/llm/optimize",
             params={
                 "prompt": "Classifie ce texte: 'J'ai adoré ce film!'",
                 "optimization_id": "few_shot",
-                "examples": examples_str
-            }
+                "examples": examples_str,
+            },
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("optimized_prompt", data)
         self.assertIn("Ce film était terrible", data["optimized_prompt"])
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

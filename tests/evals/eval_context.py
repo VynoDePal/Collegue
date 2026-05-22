@@ -13,6 +13,7 @@ Intentionally small: the tools we evaluate only touch ``ctx.sample``,
 method will raise ``AttributeError`` which is loud enough to catch on first
 run.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -79,12 +80,14 @@ class EvalContext:
             temperature=temperature if temperature is not None else self._default_temperature,
         )
         response: LLMResponse = await generate_text(config, messages, system_prompt=system_prompt)
-        self.calls.append({
-            "temperature": config.temperature,
-            "max_tokens": config.max_tokens,
-            "prompt_len": len(messages),
-            "response_len": len(response.text or ""),
-        })
+        self.calls.append(
+            {
+                "temperature": config.temperature,
+                "max_tokens": config.max_tokens,
+                "prompt_len": len(messages),
+                "response_len": len(response.text or ""),
+            }
+        )
         return _SampleResult(text=response.text or "", annotations=list(response.annotations or []))
 
     # --- noop log sinks so the tool can await on them ---------------------

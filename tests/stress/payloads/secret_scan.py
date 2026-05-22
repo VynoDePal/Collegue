@@ -1,4 +1,5 @@
 """Stress payloads for secret_scan."""
+
 TOOL_NAME = "secret_scan"
 
 _big_text = "hello world\n" * 500_000  # ~6MB
@@ -16,12 +17,19 @@ PAYLOADS = [
     {"description": "ReDoS candidate (a*50000+!)", "arguments": {"content": _redos, "scan_type": "content"}},
     {"description": "Unicode emojis + RTL + combining", "arguments": {"content": _unicode, "scan_type": "content"}},
     {"description": "scan_type=batch mais files vide", "arguments": {"scan_type": "batch", "files": []}},
-    {"description": "files=200 fichiers inexistants", "arguments": {
-        "scan_type": "batch",
-        "files": [f"/tmp/nonexistent/{i}.txt" for i in range(200)],
-    }},
-    {"description": "severity_threshold invalide", "arguments": {
-        "content": "api_key=abc", "scan_type": "content", "severity_threshold": "super-high"}},
-    {"description": "max_file_size hors bornes", "arguments": {
-        "content": "x", "scan_type": "content", "max_file_size": 10_000_000_000}},
+    {
+        "description": "files=200 fichiers inexistants",
+        "arguments": {
+            "scan_type": "batch",
+            "files": [f"/tmp/nonexistent/{i}.txt" for i in range(200)],
+        },
+    },
+    {
+        "description": "severity_threshold invalide",
+        "arguments": {"content": "api_key=abc", "scan_type": "content", "severity_threshold": "super-high"},
+    },
+    {
+        "description": "max_file_size hors bornes",
+        "arguments": {"content": "x", "scan_type": "content", "max_file_size": 10_000_000_000},
+    },
 ]

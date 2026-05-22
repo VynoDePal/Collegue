@@ -1,6 +1,7 @@
 """
 Tests unitaires pour les ressources JavaScript
 """
+
 import os
 import sys
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from collegue.resources.javascript.best_practices import (
     JavaScriptBestPractice,
@@ -44,6 +45,7 @@ class TestJavaScriptStandardLibrary(unittest.TestCase):
         self.assertIn("array", apis)
         self.assertIn("string", apis)
 
+
 class TestJavaScriptFrameworks(unittest.TestCase):
     """Tests pour le module frameworks des ressources JavaScript."""
 
@@ -63,6 +65,7 @@ class TestJavaScriptFrameworks(unittest.TestCase):
         self.assertGreater(len(frameworks), 0)
         self.assertIn("react", frameworks)
         self.assertIn("vue", frameworks)
+
 
 class TestJavaScriptBestPractices(unittest.TestCase):
     """Tests pour le module best_practices des ressources JavaScript."""
@@ -84,6 +87,7 @@ class TestJavaScriptBestPractices(unittest.TestCase):
         self.assertIn("use_strict", practices)
         self.assertIn("const_let", practices)
 
+
 @unittest.skip("Endpoints FastAPI legacy supprimés (resources via FastMCP)")
 class TestJavaScriptResourcesEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI des ressources JavaScript."""
@@ -92,7 +96,6 @@ class TestJavaScriptResourcesEndpoints(unittest.TestCase):
         """Configuration avant chaque test."""
         self.app = FastAPI()
         self.app_state = {"resource_manager": MagicMock()}
-
 
         from collegue.resources.javascript.best_practices import register_best_practices
         from collegue.resources.javascript.frameworks import register_frameworks
@@ -152,5 +155,6 @@ class TestJavaScriptResourcesEndpoints(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["title"], "Utiliser 'use strict'")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()
