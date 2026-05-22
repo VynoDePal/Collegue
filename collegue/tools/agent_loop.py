@@ -156,7 +156,8 @@ class AgentLoopMixin:
             )
 
             if ctx:
-                await ctx.report_progress(progress=i, total=config.max_iterations)
+                if hasattr(ctx, "report_progress"):
+                    await ctx.report_progress(progress=i, total=config.max_iterations)
                 if config.max_iterations > 1:
                     await ctx.info(f"🔄 Itération {i + 1}/{config.max_iterations} (température: {temperature:.2f})")
 
@@ -241,7 +242,7 @@ class AgentLoopMixin:
             iterations.append(iteration)
 
         # Progression finale
-        if ctx:
+        if ctx and hasattr(ctx, "report_progress"):
             await ctx.report_progress(
                 progress=config.max_iterations,
                 total=config.max_iterations,
