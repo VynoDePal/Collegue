@@ -29,6 +29,11 @@ class RefactoringResponse(BaseModel):
     changes: List[Dict[str, Any]] = Field(..., description="Description des changements effectués")
     explanation: str = Field(..., description="Explication des modifications apportées")
     improvement_metrics: Optional[Dict[str, Any]] = Field(None, description="Métriques d'amélioration")
+    # Champs agentiques (optionnels pour rétrocompatibilité)
+    agent_iterations: int = Field(default=0, description="Nombre d'itérations agentiques effectuées")
+    agent_best_score: Optional[float] = Field(default=None, description="Meilleur score de qualité atteint (0.0-1.0)")
+    agent_errors_fixed: List[str] = Field(default_factory=list, description="Erreurs corrigées par la boucle agentique")
+    agent_converged: Optional[bool] = Field(default=None, description="True si la boucle a convergé")
 
 
 class LLMRefactoringResult(BaseModel):

@@ -15,13 +15,14 @@ Refactorisé: Le fichier original faisait 687 lignes, maintenant ~200 lignes.
 from typing import Any, Dict, List
 
 from ...core.shared import run_async_from_sync
+from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool, ToolError
 from .config import REFACTORING_LANGUAGE_INSTRUCTIONS
 from .engine import RefactoringEngine
-from .models import LLMRefactoringResult, RefactoringRequest, RefactoringResponse
+from .models import RefactoringRequest, RefactoringResponse
 
 
-class RefactoringTool(BaseTool):
+class RefactoringTool(AgentLoopMixin, BaseTool):
     """
     Outil de refactoring de code intelligent.
 
@@ -67,9 +68,96 @@ class RefactoringTool(BaseTool):
         "php",
     ]
 
+    agent_config = AgentLoopConfig(
+        max_iterations=3,
+        initial_temperature=0.7,
+        temperature_decay=0.15,
+        min_temperature=0.3,
+    )
+
     def __init__(self, config=None, app_state=None):
         super().__init__(config, app_state)
         self._engine = RefactoringEngine(logger=self.logger)
+
+    # --- AgentLoopMixin hooks ---
+
+    async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
+        """Valide le code refactoré : syntaxe et taille minimale."""
+        errors = []
+        language = context.get("language", "python")
+        original_code = context.get("original_code", "")
+
+        cleaned = self._engine.extract_code_block(output, language)
+
+        is_valid, error_msg = self._engine.validate_code_syntax(cleaned, language)
+        if not is_valid:
+            errors.append(f"Syntaxe invalide: {error_msg}")
+
+        if original_code and len(cleaned.strip()) < len(original_code) * 0.3:
+            errors.append(
+                f"Code refactoré anormalement court ({len(cleaned.strip())} chars "
+                f"vs {len(original_code)} original, < 30%)"
+            )
+
+        if not cleaned.strip():
+            errors.append("Code refactoré vide")
+
+        return errors
+
+    async def assess_agent_quality(self, output: str, context: Dict[str, Any]) -> float:
+        """Évalue la qualité du refactoring : syntaxe + réduction de complexité."""
+        language = context.get("language", "python")
+        original_metrics = context.get("original_metrics", {})
+
+        cleaned = self._engine.extract_code_block(output, language)
+
+        is_valid, _ = self._engine.validate_code_syntax(cleaned, language)
+        syntax_score = 1.0 if is_valid else 0.0
+
+        if not cleaned.strip():
+            return 0.0
+
+        new_metrics = self._engine.analyze_code_metrics(cleaned, language)
+
+        complexity_score = 0.5
+        original_complexity = original_metrics.get("complexity_score", 0)
+        if original_complexity > 0:
+            reduction = (original_complexity - new_metrics.get("complexity_score", 0)) / original_complexity
+            complexity_score = max(0.0, min(1.0, 0.5 + reduction * 0.5))
+
+        return syntax_score * 0.5 + complexity_score * 0.3 + 0.2
+
+    async def build_agent_feedback(
+        self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
+    ) -> str:
+        """Construit un feedback spécifique pour corriger le code refactoré."""
+        parts = []
+
+        for error in errors:
+            if "Syntaxe invalide" in error:
+                parts.append(f"ERREUR DE SYNTAXE: {error}. Corrige l'erreur de syntaxe.")
+            elif "anormalement court" in error:
+                parts.append(
+                    "Le code refactoré est trop court par rapport à l'original. "
+                    "Assure-toi de refactoriser le code complet, pas seulement une partie."
+                )
+            elif "vide" in error:
+                parts.append("Le code refactoré est vide. Génère le code refactoré complet.")
+
+        if quality < 0.7:
+            language = context.get("language", "python")
+            original_metrics = context.get("original_metrics", {})
+            cleaned = self._engine.extract_code_block(output, language)
+            new_metrics = self._engine.analyze_code_metrics(cleaned, language)
+            original_complexity = original_metrics.get("complexity_score", 0)
+            new_complexity = new_metrics.get("complexity_score", 0)
+            if new_complexity >= original_complexity and original_complexity > 0:
+                parts.append(
+                    f"La complexité n'a pas diminué (original: {original_complexity}, "
+                    f"refactoré: {new_complexity}). Simplifie davantage la logique."
+                )
+
+        return "\n".join(parts) if parts else "Améliore la qualité globale du code refactoré."
 
     def get_supported_refactoring_types(self) -> List[str]:
         """Retourne la liste des types de refactoring supportés."""
@@ -257,9 +345,8 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
             return self._perform_local_refactoring(request)
 
     async def _execute_core_logic_async(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
-        """Version asynchrone avec support structured output."""
+        """Version asynchrone avec boucle agentique itérative."""
         ctx = kwargs.get("ctx")
-        use_structured_output = kwargs.get("use_structured_output", True)
 
         if ctx:
             await ctx.info("Analyse du code original...")
@@ -267,73 +354,32 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
         original_metrics = self._engine.analyze_code_metrics(request.code, request.language)
 
         prompt = await self.prepare_prompt(request, f"refactoring_{request.refactoring_type}")
-        system_prompt = f"""Tu es un expert en refactoring de code {request.language}.
-Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'."""
+        system_prompt = (
+            f"Tu es un expert en refactoring de code {request.language}.\n"
+            f"Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.\n"
+            "Réponds UNIQUEMENT avec le code refactoré, sans explications."
+        )
 
-        if ctx:
-            await ctx.info("Refactoring en cours via LLM...")
+        if not ctx:
+            return self._perform_local_refactoring(request)
 
         try:
-            # Essayer structured output d'abord
-            if ctx is not None and use_structured_output:
-                try:
-                    self.logger.debug("Utilisation du structured output avec LLMRefactoringResult")
-                    llm_result = await ctx.sample(
-                        messages=prompt,
-                        system_prompt=system_prompt,
-                        result_type=LLMRefactoringResult,
-                        temperature=0.5,
-                        max_tokens=2000,
-                    )
+            await ctx.info("Refactoring agentique en cours...")
 
-                    if isinstance(llm_result.result, LLMRefactoringResult):
-                        result_data = llm_result.result
-                        if ctx:
-                            await ctx.info(f"Structured output: {result_data.changes_count} modifications")
-
-                        cleaned_code = self._engine.extract_code_block(result_data.refactored_code, request.language)
-
-                        is_valid, error_msg = self._engine.validate_code_syntax(cleaned_code, request.language)
-                        if not is_valid:
-                            self.logger.warning(f"Code structuré invalide: {error_msg}")
-
-                        changes = [
-                            {"type": area, "description": f"Amélioration: {area}"}
-                            for area in result_data.improved_areas
-                        ]
-
-                        improvement_metrics = {
-                            "complexity_reduction": result_data.complexity_reduction,
-                            "changes_count": result_data.changes_count,
-                            "improved_areas": result_data.improved_areas,
-                        }
-
-                        return RefactoringResponse(
-                            refactored_code=cleaned_code,
-                            original_code=request.code,
-                            language=request.language,
-                            changes=changes,
-                            explanation=result_data.changes_summary,
-                            improvement_metrics=improvement_metrics,
-                        )
-                except Exception as e:
-                    self.logger.warning(f"Structured output a échoué, fallback vers texte brut: {e}")
-
-            # Fallback vers texte brut
-            result = await ctx.sample(
-                messages=prompt,
-                system_prompt=system_prompt + "\nRéponds UNIQUEMENT avec le code refactoré.",
-                temperature=0.5,
+            agent_result = await self.agent_execute(
+                initial_prompt=prompt,
+                system_prompt=system_prompt,
+                ctx=ctx,
+                context={
+                    "language": request.language,
+                    "original_code": request.code,
+                    "original_metrics": original_metrics,
+                    "refactoring_type": request.refactoring_type,
+                },
                 max_tokens=2000,
             )
 
-            refactored_code = self._engine.extract_code_block(result.text, request.language)
-
-            is_valid, error_msg = self._engine.validate_code_syntax(refactored_code, request.language)
-            if not is_valid:
-                self.logger.warning(f"Code généré syntaxiquement invalide: {error_msg}")
-                if ctx:
-                    await ctx.warning(f"Attention: Le code généré semble contenir des erreurs de syntaxe: {error_msg}")
+            refactored_code = self._engine.extract_code_block(agent_result.best_output, request.language)
 
             if ctx:
                 await ctx.info("Analyse des améliorations...")
@@ -355,6 +401,10 @@ Applique les meilleures pratiques de refactoring de type '{request.refactoring_t
                 changes=changes,
                 explanation=explanation,
                 improvement_metrics=improvement_metrics,
+                agent_iterations=agent_result.total_iterations,
+                agent_best_score=agent_result.best_score,
+                agent_errors_fixed=agent_result.errors_fixed,
+                agent_converged=agent_result.converged,
             )
 
         except Exception as e:
