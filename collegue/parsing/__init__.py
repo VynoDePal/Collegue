@@ -16,16 +16,16 @@ from .utils import (
 )
 
 __all__ = [
-    'Import',
-    'Declaration', 
-    'ParseResult',
-    'BaseParser',
-    'JSParser',
-    'PythonParser',
-    'detect_language',
-    'parse_file',
-    'resolve_relative_import',
-    'resolve_module_to_file',
-    'get_unused_imports',
-    'get_unused_declarations',
+    "Import",
+    "Declaration",
+    "ParseResult",
+    "BaseParser",
+    "JSParser",
+    "PythonParser",
+    "detect_language",
+    "parse_file",
+    "resolve_relative_import",
+    "resolve_module_to_file",
+    "get_unused_imports",
+    "get_unused_declarations",
 ]

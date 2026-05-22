@@ -10,6 +10,7 @@ Sources:
 - Sentry API stacktrace format: https://docs.sentry.io/api/events/
 - AST-based code chunking: Best practice for LLM code context
 """
+
 import ast
 import base64
 import logging
@@ -57,12 +58,14 @@ class ContextPack:
     frames: List[StackFrame] = field(default_factory=list)
     culprit_frame: Optional[StackFrame] = None
 
-    constraints: List[str] = field(default_factory=lambda: [
-        "Ne crée PAS de nouveaux fichiers sauf si explicitement demandé",
-        "Ne remplace PAS tout le fichier - génère des patchs SEARCH/REPLACE minimaux",
-        "Conserve TOUT le code existant qui fonctionne",
-        "Utilise le format de patch spécifié"
-    ])
+    constraints: List[str] = field(
+        default_factory=lambda: [
+            "Ne crée PAS de nouveaux fichiers sauf si explicitement demandé",
+            "Ne remplace PAS tout le fichier - génère des patchs SEARCH/REPLACE minimaux",
+            "Conserve TOUT le code existant qui fonctionne",
+            "Utilise le format de patch spécifié",
+        ]
+    )
 
     def to_prompt_context(self) -> str:
         parts = []
@@ -85,7 +88,7 @@ class ContextPack:
             parts.append(f"Lignes affichées: {pf.chunk_start_line}-{pf.chunk_end_line}")
             parts.append("")
             parts.append("```python")
-            lines = pf.relevant_chunk.split('\n')
+            lines = pf.relevant_chunk.split("\n")
             for i, line in enumerate(lines, start=pf.chunk_start_line):
                 marker = " >>> " if i == pf.error_line else "     "
                 parts.append(f"{i:4d}{marker}{line}")
@@ -102,6 +105,7 @@ class ContextPack:
             parts.append(f"- {constraint}")
 
         return "\n".join(parts)
+
 
 class ContextPackBuilder:
     PROJECT_PREFIXES = ["collegue/", "src/", "app/", "lib/"]
@@ -125,7 +129,7 @@ class ContextPackBuilder:
         repo_owner: str,
         repo_name: str,
         github_token: str,
-        project_prefixes: Optional[List[str]] = None
+        project_prefixes: Optional[List[str]] = None,
     ):
         self.github = github_tool
         self.repo_owner = repo_owner
@@ -137,21 +141,20 @@ class ContextPackBuilder:
     def extract_frames_from_event(self, event: Any) -> List[StackFrame]:
         frames = []
 
-        if hasattr(event, 'stacktrace') and isinstance(event.stacktrace, str):
+        if hasattr(event, "stacktrace") and isinstance(event.stacktrace, str):
             frames = self._parse_stacktrace_string(event.stacktrace)
 
-        if hasattr(event, 'raw_data') and event.raw_data:
+        if hasattr(event, "raw_data") and event.raw_data:
             raw = event.raw_data
             frames = self._extract_frames_from_raw(raw)
 
-
-        if not frames and hasattr(event, 'entries'):
+        if not frames and hasattr(event, "entries"):
             for entry in event.entries or []:
-                if entry.get('type') == 'exception':
-                    values = entry.get('data', {}).get('values', [])
+                if entry.get("type") == "exception":
+                    values = entry.get("data", {}).get("values", [])
                     for val in values:
-                        st = val.get('stacktrace', {})
-                        for f in st.get('frames', []):
+                        st = val.get("stacktrace", {})
+                        for f in st.get("frames", []):
                             frames.append(self._dict_to_frame(f))
 
         return frames
@@ -159,41 +162,41 @@ class ContextPackBuilder:
     def _extract_frames_from_raw(self, raw: Dict) -> List[StackFrame]:
         frames = []
 
-        exception = raw.get('exception', {})
-        values = exception.get('values', [])
+        exception = raw.get("exception", {})
+        values = exception.get("values", [])
         for val in values:
-            st = val.get('stacktrace', {})
-            for f in st.get('frames', []):
+            st = val.get("stacktrace", {})
+            for f in st.get("frames", []):
                 frames.append(self._dict_to_frame(f))
 
         if not frames:
-            for entry in raw.get('entries', []):
-                if entry.get('type') == 'exception':
-                    for val in entry.get('data', {}).get('values', []):
-                        st = val.get('stacktrace', {})
-                        for f in st.get('frames', []):
+            for entry in raw.get("entries", []):
+                if entry.get("type") == "exception":
+                    for val in entry.get("data", {}).get("values", []):
+                        st = val.get("stacktrace", {})
+                        for f in st.get("frames", []):
                             frames.append(self._dict_to_frame(f))
 
         return frames
 
     def _dict_to_frame(self, f: Dict) -> StackFrame:
         return StackFrame(
-            filename=f.get('filename', f.get('absPath', '')),
-            lineno=f.get('lineNo', f.get('lineno', 0)),
-            function=f.get('function', '<unknown>'),
-            context_line=f.get('context_line') or f.get('contextLine'),
-            pre_context=f.get('pre_context') or f.get('preContext') or [],
-            post_context=f.get('post_context') or f.get('postContext') or [],
-            abs_path=f.get('absPath') or f.get('abs_path'),
-            module=f.get('module'),
-            in_app=f.get('inApp', f.get('in_app', True))
+            filename=f.get("filename", f.get("absPath", "")),
+            lineno=f.get("lineNo", f.get("lineno", 0)),
+            function=f.get("function", "<unknown>"),
+            context_line=f.get("context_line") or f.get("contextLine"),
+            pre_context=f.get("pre_context") or f.get("preContext") or [],
+            post_context=f.get("post_context") or f.get("postContext") or [],
+            abs_path=f.get("absPath") or f.get("abs_path"),
+            module=f.get("module"),
+            in_app=f.get("inApp", f.get("in_app", True)),
         )
 
     def _parse_stacktrace_string(self, stacktrace: str) -> List[StackFrame]:
         frames = []
         pattern = r'File "([^"]+)", line (\d+), in (\w+)'
 
-        lines = stacktrace.split('\n')
+        lines = stacktrace.split("\n")
         i = 0
         while i < len(lines):
             match = re.search(pattern, lines[i])
@@ -204,13 +207,15 @@ class ContextPackBuilder:
                 context_line = None
                 if i + 1 < len(lines) and lines[i + 1].strip():
                     context_line = lines[i + 1].strip()
-                frames.append(StackFrame(
-                    filename=filename,
-                    lineno=lineno,
-                    function=function,
-                    context_line=context_line,
-                    in_app=self._is_project_file(filename)
-                ))
+                frames.append(
+                    StackFrame(
+                        filename=filename,
+                        lineno=lineno,
+                        function=function,
+                        context_line=context_line,
+                        in_app=self._is_project_file(filename),
+                    )
+                )
             i += 1
 
         return frames
@@ -224,8 +229,7 @@ class ContextPackBuilder:
             if prefix in filepath or filepath.startswith(prefix):
                 return True
 
-
-        if not filepath.startswith('/usr') and not filepath.startswith('/lib'):
+        if not filepath.startswith("/usr") and not filepath.startswith("/lib"):
             return True
 
         return False
@@ -240,19 +244,18 @@ class ContextPackBuilder:
         return frames[-1] if frames else None
 
     def _normalize_filepath(self, filepath: str) -> str:
-        prefixes_to_strip = ['/app/', '/home/', '/var/', '/srv/']
+        prefixes_to_strip = ["/app/", "/home/", "/var/", "/srv/"]
         for prefix in prefixes_to_strip:
             if filepath.startswith(prefix):
-
-                parts = filepath.split('/')
+                parts = filepath.split("/")
                 for i, part in enumerate(parts):
                     for proj_prefix in self.PROJECT_PREFIXES:
-                        if part == proj_prefix.rstrip('/'):
-                            return '/'.join(parts[i:])
+                        if part == proj_prefix.rstrip("/"):
+                            return "/".join(parts[i:])
 
         for prefix in self.PROJECT_PREFIXES:
-            if filepath.startswith(prefix) or prefix.rstrip('/') in filepath:
-                idx = filepath.find(prefix.rstrip('/'))
+            if filepath.startswith(prefix) or prefix.rstrip("/") in filepath:
+                idx = filepath.find(prefix.rstrip("/"))
                 if idx >= 0:
                     return filepath[idx:]
 
@@ -264,20 +267,20 @@ class ContextPackBuilder:
         normalized_path = self._normalize_filepath(filepath)
 
         try:
-            response = self.github._execute_core_logic(GitHubRequest(
-                command="get_file",
-                owner=self.repo_owner,
-                repo=self.repo_name,
-                path=normalized_path,
-                token=self.github_token
-            ))
+            response = self.github._execute_core_logic(
+                GitHubRequest(
+                    command="get_file",
+                    owner=self.repo_owner,
+                    repo=self.repo_name,
+                    path=normalized_path,
+                    token=self.github_token,
+                )
+            )
 
             if response and response.content:
-
                 try:
-                    return base64.b64decode(response.content).decode('utf-8')
+                    return base64.b64decode(response.content).decode("utf-8")
                 except Exception:
-
                     return response.content
         except Exception as e:
             logger.warning(f"Impossible de récupérer {normalized_path} depuis GitHub: {e}")
@@ -285,13 +288,10 @@ class ContextPackBuilder:
         return None
 
     def extract_code_chunk(
-        self,
-        content: str,
-        error_line: int,
-        context_lines: int = 50
+        self, content: str, error_line: int, context_lines: int = 50
     ) -> Tuple[str, int, int, Optional[str], Optional[str]]:
 
-        lines = content.split('\n')
+        lines = content.split("\n")
         total_lines = len(lines)
 
         function_name = None
@@ -304,7 +304,7 @@ class ContextPackBuilder:
 
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
+                    if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
                         if node.lineno <= error_line <= node.end_lineno:
                             function_name = node.name
 
@@ -313,7 +313,7 @@ class ContextPackBuilder:
 
                             for parent in ast.walk(tree):
                                 if isinstance(parent, ast.ClassDef):
-                                    if hasattr(parent, 'lineno') and hasattr(parent, 'end_lineno'):
+                                    if hasattr(parent, "lineno") and hasattr(parent, "end_lineno"):
                                         if parent.lineno < node.lineno <= parent.end_lineno:
                                             class_name = parent.name
                             break
@@ -321,7 +321,7 @@ class ContextPackBuilder:
             if not function_name:
                 for node in ast.walk(tree):
                     if isinstance(node, ast.ClassDef):
-                        if hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
+                        if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
                             if node.lineno <= error_line <= node.end_lineno:
                                 class_name = node.name
                                 start_line = max(1, node.lineno - 5)
@@ -337,25 +337,25 @@ class ContextPackBuilder:
             start_line = max(1, error_line - context_lines)
             end_line = min(total_lines, error_line + context_lines)
 
-        chunk_lines = lines[start_line - 1:end_line]
-        chunk = '\n'.join(chunk_lines)
+        chunk_lines = lines[start_line - 1 : end_line]
+        chunk = "\n".join(chunk_lines)
 
         return chunk, start_line, end_line, function_name, class_name
 
     def extract_imports_section(self, content: str, max_lines: int = 30) -> str:
-        lines = content.split('\n')
+        lines = content.split("\n")
         import_lines = []
 
         for line in lines[:max_lines]:
             stripped = line.strip()
-            if stripped.startswith('import ') or stripped.startswith('from '):
+            if stripped.startswith("import ") or stripped.startswith("from "):
                 import_lines.append(line)
-            elif stripped.startswith('#') or stripped == '' or stripped.startswith('"""') or stripped.startswith("'''"):
+            elif stripped.startswith("#") or stripped == "" or stripped.startswith('"""') or stripped.startswith("'''"):
                 continue
             elif import_lines:
                 break
 
-        return '\n'.join(import_lines)
+        return "\n".join(import_lines)
 
     def build_stacktrace_summary(self, frames: List[StackFrame], max_frames: int = 5) -> str:
         if not frames:
@@ -371,21 +371,13 @@ class ContextPackBuilder:
                 line += f"\n    → {f.context_line.strip()}"
             lines.append(line)
 
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
     async def build(
-        self,
-        sentry_event: Any,
-        issue_title: str,
-        error_message: str = "",
-        error_type: str = ""
+        self, sentry_event: Any, issue_title: str, error_message: str = "", error_type: str = ""
     ) -> ContextPack:
 
-        pack = ContextPack(
-            error_title=issue_title,
-            error_message=error_message,
-            error_type=error_type
-        )
+        pack = ContextPack(error_title=issue_title, error_message=error_message, error_type=error_type)
 
         frames = self.extract_frames_from_event(sentry_event)
         pack.frames = frames
@@ -393,7 +385,7 @@ class ContextPackBuilder:
         if not frames:
             logger.warning("Aucun frame extrait de l'événement Sentry")
 
-            if hasattr(sentry_event, 'stacktrace') and sentry_event.stacktrace:
+            if hasattr(sentry_event, "stacktrace") and sentry_event.stacktrace:
                 pack.stacktrace_summary = sentry_event.stacktrace[:2000]
             return pack
 
@@ -412,10 +404,7 @@ class ContextPackBuilder:
             logger.warning(f"Impossible de récupérer le fichier {culprit.filename}")
             return pack
 
-        chunk, start, end, func_name, class_name = self.extract_code_chunk(
-            file_content,
-            culprit.lineno
-        )
+        chunk, start, end, func_name, class_name = self.extract_code_chunk(file_content, culprit.lineno)
 
         imports = self.extract_imports_section(file_content)
 
@@ -428,7 +417,7 @@ class ContextPackBuilder:
             error_line=culprit.lineno,
             function_name=func_name or culprit.function,
             class_name=class_name,
-            imports_section=imports
+            imports_section=imports,
         )
 
         logger.info(

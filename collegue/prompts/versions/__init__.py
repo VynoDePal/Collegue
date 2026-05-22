@@ -17,6 +17,7 @@ def get_versions_file() -> Path:
     """
     return Path(__file__).parent / "versions.json"
 
+
 def load_version_metrics(tool_name: str, version: str) -> Optional[Dict[str, Any]]:
     """
     Charge les métriques pour une version spécifique d'un outil.
@@ -32,7 +33,7 @@ def load_version_metrics(tool_name: str, version: str) -> Optional[Dict[str, Any
 
     if versions_file.exists():
         try:
-            with open(versions_file, 'r', encoding='utf-8') as f:
+            with open(versions_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if tool_name in data and version in data[tool_name]:
                     return data[tool_name][version]
@@ -40,6 +41,7 @@ def load_version_metrics(tool_name: str, version: str) -> Optional[Dict[str, Any
             pass
 
     return None
+
 
 def save_version_metrics(tool_name: str, version: str, metrics: Dict[str, Any]) -> bool:
     """
@@ -56,23 +58,21 @@ def save_version_metrics(tool_name: str, version: str, metrics: Dict[str, Any]) 
     versions_file = get_versions_file()
 
     try:
-
         data = {}
         if versions_file.exists():
-            with open(versions_file, 'r', encoding='utf-8') as f:
+            with open(versions_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
 
         if tool_name not in data:
             data[tool_name] = {}
         data[tool_name][version] = metrics
 
-
-        with open(versions_file, 'w', encoding='utf-8') as f:
+        with open(versions_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
         return True
     except Exception:
         return False
 
-__all__ = ['get_versions_file', 'load_version_metrics', 'save_version_metrics']
+
+__all__ = ["get_versions_file", "load_version_metrics", "save_version_metrics"]

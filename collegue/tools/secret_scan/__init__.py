@@ -10,12 +10,8 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.secret_scan import SecretScanTool
 """
+
 from .models import SecretFinding, SecretScanRequest, SecretScanResponse
 from .tool import SecretScanTool
 
-__all__ = [
-    'SecretScanTool',
-    'SecretScanRequest',
-    'SecretScanResponse',
-    'SecretFinding'
-]
+__all__ = ["SecretScanTool", "SecretScanRequest", "SecretScanResponse", "SecretFinding"]

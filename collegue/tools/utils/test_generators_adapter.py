@@ -4,6 +4,7 @@ Test Templates - Fonctions simples de génération de tests.
 Ce module fournit des fonctions directes pour générer des templates de tests
 sans architecture OO complexe.
 """
+
 from typing import Any, Dict, List
 
 
@@ -36,8 +37,9 @@ def _classes_to_test_cases(classes: List[Dict[str, Any]], language: str = "pytho
     return test_cases
 
 
-def generate_unittest_tests(code: str, functions: List[Dict[str, Any]],
-                          classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+def generate_unittest_tests(
+    code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool = False
+) -> str:
     """Generate unittest tests template."""
     lines = [
         "import unittest",
@@ -50,50 +52,59 @@ def generate_unittest_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "    def setUp(self):",
-            '        """Set up test fixtures."""',
-            "        pass",
-            "",
-            "    def tearDown(self):",
-            '        """Tear down test fixtures."""',
-            "        pass",
-            "",
-        ])
+        lines.extend(
+            [
+                "    def setUp(self):",
+                '        """Set up test fixtures."""',
+                "        pass",
+                "",
+                "    def tearDown(self):",
+                '        """Tear down test fixtures."""',
+                "        pass",
+                "",
+            ]
+        )
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"    def test_{func_name}(self):",
-            f'        """Test {func_name} functionality."""',
-            "        # TODO: Implement test",
-            "        pass",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    def test_{func_name}(self):",
+                f'        """Test {func_name} functionality."""',
+                "        # TODO: Implement test",
+                "        pass",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"    def test_{class_name}_initialization(self):",
-            f'        """Test {class_name} initialization."""',
-            "        # TODO: Implement test",
-            "        pass",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    def test_{class_name}_initialization(self):",
+                f'        """Test {class_name} initialization."""',
+                "        # TODO: Implement test",
+                "        pass",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "",
-        "if __name__ == '__main__':",
-        "    unittest.main()",
-    ])
+    lines.extend(
+        [
+            "",
+            "if __name__ == '__main__':",
+            "    unittest.main()",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def generate_pytest_tests(code: str, functions: List[Dict[str, Any]],
-                        classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+def generate_pytest_tests(
+    code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool = False
+) -> str:
     """Generate pytest tests template."""
     lines = [
         "import pytest",
@@ -102,44 +113,51 @@ def generate_pytest_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "",
-            "@pytest.fixture",
-            "def mock_fixture():",
-            '    """Fixture for mocking."""',
-            "    return Mock()",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "@pytest.fixture",
+                "def mock_fixture():",
+                '    """Fixture for mocking."""',
+                "    return Mock()",
+                "",
+            ]
+        )
 
     lines.append("")
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"def test_{func_name}():",
-            f'    """Test {func_name} functionality."""',
-            "    # TODO: Implement test",
-            "    pass",
-            "",
-        ])
+        lines.extend(
+            [
+                f"def test_{func_name}():",
+                f'    """Test {func_name} functionality."""',
+                "    # TODO: Implement test",
+                "    pass",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"def test_{class_name}_initialization():",
-            f'    """Test {class_name} initialization."""',
-            "    # TODO: Implement test",
-            "    pass",
-            "",
-        ])
+        lines.extend(
+            [
+                f"def test_{class_name}_initialization():",
+                f'    """Test {class_name} initialization."""',
+                "    # TODO: Implement test",
+                "    pass",
+                "",
+            ]
+        )
 
     return "\n".join(lines)
 
 
-def generate_jest_tests(code: str, functions: List[Dict[str, Any]],
-                      classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+def generate_jest_tests(
+    code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool = False
+) -> str:
     """Generate Jest tests template."""
     lines = [
         "// Jest tests",
@@ -148,48 +166,57 @@ def generate_jest_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "    beforeEach(() => {",
-            "        // Set up mocks",
-            "    });",
-            "",
-            "    afterEach(() => {",
-            "        // Clean up mocks",
-            "    });",
-            "",
-        ])
+        lines.extend(
+            [
+                "    beforeEach(() => {",
+                "        // Set up mocks",
+                "    });",
+                "",
+                "    afterEach(() => {",
+                "        // Clean up mocks",
+                "    });",
+                "",
+            ]
+        )
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"    test('{func_name} should work correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).toBe(true);",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    test('{func_name} should work correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).toBe(true);",
+                "    }});",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"    test('{class_name} should initialize correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).toBe(true);",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    test('{class_name} should initialize correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).toBe(true);",
+                "    }});",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "});",
-    ])
+    lines.extend(
+        [
+            "});",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def generate_mocha_tests(code: str, functions: List[Dict[str, Any]],
-                       classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+def generate_mocha_tests(
+    code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool = False
+) -> str:
     """Generate Mocha tests template."""
     lines = [
         "const { expect } = require('chai');",
@@ -200,51 +227,62 @@ def generate_mocha_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "    beforeEach(() => {",
-            "        // Set up mocks",
-            "    });",
-            "",
-            "    afterEach(() => {",
-            "        // Clean up mocks",
-            "    });",
-            "",
-        ])
+        lines.extend(
+            [
+                "    beforeEach(() => {",
+                "        // Set up mocks",
+                "    });",
+                "",
+                "    afterEach(() => {",
+                "        // Clean up mocks",
+                "    });",
+                "",
+            ]
+        )
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"    it('{func_name} should work correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).to.be.true;",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    it('{func_name} should work correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).to.be.true;",
+                "    }});",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"    it('{class_name} should initialize correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).to.be.true;",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    it('{class_name} should initialize correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).to.be.true;",
+                "    }});",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "});",
-    ])
+    lines.extend(
+        [
+            "});",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def generate_typescript_jest_tests(code: str, functions: List[Dict[str, Any]],
-                                  classes: List[Dict[str, Any]],
-                                  interfaces: List[Dict[str, Any]],
-                                  types: List[Dict[str, Any]],
-                                  include_mocks: bool = False) -> str:
+def generate_typescript_jest_tests(
+    code: str,
+    functions: List[Dict[str, Any]],
+    classes: List[Dict[str, Any]],
+    interfaces: List[Dict[str, Any]],
+    types: List[Dict[str, Any]],
+    include_mocks: bool = False,
+) -> str:
     """Generate TypeScript Jest tests template."""
     lines = [
         "// TypeScript Jest tests",
@@ -253,47 +291,58 @@ def generate_typescript_jest_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "    beforeEach(() => {",
-            "        // Set up mocks",
-            "    });",
-            "",
-        ])
+        lines.extend(
+            [
+                "    beforeEach(() => {",
+                "        // Set up mocks",
+                "    });",
+                "",
+            ]
+        )
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"    test('{func_name} should work correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).toBe(true);",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    test('{func_name} should work correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).toBe(true);",
+                "    }});",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"    test('{class_name} should initialize correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).toBe(true);",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    test('{class_name} should initialize correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).toBe(true);",
+                "    }});",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "});",
-    ])
+    lines.extend(
+        [
+            "});",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def generate_typescript_mocha_tests(code: str, functions: List[Dict[str, Any]],
-                                   classes: List[Dict[str, Any]],
-                                   interfaces: List[Dict[str, Any]],
-                                   types: List[Dict[str, Any]],
-                                   include_mocks: bool = False) -> str:
+def generate_typescript_mocha_tests(
+    code: str,
+    functions: List[Dict[str, Any]],
+    classes: List[Dict[str, Any]],
+    interfaces: List[Dict[str, Any]],
+    types: List[Dict[str, Any]],
+    include_mocks: bool = False,
+) -> str:
     """Generate TypeScript Mocha tests template."""
     lines = [
         "import { expect } from 'chai';",
@@ -304,44 +353,53 @@ def generate_typescript_mocha_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "    beforeEach(() => {",
-            "        // Set up mocks",
-            "    });",
-            "",
-        ])
+        lines.extend(
+            [
+                "    beforeEach(() => {",
+                "        // Set up mocks",
+                "    });",
+                "",
+            ]
+        )
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"    it('{func_name} should work correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).to.be.true;",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    it('{func_name} should work correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).to.be.true;",
+                "    }});",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"    it('{class_name} should initialize correctly', () => {{",
-            "        // TODO: Implement test",
-            "        expect(true).to.be.true;",
-            "    }});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"    it('{class_name} should initialize correctly', () => {{",
+                "        // TODO: Implement test",
+                "        expect(true).to.be.true;",
+                "    }});",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "});",
-    ])
+    lines.extend(
+        [
+            "});",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def generate_phpunit_tests(code: str, functions: List[Dict[str, Any]],
-                         classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+def generate_phpunit_tests(
+    code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool = False
+) -> str:
     """Generate PHPUnit tests template."""
     lines = [
         "<?php",
@@ -356,57 +414,66 @@ def generate_phpunit_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "    protected function setUp(): void",
-            "    {",
-            "        parent::setUp();",
-            "        // Set up mocks",
-            "    }",
-            "",
-            "    protected function tearDown(): void",
-            "    {",
-            "        Mockery::close();",
-            "        parent::tearDown();",
-            "    }",
-            "",
-        ])
+        lines.extend(
+            [
+                "    protected function setUp(): void",
+                "    {",
+                "        parent::setUp();",
+                "        // Set up mocks",
+                "    }",
+                "",
+                "    protected function tearDown(): void",
+                "    {",
+                "        Mockery::close();",
+                "        parent::tearDown();",
+                "    }",
+                "",
+            ]
+        )
 
     # Add test cases for functions (wrapped in a class usually in PHPUnit)
     for func in functions:
         func_name = func.get("name", "unknown")
         test_name = f"test_{func_name}".replace(" ", "_")
-        lines.extend([
-            "    /** @test */",
-            f"    public function {test_name}()",
-            "    {",
-            "        // TODO: Implement test",
-            "        $this->assertTrue(true);",
-            "    }",
-            "",
-        ])
+        lines.extend(
+            [
+                "    /** @test */",
+                f"    public function {test_name}()",
+                "    {",
+                "        // TODO: Implement test",
+                "        $this->assertTrue(true);",
+                "    }",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            "    /** @test */",
-            f"    public function {class_name.lower()}_initialization()",
-            "    {",
-            "        // TODO: Implement test",
-            "        $this->assertTrue(true);",
-            "    }",
-            "",
-        ])
+        lines.extend(
+            [
+                "    /** @test */",
+                f"    public function {class_name.lower()}_initialization()",
+                "    {",
+                "        // TODO: Implement test",
+                "        $this->assertTrue(true);",
+                "    }",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "}",
-    ])
+    lines.extend(
+        [
+            "}",
+        ]
+    )
 
     return "\n".join(lines)
 
 
-def generate_pest_tests(code: str, functions: List[Dict[str, Any]],
-                      classes: List[Dict[str, Any]], include_mocks: bool = False) -> str:
+def generate_pest_tests(
+    code: str, functions: List[Dict[str, Any]], classes: List[Dict[str, Any]], include_mocks: bool = False
+) -> str:
     """Generate Pest tests template."""
     lines = [
         "<?php",
@@ -416,34 +483,40 @@ def generate_pest_tests(code: str, functions: List[Dict[str, Any]],
     ]
 
     if include_mocks:
-        lines.extend([
-            "beforeEach(function () {",
-            "    // Set up mocks",
-            "});",
-            "",
-        ])
+        lines.extend(
+            [
+                "beforeEach(function () {",
+                "    // Set up mocks",
+                "});",
+                "",
+            ]
+        )
 
     # Add test cases for functions
     for func in functions:
         func_name = func.get("name", "unknown")
-        lines.extend([
-            f"it('{func_name} works correctly', function () {{",
-            "    // TODO: Implement test",
-            "    expect(true)->toBeTrue();",
-            "});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"it('{func_name} works correctly', function () {{",
+                "    // TODO: Implement test",
+                "    expect(true)->toBeTrue();",
+                "});",
+                "",
+            ]
+        )
 
     # Add test cases for classes
     for cls in classes:
         class_name = cls.get("name", "Unknown")
-        lines.extend([
-            f"it('{class_name} initializes correctly', function () {{",
-            "    // TODO: Implement test",
-            "    expect(true)->toBeTrue();",
-            "});",
-            "",
-        ])
+        lines.extend(
+            [
+                f"it('{class_name} initializes correctly', function () {{",
+                "    // TODO: Implement test",
+                "    expect(true)->toBeTrue();",
+                "});",
+                "",
+            ]
+        )
 
     return "\n".join(lines)
 
