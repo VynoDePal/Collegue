@@ -3,6 +3,7 @@
 Establishes a session with the MCP server, calls a tool, captures status/latency/response
 and observes container state transitions via `docker inspect`.
 """
+
 from __future__ import annotations
 
 import json
@@ -121,9 +122,14 @@ class MCPSession:
         # httpx treats a scalar timeout as per-operation (connect/read/write/pool).
         # Keep read-timeout low so a trickling SSE stream cannot stall forever;
         # we enforce overall per-case budget with deadline checks higher up.
-        self._client = httpx.Client(timeout=httpx.Timeout(
-            connect=15.0, read=timeout, write=30.0, pool=10.0,
-        ))
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(
+                connect=15.0,
+                read=timeout,
+                write=30.0,
+                pool=10.0,
+            )
+        )
         self._next_id = 0
 
     def _rpc_id(self) -> int:
@@ -195,12 +201,12 @@ VALIDATION_MARKERS = (
     "extra_forbidden",
     "input should be",
     "invalid",
-    "non supporté",            # tool-level: "Langage 'X' non supporté"
+    "non supporté",  # tool-level: "Langage 'X' non supporté"
     "non supportée",
     "doit être",
     "toolvalidationerror",
     "frameworks disponibles",  # test_generation framework mismatch
-    "styles supportés",        # code_documentation
+    "styles supportés",  # code_documentation
     "formats supportés",
     "langages supportés",
     "types supportés",
@@ -289,8 +295,9 @@ def classify(result: TestResult) -> str:
     return "OK"
 
 
-def run_case(session: MCPSession, tool: str, case_id: str, description: str,
-             arguments: dict, per_case_budget: float = 120.0) -> TestResult:
+def run_case(
+    session: MCPSession, tool: str, case_id: str, description: str, arguments: dict, per_case_budget: float = 120.0
+) -> TestResult:
     before = _container_state()
     t0 = time.time()
     response_body: Any = None

@@ -1,6 +1,7 @@
 """
 Tests unitaires pour le système de prompts amélioré
 """
+
 import asyncio
 import os
 import shutil
@@ -34,7 +35,7 @@ class TestPromptVersionManager(unittest.TestCase):
             template_id="test_tool",
             content="Test prompt {variable}",
             variables=[{"name": "variable", "type": "string"}],
-            version="1.0.0"
+            version="1.0.0",
         )
 
         self.assertIsNotNone(version)
@@ -44,18 +45,12 @@ class TestPromptVersionManager(unittest.TestCase):
     def test_get_best_version(self):
         """Test de récupération de la meilleure version."""
         v1 = self.manager.create_version(
-            template_id="test_tool",
-            content="Test prompt v1",
-            variables=[],
-            version="1.0.0"
+            template_id="test_tool", content="Test prompt v1", variables=[], version="1.0.0"
         )
         v1.success_rate = 0.7
 
         v2 = self.manager.create_version(
-            template_id="test_tool",
-            content="Test prompt v2",
-            variables=[],
-            version="2.0.0"
+            template_id="test_tool", content="Test prompt v2", variables=[], version="2.0.0"
         )
         v2.success_rate = 0.9
 
@@ -104,11 +99,8 @@ class TestEnhancedPromptEngine(unittest.TestCase):
         version = self.engine.version_manager.create_version(
             template_id="test_tool",
             content="Generate {language} code: {description}",
-            variables=[
-                {"name": "language", "type": "string"},
-                {"name": "description", "type": "string"}
-            ],
-            version="1.0.0"
+            variables=[{"name": "language", "type": "string"}, {"name": "description", "type": "string"}],
+            version="1.0.0",
         )
 
         context = {"language": "python", "description": "sort a list"}

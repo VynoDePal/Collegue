@@ -1,4 +1,5 @@
 """Real-world scenarios for dependency_guard (offline)."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import fixture, tool_content
@@ -18,10 +19,8 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 15 dépendances détectées",
-             lambda r: (tool_content(r).get("total_dependencies") or 0) >= 15),
-            ("valid=true",
-             lambda r: tool_content(r).get("valid") is True),
+            ("≥ 15 dépendances détectées", lambda r: (tool_content(r).get("total_dependencies") or 0) >= 15),
+            ("valid=true", lambda r: tool_content(r).get("valid") is True),
         ],
     },
     {
@@ -35,10 +34,8 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 1 issue détectée",
-             lambda r: len(tool_content(r).get("issues") or []) >= 1),
-            ("total_dependencies ≥ 5",
-             lambda r: (tool_content(r).get("total_dependencies") or 0) >= 5),
+            ("≥ 1 issue détectée", lambda r: len(tool_content(r).get("issues") or []) >= 1),
+            ("total_dependencies ≥ 5", lambda r: (tool_content(r).get("total_dependencies") or 0) >= 5),
         ],
     },
     {
@@ -51,8 +48,10 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("≥ 3 dépendances (express, lodash, axios) détectées",
-             lambda r: (tool_content(r).get("total_dependencies") or 0) >= 3),
+            (
+                "≥ 3 dépendances (express, lodash, axios) détectées",
+                lambda r: (tool_content(r).get("total_dependencies") or 0) >= 3,
+            ),
         ],
     },
 ]

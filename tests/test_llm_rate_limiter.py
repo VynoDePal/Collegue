@@ -5,6 +5,7 @@ middleware stack via ``collegue.core.middleware_llm_rate_limit``. These tests
 exercise the limiter in isolation so regressions surface quickly without
 needing a running MCP server.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +29,7 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 # Scope — which tools trigger the limiter
 # ---------------------------------------------------------------------------
+
 
 def test_expected_llm_tools_are_in_scope():
     """The 7 LLM-consuming tools from issue #210 must all be tracked."""
@@ -66,6 +68,7 @@ def test_non_llm_tools_are_never_rate_limited():
 # Minute window
 # ---------------------------------------------------------------------------
 
+
 def test_minute_window_blocks_at_limit_and_resets():
     """After N allowed calls, the (N+1)th is rejected; rolling the window
     forward by 60s+ must unlock subsequent calls."""
@@ -73,24 +76,18 @@ def test_minute_window_blocks_at_limit_and_resets():
 
     # 3 allowed
     for i in range(3):
-        allowed, _, reason = _run(
-            limiter.check_and_track("bob", "code_documentation", now=1_000.0 + i)
-        )
+        allowed, _, reason = _run(limiter.check_and_track("bob", "code_documentation", now=1_000.0 + i))
         assert allowed is True, f"call #{i + 1} should be allowed"
         assert reason == "ok"
 
     # 4th rejected, bucket reports "per_minute"
-    allowed, retry, reason = _run(
-        limiter.check_and_track("bob", "code_documentation", now=1_002.0)
-    )
+    allowed, retry, reason = _run(limiter.check_and_track("bob", "code_documentation", now=1_002.0))
     assert allowed is False
     assert reason == "per_minute"
     assert retry >= 1
 
     # After the minute window elapses, the caller is unblocked
-    allowed, _, reason = _run(
-        limiter.check_and_track("bob", "code_documentation", now=1_062.0)
-    )
+    allowed, _, reason = _run(limiter.check_and_track("bob", "code_documentation", now=1_062.0))
     assert allowed is True
     assert reason == "ok"
 
@@ -99,21 +96,18 @@ def test_minute_window_blocks_at_limit_and_resets():
 # Day window
 # ---------------------------------------------------------------------------
 
+
 def test_day_window_blocks_independently_of_minute_window():
     """Setting a tiny per_day cap with a large per_minute cap must still block."""
     limiter = LLMRateLimiter(per_minute=1_000, per_day=2)
 
     # Two calls in quick succession -> allowed
     for i in range(2):
-        allowed, _, _ = _run(
-            limiter.check_and_track("carol", "code_documentation", now=10_000.0 + i)
-        )
+        allowed, _, _ = _run(limiter.check_and_track("carol", "code_documentation", now=10_000.0 + i))
         assert allowed is True
 
     # Third one blocked with reason "per_day"
-    allowed, retry, reason = _run(
-        limiter.check_and_track("carol", "code_documentation", now=10_003.0)
-    )
+    allowed, retry, reason = _run(limiter.check_and_track("carol", "code_documentation", now=10_003.0))
     assert allowed is False
     assert reason == "per_day"
     assert retry > 60  # blocked until tomorrow, not until next minute
@@ -122,6 +116,7 @@ def test_day_window_blocks_independently_of_minute_window():
 # ---------------------------------------------------------------------------
 # Isolation between identities
 # ---------------------------------------------------------------------------
+
 
 def test_identities_have_independent_buckets():
     """Two clients must not share a rate-limit budget."""
@@ -145,6 +140,7 @@ def test_identities_have_independent_buckets():
 # Unlimited mode (sentinel value 0)
 # ---------------------------------------------------------------------------
 
+
 def test_zero_disables_per_minute_cap():
     limiter = LLMRateLimiter(per_minute=0, per_day=10)
     for _ in range(100):
@@ -167,6 +163,7 @@ def test_zero_disables_per_day_cap():
 # Snapshot for observability
 # ---------------------------------------------------------------------------
 
+
 def test_snapshot_reports_current_counters():
     limiter = LLMRateLimiter(per_minute=10, per_day=100)
     for _ in range(3):
@@ -182,6 +179,7 @@ def test_snapshot_reports_current_counters():
 # ---------------------------------------------------------------------------
 # Defensive input
 # ---------------------------------------------------------------------------
+
 
 def test_negative_limits_are_rejected():
     with pytest.raises(ValueError):

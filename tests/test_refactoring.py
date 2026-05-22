@@ -1,6 +1,7 @@
 """
 Tests unitaires pour l'outil Refactoring refactorisé.
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -67,16 +68,24 @@ class MyClass:
     def test_calculate_improvements(self, engine):
         """Test le calcul des améliorations."""
         original = {
-            "code_lines": 100, "complexity_score": 20, "comment_lines": 5,
-            "function_count": 5, "class_count": 2, "total_lines": 120
+            "code_lines": 100,
+            "complexity_score": 20,
+            "comment_lines": 5,
+            "function_count": 5,
+            "class_count": 2,
+            "total_lines": 120,
         }
         refactored = {
-            "code_lines": 80, "complexity_score": 15, "comment_lines": 10,
-            "function_count": 7, "class_count": 2, "total_lines": 100
+            "code_lines": 80,
+            "complexity_score": 15,
+            "comment_lines": 10,
+            "function_count": 7,
+            "class_count": 2,
+            "total_lines": 100,
         }
-        
+
         improvements = engine.calculate_improvements(original, refactored)
-        
+
         assert improvements["lines_reduced"] == 20
         assert improvements["complexity_reduced"] == 5
         assert improvements["comments_added"] == 5
@@ -90,9 +99,9 @@ class MyClass:
             "rename",
             "def calc(a, b): return a + b",
             "def add_numbers(num1, num2): return num1 + num2",
-            {"naming_convention": "descriptive"}
+            {"naming_convention": "descriptive"},
         )
-        
+
         assert len(changes) >= 1
         assert changes[0]["type"] == "rename"
 
@@ -100,9 +109,9 @@ class MyClass:
         """Test la génération d'explications."""
         changes = [{"description": "Variables renommées"}]
         improvements = {"lines_reduced": 10, "complexity_reduced": 5}
-        
+
         explanation = engine.generate_explanation("rename", changes, improvements)
-        
+
         assert "rename" in explanation
         assert "10 lignes" in explanation or "5 points" in explanation
 
@@ -155,46 +164,33 @@ class TestRefactoringTool:
 
     def test_validate_request_valid(self, tool):
         """Test la validation d'une requête valide."""
-        request = RefactoringRequest(
-            code="def hello(): pass",
-            language="python",
-            refactoring_type="clean"
-        )
+        request = RefactoringRequest(code="def hello(): pass", language="python", refactoring_type="clean")
         assert tool.validate_request(request) is True
 
     def test_validate_request_invalid_type(self, tool):
         """Test la validation d'un type invalide."""
         from collegue.tools.base import ToolError
-        request = RefactoringRequest(
-            code="def hello(): pass",
-            language="python",
-            refactoring_type="invalid_type"
-        )
+
+        request = RefactoringRequest(code="def hello(): pass", language="python", refactoring_type="invalid_type")
         with pytest.raises(ToolError):
             tool.validate_request(request)
 
     def test_perform_local_refactoring_clean(self, tool):
         """Test le refactoring local de type clean."""
         request = RefactoringRequest(
-            code="import os\n\n\ndef hello():\n    pass\n\n",
-            language="python",
-            refactoring_type="clean"
+            code="import os\n\n\ndef hello():\n    pass\n\n", language="python", refactoring_type="clean"
         )
         response = tool._perform_local_refactoring(request)
-        
+
         assert response.refactored_code is not None
         assert response.language == "python"
         assert "clean" in response.changes[0]["type"]
 
     def test_build_prompt(self, tool):
         """Test la construction du prompt."""
-        request = RefactoringRequest(
-            code="def calc(a, b): return a + b",
-            language="python",
-            refactoring_type="rename"
-        )
+        request = RefactoringRequest(code="def calc(a, b): return a + b", language="python", refactoring_type="rename")
         prompt = tool._build_prompt(request)
-        
+
         assert "rename" in prompt
         assert "python" in prompt
         assert "def calc(a, b)" in prompt
@@ -209,7 +205,7 @@ class TestRefactoringRequest:
             code="def hello(): pass",
             language="python",
             refactoring_type="clean",
-            parameters={"remove_unused_imports": True}
+            parameters={"remove_unused_imports": True},
         )
         assert request.language == "python"
         assert request.refactoring_type == "clean"
@@ -222,7 +218,7 @@ class TestRefactoringRequest:
             language="python",
             refactoring_type="clean",
             file_path="/path/to/file.py",
-            session_id="abc123"
+            session_id="abc123",
         )
         assert request.file_path == "/path/to/file.py"
         assert request.session_id == "abc123"
@@ -239,7 +235,7 @@ class TestRefactoringResponse:
             language="python",
             changes=[{"type": "rename", "description": "Renamed"}],
             explanation="Variables renommées",
-            improvement_metrics={"lines_reduced": 5}
+            improvement_metrics={"lines_reduced": 5},
         )
         assert response.refactored_code == "def greet(): pass"
         assert response.improvement_metrics["lines_reduced"] == 5

@@ -7,7 +7,6 @@ from collegue.tools.clients.sentry import SentryClient
 
 
 class TestSentrySecurity:
-    
     @pytest.fixture
     def client(self):
         return SentryClient(token="fake", organization="org")
@@ -35,9 +34,9 @@ class TestSentrySecurity:
     def test_valid_slugs(self, client):
         """Test that valid slugs are accepted."""
         # We mock _get to avoid making actual requests
-        with patch.object(client, '_get') as mock_get:
+        with patch.object(client, "_get") as mock_get:
             mock_get.return_value = MagicMock(success=True)
-            
+
             # These should not raise exceptions
             client.list_issues(project="my-project")
             client.list_issues(project="my_project_123")

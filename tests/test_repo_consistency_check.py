@@ -1,6 +1,7 @@
 """
 Tests unitaires pour l'outil Repo Consistency Check refactorisé.
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -42,7 +43,7 @@ class TestConsistencyAnalysisEngine:
         """Test la détection de duplication."""
         files = [
             FileInput(path="file1.py", content="def foo():\n    return 1\n    \ndef bar():\n    return 2"),
-            FileInput(path="file2.py", content="def baz():\n    return 1\n    \ndef qux():\n    return 2")
+            FileInput(path="file2.py", content="def baz():\n    return 1\n    \ndef qux():\n    return 2"),
         ]
         issues = engine.analyze_duplication(files, min_lines=2)
         # Devrait détecter la duplication de "return 1" et "return 2"
@@ -50,14 +51,11 @@ class TestConsistencyAnalysisEngine:
 
     def test_extract_defined_symbols_python(self, engine):
         """Test l'extraction des symboles Python."""
-        file = FileInput(
-            path="test.py",
-            content="def my_func():\n    pass\n\nclass MyClass:\n    pass\n\nMY_VAR = 1"
-        )
+        file = FileInput(path="test.py", content="def my_func():\n    pass\n\nclass MyClass:\n    pass\n\nMY_VAR = 1")
         symbols = engine.extract_defined_symbols(file)
-        assert 'my_func' in symbols
-        assert 'MyClass' in symbols
-        assert 'MY_VAR' in symbols
+        assert "my_func" in symbols
+        assert "MyClass" in symbols
+        assert "MY_VAR" in symbols
 
     def test_calculate_refactoring_score_no_issues(self, engine):
         """Test le calcul du score sans issues."""
@@ -68,16 +66,56 @@ class TestConsistencyAnalysisEngine:
     def test_calculate_refactoring_score_with_issues(self, engine):
         """Test le calcul du score avec issues."""
         issues = [
-            ConsistencyIssue(kind="unused_var", severity="medium", path="f.py", line=1,
-                           message="unused", confidence=80, suggested_fix="remove", engine="test"),
-            ConsistencyIssue(kind="dead_code", severity="high", path="f.py", line=2,
-                           message="dead", confidence=90, suggested_fix="remove", engine="test"),
-            ConsistencyIssue(kind="unused_import", severity="medium", path="f.py", line=3,
-                           message="import", confidence=85, suggested_fix="remove", engine="test"),
-            ConsistencyIssue(kind="dead_code", severity="high", path="f.py", line=4,
-                           message="dead2", confidence=90, suggested_fix="remove", engine="test"),
-            ConsistencyIssue(kind="duplication", severity="low", path="f.py", line=5,
-                           message="dup", confidence=70, suggested_fix="extract", engine="test"),
+            ConsistencyIssue(
+                kind="unused_var",
+                severity="medium",
+                path="f.py",
+                line=1,
+                message="unused",
+                confidence=80,
+                suggested_fix="remove",
+                engine="test",
+            ),
+            ConsistencyIssue(
+                kind="dead_code",
+                severity="high",
+                path="f.py",
+                line=2,
+                message="dead",
+                confidence=90,
+                suggested_fix="remove",
+                engine="test",
+            ),
+            ConsistencyIssue(
+                kind="unused_import",
+                severity="medium",
+                path="f.py",
+                line=3,
+                message="import",
+                confidence=85,
+                suggested_fix="remove",
+                engine="test",
+            ),
+            ConsistencyIssue(
+                kind="dead_code",
+                severity="high",
+                path="f.py",
+                line=4,
+                message="dead2",
+                confidence=90,
+                suggested_fix="remove",
+                engine="test",
+            ),
+            ConsistencyIssue(
+                kind="duplication",
+                severity="low",
+                path="f.py",
+                line=5,
+                message="dup",
+                confidence=70,
+                suggested_fix="extract",
+                engine="test",
+            ),
         ]
         score, priority = engine.calculate_refactoring_score(issues)
         assert score > 0.0
@@ -85,14 +123,14 @@ class TestConsistencyAnalysisEngine:
 
     def test_build_analysis_summary_no_issues(self, engine):
         """Test le résumé sans issues."""
-        summary = engine.build_analysis_summary([], 3, {'high': 0, 'medium': 0, 'low': 0, 'info': 0})
+        summary = engine.build_analysis_summary([], 3, {"high": 0, "medium": 0, "low": 0, "info": 0})
         assert "Aucune incohérence" in summary
         assert "3 fichier(s)" in summary
 
     def test_build_analysis_summary_with_issues(self, engine):
         """Test le résumé avec issues."""
         issues = [MagicMock()]
-        severity_counts = {'high': 1, 'medium': 2, 'low': 3, 'info': 0}
+        severity_counts = {"high": 1, "medium": 2, "low": 3, "info": 0}
         summary = engine.build_analysis_summary(issues, 2, severity_counts)
         assert "incohérence(s)" in summary
         assert "Haute(1)" in summary
@@ -113,49 +151,30 @@ class TestRepoConsistencyCheckTool:
 
     def test_scan_unused_imports_python(self, tool):
         """Test la détection d'imports non utilisés en Python."""
-        files = [
-            ConsistencyFile(path="test.py", content="import os\nimport sys\nprint('hello')")
-        ]
-        request = ConsistencyCheckRequest(
-            files=files,
-            language="python",
-            checks=["unused_imports"]
-        )
+        files = [ConsistencyFile(path="test.py", content="import os\nimport sys\nprint('hello')")]
+        request = ConsistencyCheckRequest(files=files, language="python", checks=["unused_imports"])
         response = tool._execute_core_logic(request)
-        
+
         # os et sys sont importés mais pas utilisés
         assert response.files_analyzed == 1
         assert len(response.issues) >= 1
-        assert any("unused" in i.kind.lower() or "import" in i.kind.lower() 
-                  for i in response.issues)
+        assert any("unused" in i.kind.lower() or "import" in i.kind.lower() for i in response.issues)
 
     def test_scan_no_issues(self, tool):
         """Test le scan sans problèmes."""
-        files = [
-            ConsistencyFile(path="test.py", content="print('hello')")
-        ]
-        request = ConsistencyCheckRequest(
-            files=files,
-            language="python",
-            checks=["unused_imports"]
-        )
+        files = [ConsistencyFile(path="test.py", content="print('hello')")]
+        request = ConsistencyCheckRequest(files=files, language="python", checks=["unused_imports"])
         response = tool._execute_core_logic(request)
-        
+
         assert response.valid is True
-        assert response.summary['total'] == 0
+        assert response.summary["total"] == 0
 
     def test_scan_multiple_files(self, tool):
         """Test le scan de plusieurs fichiers."""
-        files = [
-            ConsistencyFile(path="file1.py", content="x = 1"),
-            ConsistencyFile(path="file2.py", content="y = 2")
-        ]
-        request = ConsistencyCheckRequest(
-            files=files,
-            language="python"
-        )
+        files = [ConsistencyFile(path="file1.py", content="x = 1"), ConsistencyFile(path="file2.py", content="y = 2")]
+        request = ConsistencyCheckRequest(files=files, language="python")
         response = tool._execute_core_logic(request)
-        
+
         assert response.files_analyzed == 2
 
     def test_mode_validation(self, tool):
@@ -163,7 +182,7 @@ class TestRepoConsistencyCheckTool:
         files = [ConsistencyFile(path="test.py", content="pass")]
         request = ConsistencyCheckRequest(files=files, language="python", mode="deep")
         assert request.mode == "deep"
-        
+
         with pytest.raises(ValueError):
             ConsistencyCheckRequest(files=files, language="python", mode="invalid")
 
@@ -174,19 +193,11 @@ class TestConsistencyCheckRequest:
     def test_request_validation_checks(self):
         """Test la validation des checks."""
         files = [ConsistencyFile(path="test.py", content="pass")]
-        request = ConsistencyCheckRequest(
-            files=files,
-            language="python",
-            checks=["unused_imports", "dead_code"]
-        )
+        request = ConsistencyCheckRequest(files=files, language="python", checks=["unused_imports", "dead_code"])
         assert "unused_imports" in request.checks
-        
+
         with pytest.raises(ValueError):
-            ConsistencyCheckRequest(
-                files=files,
-                language="python",
-                checks=["invalid_check"]
-            )
+            ConsistencyCheckRequest(files=files, language="python", checks=["invalid_check"])
 
     def test_request_language_auto(self):
         """Test la détection auto du langage."""

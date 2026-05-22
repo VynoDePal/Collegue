@@ -20,6 +20,7 @@ Correctifs couverts :
                                           Pod and Deployment, new rules
                                           K8S-008 / K8S-010
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -47,6 +48,7 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 # Fix #1 — SENTRY_DSN empty string is treated as "unset"
 # ---------------------------------------------------------------------------
+
 
 def _reload_settings():
     """Force a fresh import of collegue.config so env changes are picked up."""
@@ -93,6 +95,7 @@ from collegue.core.meta_orchestrator import (  # noqa: E402
 
 class _Ctx:
     """Minimal FastMCP-ish context for the orchestrator handler."""
+
     def __init__(self, tools_registry=None):
         self.lifespan_context = {"tools_registry": tools_registry} if tools_registry else {}
         self.info = AsyncMock()
@@ -103,19 +106,23 @@ class _Ctx:
 
 class _StubTool:
     """Tool double that always succeeds."""
+
     def __init__(self):
         self.calls: list = []
 
     def get_request_model(self):
         class _AnyParams(BaseModel):
             model_config = {"extra": "allow"}
+
         return _AnyParams
 
     async def execute_async(self, request, **kwargs):
         self.calls.append(request)
+
         class _Res:
             def dict(self_inner):
                 return {"ok": True}
+
         return _Res()
 
 
@@ -146,12 +153,16 @@ def test_orchestration_steps_are_capped_at_max():
     """Fix #2: a plan returning more than MAX_ORCHESTRATION_STEPS is truncated."""
     handler, stub, registry = _capture_handler()
 
-    too_many_steps = OrchestratorPlan(steps=[
-        OrchestratorStep(tool="code_documentation", reason=f"step {i}", params={})
-        for i in range(MAX_ORCHESTRATION_STEPS + 5)
-    ])
-    plan_resp = MagicMock(); plan_resp.result = too_many_steps
-    synth_resp = MagicMock(); synth_resp.text = "synthesis"
+    too_many_steps = OrchestratorPlan(
+        steps=[
+            OrchestratorStep(tool="code_documentation", reason=f"step {i}", params={})
+            for i in range(MAX_ORCHESTRATION_STEPS + 5)
+        ]
+    )
+    plan_resp = MagicMock()
+    plan_resp.result = too_many_steps
+    synth_resp = MagicMock()
+    synth_resp.text = "synthesis"
 
     ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
@@ -165,8 +176,10 @@ def test_query_is_truncated_to_max_chars():
     """Fix #2: the prompt sent to the LLM must not contain the full oversized query."""
     handler, _, registry = _capture_handler()
 
-    plan_resp = MagicMock(); plan_resp.result = OrchestratorPlan(steps=[])
-    synth_resp = MagicMock(); synth_resp.text = "synth"
+    plan_resp = MagicMock()
+    plan_resp.result = OrchestratorPlan(steps=[])
+    synth_resp = MagicMock()
+    synth_resp.text = "synth"
     ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
@@ -219,8 +232,10 @@ def test_system_prompt_declares_tool_names_and_refuse_sentinel():
     and the __refuse__ sentinel must be documented."""
     handler, _, registry = _capture_handler()
 
-    plan_resp = MagicMock(); plan_resp.result = OrchestratorPlan(steps=[])
-    synth_resp = MagicMock(); synth_resp.text = "synth"
+    plan_resp = MagicMock()
+    plan_resp.result = OrchestratorPlan(steps=[])
+    synth_resp = MagicMock()
+    synth_resp.text = "synth"
     ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
@@ -240,15 +255,19 @@ def test_refuse_sentinel_short_circuits_tool_execution():
     the sentinel name in the tool registry and must not invoke any tool."""
     handler, stub, registry = _capture_handler()
 
-    plan = OrchestratorPlan(steps=[
-        OrchestratorStep(
-            tool="__refuse__",
-            reason="user requested secret exfiltration",
-            params={},
-        )
-    ])
-    plan_resp = MagicMock(); plan_resp.result = plan
-    synth_resp = MagicMock(); synth_resp.text = "refused"
+    plan = OrchestratorPlan(
+        steps=[
+            OrchestratorStep(
+                tool="__refuse__",
+                reason="user requested secret exfiltration",
+                params={},
+            )
+        ]
+    )
+    plan_resp = MagicMock()
+    plan_resp.result = plan
+    synth_resp = MagicMock()
+    synth_resp.text = "refused"
     ctx = _Ctx(tools_registry=registry)
     ctx.sample.side_effect = [plan_resp, synth_resp]
 
@@ -265,23 +284,29 @@ def test_refuse_sentinel_short_circuits_tool_execution():
 from collegue.tools.iac_guardrails_scan.tool import IacGuardrailsScanTool  # noqa: E402
 
 
-@pytest.mark.parametrize("pattern", [
-    r"(a+)+$",                  # classic nested-quantifier
-    r"(a*)*",                   # zero-or-more over zero-or-more
-    r"(a|aa)+",                 # ambiguous alternation with quantifier
-    "a" * 10_001,               # absurdly long pattern
-])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"(a+)+$",  # classic nested-quantifier
+        r"(a*)*",  # zero-or-more over zero-or-more
+        r"(a|aa)+",  # ambiguous alternation with quantifier
+        "a" * 10_001,  # absurdly long pattern
+    ],
+)
 def test_regex_redos_patterns_are_rejected(pattern):
     """Fix #5: patterns matching well-known ReDoS shapes are refused
     before they reach `re.finditer`."""
     assert IacGuardrailsScanTool._regex_looks_dangerous(pattern) is True
 
 
-@pytest.mark.parametrize("pattern", [
-    r"\bfoo\b",
-    r"acl\s*=\s*\"public-read\"",
-    r"^[A-Z][a-z]+$",
-])
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"\bfoo\b",
+        r"acl\s*=\s*\"public-read\"",
+        r"^[A-Z][a-z]+$",
+    ],
+)
 def test_benign_regex_patterns_are_allowed(pattern):
     """Fix #5 must not be over-eager and must accept reasonable user regex."""
     assert IacGuardrailsScanTool._regex_looks_dangerous(pattern) is False

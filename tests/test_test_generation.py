@@ -1,6 +1,7 @@
 """
 Tests unitaires pour l'outil Test Generation refactorisé.
 """
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,12 +53,12 @@ class Calculator:
         return a * b
 """
         elements = engine.extract_code_elements(code, "python")
-        
+
         # Devrait avoir: add (function), Calculator (class), multiply (method)
         assert len(elements) == 3
-        assert any(e['type'] == 'function' and e['name'] == 'add' for e in elements)
-        assert any(e['type'] == 'class' and e['name'] == 'Calculator' for e in elements)
-        assert any(e['name'] == 'multiply' for e in elements)
+        assert any(e["type"] == "function" and e["name"] == "add" for e in elements)
+        assert any(e["type"] == "class" and e["name"] == "Calculator" for e in elements)
+        assert any(e["name"] == "multiply" for e in elements)
 
     def test_extract_js_elements(self, engine):
         """Test l'extraction d'éléments JavaScript."""
@@ -73,10 +74,10 @@ class Person {
 }
 """
         elements = engine.extract_code_elements(code, "javascript")
-        
+
         assert len(elements) >= 2
-        assert any(e['type'] == 'function' for e in elements)
-        assert any(e['type'] == 'class' and e['name'] == 'Person' for e in elements)
+        assert any(e["type"] == "function" for e in elements)
+        assert any(e["type"] == "class" and e["name"] == "Person" for e in elements)
 
     def test_extract_php_elements(self, engine):
         """Test l'extraction d'éléments PHP."""
@@ -89,25 +90,19 @@ class UserService {
 }
 """
         elements = engine.extract_code_elements(code, "php")
-        
+
         assert len(elements) >= 1
-        assert any(e['type'] == 'class' and e['name'] == 'UserService' for e in elements)
+        assert any(e["type"] == "class" and e["name"] == "UserService" for e in elements)
 
     def test_estimate_coverage_full(self, engine):
         """Test l'estimation de couverture complète."""
-        elements = [
-            {'name': 'func1', 'type': 'function'},
-            {'name': 'func2', 'type': 'function'}
-        ]
+        elements = [{"name": "func1", "type": "function"}, {"name": "func2", "type": "function"}]
         coverage = engine.estimate_coverage(elements, 2)
         assert coverage > 0.7  # 2 tests pour 2 éléments = ~80%
 
     def test_estimate_coverage_partial(self, engine):
         """Test l'estimation de couverture partielle."""
-        elements = [
-            {'name': 'func1', 'type': 'function'},
-            {'name': 'func2', 'type': 'function'}
-        ]
+        elements = [{"name": "func1", "type": "function"}, {"name": "func2", "type": "function"}]
         coverage = engine.estimate_coverage(elements, 1)
         assert coverage < 0.5  # 1 test pour 2 éléments = ~40%
 
@@ -123,19 +118,19 @@ class UserService {
 
     def test_generate_fallback_tests(self, engine):
         """Test la génération de tests fallback."""
-        elements = [{'type': 'function', 'name': 'add', 'params': ['a', 'b']}]
+        elements = [{"type": "function", "name": "add", "params": ["a", "b"]}]
         code, count = engine.generate_fallback_tests("def add(a, b): pass", "python", "pytest", elements)
-        
+
         assert "test_add" in code
         assert count == 1
 
     def test_build_prompt(self, engine):
         """Test la construction du prompt."""
         code = "def add(a, b): return a + b"
-        elements = [{'type': 'function', 'name': 'add', 'params': ['a', 'b']}]
-        
+        elements = [{"type": "function", "name": "add", "params": ["a", "b"]}]
+
         prompt = engine.build_prompt(code, "python", "pytest", False, 0.8, elements)
-        
+
         assert "python" in prompt
         assert "pytest" in prompt
         assert "def add" in prompt
@@ -167,35 +162,24 @@ class TestTestGenerationTool:
 
     def test_validate_request_valid(self, tool):
         """Test la validation d'une requête valide."""
-        request = TestGenerationRequest(
-            code="def hello(): pass",
-            language="python",
-            test_framework="pytest"
-        )
+        request = TestGenerationRequest(code="def hello(): pass", language="python", test_framework="pytest")
         assert tool.validate_request(request) is True
 
     def test_validate_request_invalid_framework(self, tool):
         """Test la validation avec framework invalide."""
         from collegue.tools.base import ToolValidationError
-        request = TestGenerationRequest(
-            code="def hello(): pass",
-            language="python",
-            test_framework="invalid_framework"
-        )
+
+        request = TestGenerationRequest(code="def hello(): pass", language="python", test_framework="invalid_framework")
         with pytest.raises(ToolValidationError):
             tool.validate_request(request)
 
     def test_generate_fallback_response(self, tool):
         """Test la génération de réponse fallback."""
-        request = TestGenerationRequest(
-            code="def add(a, b): return a + b",
-            language="python",
-            test_framework="pytest"
-        )
-        elements = [{'type': 'function', 'name': 'add', 'params': ['a', 'b']}]
-        
+        request = TestGenerationRequest(code="def add(a, b): return a + b", language="python", test_framework="pytest")
+        elements = [{"type": "function", "name": "add", "params": ["a", "b"]}]
+
         response = tool._generate_fallback_response(request, "pytest", elements)
-        
+
         assert response.test_code is not None
         assert response.language == "python"
         assert response.framework == "pytest"
@@ -211,7 +195,7 @@ class TestTestGenerationRequest:
             language="python",
             test_framework="pytest",
             include_mocks=True,
-            coverage_target=0.9
+            coverage_target=0.9,
         )
         assert request.language == "python"
         assert request.test_framework == "pytest"
@@ -220,30 +204,20 @@ class TestTestGenerationRequest:
 
     def test_request_defaults(self):
         """Test les valeurs par défaut."""
-        request = TestGenerationRequest(
-            code="def hello(): pass",
-            language="python"
-        )
+        request = TestGenerationRequest(code="def hello(): pass", language="python")
         assert request.test_framework is None
         assert request.include_mocks is False
         assert request.coverage_target == 0.8
 
     def test_validate_language(self):
         """Test la validation du langage."""
-        request = TestGenerationRequest(
-            code="def hello(): pass",
-            language="  PYTHON  "
-        )
+        request = TestGenerationRequest(code="def hello(): pass", language="  PYTHON  ")
         assert request.language == "python"
 
     def test_validate_coverage_target(self):
         """Test la validation de la cible de couverture."""
         with pytest.raises(ValueError):
-            TestGenerationRequest(
-                code="def hello(): pass",
-                language="python",
-                coverage_target=1.5
-            )
+            TestGenerationRequest(code="def hello(): pass", language="python", coverage_target=1.5)
 
 
 class TestTestGenerationResponse:
@@ -257,7 +231,7 @@ class TestTestGenerationResponse:
             framework="pytest",
             test_file_path="test_module.py",
             estimated_coverage=0.9,
-            tested_elements=[{'name': 'hello', 'type': 'function'}]
+            tested_elements=[{"name": "hello", "type": "function"}],
         )
         assert response.test_code == "def test_hello(): pass"
         assert response.estimated_coverage == 0.9

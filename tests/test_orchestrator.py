@@ -1,11 +1,12 @@
 """
 Tests unitaires pour le ToolOrchestrator
 """
+
 import pytest
 
 pytest.skip(
-	"ToolOrchestrator supprimé volontairement (migration FastMCP)",
-	allow_module_level=True,
+    "ToolOrchestrator supprimé volontairement (migration FastMCP)",
+    allow_module_level=True,
 )
 
 import asyncio
@@ -27,7 +28,6 @@ class TestToolOrchestrator(unittest.TestCase):
         """Initialisation avant chaque test"""
         self.orchestrator = ToolOrchestrator()
 
-
         def add(a, b, context=None):
             return {"result": a + b}
 
@@ -38,18 +38,14 @@ class TestToolOrchestrator(unittest.TestCase):
             await asyncio.sleep(0.1)
             return {"result": a - b}
 
-
         self.orchestrator.register_tool(
-            "add", add, "Additionne deux nombres",
-            category="math", required_args=["a", "b"]
+            "add", add, "Additionne deux nombres", category="math", required_args=["a", "b"]
         )
         self.orchestrator.register_tool(
-            "multiply", multiply, "Multiplie deux nombres",
-            category="math", required_args=["a", "b"]
+            "multiply", multiply, "Multiplie deux nombres", category="math", required_args=["a", "b"]
         )
         self.orchestrator.register_tool(
-            "subtract", async_subtract, "Soustrait deux nombres",
-            category="math", required_args=["a", "b"]
+            "subtract", async_subtract, "Soustrait deux nombres", category="math", required_args=["a", "b"]
         )
 
     def test_register_tool(self):
@@ -57,11 +53,9 @@ class TestToolOrchestrator(unittest.TestCase):
         self.assertIn("multiply", self.orchestrator.tools)
         self.assertIn("subtract", self.orchestrator.tools)
 
-
         self.assertEqual(self.orchestrator.tools["add"]["description"], "Additionne deux nombres")
         self.assertEqual(self.orchestrator.tools["add"]["category"], "math")
         self.assertEqual(self.orchestrator.tools["add"]["required_args"], ["a", "b"])
-
 
         def new_add(a, b):
             return a + b
@@ -139,15 +133,8 @@ class TestToolOrchestrator(unittest.TestCase):
 
     def test_create_tool_chain(self):
         tools_chain = [
-            {
-                "name": "add",
-                "args": {"a": 5, "b": 3},
-                "result_mapping": {"b": "result"}
-            },
-            {
-                "name": "multiply",
-                "args": {"a": 2}
-            }
+            {"name": "add", "args": {"a": 5, "b": 3}, "result_mapping": {"b": "result"}},
+            {"name": "multiply", "args": {"a": 2}},
         ]
 
         result = self.orchestrator.create_tool_chain("math_chain", tools_chain)
@@ -185,6 +172,7 @@ class TestToolOrchestrator(unittest.TestCase):
 
         value = self.orchestrator._extract_result_value(result, "nonexistent")
         self.assertIsNone(value)
+
 
 if __name__ == "__main__":
     unittest.main()

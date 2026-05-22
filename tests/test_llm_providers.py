@@ -1,11 +1,12 @@
 """
 Tests unitaires pour les fournisseurs LLM
 """
+
 import pytest
 
 pytest.skip(
-	"Tests hérités OpenAI/Anthropic: providers actuels = Gemini uniquement",
-	allow_module_level=True,
+    "Tests hérités OpenAI/Anthropic: providers actuels = Gemini uniquement",
+    allow_module_level=True,
 )
 
 import asyncio
@@ -17,7 +18,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from collegue.resources.llm.providers import (
     LLMConfig,
@@ -49,13 +50,9 @@ class TestLLMProviders(unittest.TestCase):
         self.assertIn("gpt-4", models)
         self.assertIn("claude-3-opus", models)
 
-    @patch('builtins.__import__')
+    @patch("builtins.__import__")
     def test_initialize_openai_client(self, mock_import):
-        config = LLMConfig(
-            provider=LLMProvider.OPENAI,
-            model_name="gpt-4",
-            api_key="test_key"
-        )
+        config = LLMConfig(provider=LLMProvider.OPENAI, model_name="gpt-4", api_key="test_key")
 
         mock_openai = MagicMock()
         mock_model = MagicMock()
@@ -63,91 +60,72 @@ class TestLLMProviders(unittest.TestCase):
         mock_openai.Model = mock_model
 
         def side_effect(name, *args, **kwargs):
-            if name == 'openai':
+            if name == "openai":
                 return mock_openai
             return unittest.mock.DEFAULT
 
         mock_import.side_effect = side_effect
 
-        with patch.dict('sys.modules', {'openai': mock_openai}):
+        with patch.dict("sys.modules", {"openai": mock_openai}):
             client = initialize_llm_client(config)
 
         self.assertEqual(mock_openai.api_key, "test_key")
         self.assertEqual(client, mock_openai)
 
-    @patch('builtins.__import__')
+    @patch("builtins.__import__")
     def test_initialize_anthropic_client(self, mock_import):
-        config = LLMConfig(
-            provider=LLMProvider.ANTHROPIC,
-            model_name="claude-3-opus-20240229",
-            api_key="test_key"
-        )
+        config = LLMConfig(provider=LLMProvider.ANTHROPIC, model_name="claude-3-opus-20240229", api_key="test_key")
 
         mock_anthropic = MagicMock()
         mock_client = MagicMock()
         mock_anthropic.Anthropic.return_value = mock_client
 
         def side_effect(name, *args, **kwargs):
-            if name == 'anthropic':
+            if name == "anthropic":
                 return mock_anthropic
             return unittest.mock.DEFAULT
 
         mock_import.side_effect = side_effect
 
-
-        with patch.dict('sys.modules', {'anthropic': mock_anthropic}):
+        with patch.dict("sys.modules", {"anthropic": mock_anthropic}):
             client = initialize_llm_client(config)
-
 
         mock_anthropic.Anthropic.assert_called_once_with(api_key="test_key")
         self.assertEqual(client, mock_client)
 
+
 class TestLLMProvidersAsync(unittest.IsolatedAsyncioTestCase):
     """Tests asynchrones pour les fonctions async du module providers."""
 
-    @patch('collegue.resources.llm.providers.initialize_llm_client')
-    @patch('collegue.resources.llm.providers.llm_clients', {})
+    @patch("collegue.resources.llm.providers.initialize_llm_client")
+    @patch("collegue.resources.llm.providers.llm_clients", {})
     async def test_generate_text_openai(self, mock_initialize):
         """Teste la génération de texte avec OpenAI."""
 
-        config = LLMConfig(
-            provider=LLMProvider.OPENAI,
-            model_name="gpt-4",
-            api_key="test_key"
-        )
-
+        config = LLMConfig(provider=LLMProvider.OPENAI, model_name="gpt-4", api_key="test_key")
 
         mock_client = MagicMock()
         mock_chat_completion = MagicMock()
         mock_client.ChatCompletion.create.return_value = mock_chat_completion
-        mock_chat_completion.choices = [
-            MagicMock(message=MagicMock(content="Test response"), finish_reason="stop")
-        ]
+        mock_chat_completion.choices = [MagicMock(message=MagicMock(content="Test response"), finish_reason="stop")]
         mock_chat_completion.usage = {"total_tokens": 10}
         mock_chat_completion.model = "gpt-4"
 
         mock_initialize.return_value = mock_client
 
-
         response = await generate_text(config, "Test prompt", "System prompt")
-
 
         self.assertIsInstance(response, LLMResponse)
         self.assertEqual(response.text, "Test response")
         self.assertEqual(response.provider, LLMProvider.OPENAI)
         self.assertEqual(response.model, "gpt-4")
 
-    @patch('collegue.resources.llm.providers.initialize_llm_client')
-    @patch('collegue.resources.llm.providers.llm_clients', {})
+    @patch("collegue.resources.llm.providers.initialize_llm_client")
+    @patch("collegue.resources.llm.providers.llm_clients", {})
     async def test_generate_text_anthropic(self, mock_initialize):
         """Teste la génération de texte avec Anthropic."""
 
-        config = LLMConfig(
-            provider=LLMProvider.ANTHROPIC,
-            model_name="claude-3-opus-20240229",
-            api_key="test_key"
-        )
-
+        config = LLMConfig(provider=LLMProvider.ANTHROPIC, model_name="claude-3-opus-20240229", api_key="test_key")
 
         mock_client = MagicMock()
         mock_message = MagicMock()
@@ -158,14 +136,13 @@ class TestLLMProvidersAsync(unittest.IsolatedAsyncioTestCase):
 
         mock_initialize.return_value = mock_client
 
-
         response = await generate_text(config, "Test prompt", "System prompt")
-
 
         self.assertIsInstance(response, LLMResponse)
         self.assertEqual(response.text, "Test response")
         self.assertEqual(response.provider, LLMProvider.ANTHROPIC)
         self.assertEqual(response.model, "claude-3-opus-20240229")
+
 
 class TestLLMProvidersEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI des fournisseurs LLM."""
@@ -175,6 +152,7 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
         self.app_state = {"resource_manager": MagicMock()}
 
         from collegue.resources.llm.providers import register_providers
+
         register_providers(self.app, self.app_state)
 
         self.client = TestClient(self.app)
@@ -196,14 +174,14 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
         self.assertEqual(data["provider"], "openai")
         self.assertEqual(data["model_name"], "gpt-4")
 
-    @patch('collegue.resources.llm.providers.generate_text')
+    @patch("collegue.resources.llm.providers.generate_text")
     def test_generate_text_endpoint(self, mock_generate):
         mock_response = LLMResponse(
             text="Test response",
             model="gpt-4",
             provider=LLMProvider.OPENAI,
             usage={"total_tokens": 10},
-            finish_reason="stop"
+            finish_reason="stop",
         )
 
         mock_generate.return_value = mock_response
@@ -213,12 +191,11 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
             "model_name": "gpt-4",
             "api_key": "test_key",
             "max_tokens": 4096,
-            "temperature": 0.7
+            "temperature": 0.7,
         }
 
         response = self.client.post(
-            "/resources/llm/generate?prompt=Test%20prompt&system_prompt=System%20prompt",
-            json=config
+            "/resources/llm/generate?prompt=Test%20prompt&system_prompt=System%20prompt", json=config
         )
 
         self.assertEqual(response.status_code, 200)
@@ -227,5 +204,6 @@ class TestLLMProvidersEndpoints(unittest.TestCase):
         self.assertEqual(data["model"], "gpt-4")
         self.assertEqual(data["provider"], "openai")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

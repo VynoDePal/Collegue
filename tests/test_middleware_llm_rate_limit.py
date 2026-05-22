@@ -7,6 +7,7 @@ fake ``MiddlewareContext`` directly and assert on the downstream behaviour:
 * two different identities keep independent budgets, even when they hit the
   same tool from the same process.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -54,6 +55,7 @@ def _call_next_factory():
 # Pass-through for non-LLM tools
 # ---------------------------------------------------------------------------
 
+
 def test_middleware_passes_non_llm_tools_through():
     mw = LLMRateLimitingMiddleware(per_minute=1, per_day=1)
     call_next = _call_next_factory()
@@ -70,13 +72,13 @@ def test_middleware_passes_non_llm_tools_through():
 # LLM tools are gated
 # ---------------------------------------------------------------------------
 
+
 def test_llm_tool_allowed_then_blocked_by_minute_budget():
     limiter = LLMRateLimiter(per_minute=2, per_day=100)
     mw = LLMRateLimitingMiddleware(limiter=limiter)
     call_next = _call_next_factory()
 
-    with patch("collegue.core.middleware_llm_rate_limit._extract_identity",
-               return_value="ip:10.0.0.1"):
+    with patch("collegue.core.middleware_llm_rate_limit._extract_identity", return_value="ip:10.0.0.1"):
         # 2 allowed
         for _ in range(2):
             ctx = _FakeContext(message=_FakeMessage(name="code_documentation"))
@@ -84,6 +86,7 @@ def test_llm_tool_allowed_then_blocked_by_minute_budget():
 
         # 3rd raises McpError
         from mcp.shared.exceptions import McpError
+
         ctx = _FakeContext(message=_FakeMessage(name="code_documentation"))
         with pytest.raises(McpError) as excinfo:
             _run(mw.on_call_tool(ctx, call_next))
@@ -102,20 +105,19 @@ def test_llm_tool_allowed_then_blocked_by_minute_budget():
 # Per-identity isolation through the middleware
 # ---------------------------------------------------------------------------
 
+
 def test_two_identities_have_independent_budgets_in_middleware():
     limiter = LLMRateLimiter(per_minute=1, per_day=100)
     mw = LLMRateLimitingMiddleware(limiter=limiter)
     call_next = _call_next_factory()
 
     # Alice consumes her single token
-    with patch("collegue.core.middleware_llm_rate_limit._extract_identity",
-               return_value="sub:alice"):
+    with patch("collegue.core.middleware_llm_rate_limit._extract_identity", return_value="sub:alice"):
         ctx = _FakeContext(message=_FakeMessage(name="code_documentation"))
         _run(mw.on_call_tool(ctx, call_next))
 
     # Bob still has one
-    with patch("collegue.core.middleware_llm_rate_limit._extract_identity",
-               return_value="sub:bob"):
+    with patch("collegue.core.middleware_llm_rate_limit._extract_identity", return_value="sub:bob"):
         ctx = _FakeContext(message=_FakeMessage(name="code_documentation"))
         _run(mw.on_call_tool(ctx, call_next))
 
@@ -126,14 +128,14 @@ def test_two_identities_have_independent_budgets_in_middleware():
 # Identity extraction
 # ---------------------------------------------------------------------------
 
+
 def test_extract_identity_uses_oauth_sub_when_available():
     # fastmcp_context.auth.claims has a sub claim
     auth = MagicMock()
     auth.claims = {"sub": "user-42", "aud": "collegue"}
     fmcp_ctx = MagicMock()
     fmcp_ctx.auth = auth
-    ctx = _FakeContext(message=_FakeMessage(name="code_documentation"),
-                        fastmcp_context=fmcp_ctx)
+    ctx = _FakeContext(message=_FakeMessage(name="code_documentation"), fastmcp_context=fmcp_ctx)
 
     with patch("fastmcp.server.dependencies.get_http_headers", return_value={}):
         ident = _extract_identity(ctx)
@@ -142,8 +144,7 @@ def test_extract_identity_uses_oauth_sub_when_available():
 
 def test_extract_identity_falls_back_to_bearer_hash():
     ctx = _FakeContext(message=_FakeMessage(name="code_documentation"))
-    with patch("fastmcp.server.dependencies.get_http_headers",
-               return_value={"authorization": "Bearer abcdef123456"}):
+    with patch("fastmcp.server.dependencies.get_http_headers", return_value={"authorization": "Bearer abcdef123456"}):
         ident = _extract_identity(ctx)
     assert ident.startswith("tok_")
     assert len(ident) > 4
@@ -151,8 +152,9 @@ def test_extract_identity_falls_back_to_bearer_hash():
 
 def test_extract_identity_falls_back_to_x_forwarded_for():
     ctx = _FakeContext(message=_FakeMessage(name="code_documentation"))
-    with patch("fastmcp.server.dependencies.get_http_headers",
-               return_value={"x-forwarded-for": "203.0.113.7, 10.0.0.1"}):
+    with patch(
+        "fastmcp.server.dependencies.get_http_headers", return_value={"x-forwarded-for": "203.0.113.7, 10.0.0.1"}
+    ):
         ident = _extract_identity(ctx)
     assert ident == "ip:203.0.113.7"
 

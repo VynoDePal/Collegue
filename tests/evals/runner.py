@@ -30,6 +30,7 @@ Usage::
     python -m tests.evals.runner --tool test_generation --case 01_arithmetic
     python -m tests.evals.runner --tool test_generation --limit 2
 """
+
 from __future__ import annotations
 
 import argparse
@@ -75,6 +76,7 @@ def _get_shared_prompt_engine():
     global _SHARED_PROMPT_ENGINE
     if _SHARED_PROMPT_ENGINE is None:
         from collegue.prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
+
         _SHARED_PROMPT_ENGINE = EnhancedPromptEngine()
     return _SHARED_PROMPT_ENGINE
 
@@ -143,13 +145,15 @@ async def _run_test_generation_raw(case: Dict[str, Any], ctx: EvalContext) -> st
         f"```python\n{case['code']}\n```\n"
     )
     response = await generate_text(config, prompt, system_prompt=_RAW_SYSTEM_PROMPT)
-    ctx.calls.append({
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-        "prompt_len": len(prompt),
-        "response_len": len(response.text or ""),
-        "path": "raw",
-    })
+    ctx.calls.append(
+        {
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+            "prompt_len": len(prompt),
+            "response_len": len(response.text or ""),
+            "path": "raw",
+        }
+    )
     return response.text or ""
 
 
@@ -180,13 +184,15 @@ async def _run_test_generation_competent(case: Dict[str, Any], ctx: EvalContext)
         f"```{language}\n{case['code']}\n```\n"
     )
     response = await generate_text(config, prompt, system_prompt=_COMPETENT_SYSTEM_PROMPT)
-    ctx.calls.append({
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-        "prompt_len": len(prompt),
-        "response_len": len(response.text or ""),
-        "path": "competent",
-    })
+    ctx.calls.append(
+        {
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+            "prompt_len": len(prompt),
+            "response_len": len(response.text or ""),
+            "path": "competent",
+        }
+    )
     return response.text or ""
 
 
@@ -233,18 +239,17 @@ async def _run_code_documentation_raw(case: Dict[str, Any], ctx: EvalContext) ->
         temperature=0.5,
     )
     language = case.get("language", "python")
-    prompt = (
-        f"Write markdown documentation for the following {language} code.\n\n"
-        f"```{language}\n{case['code']}\n```\n"
-    )
+    prompt = f"Write markdown documentation for the following {language} code.\n\n```{language}\n{case['code']}\n```\n"
     response = await generate_text(config, prompt, system_prompt=_DOC_RAW_SYSTEM_PROMPT)
-    ctx.calls.append({
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-        "prompt_len": len(prompt),
-        "response_len": len(response.text or ""),
-        "path": "raw",
-    })
+    ctx.calls.append(
+        {
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+            "prompt_len": len(prompt),
+            "response_len": len(response.text or ""),
+            "path": "raw",
+        }
+    )
     return response.text or ""
 
 
@@ -269,13 +274,15 @@ async def _run_code_documentation_competent(case: Dict[str, Any], ctx: EvalConte
         f"```{language}\n{case['code']}\n```\n"
     )
     response = await generate_text(config, prompt, system_prompt=_DOC_COMPETENT_SYSTEM_PROMPT)
-    ctx.calls.append({
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens,
-        "prompt_len": len(prompt),
-        "response_len": len(response.text or ""),
-        "path": "competent",
-    })
+    ctx.calls.append(
+        {
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+            "prompt_len": len(prompt),
+            "response_len": len(response.text or ""),
+            "path": "competent",
+        }
+    )
     return response.text or ""
 
 
@@ -449,9 +456,7 @@ def _write_matrix_report(
     lines.append("")
 
     # Index records by (tool, model, case) for fast lookup.
-    idx: Dict[tuple, Dict[str, Any]] = {
-        (r["tool"], r["model"], r["case_id"]): r for r in records
-    }
+    idx: Dict[tuple, Dict[str, Any]] = {(r["tool"], r["model"], r["case_id"]): r for r in records}
 
     for tool in tools:
         lines.append(f"## `{tool}`")
@@ -469,7 +474,11 @@ def _write_matrix_report(
         # Aggregate row.
         agg_row = ["**Avg**"]
         for model in models:
-            recs = [idx[(tool, model, c)] for c in case_ids if (tool, model, c) in idx and not idx[(tool, model, c)].get("raw_error")]
+            recs = [
+                idx[(tool, model, c)]
+                for c in case_ids
+                if (tool, model, c) in idx and not idx[(tool, model, c)].get("raw_error")
+            ]
             if recs:
                 agg = _aggregate(recs)
                 agg_row.append(f"**{agg['avg']:.3f}**")
@@ -499,7 +508,7 @@ def _write_matrix_report(
     if "test_generation" in tools and "test_generation_raw" in tools:
         lines.append("## Δ `test_generation` − `test_generation_raw` (naive baseline)")
         lines.append("")
-        lines.append("Positive = MCP tool adds value over a naive \"write tests\" prompt.")
+        lines.append('Positive = MCP tool adds value over a naive "write tests" prompt.')
         lines.append("")
         lines.append("| Model | MCP avg | Raw avg | Δ |")
         lines.append("|---|---|---|---|")
@@ -513,7 +522,9 @@ def _write_matrix_report(
     if "test_generation" in tools and "test_generation_competent" in tools:
         lines.append("## Δ `test_generation` − `test_generation_competent` (honest baseline)")
         lines.append("")
-        lines.append("Positive = MCP tool beats a skilled developer's prompt. Near-zero = the tool's value is mostly saving the user from writing the careful prompt themselves.")
+        lines.append(
+            "Positive = MCP tool beats a skilled developer's prompt. Near-zero = the tool's value is mostly saving the user from writing the careful prompt themselves."
+        )
         lines.append("")
         lines.append("| Model | MCP avg | Competent avg | Δ |")
         lines.append("|---|---|---|---|")
@@ -543,7 +554,9 @@ def _write_matrix_report(
         lines.append("## Errors")
         lines.append("")
         for r in errs:
-            lines.append(f"- `{r['tool']}` · `{r['model']}` · `{r['case_id']}` — first line: `{r['raw_error'].splitlines()[0] if r['raw_error'] else ''}`")
+            lines.append(
+                f"- `{r['tool']}` · `{r['model']}` · `{r['case_id']}` — first line: `{r['raw_error'].splitlines()[0] if r['raw_error'] else ''}`"
+            )
         lines.append("")
 
     (out_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -621,7 +634,9 @@ async def _run(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     total_runs = sum(len(per_tool_cases[t]) for t in tools) * len(models)
-    print(f"=== Matrix run: {total_runs} LLM calls ({len(case_ids)} cases × {len(tools)} tool(s) × {len(models)} model(s))")
+    print(
+        f"=== Matrix run: {total_runs} LLM calls ({len(case_ids)} cases × {len(tools)} tool(s) × {len(models)} model(s))"
+    )
     print(f"=== Tools: {tools}")
     print(f"=== Models: {models}")
     print()
@@ -687,9 +702,7 @@ def main() -> int:
     models = args.model or [settings.LLM_MODEL]
 
     out_dir = args.out or (
-        Path(__file__).parent
-        / "reports"
-        / _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+        Path(__file__).parent / "reports" / _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
     )
     return asyncio.run(_run(tools, models, out_dir, args.case or None, args.limit))
 

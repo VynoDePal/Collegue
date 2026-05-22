@@ -3,6 +3,7 @@
 Loads scenario modules from tests/stress/real_cases/scenarios/, executes each
 via the existing MCPSession, evaluates assertions, and produces a scorecard.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -19,8 +20,8 @@ from typing import Any, Callable
 
 # Make both the project root and tests/stress importable.
 _HERE = Path(__file__).parent
-sys.path.insert(0, str(_HERE.parent.parent))   # repo root → enables `tests.stress.real_cases` imports
-sys.path.insert(0, str(_HERE))                  # stress dir → enables `runner`
+sys.path.insert(0, str(_HERE.parent.parent))  # repo root → enables `tests.stress.real_cases` imports
+sys.path.insert(0, str(_HERE))  # stress dir → enables `runner`
 
 from runner import MCPSession, run_case  # noqa: E402
 
@@ -123,9 +124,8 @@ def main() -> int:
         if args.rate_limit_sec > 0 and i > 1:
             time.sleep(args.rate_limit_sec)
 
-        print(f"[{i:>3}/{len(scenarios)}] {scn['id']:<30} {tool:<24} — {scn.get('description','')[:55]}")
-        r = run_case(session, tool, scn["id"], scn.get("description", ""),
-                     scn["arguments"], per_case_budget=120.0)
+        print(f"[{i:>3}/{len(scenarios)}] {scn['id']:<30} {tool:<24} — {scn.get('description', '')[:55]}")
+        r = run_case(session, tool, scn["id"], scn.get("description", ""), scn["arguments"], per_case_budget=120.0)
 
         # Verdict logic
         if r.error == "timeout":
@@ -160,11 +160,16 @@ def main() -> int:
         excerpt = response_text(r.response or {})[:500] if r.response else ""
 
         result = ScenarioResult(
-            id=scn["id"], tool=tool, description=scn.get("description", ""),
-            verdict=verdict, assertions_passed=passed,
+            id=scn["id"],
+            tool=tool,
+            description=scn.get("description", ""),
+            verdict=verdict,
+            assertions_passed=passed,
             assertions_total=len(scn["assertions"]),
-            latency_ms=r.latency_ms, http_status=r.http_status,
-            failure_reasons=failures, response_excerpt=excerpt,
+            latency_ms=r.latency_ms,
+            http_status=r.http_status,
+            failure_reasons=failures,
+            response_excerpt=excerpt,
         )
         results.append(result)
         counter[verdict] += 1
@@ -172,8 +177,7 @@ def main() -> int:
         # Reset session if the container looks unhealthy
         if verdict in ("HANG", "SERVER-ERR"):
             try:
-                subprocess.run(["docker", "compose", "restart", "collegue-app"],
-                               capture_output=True, timeout=60)
+                subprocess.run(["docker", "compose", "restart", "collegue-app"], capture_output=True, timeout=60)
             except Exception:
                 pass
             session.close()
@@ -183,9 +187,7 @@ def main() -> int:
             except Exception:
                 pass
 
-        (cases_dir / f"{scn['id']}.json").write_text(
-            json.dumps(asdict(result), ensure_ascii=False, indent=2)
-        )
+        (cases_dir / f"{scn['id']}.json").write_text(json.dumps(asdict(result), ensure_ascii=False, indent=2))
         print(f"       → {verdict:<22} {passed}/{len(scn['assertions'])}  {r.latency_ms:.0f}ms")
         if verdict in ("FAIL", "PARTIAL") and failures:
             for f in failures[:3]:
@@ -211,11 +213,10 @@ def main() -> int:
         passed_asserts = sum(r.assertions_passed for r in rs)
         total_asserts = sum(r.assertions_total for r in rs)
         rate = f"{passed_asserts}/{total_asserts}" if total_asserts else "n/a"
-        other = sum(v for k, v in c.items()
-                     if k not in ("PASS", "PARTIAL", "FAIL", "INCONCLUSIVE-LLM-QUOTA"))
+        other = sum(v for k, v in c.items() if k not in ("PASS", "PARTIAL", "FAIL", "INCONCLUSIVE-LLM-QUOTA"))
         lines.append(
-            f"| {tool} | {c.get('PASS',0)} | {c.get('PARTIAL',0)} | {c.get('FAIL',0)} | "
-            f"{c.get('INCONCLUSIVE-LLM-QUOTA',0)} | {other} | {rate} |"
+            f"| {tool} | {c.get('PASS', 0)} | {c.get('PARTIAL', 0)} | {c.get('FAIL', 0)} | "
+            f"{c.get('INCONCLUSIVE-LLM-QUOTA', 0)} | {other} | {rate} |"
         )
 
     lines.append("\n## Failures (FAIL / PARTIAL / SERVER-ERR / HANG)\n")

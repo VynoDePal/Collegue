@@ -1,9 +1,10 @@
 """
 Tests pour le module transformers/kubernetes.py
 """
+
 import sys
 
-sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
+sys.path.insert(0, "/home/kevyn-odjo/Documents/Collegue")
 
 from datetime import datetime, timezone
 
@@ -67,31 +68,29 @@ class TestTransformPods:
 
     def test_transform_single_pod(self):
         """Test avec un seul pod."""
-        pod_data = [{
-            'metadata': {
-                'name': 'test-pod',
-                'namespace': 'default',
-                'creation_timestamp': '2024-01-01T00:00:00Z',
-                'labels': {'app': 'test'}
-            },
-            'status': {
-                'phase': 'Running',
-                'pod_ip': '10.0.0.1',
-                'container_statuses': [
-                    {'name': 'container1', 'ready': True, 'restart_count': 0}
-                ]
-            },
-            'spec': {
-                'node_name': 'node-1'
+        pod_data = [
+            {
+                "metadata": {
+                    "name": "test-pod",
+                    "namespace": "default",
+                    "creation_timestamp": "2024-01-01T00:00:00Z",
+                    "labels": {"app": "test"},
+                },
+                "status": {
+                    "phase": "Running",
+                    "pod_ip": "10.0.0.1",
+                    "container_statuses": [{"name": "container1", "ready": True, "restart_count": 0}],
+                },
+                "spec": {"node_name": "node-1"},
             }
-        }]
+        ]
         result = transform_pods(pod_data)
         assert len(result) == 1
-        assert result[0].name == 'test-pod'
-        assert result[0].namespace == 'default'
-        assert result[0].status == 'Running'
-        assert result[0].node == 'node-1'
-        assert result[0].ip == '10.0.0.1'
+        assert result[0].name == "test-pod"
+        assert result[0].namespace == "default"
+        assert result[0].status == "Running"
+        assert result[0].node == "node-1"
+        assert result[0].ip == "10.0.0.1"
 
 
 class TestTransformDeployments:
@@ -104,25 +103,24 @@ class TestTransformDeployments:
 
     def test_transform_single_deployment(self):
         """Test avec un seul déploiement."""
-        deployment_data = [{
-            'metadata': {
-                'name': 'test-deployment',
-                'namespace': 'default',
-                'creation_timestamp': '2024-01-01T00:00:00Z'
-            },
-            'spec': {
-                'replicas': 3,
-                'selector': {'match_labels': {'app': 'test'}},
-                'strategy': {'type': 'RollingUpdate'}
-            },
-            'status': {
-                'ready_replicas': 2,
-                'available_replicas': 2
+        deployment_data = [
+            {
+                "metadata": {
+                    "name": "test-deployment",
+                    "namespace": "default",
+                    "creation_timestamp": "2024-01-01T00:00:00Z",
+                },
+                "spec": {
+                    "replicas": 3,
+                    "selector": {"match_labels": {"app": "test"}},
+                    "strategy": {"type": "RollingUpdate"},
+                },
+                "status": {"ready_replicas": 2, "available_replicas": 2},
             }
-        }]
+        ]
         result = transform_deployments(deployment_data)
         assert len(result) == 1
-        assert result[0].name == 'test-deployment'
+        assert result[0].name == "test-deployment"
         assert result[0].ready == 2
         assert result[0].available == 2
 
@@ -137,25 +135,27 @@ class TestTransformServices:
 
     def test_transform_single_service(self):
         """Test avec un seul service."""
-        service_data = [{
-            'metadata': {
-                'name': 'test-service',
-                'namespace': 'default',
-                'creation_timestamp': '2024-01-01T00:00:00Z'
-            },
-            'spec': {
-                'type': 'ClusterIP',
-                'cluster_ip': '10.0.0.10',
-                'external_ips': ['192.168.1.1'],
-                'ports': [{'port': 80}],
-                'selector': {'app': 'test'}
+        service_data = [
+            {
+                "metadata": {
+                    "name": "test-service",
+                    "namespace": "default",
+                    "creation_timestamp": "2024-01-01T00:00:00Z",
+                },
+                "spec": {
+                    "type": "ClusterIP",
+                    "cluster_ip": "10.0.0.10",
+                    "external_ips": ["192.168.1.1"],
+                    "ports": [{"port": 80}],
+                    "selector": {"app": "test"},
+                },
             }
-        }]
+        ]
         result = transform_services(service_data)
         assert len(result) == 1
-        assert result[0].name == 'test-service'
-        assert result[0].type == 'ClusterIP'
-        assert result[0].cluster_ip == '10.0.0.10'
+        assert result[0].name == "test-service"
+        assert result[0].type == "ClusterIP"
+        assert result[0].cluster_ip == "10.0.0.10"
 
 
 class TestTransformNamespaces:
@@ -168,18 +168,16 @@ class TestTransformNamespaces:
 
     def test_transform_single_namespace(self):
         """Test avec un seul namespace."""
-        ns_data = [{
-            'metadata': {
-                'name': 'test-ns',
-                'creationTimestamp': '2024-01-01T00:00:00Z',
-                'labels': {'env': 'test'}
-            },
-            'status': {'phase': 'Active'}
-        }]
+        ns_data = [
+            {
+                "metadata": {"name": "test-ns", "creationTimestamp": "2024-01-01T00:00:00Z", "labels": {"env": "test"}},
+                "status": {"phase": "Active"},
+            }
+        ]
         result = transform_namespaces(ns_data)
         assert len(result) == 1
-        assert result[0].name == 'test-ns'
-        assert result[0].status == 'Active'
+        assert result[0].name == "test-ns"
+        assert result[0].status == "Active"
 
 
 class TestTransformEvents:
@@ -192,26 +190,28 @@ class TestTransformEvents:
 
     def test_transform_single_event(self):
         """Test avec un seul événement."""
-        event_data = [{
-            'metadata': {
-                'name': 'test-event.123',
-                'namespace': 'default',
-                'creationTimestamp': '2024-01-01T00:00:00Z'
-            },
-            'type': 'Warning',
-            'reason': 'FailedMount',
-            'message': 'Mount failed',
-            'source': {'component': 'kubelet'},
-            'firstTimestamp': '2024-01-01T00:00:00Z',
-            'lastTimestamp': '2024-01-01T00:01:00Z',
-            'count': 5,
-            'involvedObject': {'name': 'test-pod', 'kind': 'Pod'}
-        }]
+        event_data = [
+            {
+                "metadata": {
+                    "name": "test-event.123",
+                    "namespace": "default",
+                    "creationTimestamp": "2024-01-01T00:00:00Z",
+                },
+                "type": "Warning",
+                "reason": "FailedMount",
+                "message": "Mount failed",
+                "source": {"component": "kubelet"},
+                "firstTimestamp": "2024-01-01T00:00:00Z",
+                "lastTimestamp": "2024-01-01T00:01:00Z",
+                "count": 5,
+                "involvedObject": {"name": "test-pod", "kind": "Pod"},
+            }
+        ]
         result = transform_events(event_data)
         assert len(result) == 1
-        assert result[0].name == 'test-event.123'
-        assert result[0].type == 'Warning'
-        assert result[0].reason == 'FailedMount'
+        assert result[0].name == "test-event.123"
+        assert result[0].type == "Warning"
+        assert result[0].reason == "FailedMount"
         assert result[0].count == 5
 
 
@@ -225,35 +225,26 @@ class TestTransformNodes:
 
     def test_transform_single_node(self):
         """Test avec un seul nœud."""
-        node_data = [{
-            'metadata': {
-                'name': 'test-node',
-                'creation_timestamp': '2024-01-01T00:00:00Z',
-                'labels': {
-                    'node-role.kubernetes.io/master': 'true'
-                }
-            },
-            'status': {
-                'conditions': [
-                    {'type': 'Ready', 'status': 'True'}
-                ],
-                'node_info': {
-                    'kubelet_version': 'v1.28.0',
-                    'os_image': 'Ubuntu 22.04'
+        node_data = [
+            {
+                "metadata": {
+                    "name": "test-node",
+                    "creation_timestamp": "2024-01-01T00:00:00Z",
+                    "labels": {"node-role.kubernetes.io/master": "true"},
                 },
-                'capacity': {
-                    'cpu': '4',
-                    'memory': '16Gi',
-                    'pods': '110'
-                }
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "node_info": {"kubelet_version": "v1.28.0", "os_image": "Ubuntu 22.04"},
+                    "capacity": {"cpu": "4", "memory": "16Gi", "pods": "110"},
+                },
             }
-        }]
+        ]
         result = transform_nodes(node_data)
         assert len(result) == 1
-        assert result[0].name == 'test-node'
-        assert result[0].status == 'Ready'
-        assert 'master' in result[0].roles
-        assert result[0].version == 'v1.28.0'
+        assert result[0].name == "test-node"
+        assert result[0].status == "Ready"
+        assert "master" in result[0].roles
+        assert result[0].version == "v1.28.0"
 
 
 class TestTransformConfigMaps:
@@ -266,21 +257,16 @@ class TestTransformConfigMaps:
 
     def test_transform_single_configmap(self):
         """Test avec un seul ConfigMap."""
-        cm_data = [{
-            'metadata': {
-                'name': 'test-cm',
-                'namespace': 'default',
-                'creationTimestamp': '2024-01-01T00:00:00Z'
-            },
-            'data': {
-                'key1': 'value1',
-                'key2': 'value2'
+        cm_data = [
+            {
+                "metadata": {"name": "test-cm", "namespace": "default", "creationTimestamp": "2024-01-01T00:00:00Z"},
+                "data": {"key1": "value1", "key2": "value2"},
             }
-        }]
+        ]
         result = transform_configmaps(cm_data)
         assert len(result) == 1
-        assert result[0].name == 'test-cm'
-        assert result[0].data_keys == ['key1', 'key2']
+        assert result[0].name == "test-cm"
+        assert result[0].data_keys == ["key1", "key2"]
 
 
 class TestTransformSecrets:
@@ -293,24 +279,27 @@ class TestTransformSecrets:
 
     def test_transform_single_secret(self):
         """Test avec un seul Secret."""
-        secret_data = [{
-            'metadata': {
-                'name': 'test-secret',
-                'namespace': 'default',
-                'creationTimestamp': '2024-01-01T00:00:00Z'
-            },
-            'type': 'Opaque',
-            'data': {
-                'password': 'cGFzc3dvcmQ='  # base64
+        secret_data = [
+            {
+                "metadata": {
+                    "name": "test-secret",
+                    "namespace": "default",
+                    "creationTimestamp": "2024-01-01T00:00:00Z",
+                },
+                "type": "Opaque",
+                "data": {
+                    "password": "cGFzc3dvcmQ="  # base64
+                },
             }
-        }]
+        ]
         result = transform_secrets(secret_data)
         assert len(result) == 1
-        assert result[0].name == 'test-secret'
-        assert result[0].type == 'Opaque'
-        assert result[0].data_keys == ['password']
+        assert result[0].name == "test-secret"
+        assert result[0].type == "Opaque"
+        assert result[0].data_keys == ["password"]
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import pytest
-    pytest.main([__file__, '-v'])
+
+    pytest.main([__file__, "-v"])

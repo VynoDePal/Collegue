@@ -1,4 +1,5 @@
 """Real-world scenarios for code_refactoring (LLM)."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import tool_content
@@ -31,12 +32,14 @@ SCENARIOS = [
         },
         "llm_dependent": True,
         "assertions": [
-            ("Output refactored_code non vide",
-             lambda r: len(tool_content(r).get("refactored_code") or "") > 5),
-            ("≥ 1 change ou code plus court",
-             lambda r: (len(tool_content(r).get("changes") or []) >= 1
-                         or len(tool_content(r).get("refactored_code") or "")
-                            < len(BLOATED_CODE))),
+            ("Output refactored_code non vide", lambda r: len(tool_content(r).get("refactored_code") or "") > 5),
+            (
+                "≥ 1 change ou code plus court",
+                lambda r: (
+                    len(tool_content(r).get("changes") or []) >= 1
+                    or len(tool_content(r).get("refactored_code") or "") < len(BLOATED_CODE)
+                ),
+            ),
         ],
     },
     {
@@ -49,8 +52,7 @@ SCENARIOS = [
         },
         "llm_dependent": True,
         "assertions": [
-            ("Output non vide",
-             lambda r: len(tool_content(r).get("refactored_code") or "") > 5),
+            ("Output non vide", lambda r: len(tool_content(r).get("refactored_code") or "") > 5),
         ],
     },
 ]

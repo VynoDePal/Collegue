@@ -7,8 +7,8 @@ Teste la priorité de configuration et différents modèles.
 import pytest
 
 pytest.skip(
-	"ToolLLMManager legacy remplacé par FastMCP ctx.sample",
-	allow_module_level=True,
+    "ToolLLMManager legacy remplacé par FastMCP ctx.sample",
+    allow_module_level=True,
 )
 
 import json
@@ -23,17 +23,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from collegue.config import Settings
 from collegue.core.tool_llm_manager import ToolLLMManager
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 def test_config_priority():
     """Test de la priorité de configuration MCP > ENV > DEFAULT."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST DE PRIORITÉ DE CONFIGURATION")
-    print("="*60)
+    print("=" * 60)
 
     original_env_model = os.environ.get("LLM_MODEL")
     original_env_key = os.environ.get("LLM_API_KEY")
@@ -81,35 +79,35 @@ def test_config_priority():
         elif "LLM_API_KEY" in os.environ:
             del os.environ["LLM_API_KEY"]
 
+
 def test_different_models():
     """Test avec différents modèles Google Gemini."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST DE DIFFÉRENTS MODÈLES")
-    print("="*60)
+    print("=" * 60)
 
     models_to_test = [
         {
             "name": "Google Gemini 3 Flash Preview",
             "model": "gemini-3-flash-preview",
-            "description": "Dernier modèle Gemini 3, rapide et économique"
+            "description": "Dernier modèle Gemini 3, rapide et économique",
         },
         {
             "name": "Google Gemini 2.5 Flash",
             "model": "gemini-2.5-flash",
-            "description": "Modèle performant pour la plupart des tâches"
+            "description": "Modèle performant pour la plupart des tâches",
         },
         {
             "name": "Google Gemini 2.5 Flash Lite",
             "model": "gemini-2.5-flash-lite",
-            "description": "Version légère pour les tâches simples"
+            "description": "Version légère pour les tâches simples",
         },
         {
             "name": "Google Gemini 2.5 Pro",
             "model": "gemini-2.5-pro",
-            "description": "Modèle premium pour les tâches complexes"
-        }
+            "description": "Modèle premium pour les tâches complexes",
+        },
     ]
-
 
     test_api_key = os.environ.get("LLM_API_KEY", "AIzaSy-test-key-12345")
 
@@ -118,15 +116,12 @@ def test_different_models():
         print(f"   Description: {model_info['description']}")
 
         try:
-
             os.environ["LLM_MODEL"] = model_info["model"]
             os.environ["LLM_API_KEY"] = test_api_key
             settings = Settings()
 
-
             assert settings.llm_model == model_info["model"]
             print(f"   ✅ Configuration acceptée: {settings.llm_model}")
-
 
             if test_api_key and test_api_key.startswith("AIzaSy-"):
                 try:
@@ -140,31 +135,24 @@ def test_different_models():
         except Exception as e:
             print(f"   ❌ Erreur: {str(e)}")
 
+
 def simulate_windsurf_config():
     """Simule la configuration depuis Windsurf MCP."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("SIMULATION DE CONFIGURATION WINDSURF")
-    print("="*60)
-
+    print("=" * 60)
 
     windsurf_configs = [
-        {
-            "name": "Configuration Minimale",
-            "config": {
-                "collegue": {
-                    "serverUrl": "http://localhost:8088/mcp/"
-                }
-            }
-        },
+        {"name": "Configuration Minimale", "config": {"collegue": {"serverUrl": "http://localhost:8088/mcp/"}}},
         {
             "name": "Configuration Développement",
             "config": {
                 "collegue": {
                     "serverUrl": "http://localhost:8088/mcp/",
                     "LLM_MODEL": "gemini-3-flash-preview",
-                    "LLM_API_KEY": "AIzaSy-dev-key"
+                    "LLM_API_KEY": "AIzaSy-dev-key",
                 }
-            }
+            },
         },
         {
             "name": "Configuration Production",
@@ -172,23 +160,23 @@ def simulate_windsurf_config():
                 "collegue": {
                     "serverUrl": "https://collegue.example.com/mcp/",
                     "LLM_MODEL": "gemini-2.5-pro",
-                    "LLM_API_KEY": "AIzaSy-prod-key"
+                    "LLM_API_KEY": "AIzaSy-prod-key",
                 }
-            }
-        }
+            },
+        },
     ]
 
     for config_info in windsurf_configs:
         print(f"\n📋 {config_info['name']}:")
         print(f"   Config JSON: {json.dumps(config_info['config'], indent=6)}")
 
-        collegue_config = config_info['config'].get('collegue', {})
+        collegue_config = config_info["config"].get("collegue", {})
         mcp_params = {}
 
-        if 'LLM_MODEL' in collegue_config:
-            mcp_params['LLM_MODEL'] = collegue_config['LLM_MODEL']
-        if 'LLM_API_KEY' in collegue_config:
-            mcp_params['LLM_API_KEY'] = collegue_config['LLM_API_KEY']
+        if "LLM_MODEL" in collegue_config:
+            mcp_params["LLM_MODEL"] = collegue_config["LLM_MODEL"]
+        if "LLM_API_KEY" in collegue_config:
+            mcp_params["LLM_API_KEY"] = collegue_config["LLM_API_KEY"]
 
         for k, v in mcp_params.items():
             os.environ[k] = v
@@ -202,11 +190,12 @@ def simulate_windsurf_config():
             print(f"   - Utilise la configuration par défaut ou .env")
             print(f"   - Modèle: {settings.llm_model}")
 
+
 def test_error_handling():
     """Test de la gestion d'erreurs."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST DE GESTION D'ERREURS")
-    print("="*60)
+    print("=" * 60)
 
     print("\n1. Test sans clé API:")
     os.environ.pop("LLM_API_KEY", None)
@@ -230,11 +219,12 @@ def test_error_handling():
     except Exception as e:
         print(f"   ❌ Erreur inattendue: {str(e)}")
 
+
 def main():
     """Fonction principale d'exécution des tests."""
-    print("\n" + "🚀"*30)
+    print("\n" + "🚀" * 30)
     print("TESTS DE CONFIGURATION MCP POUR COLLÈGUE")
-    print("🚀"*30)
+    print("🚀" * 30)
 
     try:
         test_config_priority()
@@ -242,9 +232,9 @@ def main():
         simulate_windsurf_config()
         test_error_handling()
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("✅ TOUS LES TESTS SONT PASSÉS AVEC SUCCÈS!")
-        print("="*60)
+        print("=" * 60)
         print("\n📌 Prochaines étapes:")
         print("1. Configurer une vraie clé API Google Gemini dans .env")
         print("2. Tester avec Windsurf en utilisant mcp_config.json")
@@ -254,10 +244,12 @@ def main():
     except Exception as e:
         print(f"\n❌ Erreur lors des tests: {str(e)}")
         import traceback
+
         traceback.print_exc()
         return 1
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

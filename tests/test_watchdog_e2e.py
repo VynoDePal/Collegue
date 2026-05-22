@@ -18,6 +18,7 @@ Plus:
      before any tool is called.
   5. Multi-user loop runs ``attempt_fix`` once per registered config.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -165,15 +166,15 @@ async def test_trivial_attribute_error_fix_creates_pr():
         "explanation": "Guard against None to avoid AttributeError.",
         "patches": [
             {
-                "search": "def get_user_email(user: Optional[User]) -> str:\n    \"\"\"BUG 1 (AttributeError) : si `user` est None, l'accès à .email casse.\"\"\"\n    return user.email",
-                "replace": "def get_user_email(user: Optional[User]) -> str:\n    \"\"\"Retourne l'email ou '' si user est None (fix Sentry PROJ-42).\"\"\"\n    if user is None:\n        return \"\"\n    return user.email",
+                "search": 'def get_user_email(user: Optional[User]) -> str:\n    """BUG 1 (AttributeError) : si `user` est None, l\'accès à .email casse."""\n    return user.email',
+                "replace": 'def get_user_email(user: Optional[User]) -> str:\n    """Retourne l\'email ou \'\' si user est None (fix Sentry PROJ-42)."""\n    if user is None:\n        return ""\n    return user.email',
             }
         ],
     }
 
     fixer, _, gh = _build_fixer_with_mocks(
         gh_side_effect=[
-            _gh_get_file(source),          # ContextPackBuilder.fetch_file_content
+            _gh_get_file(source),  # ContextPackBuilder.fetch_file_content
             _gh_noop("create_branch"),
             _gh_noop("update_file"),
             _gh_pr(),
@@ -211,7 +212,7 @@ async def test_fuzzy_match_survives_indentation_drift():
     drifted_search = (
         "    result = []\n"
         "        for u in users:\n"
-        "            line = \"<\" + u.email + \">\"\n"
+        '            line = "<" + u.email + ">"\n'
         "            result.append(line)\n"
         "        return result"
     )
@@ -224,8 +225,8 @@ async def test_fuzzy_match_survives_indentation_drift():
                 "replace": (
                     "    result = []\n"
                     "    for u in users:\n"
-                    "        email = u.email or \"\"\n"
-                    "        line = \"<\" + email + \">\"\n"
+                    '        email = u.email or ""\n'
+                    '        line = "<" + email + ">"\n'
                     "        result.append(line)\n"
                     "    return result"
                 ),
@@ -249,9 +250,7 @@ async def test_fuzzy_match_survives_indentation_drift():
             await fixer.attempt_fix(issue, "acme", "svc", "real-org", "sentry-token")
 
     commands = [call.args[0].command for call in gh._execute_core_logic.call_args_list]
-    assert "create_pr" in commands, (
-        "Fuzzy match should have succeeded and produced a PR"
-    )
+    assert "create_pr" in commands, "Fuzzy match should have succeeded and produced a PR"
     update_call = gh._execute_core_logic.call_args_list[2].args[0]
     assert "email = u.email or" in update_call.content
 
@@ -305,9 +304,16 @@ async def test_destructive_patch_refused_by_size_guard():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("placeholder", [
-    "your-org", "my-organization", "test-org", "placeholder", "YOUR-ORG",
-])
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "your-org",
+        "my-organization",
+        "test-org",
+        "placeholder",
+        "YOUR-ORG",
+    ],
+)
 def test_registry_rejects_placeholder_orgs(_isolated_registry, placeholder):
     """Any `sentry_org` in the hardcoded blacklist must not persist — the
     Watchdog's multi-user loop skips orgs that return None from `register()`."""

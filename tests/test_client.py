@@ -1,6 +1,7 @@
 """
 Tests du client Python pour Collègue MCP
 """
+
 import asyncio
 import os
 import sys
@@ -8,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
 
 
@@ -25,7 +26,7 @@ class TestCollegueClient(unittest.TestCase):
         self.mock_fastmcp_client.__aenter__ = AsyncMock(return_value=self.mock_fastmcp_client)
         self.mock_fastmcp_client.__aexit__ = AsyncMock(return_value=None)
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_client_initialization(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
 
@@ -33,7 +34,7 @@ class TestCollegueClient(unittest.TestCase):
             self.assertIsNotNone(client)
             self.assertEqual(client.client, self.mock_fastmcp_client)
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_list_tools(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
 
@@ -54,7 +55,7 @@ class TestCollegueClient(unittest.TestCase):
 
             self.mock_fastmcp_client.list_tools.assert_called_once()
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_create_session(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
         mock_result = MagicMock()
@@ -68,7 +69,7 @@ class TestCollegueClient(unittest.TestCase):
 
             self.mock_fastmcp_client.call_tool.assert_called_once_with("create_session", {})
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_get_session_context(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
         mock_result = MagicMock()
@@ -82,20 +83,15 @@ class TestCollegueClient(unittest.TestCase):
             self.assertEqual(context["session_id"], "test_session_id")
             self.assertIn("context", context)
 
-            self.mock_fastmcp_client.call_tool.assert_called_once_with("get_session_context", {"request": {
-                "session_id": "test_session_id"
-            }})
+            self.mock_fastmcp_client.call_tool.assert_called_once_with(
+                "get_session_context", {"request": {"session_id": "test_session_id"}}
+            )
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_analyze_code(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
         mock_result = MagicMock()
-        mock_result.data = {
-            "structure": {
-                "functions": [{"name": "hello_world", "line": 1}],
-                "classes": []
-            }
-        }
+        mock_result.data = {"structure": {"functions": [{"name": "hello_world", "line": 1}], "classes": []}}
         self.mock_fastmcp_client.call_tool = AsyncMock(return_value=mock_result)
 
         async with CollegueClient(server_path=self.script_path) as client:
@@ -108,20 +104,25 @@ class TestCollegueClient(unittest.TestCase):
             self.assertEqual(len(analysis["structure"]["functions"]), 1)
             self.assertEqual(analysis["structure"]["functions"][0]["name"], "hello_world")
 
-            self.mock_fastmcp_client.call_tool.assert_called_once_with("analyze_code", {"request": {
-                "code": code,
-                "language": "python",
-                "session_id": "test_session_id",
-                "file_path": "test_file.py"
-            }})
+            self.mock_fastmcp_client.call_tool.assert_called_once_with(
+                "analyze_code",
+                {
+                    "request": {
+                        "code": code,
+                        "language": "python",
+                        "session_id": "test_session_id",
+                        "file_path": "test_file.py",
+                    }
+                },
+            )
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_suggest_tools_for_query(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
         mock_result = MagicMock()
         mock_result.data = [
             {"name": "analyze_code", "description": "Analyse un extrait de code"},
-            {"name": "generate_code", "description": "Génère du code à partir d'une description"}
+            {"name": "generate_code", "description": "Génère du code à partir d'une description"},
         ]
         self.mock_fastmcp_client.call_tool = AsyncMock(return_value=mock_result)
 
@@ -133,18 +134,17 @@ class TestCollegueClient(unittest.TestCase):
             self.assertEqual(len(tools), 2)
             self.assertEqual(tools[0]["name"], "analyze_code")
 
-            self.mock_fastmcp_client.call_tool.assert_called_once_with("suggest_tools_for_query", {"request": {
-                "query": query,
-                "session_id": "test_session_id"
-            }})
+            self.mock_fastmcp_client.call_tool.assert_called_once_with(
+                "suggest_tools_for_query", {"request": {"query": query, "session_id": "test_session_id"}}
+            )
 
-    @patch('collegue.client.mcp_client.Client')
+    @patch("collegue.client.mcp_client.Client")
     async def async_test_generate_code_from_description(self, mock_client_class):
         mock_client_class.return_value = self.mock_fastmcp_client
         mock_result = MagicMock()
         mock_result.data = {
             "code": "def hello_world():\n    print('Hello, world!')",
-            "explanation": "Cette fonction affiche 'Hello, world!'"
+            "explanation": "Cette fonction affiche 'Hello, world!'",
         }
         self.mock_fastmcp_client.call_tool = AsyncMock(return_value=mock_result)
 
@@ -158,12 +158,17 @@ class TestCollegueClient(unittest.TestCase):
             self.assertIn("code", code_result)
             self.assertIn("explanation", code_result)
 
-            self.mock_fastmcp_client.call_tool.assert_called_once_with("generate_code_from_description", {"request": {
-                "description": description,
-                "language": language,
-                "constraints": constraints,
-                "session_id": "test_session_id"
-            }})
+            self.mock_fastmcp_client.call_tool.assert_called_once_with(
+                "generate_code_from_description",
+                {
+                    "request": {
+                        "description": description,
+                        "language": language,
+                        "constraints": constraints,
+                        "session_id": "test_session_id",
+                    }
+                },
+            )
 
     def test_client_initialization(self):
         """Exécute le test d'initialisation du client."""
@@ -192,6 +197,7 @@ class TestCollegueClient(unittest.TestCase):
     def test_generate_code_from_description(self):
         """Exécute le test de la méthode generate_code_from_description."""
         asyncio.run(self.async_test_generate_code_from_description())
+
 
 if __name__ == "__main__":
     unittest.main()
