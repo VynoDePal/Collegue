@@ -2,12 +2,13 @@
 Tests unitaires pour le script entrypoint.sh
 Vérifie que les deux services démarrent correctement.
 """
-import pytest
+import os
+import signal
 import subprocess
 import time
+
+import pytest
 import requests
-import signal
-import os
 
 
 class TestEntrypoint:
@@ -34,8 +35,8 @@ class TestHealthServer:
     @pytest.fixture(scope="module")
     def health_server(self):
         """Démarre le health server pour les tests."""
-        import subprocess
         import os
+        import subprocess
         
         health_server_path = os.path.join(os.path.dirname(__file__), '..', 'collegue', 'health_server.py')
         proc = subprocess.Popen(['python3', health_server_path], 

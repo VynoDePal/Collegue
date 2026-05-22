@@ -48,9 +48,7 @@ from typing import Any, Dict, Optional
 
 from collegue.config import settings
 from collegue.resources.llm.providers import LLMConfig, generate_text
-
 from tests.evals.scorers.test_generation import EvalScore
-
 
 JUDGE_MODEL = "gemini-2.5-flash"
 _AXES = ("accuracy", "completeness", "clarity", "usefulness")

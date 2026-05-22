@@ -1,5 +1,7 @@
 import pytest
+
 from collegue.tools.clients.kubernetes import KubernetesClient
+
 
 def test_kubernetes_client_command_injection():
     client = KubernetesClient()

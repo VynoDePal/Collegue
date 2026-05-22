@@ -2,15 +2,15 @@
 """
 Test du parser TypeScript
 """
-import sys
-import os
 import json
+import os
+import sys
 from pathlib import Path
-
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 from collegue.core.parser import CodeParser
+
 
 def main():
     """Test du parser TypeScript avec un fichier d'exemple"""

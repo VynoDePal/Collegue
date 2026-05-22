@@ -1,14 +1,15 @@
 """
 Tests unitaires pour l'outil Test Generation refactorisé.
 """
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+
 from collegue.tools.test_generation import (
-    TestGenerationTool,
+    TestGenerationEngine,
     TestGenerationRequest,
     TestGenerationResponse,
-    TestGenerationEngine
+    TestGenerationTool,
 )
 
 

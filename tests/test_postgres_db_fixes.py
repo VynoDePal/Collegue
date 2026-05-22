@@ -1,7 +1,10 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from collegue.tools.postgres_db import PostgresDBTool, PostgresRequest
+
 from collegue.tools.clients.base import APIResponse
+from collegue.tools.postgres_db import PostgresDBTool, PostgresRequest
+
 
 @pytest.fixture
 def mock_postgres_client():

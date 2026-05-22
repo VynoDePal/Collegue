@@ -3,12 +3,13 @@ Tests unitaires pour les clients du package collegue.tools.clients
 
 Ces tests utilisent des mocks pour tester les clients sans faire d'appels réels aux APIs.
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, '/home/kevyn-odjo/Documents/Collegue')
 
-from unittest.mock import Mock, patch, MagicMock
 import json
+from unittest.mock import MagicMock, Mock, patch
 
 print("=" * 80)
 print("TESTS UNITAIRES - CLIENTS")
@@ -22,7 +23,7 @@ print("TEST 1: SENTRY CLIENT")
 print("=" * 80)
 
 try:
-    from collegue.tools.clients import SentryClient, APIError
+    from collegue.tools.clients import APIError, SentryClient
     
     # Test 1.1: Initialisation
     print("\n1.1 Test initialisation SentryClient...")
@@ -195,7 +196,7 @@ print("TEST 2: KUBERNETES CLIENT")
 print("=" * 80)
 
 try:
-    from collegue.tools.clients import KubernetesClient, APIError
+    from collegue.tools.clients import APIError, KubernetesClient
     
     # Test 2.1: Initialisation avec kubectl
     print("\n2.1 Test initialisation KubernetesClient (mode kubectl)...")
@@ -490,7 +491,7 @@ print("TEST 3: POSTGRES CLIENT")
 print("=" * 80)
 
 try:
-    from collegue.tools.clients import PostgresClient, APIError
+    from collegue.tools.clients import APIError, PostgresClient
     
     # Test 3.1: Initialisation avec connection_string
     print("\n3.1 Test initialisation PostgresClient (avec connection_string)...")

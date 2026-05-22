@@ -2,13 +2,12 @@
 """
 Script de test avancé pour MCP transport http avec gestion de session
 """
-import requests
 import json
 import re
 from typing import Optional
 
-
 import pytest
+import requests
 
 pytest.skip(
 	"Test d’intégration (docker/serveur MCP requis) – non déterministe en CI",
