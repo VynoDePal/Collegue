@@ -47,6 +47,14 @@ class TestGenerationResponse(BaseModel):
     test_file_path: Optional[str] = Field(None, description="Chemin du fichier de test généré")
     estimated_coverage: float = Field(..., description="Estimation de la couverture de code")
     tested_elements: List[Dict[str, str]] = Field(..., description="Éléments testés (fonctions, classes, etc.)")
+    # Champs agentiques (optionnels pour rétrocompatibilité)
+    agent_iterations: int = Field(default=0, description="Nombre d'itérations agentiques effectuées")
+    agent_best_score: Optional[float] = Field(default=None, description="Meilleur score de qualité atteint (0.0-1.0)")
+    agent_coverage_progression: List[float] = Field(
+        default_factory=list,
+        description="Progression de la couverture estimée par itération",
+    )
+    agent_converged: Optional[bool] = Field(default=None, description="True si la boucle a convergé")
 
 
 class LLMTestGenerationResult(BaseModel):

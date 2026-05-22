@@ -7,10 +7,12 @@ avec différents frameworks et options de personnalisation.
 Refactorisé: Le fichier original faisait 767 lignes, maintenant ~200 lignes.
 """
 
+import ast
 import time
 from typing import Any, Dict, List
 
 from ...core.shared import run_async_from_sync
+from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool, ToolValidationError
 from .engine import TestGenerationEngine
 from .models import (
@@ -19,7 +21,7 @@ from .models import (
 )
 
 
-class TestGenerationTool(BaseTool):
+class TestGenerationTool(AgentLoopMixin, BaseTool):
     """
     Outil de génération automatique de tests unitaires.
 
@@ -54,9 +56,96 @@ class TestGenerationTool(BaseTool):
     supported_languages = ["python", "javascript", "typescript", "php"]
     long_running = True
 
+    agent_config = AgentLoopConfig(
+        max_iterations=3,
+        initial_temperature=0.7,
+        temperature_decay=0.15,
+        min_temperature=0.3,
+    )
+
     def __init__(self, config=None, app_state=None):
         super().__init__(config, app_state)
         self._engine = TestGenerationEngine(logger=self.logger)
+
+    # --- AgentLoopMixin hooks ---
+
+    async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
+        """Valide les tests générés : syntaxe, nombre de tests, couverture."""
+        errors = []
+        test_code = self._extract_test_code_block(output)
+
+        language = context.get("language", "python")
+        if language.lower() == "python":
+            try:
+                ast.parse(test_code)
+            except SyntaxError as e:
+                errors.append(f"Syntaxe invalide: ligne {e.lineno}: {e.msg}")
+
+        test_count = test_code.count("def test_") + test_code.count("@Test")
+        if test_count == 0:
+            errors.append("Aucune fonction de test trouvée (pas de 'def test_' ni '@Test')")
+
+        coverage_target = context.get("coverage_target", 0.8)
+        elements = context.get("elements", [])
+        if elements and test_count > 0:
+            estimated = self._engine.estimate_coverage(elements, test_count)
+            if estimated < coverage_target * 100:
+                errors.append(
+                    f"Couverture estimée ({estimated:.0f}%) < cible ({coverage_target * 100:.0f}%). "
+                    f"Génère plus de tests pour couvrir les {len(elements)} éléments."
+                )
+
+        return errors
+
+    async def assess_agent_quality(self, output: str, context: Dict[str, Any]) -> float:
+        """Évalue la qualité : syntaxe + nombre de tests + couverture."""
+        test_code = self._extract_test_code_block(output)
+        language = context.get("language", "python")
+
+        # Syntaxe
+        syntax_ok = True
+        if language.lower() == "python":
+            try:
+                ast.parse(test_code)
+            except SyntaxError:
+                syntax_ok = False
+        syntax_score = 1.0 if syntax_ok else 0.0
+
+        # Nombre de tests
+        test_count = test_code.count("def test_") + test_code.count("@Test")
+        count_score = min(1.0, test_count / max(len(context.get("elements", [])), 1))
+
+        # Couverture
+        elements = context.get("elements", [])
+        coverage_target = context.get("coverage_target", 0.8)
+        if elements and test_count > 0:
+            estimated = self._engine.estimate_coverage(elements, test_count)
+            coverage_score = min(1.0, estimated / (coverage_target * 100))
+        else:
+            coverage_score = 0.3 if test_count > 0 else 0.0
+
+        return syntax_score * 0.4 + count_score * 0.3 + coverage_score * 0.3
+
+    async def build_agent_feedback(
+        self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
+    ) -> str:
+        """Construit un feedback spécifique pour améliorer les tests."""
+        parts = []
+        elements = context.get("elements", [])
+
+        for error in errors:
+            if "Syntaxe invalide" in error:
+                parts.append(f"ERREUR: {error}. Corrige la syntaxe du code de test.")
+            elif "Aucune fonction de test" in error:
+                parts.append(
+                    "Aucun test détecté. Génère des fonctions de test "
+                    "commençant par 'def test_' (pour pytest) ou annotées '@Test'."
+                )
+            elif "Couverture estimée" in error:
+                element_names = [e["name"] for e in elements[:10]]
+                parts.append(f"{error}\nÉléments à tester: {', '.join(element_names)}")
+
+        return "\n".join(parts) if parts else "Améliore le nombre et la qualité des tests."
 
     def get_supported_test_frameworks(self) -> Dict[str, List[str]]:
         """Retourne les frameworks de test supportés par langage."""
@@ -251,47 +340,49 @@ class TestGenerationTool(BaseTool):
             return self._generate_fallback_response(request, framework, elements)
 
     async def _execute_core_logic_async(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
-        """Version asynchrone de la génération de tests."""
+        """Version asynchrone avec boucle agentique itérative."""
         ctx = kwargs.get("ctx")
 
-        # Détecter le framework
         framework = self._engine.detect_framework(request.language, request.test_framework)
-
-        if ctx:
-            await ctx.info(f"Génération de tests {framework} pour {request.language}...")
-
-        # Extraire les éléments
         elements = self._engine.extract_code_elements(request.code, request.language)
 
-        # Préparer le prompt via le pipeline template (#233).
+        if not ctx:
+            return self._generate_fallback_response(request, framework, elements)
+
+        await ctx.info(f"Génération agentique de tests {framework} pour {request.language}...")
+
         prompt = await self.prepare_prompt(request, template_name="test_generation")
 
         try:
-            started = time.monotonic()
-            result = await ctx.sample(
-                messages=prompt,
-                temperature=0.5,
+            agent_result = await self.agent_execute(
+                initial_prompt=prompt,
+                system_prompt=(
+                    f"Tu es un expert en tests unitaires {request.language} avec {framework}.\n"
+                    "Génère des tests complets et exécutables. "
+                    "Réponds UNIQUEMENT avec le code de test."
+                ),
+                ctx=ctx,
+                context={
+                    "language": request.language,
+                    "coverage_target": request.coverage_target or 0.8,
+                    "elements": elements,
+                    "framework": framework,
+                },
                 max_tokens=2000,
             )
-            elapsed = time.monotonic() - started
-            test_code = self._extract_test_code_block(result.text or "")
-            self.track_last_prompt_performance(
-                execution_time=elapsed,
-                tokens_used=len(test_code) // 4,
-                success=bool(test_code),
-            )
 
-            if ctx:
-                await ctx.info("Tests générés, calcul de la couverture...")
+            test_code = self._extract_test_code_block(agent_result.best_output)
 
-            # Compter les tests
             test_count = test_code.count("def test_") + test_code.count("@Test")
             estimated_coverage = self._engine.estimate_coverage(elements, test_count)
-
-            # Générer le chemin
             test_file_path = self._engine.generate_test_file_path(request.file_path, request.language, framework)
-
             tested_elements = [{"name": e["name"], "type": e["type"]} for e in elements]
+
+            coverage_progression = []
+            for it in agent_result.iterations:
+                it_count = test_code.count("def test_") if it.iteration == agent_result.total_iterations else 0
+                if it_count > 0:
+                    coverage_progression.append(self._engine.estimate_coverage(elements, it_count))
 
             return TestGenerationResponse(
                 test_code=test_code,
@@ -300,6 +391,10 @@ class TestGenerationTool(BaseTool):
                 test_file_path=test_file_path,
                 estimated_coverage=estimated_coverage,
                 tested_elements=tested_elements,
+                agent_iterations=agent_result.total_iterations,
+                agent_best_score=agent_result.best_score,
+                agent_coverage_progression=coverage_progression,
+                agent_converged=agent_result.converged,
             )
 
         except Exception as e:
