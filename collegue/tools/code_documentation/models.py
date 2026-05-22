@@ -33,3 +33,7 @@ class DocumentationResponse(BaseModel):
     documented_elements: List[Dict[str, str]] = Field(..., description="Éléments documentés (fonctions, classes, etc.)")
     coverage: float = Field(..., description="Pourcentage du code couvert par la documentation")
     suggestions: Optional[List[str]] = Field(None, description="Suggestions d'amélioration de la documentation")
+    # Champs agentiques (optionnels pour rétrocompatibilité)
+    agent_iterations: int = Field(default=0, description="Nombre d'itérations agentiques effectuées")
+    agent_best_score: Optional[float] = Field(default=None, description="Meilleur score de qualité atteint (0.0-1.0)")
+    agent_converged: Optional[bool] = Field(default=None, description="True si la boucle a convergé")
