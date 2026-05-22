@@ -23,7 +23,6 @@ import pytest
 from collegue.prompts.engine.enhanced_prompt_engine import EnhancedPromptEngine
 from collegue.tools.refactoring.tool import RefactoringTool
 
-
 TEMPLATES_DIR = Path("collegue/prompts/templates/tools")
 
 

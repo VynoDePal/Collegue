@@ -4,7 +4,7 @@ Test Templates - Fonctions simples de génération de tests.
 Ce module fournit des fonctions directes pour générer des templates de tests
 sans architecture OO complexe.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 def _generate_test_case(name: str, description: str = "") -> str:
@@ -376,7 +376,7 @@ def generate_phpunit_tests(code: str, functions: List[Dict[str, Any]],
         func_name = func.get("name", "unknown")
         test_name = f"test_{func_name}".replace(" ", "_")
         lines.extend([
-            f"    /** @test */",
+            "    /** @test */",
             f"    public function {test_name}()",
             "    {",
             "        // TODO: Implement test",
@@ -389,7 +389,7 @@ def generate_phpunit_tests(code: str, functions: List[Dict[str, Any]],
     for cls in classes:
         class_name = cls.get("name", "Unknown")
         lines.extend([
-            f"    /** @test */",
+            "    /** @test */",
             f"    public function {class_name.lower()}_initialization()",
             "    {",
             "        // TODO: Implement test",

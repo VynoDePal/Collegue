@@ -4,8 +4,8 @@ Utilitaires de lecture de fichiers sécurisés.
 Ce module fournit des fonctions pour lire des fichiers en toute sécurité,
 protégées contre les attaques TOCTOU, les symlinks et les traversées de chemin.
 """
-import os
 import fcntl
+import os
 import stat
 from typing import Optional
 
@@ -52,7 +52,7 @@ def safe_read_file(filepath: str, max_size: int, base_dir: Optional[str] = None)
         fd = os.open(filepath, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as e:
         if e.errno == 40:  # ELOOP - trop de niveaux de liens symboliques
-            raise FileSecurityError(f'Symlink detected and blocked: {filepath}')
+            raise FileSecurityError(f'Symlink detected and blocked: {filepath}') from e
         raise
     
     try:
@@ -122,7 +122,7 @@ def safe_getsize(filepath: str, base_dir: Optional[str] = None) -> int:
         fd = os.open(filepath, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as e:
         if e.errno == 40:
-            raise FileSecurityError(f'Symlink detected and blocked: {filepath}')
+            raise FileSecurityError(f'Symlink detected and blocked: {filepath}') from e
         raise
     
     try:

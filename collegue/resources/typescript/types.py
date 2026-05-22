@@ -3,9 +3,9 @@ Ressources pour les types et interfaces TypeScript.
 
 Ce module fournit des informations sur les types et interfaces standard de TypeScript.
 """
-from fastmcp import FastMCP
-from typing import Dict, Any, List
 import json
+
+from fastmcp import FastMCP
 
 PRIMITIVE_TYPES = {
     "string": {

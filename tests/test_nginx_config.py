@@ -1,9 +1,10 @@
 """
 Tests unitaires pour la configuration nginx
 """
-import pytest
-import re
 import os
+import re
+
+import pytest
 
 
 class TestNginxConfig:

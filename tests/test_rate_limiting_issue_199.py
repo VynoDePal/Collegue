@@ -3,16 +3,17 @@ Tests pour les corrections de l'issue #199 - Problèmes résiduels rate limiting
 """
 import pytest
 from pydantic import BaseModel
+
 from collegue.tools.base import BaseTool, ToolValidationError
-from collegue.tools.rate_limiter import (
-    get_rate_limiter_manager,
-    reset_rate_limiter_manager,
-    RateLimitConfig,
-    RateLimitStrategy,
-)
 from collegue.tools.quotas import (
     get_global_quota_manager,
     reset_global_quota_manager,
+)
+from collegue.tools.rate_limiter import (
+    RateLimitConfig,
+    RateLimitStrategy,
+    get_rate_limiter_manager,
+    reset_rate_limiter_manager,
 )
 
 

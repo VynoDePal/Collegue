@@ -5,14 +5,13 @@ Fournit des utilitaires pour surveiller et nettoyer la mémoire,
 prévenant les fuites sur les sessions longues.
 """
 import gc
-import weakref
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional, Callable, List, Iterator, Tuple
-from dataclasses import dataclass
+import weakref
 from collections import deque
-
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 # Lock pour le singleton MemoryManager
 _memory_manager_lock = threading.Lock()

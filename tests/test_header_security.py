@@ -2,11 +2,12 @@
 Tests for HTTP Header Security utilities
 """
 import pytest
+
 from collegue.core.header_security import (
-    sanitize_header_value,
+    HeaderSecurityError,
     sanitize_header_name,
+    sanitize_header_value,
     validate_url_safe_string,
-    HeaderSecurityError
 )
 
 

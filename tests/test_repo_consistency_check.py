@@ -1,17 +1,18 @@
 """
 Tests unitaires pour l'outil Repo Consistency Check refactorisé.
 """
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from collegue.core.shared import ConsistencyIssue, FileInput
 from collegue.tools.repo_consistency_check import (
-    RepoConsistencyCheckTool,
     ConsistencyCheckRequest,
-    ConsistencyCheckResponse
+    ConsistencyCheckResponse,
+    RepoConsistencyCheckTool,
 )
 from collegue.tools.repo_consistency_check.engine import ConsistencyAnalysisEngine
 from collegue.tools.repo_consistency_check.models import ConsistencyFile
-from collegue.core.shared import FileInput, ConsistencyIssue
 
 
 class TestConsistencyAnalysisEngine:

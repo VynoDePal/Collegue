@@ -3,10 +3,12 @@ Branch Commands for GitHub Operations.
 
 Handles branch listing, creation, and commit operations.
 """
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel
-from ..clients import GitHubClient
+
 from ..base import ToolExecutionError
+from ..clients import GitHubClient
 
 
 class BranchInfo(BaseModel):
@@ -55,8 +57,8 @@ class BranchCommands(GitHubClient):
 		try:
 			resp = self._api_get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
 			return resp['object']['sha']
-		except ToolExecutionError:
-			raise ToolExecutionError(f"Source branch '{branch}' not found")
+		except ToolExecutionError as e:
+			raise ToolExecutionError(f"Source branch '{branch}' not found") from e
 
 	def create_branch(self, owner: str, repo: str, branch: str,
 					  from_branch: Optional[str] = None) -> BranchInfo:

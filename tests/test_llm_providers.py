@@ -8,22 +8,27 @@ pytest.skip(
 	allow_module_level=True,
 )
 
+import asyncio
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import sys
-import os
-import asyncio
-from fastapi.testclient import TestClient
-from fastapi import FastAPI
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from collegue.resources.llm.providers import (
-    initialize_llm_client, generate_text,
-    get_default_model_config, get_available_models,
-    LLMConfig, LLMProvider, LLMResponse
+    LLMConfig,
+    LLMProvider,
+    LLMResponse,
+    generate_text,
+    get_available_models,
+    get_default_model_config,
+    initialize_llm_client,
 )
+
 
 class TestLLMProviders(unittest.TestCase):
     """Tests pour le module providers des ressources LLM."""

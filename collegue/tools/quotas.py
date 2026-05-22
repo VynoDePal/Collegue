@@ -7,13 +7,13 @@ Gère les limites globales pour:
 - Nombre de fichiers par requête
 - Temps d'exécution des tools
 """
-import os
-import time
-import threading
-from typing import Dict, Optional, Any, List
-from dataclasses import dataclass, field
-from enum import Enum
 import logging
+import os
+import threading
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 
 class QuotaExceeded(Exception):

@@ -6,7 +6,8 @@ Provides access to Sentry API for listing projects, issues, and releases.
 import os
 import re
 from typing import Dict, Optional
-from .base import APIClient, APIResponse, APIError
+
+from .base import APIClient, APIError, APIResponse
 
 
 class SentryClient(APIClient):

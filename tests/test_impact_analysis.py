@@ -1,19 +1,20 @@
 """
 Tests unitaires pour l'outil Impact Analysis refactorisé.
 """
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+
+from collegue.core.shared import FileInput
 from collegue.tools.impact_analysis import (
-    ImpactAnalysisTool,
+    ImpactAnalysisEngine,
     ImpactAnalysisRequest,
     ImpactAnalysisResponse,
+    ImpactAnalysisTool,
     ImpactedFile,
     RiskNote,
-    ImpactAnalysisEngine
 )
 from collegue.tools.impact_analysis.models import ImpactFile
-from collegue.core.shared import FileInput
 
 
 class TestImpactAnalysisEngine:

@@ -3,15 +3,12 @@ Sentry Transformers - Fonctions de transformation des données Sentry.
 
 Transforme les données brutes de l'API Sentry en modèles Pydantic typés.
 """
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List
 
 from ...core.shared import normalize_keys
 
 if TYPE_CHECKING:
-	from ..sentry_monitor import (
-		ProjectInfo, IssueInfo, EventInfo, ReleaseInfo,
-		RepoInfo, TagDistribution, ProjectStats
-	)
+	from ..sentry_monitor import EventInfo, IssueInfo, ProjectInfo, ProjectStats, ReleaseInfo, RepoInfo, TagDistribution
 
 def transform_projects(projects_data: List[Dict[str, Any]]) -> List['ProjectInfo']:
 	from ..sentry_monitor import ProjectInfo

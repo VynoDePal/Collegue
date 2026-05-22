@@ -4,10 +4,11 @@ Moteur d'analyse et de génération de tests.
 Contient la logique métier pure : analyse de code, extraction d'éléments,
 gestion des templates, génération de fallback.
 """
-import re
 import ast
-from typing import List, Dict, Any, Optional, Tuple
-from .config import TEST_FRAMEWORKS, DEFAULT_FRAMEWORKS, IMPORT_TEMPLATES, TEST_TEMPLATES, LANGUAGE_TEST_INSTRUCTIONS
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+from .config import DEFAULT_FRAMEWORKS, IMPORT_TEMPLATES, LANGUAGE_TEST_INSTRUCTIONS, TEST_FRAMEWORKS
 
 
 class TestGenerationEngine:
@@ -285,15 +286,15 @@ class TestGenerationEngine:
         """Construit le prompt pour le LLM."""
         prompt_parts = [
             f"Génère des tests unitaires pour le code {language} suivant.",
-            f"",
+            "",
             f"Framework de test: {framework}",
             f"Cible de couverture: {coverage_target:.0%}",
             f"Inclure des mocks: {'oui' if include_mocks else 'non'}",
-            f"",
+            "",
             f"```{language}",
             code,
-            f"```",
-            f"",
+            "```",
+            "",
         ]
         
         if elements:

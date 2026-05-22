@@ -1,12 +1,14 @@
 """
 Tests unitaires pour les utilitaires de sécurité fichier.
 """
-import pytest
+import fcntl
 import os
 import tempfile
-import fcntl
-from unittest.mock import patch, MagicMock
-from collegue.core.file_security import safe_read_file, safe_getsize, FileSecurityError
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from collegue.core.file_security import FileSecurityError, safe_getsize, safe_read_file
 
 
 class TestFileSecurity:

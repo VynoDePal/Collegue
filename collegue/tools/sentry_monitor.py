@@ -4,25 +4,25 @@ Sentry Monitor Tool - Récupération des erreurs et monitoring depuis Sentry
 Permet à Collègue de récupérer les stacktraces réelles et prioriser le refactoring.
 """
 
-import logging
-import os
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field, field_validator
-from .base import BaseTool, ToolExecutionError
+
+from ..core.auth import register_config_with_github, resolve_org, resolve_token
 from ..core.shared import validate_sentry_command
+from .base import BaseTool, ToolExecutionError
 from .clients import SentryClient
 from .transformers import (
-    transform_projects,
-    transform_project,
-    transform_issues,
     transform_issue,
-    transform_sentry_events,
+    transform_issues,
+    transform_project,
+    transform_project_stats,
+    transform_projects,
     transform_releases,
     transform_repos,
+    transform_sentry_events,
     transform_tags,
-    transform_project_stats,
 )
-from ..core.auth import resolve_token, resolve_org, register_config_with_github
 
 try:
     from fastmcp.server.dependencies import get_http_headers
@@ -30,14 +30,14 @@ except Exception:
     get_http_headers = None
 
 try:
-    import requests
+    import requests  # noqa: F401
 
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
 
 try:
-    from collegue.autonomous.config_registry import get_config_registry
+    from collegue.autonomous.config_registry import get_config_registry  # noqa: F401
 
     HAS_CONFIG_REGISTRY = True
 except ImportError:
@@ -263,13 +263,12 @@ class SentryMonitorTool(BaseTool):
     def _parse_sentryclirc(self, content: str) -> ConfigInfo:
         """Parse un contenu style INI (.sentryclirc)."""
         import configparser
-        import io
 
         config = configparser.ConfigParser()
         try:
             config.read_string(content)
         except configparser.Error as e:
-            raise ToolExecutionError(f"Erreur de parsing .sentryclirc: {e}")
+            raise ToolExecutionError(f"Erreur de parsing .sentryclirc: {e}") from e
 
         info = ConfigInfo()
 
@@ -504,9 +503,6 @@ class SentryMonitorTool(BaseTool):
                     response.error_message or "Failed to get project stats"
                 )
             stats_data = response.data or {}
-            # Extract stats from response
-            total_events = stats_data.get("total", 0)
-            unresolved = stats_data.get("unresolved", 0)
             stats = transform_project_stats(stats_data, request.project)
             return SentryResponse(
                 success=True,

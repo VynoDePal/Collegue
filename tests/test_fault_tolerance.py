@@ -1,9 +1,11 @@
-import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from pydantic import BaseModel
 
 from collegue.tools.base import BaseTool, ToolExecutionError
-from pydantic import BaseModel
+
 
 class DummyRequest(BaseModel):
     code: str

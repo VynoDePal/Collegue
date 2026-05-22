@@ -1,11 +1,12 @@
 """
 Models - Modèles de données pour le système de prompts personnalisés
 """
-from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any, Union
-from enum import Enum
 import datetime
 import uuid
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class PromptVariableType(str, Enum):

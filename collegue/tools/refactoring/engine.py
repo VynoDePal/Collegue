@@ -4,10 +4,11 @@ Moteur d'analyse et de refactoring pour l'outil Refactoring.
 Contient la logique métier pure : analyse de métriques, validation syntaxique,
 extraction de code, calcul des améliorations.
 """
-import re
 import ast
 import json
-from typing import Dict, Any, List, Tuple
+import re
+from typing import Any, Dict, List, Tuple
+
 from .config import COMMENT_PATTERNS, COMPLEXITY_INDICATORS, REFACTORING_TYPES
 
 

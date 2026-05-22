@@ -3,13 +3,20 @@ GitHub Transformers - Fonctions de transformation des données GitHub.
 
 Transforme les données brutes de l'API GitHub en modèles Pydantic typés.
 """
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List
+
 from ...core.shared import normalize_keys
 
 if TYPE_CHECKING:
 	from ..github_commands import (
-		RepoInfo, PRInfo, IssueInfo, BranchInfo,
-		FileChange, Comment, WorkflowRun, SearchResult
+		BranchInfo,
+		Comment,
+		FileChange,
+		IssueInfo,
+		PRInfo,
+		RepoInfo,
+		SearchResult,
+		WorkflowRun,
 	)
 
 

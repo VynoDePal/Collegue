@@ -1,21 +1,24 @@
 """
 Tests unitaires pour le module optimization des ressources LLM
 """
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import sys
-import os
-from fastapi.testclient import TestClient
-from fastapi import FastAPI
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from collegue.resources.llm.optimization import (
-    OptimizationStrategy, PromptOptimization,
-    get_optimization, get_all_optimizations,
-    optimize_prompt
+    OptimizationStrategy,
+    PromptOptimization,
+    get_all_optimizations,
+    get_optimization,
+    optimize_prompt,
 )
+
 
 class TestLLMOptimization(unittest.TestCase):
     """Tests pour le module optimization des ressources LLM."""

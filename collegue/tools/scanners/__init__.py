@@ -4,7 +4,8 @@ Base Scanner for IaC Guardrails.
 Provides common functionality for IaC-specific scanners.
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from ..base import ToolError
 
 

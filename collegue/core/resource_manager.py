@@ -1,8 +1,8 @@
 """
 Resource Manager - Gestionnaire centralisé des ressources pour Collègue MCP
 """
-from typing import Dict, Any, Optional, List
 import logging
+from typing import Any, Dict, List, Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

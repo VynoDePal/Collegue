@@ -1,9 +1,10 @@
 """
 Best Practices PHP - Ressources pour les bonnes pratiques en PHP moderne
 """
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any
 import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel
 
 
 class PHPBestPractice(BaseModel):

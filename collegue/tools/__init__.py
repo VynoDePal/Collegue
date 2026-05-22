@@ -1,14 +1,14 @@
 """
 Tools Package - Enregistrement direct des outils avec FastMCP
 """
-import os
-import sys
 import importlib
 import inspect
-from typing import Dict, List, Type, Any
+import os
+import sys
+from typing import Any, Dict, List, Type
 
 try:
-    from fastmcp import FastMCP, Context
+    from fastmcp import Context, FastMCP
 except ImportError:
     FastMCP = Any
     Context = Any
@@ -50,7 +50,7 @@ def _discover_tools() -> List[Type[BaseTool]]:
             try:
                 module = importlib.import_module(f'collegue.tools.{module_name}')
                 
-                for name, obj in inspect.getmembers(module):
+                for _name, obj in inspect.getmembers(module):
                     if (inspect.isclass(obj) and
                         issubclass(obj, BaseTool) and
                         obj != BaseTool and
@@ -71,7 +71,7 @@ def _discover_tools() -> List[Type[BaseTool]]:
                     package_module = importlib.import_module(f'collegue.tools.{item}')
                     
                     # Chercher les classes BaseTool dans le package
-                    for name, obj in inspect.getmembers(package_module):
+                    for _name, obj in inspect.getmembers(package_module):
                         if (inspect.isclass(obj) and
                             issubclass(obj, BaseTool) and
                             obj != BaseTool and

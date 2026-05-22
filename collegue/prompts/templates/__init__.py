@@ -4,7 +4,8 @@ Templates Module - Gestion des templates YAML pour les outils MCP
 
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 
 def get_template_path(tool_name: str, version: str = "default") -> Optional[Path]:
     """

@@ -1,16 +1,16 @@
 """
 Tests unitaires pour le CodeParser
 """
-import sys
 import os
+import sys
 import unittest
 from pathlib import Path
-
 
 parent_dir = str(Path(__file__).parent.parent.absolute())
 sys.path.insert(0, parent_dir)
 
 from collegue.core.parser import CodeParser
+
 
 class TestCodeParser(unittest.TestCase):
     """Tests unitaires pour la classe CodeParser"""

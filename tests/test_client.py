@@ -1,19 +1,19 @@
 """
 Tests du client Python pour Collègue MCP
 """
+import asyncio
 import os
 import sys
 import unittest
-import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock, AsyncMock
-
+from unittest.mock import AsyncMock, MagicMock, patch
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, parent_dir)
 
 
 from collegue.client import CollegueClient
+
 
 class TestCollegueClient(unittest.TestCase):
     """Tests unitaires pour le client Python Collègue MCP."""

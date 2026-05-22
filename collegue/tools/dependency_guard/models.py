@@ -1,7 +1,8 @@
 """
 Modèles Pydantic pour l'outil Dependency Guard.
 """
-from typing import Optional, List
+from typing import List, Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
