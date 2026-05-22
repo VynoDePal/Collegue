@@ -1,6 +1,7 @@
 """
 Tests unitaires pour les modèles du système de prompts personnalisés
 """
+
 import unittest
 import uuid
 from datetime import datetime
@@ -21,10 +22,7 @@ class TestPromptVariable(unittest.TestCase):
     def test_create_variable(self):
         """Test de création d'une variable de prompt."""
         var = PromptVariable(
-            name="test_var",
-            description="Variable de test",
-            type=PromptVariableType.STRING,
-            required=True
+            name="test_var", description="Variable de test", type=PromptVariableType.STRING, required=True
         )
 
         self.assertEqual(var.name, "test_var")
@@ -43,7 +41,7 @@ class TestPromptVariable(unittest.TestCase):
             type=PromptVariableType.STRING,
             required=False,
             default="standard",
-            options=["simple", "standard", "détaillé"]
+            options=["simple", "standard", "détaillé"],
         )
 
         self.assertEqual(var.name, "level")
@@ -52,26 +50,11 @@ class TestPromptVariable(unittest.TestCase):
 
     def test_variable_validation(self):
         """Test de validation des types de variables."""
-        var_string = PromptVariable(
-            name="name",
-            description="Nom",
-            type=PromptVariableType.STRING,
-            required=True
-        )
+        var_string = PromptVariable(name="name", description="Nom", type=PromptVariableType.STRING, required=True)
 
-        var_int = PromptVariable(
-            name="age",
-            description="Âge",
-            type=PromptVariableType.INTEGER,
-            required=True
-        )
+        var_int = PromptVariable(name="age", description="Âge", type=PromptVariableType.INTEGER, required=True)
 
-        var_bool = PromptVariable(
-            name="active",
-            description="Actif",
-            type=PromptVariableType.BOOLEAN,
-            required=True
-        )
+        var_bool = PromptVariable(name="active", description="Actif", type=PromptVariableType.BOOLEAN, required=True)
 
         self.assertEqual(var_string.type, PromptVariableType.STRING)
         self.assertEqual(var_int.type, PromptVariableType.INTEGER)
@@ -90,20 +73,14 @@ class TestPromptTemplate(unittest.TestCase):
             template="Ceci est un {test} de template avec {variable}",
             variables=[
                 PromptVariable(
-                    name="test",
-                    description="Variable de test",
-                    type=PromptVariableType.STRING,
-                    required=True
+                    name="test", description="Variable de test", type=PromptVariableType.STRING, required=True
                 ),
                 PromptVariable(
-                    name="variable",
-                    description="Autre variable",
-                    type=PromptVariableType.STRING,
-                    required=True
-                )
+                    name="variable", description="Autre variable", type=PromptVariableType.STRING, required=True
+                ),
             ],
             category="test",
-            tags=["test", "exemple"]
+            tags=["test", "exemple"],
         )
 
         self.assertEqual(template.id, "test_template")
@@ -124,18 +101,10 @@ class TestPromptTemplate(unittest.TestCase):
             description="Template avec versions spécifiques",
             template="Version par défaut: {var}",
             variables=[
-                PromptVariable(
-                    name="var",
-                    description="Variable",
-                    type=PromptVariableType.STRING,
-                    required=True
-                )
+                PromptVariable(name="var", description="Variable", type=PromptVariableType.STRING, required=True)
             ],
             category="test",
-            provider_specific={
-                "openai": "Version OpenAI: {var}",
-                "anthropic": "Version Anthropic: {var}"
-            }
+            provider_specific={"openai": "Version OpenAI: {var}", "anthropic": "Version Anthropic: {var}"},
         )
 
         self.assertEqual(template.template, "Version par défaut: {var}")
@@ -149,9 +118,7 @@ class TestPromptCategory(unittest.TestCase):
     def test_create_category(self):
         """Test de création d'une catégorie."""
         category = PromptCategory(
-            id="test_category",
-            name="Catégorie de test",
-            description="Une catégorie pour les tests"
+            id="test_category", name="Catégorie de test", description="Une catégorie pour les tests"
         )
 
         self.assertEqual(category.id, "test_category")
@@ -167,7 +134,7 @@ class TestPromptCategory(unittest.TestCase):
             name="Sous-catégorie",
             description="Une sous-catégorie",
             parent_id="parent_category",
-            icon="folder"
+            icon="folder",
         )
 
         self.assertEqual(category.id, "sub_category")
@@ -190,7 +157,7 @@ class TestPromptExecution(unittest.TestCase):
             formatted_prompt="Ceci est un valeur de template avec autre",
             execution_time=0.5,
             timestamp=datetime.now(),
-            provider="openai"
+            provider="openai",
         )
 
         self.assertEqual(execution.id, execution_id)
@@ -211,7 +178,7 @@ class TestPromptExecution(unittest.TestCase):
             formatted_prompt="",
             execution_time=0.1,
             timestamp=datetime.now(),
-            result="Variable manquante: {autre_var}"
+            result="Variable manquante: {autre_var}",
         )
 
         self.assertEqual(execution.template_id, "test_error")
@@ -234,14 +201,9 @@ class TestPromptLibrary(unittest.TestCase):
                 description="Premier template",
                 template="Template {var1}",
                 variables=[
-                    PromptVariable(
-                        name="var1",
-                        description="Variable 1",
-                        type=PromptVariableType.STRING,
-                        required=True
-                    )
+                    PromptVariable(name="var1", description="Variable 1", type=PromptVariableType.STRING, required=True)
                 ],
-                category="cat1"
+                category="cat1",
             ),
             "template2": PromptTemplate(
                 id="template2",
@@ -249,34 +211,18 @@ class TestPromptLibrary(unittest.TestCase):
                 description="Deuxième template",
                 template="Template {var2}",
                 variables=[
-                    PromptVariable(
-                        name="var2",
-                        description="Variable 2",
-                        type=PromptVariableType.STRING,
-                        required=True
-                    )
+                    PromptVariable(name="var2", description="Variable 2", type=PromptVariableType.STRING, required=True)
                 ],
-                category="cat2"
-            )
+                category="cat2",
+            ),
         }
 
         categories_dict = {
-            "cat1": PromptCategory(
-                id="cat1",
-                name="Catégorie 1",
-                description="Première catégorie"
-            ),
-            "cat2": PromptCategory(
-                id="cat2",
-                name="Catégorie 2",
-                description="Deuxième catégorie"
-            )
+            "cat1": PromptCategory(id="cat1", name="Catégorie 1", description="Première catégorie"),
+            "cat2": PromptCategory(id="cat2", name="Catégorie 2", description="Deuxième catégorie"),
         }
 
-        library = PromptLibrary(
-            templates=templates_dict,
-            categories=categories_dict
-        )
+        library = PromptLibrary(templates=templates_dict, categories=categories_dict)
 
         self.assertEqual(len(library.templates), 2)
         self.assertEqual(len(library.categories), 2)

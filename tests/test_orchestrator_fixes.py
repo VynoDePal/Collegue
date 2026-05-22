@@ -21,30 +21,37 @@ class MockContext:
         self.warning = AsyncMock()
         self.sample = AsyncMock()
 
+
 class MockToolInstance:
     def __init__(self):
         pass
+
     def get_name(self):
         return "mock_tool"
+
     async def execute_async(self, request, **kwargs):
         class Result:
             def dict(self):
                 return {"status": "success"}
+
         return Result()
+
     def get_request_model(self):
         class DummyModel:
             def __init__(self, **kwargs):
                 pass
+
         return DummyModel
+
 
 @pytest.mark.asyncio
 async def test_orchestrator_planning_and_execution():
     app = MagicMock()
     register_meta_orchestrator(app)
-    
+
     tool_decorator = app.tool.return_value
     smart_orchestrator_func = tool_decorator.call_args[0][0]
-    
+
     # Inject a fake tools registry via the lifespan_context — same pattern
     # the orchestrator uses in production now that _TOOLS_CACHE is gone (#211).
     mock_tools_cache = {
@@ -52,36 +59,32 @@ async def test_orchestrator_planning_and_execution():
             "class": lambda x: MockToolInstance(),
             "description": "Mock tool",
             "prompt_desc": "mock_tool: Mock tool",
-            "schema": {}
+            "schema": {},
         }
     }
 
     mock_ctx = MockContext()
     mock_ctx.lifespan_context = {"tools_registry": mock_tools_cache}
-    
+
     # Plan response
     plan_response = MagicMock()
-    plan_response.result = OrchestratorPlan(steps=[
-        OrchestratorStep(
-            tool="mock_tool", 
-            reason="Test execution", 
-            params={"input_data": "test_payload"}
-        )
-    ])
-    
+    plan_response.result = OrchestratorPlan(
+        steps=[OrchestratorStep(tool="mock_tool", reason="Test execution", params={"input_data": "test_payload"})]
+    )
+
     # Synthesis response
     synth_response = MagicMock()
     synth_response.text = "Final synthesis result"
-    
+
     mock_ctx.sample.side_effect = [plan_response, synth_response]
-    
+
     request = OrchestratorRequest(query="Run test")
-    
+
     response = await smart_orchestrator_func(request, mock_ctx)
-    
+
     assert response.result == "Final synthesis result"
     assert response.tools_used == ["mock_tool"]
     assert response.confidence == 1.0
-    
+
     assert mock_ctx.sample.call_count == 2
     mock_ctx.info.assert_any_call("Phase 1: Planification...")

@@ -21,6 +21,7 @@ Run locally:
 Override the endpoint if nginx is not on port 8088:
     MCP_URL=http://localhost:9000/mcp/ pytest tests/test_llm_rate_limit_integration.py
 """
+
 from __future__ import annotations
 
 import json
@@ -86,19 +87,21 @@ class _Session:
 
     def initialize(self) -> None:
         self._next_id += 1
-        r = self.client.post(MCP_URL, headers=HEADERS, json={
-            "jsonrpc": "2.0",
-            "id": self._next_id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "rl-it", "version": "1"},
+        r = self.client.post(
+            MCP_URL,
+            headers=HEADERS,
+            json={
+                "jsonrpc": "2.0",
+                "id": self._next_id,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "rl-it", "version": "1"},
+                },
             },
-        })
-        self.session_id = (
-            r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
         )
+        self.session_id = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
         try:
             self.client.post(
                 MCP_URL,
@@ -167,8 +170,7 @@ def _summarize(body: Any) -> dict:
         return {"kind": "unknown"}
     if "error" in body and "result" not in body:
         err = body["error"]
-        return {"kind": "rpc_error", "code": err.get("code"),
-                "message": err.get("message"), "data": err.get("data")}
+        return {"kind": "rpc_error", "code": err.get("code"), "message": err.get("message"), "data": err.get("data")}
     inner = body.get("result") or {}
     if inner.get("isError"):
         text = ""
@@ -179,11 +181,8 @@ def _summarize(body: Any) -> dict:
         if "LLM rate limit exceeded" in text:
             m = re.search(r"Retry after (\d+)s", text)
             retry = int(m.group(1)) if m else None
-            reason = "per_minute" if "per_minute" in text else (
-                "per_day" if "per_day" in text else "unknown"
-            )
-            return {"kind": "rate_limited", "retry_after": retry,
-                    "reason": reason, "text": text}
+            reason = "per_minute" if "per_minute" in text else ("per_day" if "per_day" in text else "unknown")
+            return {"kind": "rate_limited", "retry_after": retry, "reason": reason, "text": text}
         return {"kind": "tool_error", "text": text}
     return {"kind": "ok"}
 
@@ -225,9 +224,7 @@ def test_burst_on_llm_tool_blocks_after_per_minute_cap(session):
         f"If this is flaky in CI, make sure the container was just started "
         f"to reset the sliding window."
     )
-    assert len(blocked) == 5, (
-        f"Expected 5 rate-limited responses (calls 16-20), got {len(blocked)}"
-    )
+    assert len(blocked) == 5, f"Expected 5 rate-limited responses (calls 16-20), got {len(blocked)}"
 
     # First blocked call is the 16th
     assert outcomes[15]["kind"] == "rate_limited"
@@ -257,17 +254,11 @@ def test_non_llm_tools_are_not_impacted_when_llm_budget_exhausted(session):
         results.append((tool, _summarize(body)))
 
     rate_limited = [(t, s) for t, s in results if s["kind"] == "rate_limited"]
-    assert not rate_limited, (
-        f"Non-LLM tools were rate-limited by the LLM limiter (regression!): "
-        f"{rate_limited}"
-    )
+    assert not rate_limited, f"Non-LLM tools were rate-limited by the LLM limiter (regression!): {rate_limited}"
 
     ok_count = sum(1 for _, s in results if s["kind"] == "ok")
     # We don't assert ok_count == 10: the generic 10 req/s limiter may still
     # reject an occasional non-LLM call under burst even with the 150 ms
     # spacing. What we care about is that the REJECTION, if any, is NOT
     # the LLM-specific one. That invariant is checked above.
-    assert ok_count >= 9, (
-        f"Too many non-LLM rejections ({10 - ok_count}/10). "
-        f"Investigate the global rate limiter."
-    )
+    assert ok_count >= 9, f"Too many non-LLM rejections ({10 - ok_count}/10). Investigate the global rate limiter."

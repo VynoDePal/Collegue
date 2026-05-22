@@ -7,12 +7,13 @@ Architecture actuelle:
 - Les tools sont enregistrés via register_tools(app) sans app_state.
 - L'orchestration utilise le meta_orchestrator FastMCP natif.
 """
+
 import os
 import sys
 import unittest
 from unittest.mock import MagicMock
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastmcp import FastMCP
 
@@ -119,6 +120,7 @@ class TestToolExecution(unittest.TestCase):
         result = tool.execute(request, ctx=None)
         self.assertFalse(result.clean, "Un secret doit être détecté")
         self.assertGreater(result.total_findings, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

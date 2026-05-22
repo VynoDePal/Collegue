@@ -39,6 +39,7 @@ Invalid JSON from the judge → ``errors=1, score=0.0``. Silent fallback to
 1.0 would poison the matrix (the whole point of PR B → PR C was to stop
 trusting the stub).
 """
+
 from __future__ import annotations
 
 import json
@@ -220,11 +221,7 @@ async def score(case: Dict[str, Any], doc_output: str) -> EvalScore:
     total = sum(axes.values())
     passed_count = sum(1 for v in axes.values() if v >= 3)
     reasoning = (payload.get("reasoning") or "")[:200]
-    tail = (
-        f"judge={JUDGE_MODEL} "
-        f"axes={axes} "
-        f"reasoning={reasoning!r}"
-    )
+    tail = f"judge={JUDGE_MODEL} axes={axes} reasoning={reasoning!r}"
     return EvalScore(
         score=round(total / 20.0, 3),  # mean of 4 axes, each 0-5 → total 0-20
         collected=4,

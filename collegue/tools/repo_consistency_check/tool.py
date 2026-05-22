@@ -210,9 +210,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                         )
                     )
 
-            self.logger.info(
-                f"Analyse deep: {len(insights)} insights, score={final_score:.2f}"
-            )
+            self.logger.info(f"Analyse deep: {len(insights)} insights, score={final_score:.2f}")
             return insights, final_score, priority
 
         except Exception as e:
@@ -247,10 +245,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 if not file_with_issues:
                     return None
                 params["code"] = file_with_issues.content[:5000]
-                params["language"] = (
-                    file_with_issues.language
-                    or self._engine.detect_language(file_with_issues.path)
-                )
+                params["language"] = file_with_issues.language or self._engine.detect_language(file_with_issues.path)
                 params["file_path"] = file_with_issues.path
 
             refactoring_request = RefactoringRequest(
@@ -263,23 +258,17 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
             refactoring_tool = RefactoringTool(app_state=self.app_state)
             if ctx is not None:
-                result = await refactoring_tool.execute_async(
-                    refactoring_request, ctx=ctx
-                )
+                result = await refactoring_tool.execute_async(refactoring_request, ctx=ctx)
             else:
                 result = refactoring_tool.execute(refactoring_request)
 
-            self.logger.info(
-                f"Auto-refactoring exécuté sur {params.get('file_path', 'fichier')}"
-            )
+            self.logger.info(f"Auto-refactoring exécuté sur {params.get('file_path', 'fichier')}")
 
             return {
                 "file_path": params.get("file_path"),
                 "refactoring_type": params.get("refactoring_type"),
                 "original_code_preview": params.get("code", "")[:200] + "...",
-                "refactored_code_preview": result.refactored_code[:200] + "..."
-                if result.refactored_code
-                else None,
+                "refactored_code_preview": result.refactored_code[:200] + "..." if result.refactored_code else None,
                 "changes_count": len(result.changes),
                 "explanation": result.explanation,
             }
@@ -288,13 +277,9 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             self.logger.error(f"Erreur auto-chain refactoring: {e}")
             return None
 
-    def _execute_core_logic(
-        self, request: ConsistencyCheckRequest, **kwargs
-    ) -> ConsistencyCheckResponse:
+    def _execute_core_logic(self, request: ConsistencyCheckRequest, **kwargs) -> ConsistencyCheckResponse:
         """Exécute la vérification de cohérence (synchrone)."""
-        self.logger.info(
-            f"Vérification de cohérence sur {len(request.files)} fichier(s)"
-        )
+        self.logger.info(f"Vérification de cohérence sur {len(request.files)} fichier(s)")
 
         checks = request.checks or ALL_CHECKS
         all_issues = []
@@ -303,58 +288,30 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         # Analyser chaque fichier
         for file in request.files:
             lang = file.language or (
-                request.language
-                if request.language != "auto"
-                else self._engine.detect_language(file.path)
+                request.language if request.language != "auto" else self._engine.detect_language(file.path)
             )
 
             if lang == "python":
                 if "unused_imports" in checks:
-                    all_issues.extend(
-                        self._python_analyzer.analyze_unused_imports(
-                            file.content, file.path
-                        )
-                    )
+                    all_issues.extend(self._python_analyzer.analyze_unused_imports(file.content, file.path))
                 if "unused_vars" in checks:
-                    all_issues.extend(
-                        self._python_analyzer.analyze_unused_vars(
-                            file.content, file.path
-                        )
-                    )
+                    all_issues.extend(self._python_analyzer.analyze_unused_vars(file.content, file.path))
                 if "dead_code" in checks:
-                    all_issues.extend(
-                        self._python_analyzer.analyze_dead_code(
-                            file.content, file.path, all_contents
-                        )
-                    )
+                    all_issues.extend(self._python_analyzer.analyze_dead_code(file.content, file.path, all_contents))
 
             elif lang in ("typescript", "javascript"):
                 if "unused_imports" in checks:
-                    all_issues.extend(
-                        self._js_analyzer.analyze_unused_imports(
-                            file.content, file.path
-                        )
-                    )
+                    all_issues.extend(self._js_analyzer.analyze_unused_imports(file.content, file.path))
                 if "unused_vars" in checks:
-                    all_issues.extend(
-                        self._js_analyzer.analyze_unused_vars(file.content, file.path)
-                    )
+                    all_issues.extend(self._js_analyzer.analyze_unused_vars(file.content, file.path))
 
             elif lang == "php":
                 if "unused_imports" in checks:
-                    all_issues.extend(
-                        self._php_analyzer.analyze_unused_imports(
-                            file.content, file.path
-                        )
-                    )
+                    all_issues.extend(self._php_analyzer.analyze_unused_imports(file.content, file.path))
                 if "unused_vars" in checks:
-                    all_issues.extend(
-                        self._php_analyzer.analyze_unused_vars(file.content, file.path)
-                    )
+                    all_issues.extend(self._php_analyzer.analyze_unused_vars(file.content, file.path))
                 if "dead_code" in checks:
-                    all_issues.extend(
-                        self._php_analyzer.analyze_dead_code(file.content, file.path)
-                    )
+                    all_issues.extend(self._php_analyzer.analyze_dead_code(file.content, file.path))
 
         # Analyses multi-fichiers
         if "duplication" in checks and len(request.files) > 1:
@@ -367,9 +324,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         all_issues = [i for i in all_issues if i.confidence >= request.min_confidence]
 
         # Calculer les statistiques
-        severity_counts = aggregate_severities(
-            all_issues, default_levels=["high", "medium", "low", "info"]
-        )
+        severity_counts = aggregate_severities(all_issues, default_levels=["high", "medium", "low", "info"])
         summary = {
             "total": len(all_issues),
             "high": severity_counts["high"],
@@ -379,17 +334,13 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         }
 
         # Scores et actions
-        refactoring_score, refactoring_priority = (
-            self._engine.calculate_refactoring_score(all_issues)
-        )
+        refactoring_score, refactoring_priority = self._engine.calculate_refactoring_score(all_issues)
         suggested_actions = self._engine.generate_suggested_actions(
             all_issues, request.files, refactoring_score, self._engine.detect_language
         )
 
         # Résumé
-        analysis_summary = self._engine.build_analysis_summary(
-            all_issues, len(request.files), severity_counts
-        )
+        analysis_summary = self._engine.build_analysis_summary(all_issues, len(request.files), severity_counts)
 
         return ConsistencyCheckResponse(
             valid=len(all_issues) == 0,
@@ -407,9 +358,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             auto_refactoring_result=None,
         )
 
-    async def _execute_core_logic_async(
-        self, request: ConsistencyCheckRequest, **kwargs
-    ) -> ConsistencyCheckResponse:
+    async def _execute_core_logic_async(self, request: ConsistencyCheckRequest, **kwargs) -> ConsistencyCheckResponse:
         """Version asynchrone avec support deep analysis et auto-chain."""
         ctx = kwargs.get("ctx")
 
@@ -432,9 +381,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                     llm_insights,
                     refactoring_score,
                     refactoring_priority,
-                ) = await self._deep_analysis_with_llm(
-                    request, response.issues, ctx=ctx
-                )
+                ) = await self._deep_analysis_with_llm(request, response.issues, ctx=ctx)
             except Exception as e:
                 self.logger.warning(f"Fallback mode fast suite à erreur deep: {e}")
 
@@ -447,11 +394,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
         )
 
         # Auto-chain si activé
-        if (
-            request.auto_chain
-            and refactoring_score >= request.refactoring_threshold
-            and suggested_actions
-        ):
+        if request.auto_chain and refactoring_score >= request.refactoring_threshold and suggested_actions:
             try:
                 auto_refactoring_result = await self._execute_auto_chain_refactoring(
                     request, response.issues, suggested_actions, ctx=ctx

@@ -86,16 +86,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
 
 # Poids des sévérités pour le calcul des scores
-SEVERITY_WEIGHTS = {
-    'critical': 0.4,
-    'high': 0.25,
-    'medium': 0.1,
-    'low': 0.05
-}
+SEVERITY_WEIGHTS = {"critical": 0.4, "high": 0.25, "medium": 0.1, "low": 0.05}
 
 # Seuils de risque basés sur le score de sécurité
-RISK_THRESHOLDS = {
-    'critical': 0.3,
-    'high': 0.5,
-    'medium': 0.7
-}
+RISK_THRESHOLDS = {"critical": 0.3, "high": 0.5, "medium": 0.7}

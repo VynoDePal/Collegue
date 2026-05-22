@@ -8,6 +8,7 @@ These tests guard against that regression by spinning the engine up
 several times against a throwaway storage dir and asserting the on-disk
 count stays equal to the number of YAML seeds.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -86,8 +87,7 @@ def test_repeated_init_does_not_duplicate_templates(isolated_engine):
         factory()
 
     assert _json_count(storage) == 2, (
-        f"Expected exactly 2 JSONs on disk (one per YAML seed) after 3 inits; "
-        f"got {_json_count(storage)}"
+        f"Expected exactly 2 JSONs on disk (one per YAML seed) after 3 inits; got {_json_count(storage)}"
     )
 
 
@@ -137,8 +137,7 @@ def test_versions_not_duplicated_on_reload(isolated_engine):
     assert len(template_ids) == 1
     versions = engine.version_manager.get_all_versions(template_ids[0])
     assert len(versions) == 1, (
-        f"Expected 1 PromptVersion, got {len(versions)} — the version manager "
-        f"is not idempotent across reloads"
+        f"Expected 1 PromptVersion, got {len(versions)} — the version manager is not idempotent across reloads"
     )
 
 
@@ -157,6 +156,7 @@ def test_missing_name_is_skipped_not_fatal(isolated_engine, caplog):
     _write_yaml_seed(yaml_root, "toolA", "default", "Valid {code}")
 
     import logging
+
     with caplog.at_level(logging.WARNING):
         engine = factory()
 

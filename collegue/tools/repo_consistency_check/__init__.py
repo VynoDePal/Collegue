@@ -10,13 +10,14 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.repo_consistency_check import RepoConsistencyCheckTool
 """
+
 from .models import ConsistencyCheckRequest, ConsistencyCheckResponse, LLMInsight, SuggestedAction
 from .tool import RepoConsistencyCheckTool
 
 __all__ = [
-    'RepoConsistencyCheckTool',
-    'ConsistencyCheckRequest',
-    'ConsistencyCheckResponse',
-    'LLMInsight',
-    'SuggestedAction'
+    "RepoConsistencyCheckTool",
+    "ConsistencyCheckRequest",
+    "ConsistencyCheckResponse",
+    "LLMInsight",
+    "SuggestedAction",
 ]

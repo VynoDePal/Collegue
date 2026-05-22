@@ -1,4 +1,5 @@
 """Real-world scenarios for impact_analysis."""
+
 from __future__ import annotations
 
 from tests.stress.real_cases import tool_content
@@ -7,9 +8,7 @@ TOOL_NAME = "impact_analysis"
 
 
 def _search_terms(resp) -> set[str]:
-    return {q.get("query", "").lower()
-            for q in (tool_content(resp).get("search_queries") or [])
-            if isinstance(q, dict)}
+    return {q.get("query", "").lower() for q in (tool_content(resp).get("search_queries") or []) if isinstance(q, dict)}
 
 
 SCENARIOS = [
@@ -27,10 +26,8 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("Au moins une search_query générée",
-             lambda r: len(tool_content(r).get("search_queries") or []) >= 1),
-            ("change_summary non vide",
-             lambda r: bool(tool_content(r).get("change_summary"))),
+            ("Au moins une search_query générée", lambda r: len(tool_content(r).get("search_queries") or []) >= 1),
+            ("change_summary non vide", lambda r: bool(tool_content(r).get("change_summary"))),
         ],
     },
     {
@@ -51,12 +48,13 @@ SCENARIOS = [
         },
         "llm_dependent": False,
         "assertions": [
-            ("change_summary non vide",
-             lambda r: bool(tool_content(r).get("change_summary"))),
-            ("Structure exploitable (4 champs présents)",
-             lambda r: all(k in tool_content(r)
-                            for k in ("impacted_files", "risk_notes",
-                                       "search_queries", "tests_to_run"))),
+            ("change_summary non vide", lambda r: bool(tool_content(r).get("change_summary"))),
+            (
+                "Structure exploitable (4 champs présents)",
+                lambda r: all(
+                    k in tool_content(r) for k in ("impacted_files", "risk_notes", "search_queries", "tests_to_run")
+                ),
+            ),
         ],
     },
 ]

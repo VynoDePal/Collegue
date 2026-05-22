@@ -9,6 +9,7 @@ breaks a test that cannot be fixed immediately, add its nodeid here with a
 follow-up issue reference, then remove it once the fix lands. Keep the set
 as close to empty as possible — every entry is a silenced red flag.
 """
+
 from __future__ import annotations
 
 import pytest

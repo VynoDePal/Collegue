@@ -5,11 +5,12 @@ L'authentification JWT est configurée directement dans app.py
 via FastMCP(auth=JWTVerifier(...)). Les tests de OAuthManager
 ont été supprimés car la classe n'existe plus.
 """
+
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from collegue.config import settings
 
@@ -25,5 +26,5 @@ class TestOAuthConfig(unittest.TestCase):
         self.assertIsInstance(settings.OAUTH_REQUIRED_SCOPES, list)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

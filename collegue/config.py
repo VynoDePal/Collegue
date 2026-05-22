@@ -1,6 +1,7 @@
 """
 Configuration - Paramètres de configuration pour le MCP Collègue
 """
+
 import logging
 from typing import List, Optional, Union
 
@@ -9,16 +10,16 @@ from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
+
 class Settings(BaseSettings):
-    
     APP_NAME: str = "Collègue"
     APP_VERSION: str = "1.0.0"
     APP_DESCRIPTION: str = "Assistant de développement intelligent"
-    
+
     HOST: str = "0.0.0.0"
     PORT: int = 4121
     DEBUG: bool = True
-    
+
     LLM_API_KEY: Optional[str] = None
     LLM_MODEL: str = "gemini-3-flash-preview"
 
@@ -40,7 +41,7 @@ class Settings(BaseSettings):
     LLM_RATE_LIMIT_PER_DAY: int = 500
 
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
-    
+
     OAUTH_ENABLED: bool = False
     OAUTH_JWKS_URI: Optional[str] = None
     OAUTH_ISSUER: Optional[str] = None
@@ -48,58 +49,56 @@ class Settings(BaseSettings):
     OAUTH_ALGORITHM: str = "RS256"
     OAUTH_AUDIENCE: Optional[str] = None
     OAUTH_REQUIRED_SCOPES: Union[str, List[str]] = []
-    
-    @field_validator('OAUTH_REQUIRED_SCOPES', mode='before', check_fields=False)
+
+    @field_validator("OAUTH_REQUIRED_SCOPES", mode="before", check_fields=False)
     @classmethod
     def parse_oauth_scopes(cls, v):
         if isinstance(v, str):
-            return [scope.strip() for scope in v.split(',') if scope.strip()]
+            return [scope.strip() for scope in v.split(",") if scope.strip()]
         elif isinstance(v, list):
             return v
         elif v is None:
             return []
         return v
+
     OAUTH_PUBLIC_KEY: Optional[str] = None
-    
+
     SENTRY_DSN: Optional[str] = None
     SENTRY_ENVIRONMENT: str = "production"
-    
-    @field_validator('SENTRY_DSN')
+
+    @field_validator("SENTRY_DSN")
     @classmethod
     def validate_sentry_dsn(cls, v):
         if v in (None, ""):
             return None
-        if not v.startswith('http'):
+        if not v.startswith("http"):
             raise ValueError(f"Le SENTRY_DSN configuré semble invalide (doit commencer par http/https): {v}")
         return v
-        
-    @model_validator(mode='after')
-    def validate_oauth_config(self) -> 'Settings':
+
+    @model_validator(mode="after")
+    def validate_oauth_config(self) -> "Settings":
         if self.OAUTH_ENABLED:
             if not self.OAUTH_JWKS_URI and not self.OAUTH_PUBLIC_KEY:
                 raise ValueError("OAUTH_ENABLED est true mais ni OAUTH_JWKS_URI ni OAUTH_PUBLIC_KEY n'est configuré.")
-            if self.OAUTH_JWKS_URI and not self.OAUTH_JWKS_URI.startswith('http'):
+            if self.OAUTH_JWKS_URI and not self.OAUTH_JWKS_URI.startswith("http"):
                 raise ValueError(f"OAUTH_JWKS_URI doit être une URL HTTP/HTTPS valide. Reçu: {self.OAUTH_JWKS_URI}")
             if not self.OAUTH_ISSUER:
                 raise ValueError("OAUTH_ISSUER est requis lorsque OAUTH_ENABLED est true.")
         return self
 
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "extra": "ignore"
-    }
-    
-    
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
     @property
     def llm_model(self) -> str:
         return self.LLM_MODEL
-    
+
     @property
     def llm_api_key(self) -> Optional[str]:
         return self.LLM_API_KEY
-        
+
+
 settings = Settings()
+
 
 def get_settings() -> Settings:
     return settings

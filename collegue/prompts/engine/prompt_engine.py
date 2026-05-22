@@ -1,6 +1,7 @@
 """
 Prompt Engine - Moteur de gestion des prompts personnalisés
 """
+
 import datetime
 import json
 import logging
@@ -42,7 +43,7 @@ class PromptEngine:
         categories_path = os.path.join(self.storage_path, "categories.json")
         if os.path.exists(categories_path):
             try:
-                with open(categories_path, 'r', encoding='utf-8') as f:
+                with open(categories_path, "r", encoding="utf-8") as f:
                     categories_data = json.load(f)
                     for cat_id, cat_data in categories_data.items():
                         self.library.categories[cat_id] = PromptCategory(**cat_data)
@@ -54,7 +55,7 @@ class PromptEngine:
 
         for file_path in Path(templates_dir).glob("*.json"):
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     template_data = json.load(f)
 
                     if "variables" in template_data:
@@ -73,7 +74,7 @@ class PromptEngine:
         categories_path = os.path.join(self.storage_path, "categories.json")
         try:
             categories_data = {cat_id: cat.model_dump() for cat_id, cat in self.library.categories.items()}
-            with open(categories_path, 'w', encoding='utf-8') as f:
+            with open(categories_path, "w", encoding="utf-8") as f:
                 json.dump(categories_data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Erreur lors de la sauvegarde des catégories: {str(e)}")
@@ -84,10 +85,15 @@ class PromptEngine:
         for template_id, template in self.library.templates.items():
             try:
                 file_path = os.path.join(templates_dir, f"{template_id}.json")
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_path, "w", encoding="utf-8") as f:
                     template_dict = template.model_dump()
-                    json.dump(template_dict, f, ensure_ascii=False, indent=2,
-                             default=lambda o: o.isoformat() if isinstance(o, datetime.datetime) else None)
+                    json.dump(
+                        template_dict,
+                        f,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=lambda o: o.isoformat() if isinstance(o, datetime.datetime) else None,
+                    )
             except Exception as e:
                 logger.error(f"Erreur lors de la sauvegarde du template {template_id}: {str(e)}")
 
@@ -105,15 +111,13 @@ class PromptEngine:
 
     def get_templates_by_tags(self, tags: List[str]) -> List[PromptTemplate]:
         """Récupère les templates qui ont tous les tags spécifiés."""
-        return [t for t in self.library.templates.values()
-                if all(tag in t.tags for tag in tags)]
+        return [t for t in self.library.templates.values() if all(tag in t.tags for tag in tags)]
 
     def create_template(self, template_data: Dict[str, Any]) -> PromptTemplate:
         """Crée un nouveau template de prompt."""
         if "variables" in template_data:
             template_data["variables"] = [
-                PromptVariable(**var) if isinstance(var, dict) else var
-                for var in template_data["variables"]
+                PromptVariable(**var) if isinstance(var, dict) else var for var in template_data["variables"]
             ]
 
         template = PromptTemplate(**template_data)
@@ -170,8 +174,9 @@ class PromptEngine:
         """Récupère une catégorie par son ID."""
         return self.library.categories.get(category_id)
 
-    def format_prompt(self, template_id: str, variables: Dict[str, Any],
-                     provider: Optional[str] = None) -> Optional[str]:
+    def format_prompt(
+        self, template_id: str, variables: Dict[str, Any], provider: Optional[str] = None
+    ) -> Optional[str]:
         """Formate un template avec les variables fournies."""
         template = self.get_template(template_id)
         if not template:
@@ -200,7 +205,7 @@ class PromptEngine:
                 variables=variables,
                 provider=provider,
                 formatted_prompt=formatted,
-                execution_time=0.0
+                execution_time=0.0,
             )
             self.library.history.append(execution)
 
@@ -216,8 +221,7 @@ class PromptEngine:
         """Récupère l'historique des exécutions de prompts."""
         return self.library.history[-limit:] if self.library.history else []
 
-    def record_execution_result(self, execution_id: str, result: str,
-                               execution_time: float) -> bool:
+    def record_execution_result(self, execution_id: str, result: str, execution_time: float) -> bool:
         for execution in self.library.history:
             if execution.id == execution_id:
                 execution.result = result

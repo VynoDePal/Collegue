@@ -1,4 +1,5 @@
 """Module with unused imports and dead code for repo_consistency_check testing."""
+
 import json  # unused
 import os  # unused
 from collections import OrderedDict  # unused

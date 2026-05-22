@@ -4,6 +4,7 @@ Gestionnaire de mémoire pour Collègue.
 Fournit des utilitaires pour surveiller et nettoyer la mémoire,
 prévenant les fuites sur les sessions longues.
 """
+
 import gc
 import logging
 import threading
@@ -20,6 +21,7 @@ _memory_manager_lock = threading.Lock()
 @dataclass
 class MemoryStats:
     """Statistiques de mémoire."""
+
     tracked_objects: int = 0
     cleaned_objects: int = 0
     peak_memory_mb: float = 0.0
@@ -45,7 +47,7 @@ class MemoryManager:
         self._stats = MemoryStats()
         self._logger = logging.getLogger(__name__)
         self._lock = threading.RLock()
-    
+
     def track_object(self, obj_id: str, obj: Any) -> None:
         """
         Suit un objet avec une référence faible.
@@ -97,7 +99,7 @@ class MemoryManager:
             if obj_id in self._tracked_objects:
                 del self._tracked_objects[obj_id]
                 self._stats.tracked_objects = len(self._tracked_objects)
-    
+
     def register_cleanup_callback(self, callback: Callable) -> None:
         """
         Enregistre une fonction de nettoyage à appeler périodiquement.
@@ -108,7 +110,7 @@ class MemoryManager:
         """
         with self._lock:
             self._cleanup_callbacks.append(callback)
-    
+
     def cleanup(self, force: bool = False) -> int:
         """
         Déclenche le nettoyage de la mémoire.
@@ -132,10 +134,7 @@ class MemoryManager:
                 gc.collect()
 
             # Nettoyer les références faibles mortes
-            dead_refs = [
-                obj_id for obj_id, ref in list(self._tracked_objects.items())
-                if ref() is None
-            ]
+            dead_refs = [obj_id for obj_id, ref in list(self._tracked_objects.items()) if ref() is None]
             for obj_id in dead_refs:
                 del self._tracked_objects[obj_id]
 
@@ -147,20 +146,20 @@ class MemoryManager:
                 self._logger.info(f"Memory cleanup: {cleaned} objects cleaned")
 
             return cleaned
-    
+
     def get_stats(self) -> MemoryStats:
         """Retourne les statistiques de mémoire."""
         return self._stats
-    
+
     @staticmethod
     def limit_collection_size(collection: deque, max_size: int) -> int:
         """
         Limite la taille d'une collection (deque, list, etc.).
-        
+
         Args:
             collection: Collection à limiter
             max_size: Taille maximale
-        
+
         Returns:
             Nombre d'éléments supprimés
         """
@@ -183,34 +182,34 @@ class MemoryManager:
 class LimitedSizeHistory:
     """
     Historique avec taille limitée.
-    
+
     Supprime automatiquement les anciens éléments quand la limite est atteinte.
     """
-    
+
     def __init__(self, max_size: int = 100, name: str = "history"):
         self.max_size = max_size
         self.name = name
         self._deque: deque = deque(maxlen=max_size)
         self._logger = logging.getLogger(f"{__name__}.{name}")
-    
+
     def append(self, item: Any) -> None:
         """Ajoute un élément, supprime automatiquement le plus ancien si nécessaire."""
         if len(self._deque) >= self.max_size:
             self._logger.debug(f"History {self.name} full, removing oldest item")
         self._deque.append(item)
-    
+
     def get_all(self) -> List[Any]:
         """Retourne tous les éléments sous forme de liste."""
         return list(self._deque)
-    
+
     def clear(self) -> None:
         """Vide l'historique."""
         self._deque.clear()
         self._logger.info(f"History {self.name} cleared")
-    
+
     def __len__(self) -> int:
         return len(self._deque)
-    
+
     def __iter__(self):
         return iter(self._deque)
 
@@ -232,7 +231,7 @@ class TTLCache:
         self._timestamps: Dict[str, float] = {}
         self._logger = logging.getLogger(f"{__name__}.{name}")
         self._lock = threading.RLock()
-    
+
     def _is_expired(self, key: str) -> bool:
         """Vérifie si une entrée est expirée (utilise time.monotonic pour robustesse)."""
         if key not in self._timestamps:
@@ -242,10 +241,7 @@ class TTLCache:
     def _cleanup_expired(self) -> int:
         """Nettoie les entrées expirées."""
         with self._lock:
-            expired_keys = [
-                key for key in list(self._cache.keys())
-                if self._is_expired(key)
-            ]
+            expired_keys = [key for key in list(self._cache.keys()) if self._is_expired(key)]
             for key in expired_keys:
                 del self._cache[key]
                 del self._timestamps[key]
@@ -296,7 +292,7 @@ class TTLCache:
             self._cache.clear()
             self._timestamps.clear()
             self._logger.info(f"Cache {self.name} cleared")
-    
+
     def items(self) -> Iterator[Tuple[str, Any]]:
         """Retourne un itérateur sur les paires (clé, valeur) non expirées."""
         with self._lock:
@@ -358,11 +354,11 @@ def get_memory_manager() -> MemoryManager:
 def cleanup_all() -> int:
     """
     Nettoie toute la mémoire (fonction utilitaire globale).
-    
+
     Returns:
         Nombre total d'objets nettoyés
     """
     manager = get_memory_manager()
     cleaned = manager.cleanup(force=True)
-    
+
     return cleaned

@@ -22,6 +22,7 @@ Shorter run for CI / demo:
 
     python tests/stress/run_soak.py --duration 120 --sample-sec 15
 """
+
 from __future__ import annotations
 
 import argparse
@@ -80,9 +81,10 @@ def _docker_stats() -> tuple[float, float, str]:
     """
     try:
         out = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format",
-             "{{.MemUsage}} | {{.CPUPerc}}", CONTAINER],
-            capture_output=True, text=True, timeout=10,
+            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}} | {{.CPUPerc}}", CONTAINER],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         raw = out.stdout.strip()
         if not raw:
@@ -106,7 +108,7 @@ def _to_mib(mem: str) -> float:
         else:
             break
     value = float(n) if n else 0.0
-    unit = mem[len(n):].lower()
+    unit = mem[len(n) :].lower()
     if unit.startswith("g"):
         return value * 1024
     if unit.startswith("k"):
@@ -115,26 +117,34 @@ def _to_mib(mem: str) -> float:
 
 
 async def _initialize(client: httpx.AsyncClient) -> str:
-    r = await client.post(MCP_URL, headers=HEADERS, json={
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "soak-probe", "version": "1"},
+    r = await client.post(
+        MCP_URL,
+        headers=HEADERS,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "soak-probe", "version": "1"},
+            },
         },
-    })
+    )
     sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id") or ""
     headers = dict(HEADERS)
     if sid:
         headers["Mcp-Session-Id"] = sid
     try:
-        await client.post(MCP_URL, headers=headers, json={
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {},
-        })
+        await client.post(
+            MCP_URL,
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            },
+        )
     except Exception:
         pass
     return sid
@@ -145,12 +155,17 @@ async def _call(client: httpx.AsyncClient, sid: str) -> bool:
     if sid:
         headers["Mcp-Session-Id"] = sid
     try:
-        r = await client.post(MCP_URL, headers=headers, json={
-            "jsonrpc": "2.0",
-            "id": int(time.time() * 1000) & 0xFFFFFFFF,
-            "method": "tools/call",
-            "params": {"name": TOOL_NAME, "arguments": {"request": PAYLOAD}},
-        }, timeout=30.0)
+        r = await client.post(
+            MCP_URL,
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": int(time.time() * 1000) & 0xFFFFFFFF,
+                "method": "tools/call",
+                "params": {"name": TOOL_NAME, "arguments": {"request": PAYLOAD}},
+            },
+            timeout=30.0,
+        )
         body = _parse_body(r) or {}
         inner = (body.get("result") or {}) if isinstance(body, dict) else {}
         return not inner.get("isError") and r.status_code == 200
@@ -158,8 +173,7 @@ async def _call(client: httpx.AsyncClient, sid: str) -> bool:
         return False
 
 
-async def soak(duration_sec: int, interval_sec: float,
-               sample_sec: float) -> tuple[list[Sample], dict]:
+async def soak(duration_sec: int, interval_sec: float, sample_sec: float) -> tuple[list[Sample], dict]:
     samples: list[Sample] = []
     requests = 0
     errors = 0
@@ -191,8 +205,7 @@ async def soak(duration_sec: int, interval_sec: float,
             if elapsed - samples[-1].t_sec >= sample_sec:
                 mem, cpu, raw = _docker_stats()
                 samples.append(Sample(elapsed, requests, mem, cpu, raw))
-                print(f"[ t={elapsed:>5.0f}s  req={requests:>4}  "
-                      f"mem={mem:>7.1f} MiB  cpu={cpu:>5.1f}%  err={errors} ]")
+                print(f"[ t={elapsed:>5.0f}s  req={requests:>4}  mem={mem:>7.1f} MiB  cpu={cpu:>5.1f}%  err={errors} ]")
 
             # Pace: wait until the next tick
             await asyncio.sleep(max(0.0, interval_sec - (time.perf_counter() - now)))
@@ -201,8 +214,7 @@ async def soak(duration_sec: int, interval_sec: float,
         mem, cpu, raw = _docker_stats()
         t = time.perf_counter() - start
         samples.append(Sample(t, requests, mem, cpu, raw))
-        print(f"[ t={t:>5.0f}s  req={requests:>4}  mem={mem:>7.1f} MiB  "
-              f"cpu={cpu:>5.1f}%  err={errors}  FIN ]")
+        print(f"[ t={t:>5.0f}s  req={requests:>4}  mem={mem:>7.1f} MiB  cpu={cpu:>5.1f}%  err={errors}  FIN ]")
 
     summary = _summarize(samples, requests, errors)
     return samples, summary
@@ -211,8 +223,7 @@ async def soak(duration_sec: int, interval_sec: float,
 def _summarize(samples: list[Sample], requests: int, errors: int) -> dict:
     mems = [s.memory_mib for s in samples if s.memory_mib > 0]
     if not mems:
-        return {"requests": requests, "errors": errors, "mem_stable": False,
-                "note": "no memory samples"}
+        return {"requests": requests, "errors": errors, "mem_stable": False, "note": "no memory samples"}
     mem_min, mem_max = min(mems), max(mems)
     mem_mean = sum(mems) / len(mems)
     drift_pct = 100.0 * (mem_max - mem_min) / max(mem_min, 0.001)
@@ -236,15 +247,13 @@ def render_report(summary: dict, samples: list[Sample]) -> str:
     lines = [f"# Memory soak — issue #207\n"]
     lines.append(f"Tool probed: `{TOOL_NAME}` (constant, paced).")
     lines.append(f"Total duration: `{summary.get('duration_sec', 0)} s`.")
-    lines.append(f"Requests sent: `{summary.get('requests', 0)}` "
-                  f"(errors: `{summary.get('errors', 0)}`).\n")
+    lines.append(f"Requests sent: `{summary.get('requests', 0)}` (errors: `{summary.get('errors', 0)}`).\n")
 
     lines.append("## Memory envelope")
     lines.append(f"- min: **{summary.get('mem_min_mib', 0)} MiB**")
     lines.append(f"- max: **{summary.get('mem_max_mib', 0)} MiB**")
     lines.append(f"- mean: **{summary.get('mem_mean_mib', 0)} MiB**")
-    lines.append(f"- drift: **{summary.get('mem_drift_pct', 0)} %** "
-                  f"(max-min / min)")
+    lines.append(f"- drift: **{summary.get('mem_drift_pct', 0)} %** (max-min / min)")
     verdict = "✅" if summary.get("mem_stable_within_15pct") else "⚠️"
     lines.append(f"- stabilité (±15 %): **{verdict}**\n")
 
@@ -252,39 +261,46 @@ def render_report(summary: dict, samples: list[Sample]) -> str:
     lines.append("| t (s) | req | mem (MiB) | cpu (%) |")
     lines.append("|---:|---:|---:|---:|")
     for s in samples:
-        lines.append(f"| {s.t_sec:.0f} | {s.requests_so_far} | "
-                      f"{s.memory_mib:.1f} | {s.cpu_pct:.1f} |")
+        lines.append(f"| {s.t_sec:.0f} | {s.requests_so_far} | {s.memory_mib:.1f} | {s.cpu_pct:.1f} |")
     return "\n".join(lines)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--duration", type=int, default=120,
-                    help="Soak duration in seconds (default 120, issue target 1800)")
-    ap.add_argument("--interval-sec", type=float, default=1.0,
-                    help="Seconds between MCP requests (default 1 s, well under 10 req/s cap)")
-    ap.add_argument("--sample-sec", type=float, default=15.0,
-                    help="Seconds between docker stats samples (default 15)")
+    ap.add_argument(
+        "--duration", type=int, default=120, help="Soak duration in seconds (default 120, issue target 1800)"
+    )
+    ap.add_argument(
+        "--interval-sec",
+        type=float,
+        default=1.0,
+        help="Seconds between MCP requests (default 1 s, well under 10 req/s cap)",
+    )
+    ap.add_argument("--sample-sec", type=float, default=15.0, help="Seconds between docker stats samples (default 15)")
     ap.add_argument("--out", default="tests/stress/reports/concurrency")
     args = ap.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    print(f"# soak — duration={args.duration}s  interval={args.interval_sec}s "
-          f"sample={args.sample_sec}s")
+    print(f"# soak — duration={args.duration}s  interval={args.interval_sec}s sample={args.sample_sec}s")
     samples, summary = asyncio.run(soak(args.duration, args.interval_sec, args.sample_sec))
 
     (out / "soak.md").write_text(render_report(summary, samples))
-    (out / "soak.json").write_text(json.dumps({
-        "summary": summary,
-        "samples": [asdict(s) for s in samples],
-    }, ensure_ascii=False, indent=2))
+    (out / "soak.json").write_text(
+        json.dumps(
+            {
+                "summary": summary,
+                "samples": [asdict(s) for s in samples],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
-    print(f"\n  mem min/max/drift: {summary['mem_min_mib']} / "
-          f"{summary['mem_max_mib']} / {summary['mem_drift_pct']} %")
+    print(f"\n  mem min/max/drift: {summary['mem_min_mib']} / {summary['mem_max_mib']} / {summary['mem_drift_pct']} %")
     print(f"  verdict: {'STABLE' if summary.get('mem_stable_within_15pct') else 'UNSTABLE'}")
-    print(f"  ✔ report: {out/'soak.md'}")
+    print(f"  ✔ report: {out / 'soak.md'}")
     return 0 if summary.get("mem_stable_within_15pct") else 1
 
 

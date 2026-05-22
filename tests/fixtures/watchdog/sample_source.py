@@ -4,6 +4,7 @@ Kept as valid Python so `ast.parse()` can parse both original and patched
 versions — the intentional bugs are runtime, not syntactic. Each function
 is small enough that the Watchdog's 50%-reduction guard is meaningful.
 """
+
 from typing import Optional
 
 

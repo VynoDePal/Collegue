@@ -13,6 +13,7 @@ This suite enforces two contracts:
   2. The EnhancedPromptEngine can resolve that template end-to-end through
      ``get_optimized_prompt(tool_name=f"refactoring_{subtype}", ...)``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,15 +37,9 @@ def test_refactoring_subtype_has_template_directory(subtype: str):
     """Each declared subtype (rename, extract, simplify, clean, optimize,
     modernize) needs its own template subdirectory with at least one YAML."""
     tool_dir = TEMPLATES_DIR / f"refactoring_{subtype}"
-    assert tool_dir.is_dir(), (
-        f"Missing template directory: {tool_dir}. "
-        f"Create {tool_dir}/default.yaml"
-    )
+    assert tool_dir.is_dir(), f"Missing template directory: {tool_dir}. Create {tool_dir}/default.yaml"
     yamls = list(tool_dir.glob("*.yaml"))
-    assert yamls, (
-        f"No YAML templates in {tool_dir}. Expected at least "
-        f"refactoring_{subtype}/default.yaml"
-    )
+    assert yamls, f"No YAML templates in {tool_dir}. Expected at least refactoring_{subtype}/default.yaml"
 
 
 @pytest.mark.parametrize("subtype", _supported_subtypes())
@@ -71,8 +66,7 @@ def test_prompt_engine_resolves_refactoring_subtype(subtype: str):
     # prompt, confirming the template is subtype-specific rather than the
     # generic fallback.
     assert subtype in prompt.lower() or subtype[:5] in prompt.lower(), (
-        f"Prompt for {tool_name} does not mention the subtype: "
-        f"{prompt[:200]!r}"
+        f"Prompt for {tool_name} does not mention the subtype: {prompt[:200]!r}"
     )
     assert version, "Version id missing"
 

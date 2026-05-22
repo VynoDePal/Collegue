@@ -40,32 +40,29 @@ async def test_test_generation_success():
 
     mock_ctx.sample.assert_called_once()
 
+
 @pytest.mark.asyncio
 async def test_test_generation_fallback_text():
     # Test fallback to text when structured output fails or is disabled
     tool = TestGenerationTool()
-    
+
     mock_ctx = MagicMock()
     mock_ctx.info = AsyncMock()
     mock_ctx.report_progress = AsyncMock()
     mock_ctx.sample = AsyncMock()
-    
+
     # Mock text result
     mock_text_result = MagicMock()
     mock_text_result.text = "def test_sub(): assert 3-1==2"
-    
-    # sample will be called twice if the first structured attempt fails, 
+
+    # sample will be called twice if the first structured attempt fails,
     # OR once if use_structured_output is False.
     # Let's simulate use_structured_output=False for simplicity or just mock the text return
     mock_ctx.sample.return_value = mock_text_result
-    
-    request = TestGenerationRequest(
-        code="def sub(a,b): return a-b",
-        language="python",
-        test_framework="pytest"
-    )
-    
+
+    request = TestGenerationRequest(code="def sub(a,b): return a-b", language="python", test_framework="pytest")
+
     # Force disable structured output to test text path
     response = await tool.execute_async(request, ctx=mock_ctx, use_structured_output=False)
-    
+
     assert response.test_code == "def test_sub(): assert 3-1==2"

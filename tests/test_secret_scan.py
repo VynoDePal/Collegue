@@ -1,6 +1,7 @@
 """
 Tests unitaires pour l'outil Secret Scan refactorisé.
 """
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -94,12 +95,36 @@ class TestSecretDetectionEngine:
     def test_deduplicate_findings(self, engine):
         """Test la déduplication des findings."""
         findings = [
-            SecretFinding(type="aws", severity="high", file="f.py", line=1, column=0,
-                         match="AKIA...", rule="AWS", recommendation="Fix"),
-            SecretFinding(type="aws", severity="high", file="f.py", line=1, column=0,
-                         match="AKIA...", rule="AWS", recommendation="Fix"),
-            SecretFinding(type="github", severity="high", file="f.py", line=2, column=0,
-                         match="ghp...", rule="GitHub", recommendation="Fix"),
+            SecretFinding(
+                type="aws",
+                severity="high",
+                file="f.py",
+                line=1,
+                column=0,
+                match="AKIA...",
+                rule="AWS",
+                recommendation="Fix",
+            ),
+            SecretFinding(
+                type="aws",
+                severity="high",
+                file="f.py",
+                line=1,
+                column=0,
+                match="AKIA...",
+                rule="AWS",
+                recommendation="Fix",
+            ),
+            SecretFinding(
+                type="github",
+                severity="high",
+                file="f.py",
+                line=2,
+                column=0,
+                match="ghp...",
+                rule="GitHub",
+                recommendation="Fix",
+            ),
         ]
         deduped = engine.deduplicate_findings(findings)
         assert len(deduped) == 2
@@ -126,38 +151,33 @@ class TestSecretScanTool:
     def test_scan_batch_files(self, tool):
         """Test le scan batch de fichiers."""
         from collegue.tools.secret_scan.models import SecretScanFile
+
         # Clé AWS valide (20 caractères après AKIA)
         files = [
             SecretScanFile(path="config.py", content="api_key = 'AKIAIOSFODNN7EXAMPLE'"),
-            SecretScanFile(path="clean.py", content="print('hello')")
+            SecretScanFile(path="clean.py", content="print('hello')"),
         ]
         request = SecretScanRequest(files=files, severity_threshold="low")
         response = tool._execute_core_logic(request)
-        
+
         assert response.files_scanned == 2
         assert response.total_findings >= 1  # Au moins la clé AWS
         assert "config.py" in response.files_with_secrets
 
     def test_scan_content_direct(self, tool):
         """Test le scan de contenu direct."""
-        request = SecretScanRequest(
-            content="aws_secret = 'AKIAIOSFODNN7EXAMPLE'",
-            scan_type="content"
-        )
+        request = SecretScanRequest(content="aws_secret = 'AKIAIOSFODNN7EXAMPLE'", scan_type="content")
         response = tool._execute_core_logic(request)
-        
+
         assert response.files_scanned == 1
         assert response.total_findings >= 1
         assert response.clean is False
 
     def test_scan_no_secrets(self, tool):
         """Test le scan sans secrets."""
-        request = SecretScanRequest(
-            content="print('Hello World')",
-            scan_type="content"
-        )
+        request = SecretScanRequest(content="print('Hello World')", scan_type="content")
         response = tool._execute_core_logic(request)
-        
+
         assert response.clean is True
         assert response.total_findings == 0
 
@@ -167,10 +187,10 @@ class TestSecretScanTool:
         request = SecretScanRequest(
             content="password = 'mysecret123'",
             scan_type="content",
-            severity_threshold="critical"  # Seulement critical
+            severity_threshold="critical",  # Seulement critical
         )
         response = tool._execute_core_logic(request)
-        
+
         # Ne devrait pas détecter car password est medium
         assert response.total_findings == 0
 
@@ -188,7 +208,7 @@ class TestSecretFinding:
             column=15,
             match="AKIA****EXAMPLE",
             rule="Clé d'accès AWS",
-            recommendation="Utilisez AWS Secrets Manager"
+            recommendation="Utilisez AWS Secrets Manager",
         )
         assert finding.type == "aws_access_key"
         assert finding.severity == "critical"

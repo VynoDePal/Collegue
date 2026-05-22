@@ -1,6 +1,7 @@
 """
 Tests unitaires pour les ressources Python
 """
+
 import os
 import sys
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from collegue.resources.python.best_practices import PythonBestPractice, get_all_best_practices, get_best_practice
 from collegue.resources.python.frameworks import PythonFrameworkReference, get_all_frameworks, get_framework_reference
@@ -34,6 +35,7 @@ class TestPythonStandardLibrary(unittest.TestCase):
         self.assertIn("os", modules)
         self.assertIn("sys", modules)
 
+
 class TestPythonFrameworks(unittest.TestCase):
     """Tests pour le module frameworks des ressources Python."""
 
@@ -51,6 +53,7 @@ class TestPythonFrameworks(unittest.TestCase):
         self.assertGreater(len(frameworks), 0)
         self.assertIn("django", frameworks)
         self.assertIn("flask", frameworks)
+
 
 class TestPythonBestPractices(unittest.TestCase):
     """Tests pour le module best_practices des ressources Python."""
@@ -70,6 +73,7 @@ class TestPythonBestPractices(unittest.TestCase):
         self.assertIn("pep8", practices)
         self.assertIn("docstrings", practices)
 
+
 @unittest.skip("Endpoints FastAPI legacy supprimés (resources via FastMCP)")
 class TestPythonResourcesEndpoints(unittest.TestCase):
     """Tests pour les endpoints FastAPI des ressources Python."""
@@ -78,7 +82,6 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         """Configuration avant chaque test."""
         self.app = FastAPI()
         self.app_state = {"resource_manager": MagicMock()}
-
 
         from collegue.resources.python.best_practices import register_best_practices
         from collegue.resources.python.frameworks import register_frameworks
@@ -132,5 +135,6 @@ class TestPythonResourcesEndpoints(unittest.TestCase):
         data = response.json()
         self.assertEqual(data["title"], "Suivre PEP 8")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ PostgreSQL client for database operations.
 
 Provides read-only access to PostgreSQL databases with safe query execution.
 """
+
 import os
 from typing import Optional
 
@@ -11,7 +12,6 @@ from .base import APIError, APIResponse
 
 
 class PostgresClient:
-
     def __init__(
         self,
         connection_string: Optional[str] = None,
@@ -20,22 +20,20 @@ class PostgresClient:
         database: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
-        schema: str = "public"
+        schema: str = "public",
     ):
         if connection_string:
             self.connection_string = connection_string
         else:
             conn_str = resolve_postgres_url(
                 None,
-                'x-postgres-url',
-                'x-collegue-postgres-url',
+                "x-postgres-url",
+                "x-collegue-postgres-url",
             )
             if conn_str:
                 self.connection_string = conn_str
             else:
-                self.connection_string = self._build_connection_string(
-                    host, port, database, username, password
-                )
+                self.connection_string = self._build_connection_string(host, port, database, username, password)
 
         self.schema = schema
         self._connection = None
@@ -43,34 +41,32 @@ class PostgresClient:
 
         try:
             import psycopg2  # noqa: F401
-            self._driver = 'psycopg2'
+
+            self._driver = "psycopg2"
         except ImportError:
             try:
                 import asyncpg  # noqa: F401
-                self._driver = 'asyncpg'
+
+                self._driver = "asyncpg"
             except ImportError:
                 self._driver = None
 
     def _build_connection_string(
-        self,
-        host: Optional[str],
-        port: int,
-        database: Optional[str],
-        username: Optional[str],
-        password: Optional[str]
+        self, host: Optional[str], port: int, database: Optional[str], username: Optional[str], password: Optional[str]
     ) -> str:
-        host = host or os.environ.get('POSTGRES_HOST', 'localhost')
-        database = database or os.environ.get('POSTGRES_DB', 'postgres')
-        username = username or os.environ.get('POSTGRES_USER', 'postgres')
-        password = password or os.environ.get('POSTGRES_PASSWORD', '')
+        host = host or os.environ.get("POSTGRES_HOST", "localhost")
+        database = database or os.environ.get("POSTGRES_DB", "postgres")
+        username = username or os.environ.get("POSTGRES_USER", "postgres")
+        password = password or os.environ.get("POSTGRES_PASSWORD", "")
 
         if password:
             return f"postgresql://{username}:{password}@{host}:{port}/{database}"
         return f"postgresql://{username}@{host}:{port}/{database}"
 
     def _get_connection(self):
-        if self._driver == 'psycopg2':
+        if self._driver == "psycopg2":
             import psycopg2  # noqa: F401
+
             return psycopg2.connect(self.connection_string)
         else:
             raise APIError("No PostgreSQL driver available. Install psycopg2 or asyncpg.")
@@ -100,11 +96,7 @@ class PostgresClient:
         """
         return self._execute_query(query, (schema,))
 
-    def describe_table(
-        self,
-        table_name: str,
-        schema_name: Optional[str] = None
-    ) -> APIResponse:
+    def describe_table(self, table_name: str, schema_name: Optional[str] = None) -> APIResponse:
         schema = schema_name or self.schema
 
         query = """
@@ -151,11 +143,7 @@ class PostgresClient:
         """
         return self._execute_query(query, (schema, table_name))
 
-    def get_foreign_keys(
-        self,
-        table_name: str,
-        schema_name: Optional[str] = None
-    ) -> APIResponse:
+    def get_foreign_keys(self, table_name: str, schema_name: Optional[str] = None) -> APIResponse:
         schema = schema_name or self.schema
 
         query = """
@@ -195,52 +183,31 @@ class PostgresClient:
         """
         return self._execute_query(query, (schema, table_name))
 
-    def sample_data(
-        self,
-        table_name: str,
-        schema_name: Optional[str] = None,
-        limit: int = 100
-    ) -> APIResponse:
+    def sample_data(self, table_name: str, schema_name: Optional[str] = None, limit: int = 100) -> APIResponse:
         schema = schema_name or self.schema
 
         if not self._is_valid_identifier(table_name):
-            return APIResponse(
-                success=False,
-                error_message=f"Invalid table name: {table_name}"
-            )
+            return APIResponse(success=False, error_message=f"Invalid table name: {table_name}")
 
         if not self._is_valid_identifier(schema):
-            return APIResponse(
-                success=False,
-                error_message=f"Invalid schema name: {schema}"
-            )
+            return APIResponse(success=False, error_message=f"Invalid schema name: {schema}")
 
         query = f'SELECT * FROM "{schema}"."{table_name}" LIMIT %s'
         return self._execute_query(query, (limit,))
 
     def execute_query(self, query: str, limit: int = 1000) -> APIResponse:
         normalized = query.strip().upper()
-        if not normalized.startswith('SELECT'):
-            return APIResponse(
-                success=False,
-                error_message="Only SELECT queries are allowed for safety"
-            )
+        if not normalized.startswith("SELECT"):
+            return APIResponse(success=False, error_message="Only SELECT queries are allowed for safety")
 
-        if 'LIMIT' not in normalized:
-            query = query.rstrip(';') + f' LIMIT {limit}'
+        if "LIMIT" not in normalized:
+            query = query.rstrip(";") + f" LIMIT {limit}"
 
         return self._execute_query(query)
 
-    def _execute_query(
-        self,
-        query: str,
-        params: Optional[tuple] = None
-    ) -> APIResponse:
+    def _execute_query(self, query: str, params: Optional[tuple] = None) -> APIResponse:
         if self._driver is None:
-            return APIResponse(
-                success=False,
-                error_message="No PostgreSQL driver available. Install psycopg2."
-            )
+            return APIResponse(success=False, error_message="No PostgreSQL driver available. Install psycopg2.")
 
         try:
             conn = self._get_connection()
@@ -255,20 +222,14 @@ class PostgresClient:
                     else:
                         data = []
 
-                    return APIResponse(
-                        success=True,
-                        data=data,
-                        status_code=200
-                    )
+                    return APIResponse(success=True, data=data, status_code=200)
             finally:
                 conn.close()
 
         except Exception as e:
-            return APIResponse(
-                success=False,
-                error_message=str(e)
-            )
+            return APIResponse(success=False, error_message=str(e))
 
     def _is_valid_identifier(self, name: str) -> bool:
         import re
-        return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name))
+
+        return bool(re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", name))

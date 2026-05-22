@@ -7,6 +7,7 @@ invariant: selection is stable across calls and across theoretical
 `ab_testing_enabled` toggles (which no longer exist, but historical
 fixture setups might still touch the attribute).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -83,13 +84,8 @@ def test_selection_is_deterministic_across_calls(isolated_engine):
     _add_clone_versions(engine, template_id, "Hello {code}", n=9)
     assert len(engine.version_manager.get_all_versions(template_id)) >= 10
 
-    chosen_ids = {
-        engine._select_version(template_id).id
-        for _ in range(100)
-    }
-    assert len(chosen_ids) == 1, (
-        f"Expected selection to be deterministic; got {len(chosen_ids)} distinct picks"
-    )
+    chosen_ids = {engine._select_version(template_id).id for _ in range(100)}
+    assert len(chosen_ids) == 1, f"Expected selection to be deterministic; got {len(chosen_ids)} distinct picks"
 
 
 def test_selection_deterministic_even_with_distinct_variants(isolated_engine):
@@ -110,13 +106,9 @@ def test_selection_deterministic_even_with_distinct_variants(isolated_engine):
         version="2.0.0",
     )
 
-    contents_seen = {
-        engine._select_version(template_id).content
-        for _ in range(50)
-    }
+    contents_seen = {engine._select_version(template_id).content for _ in range(50)}
     assert len(contents_seen) == 1, (
-        f"Expected exactly one variant to be returned across 50 calls "
-        f"(bandit removed under #240); saw {contents_seen}"
+        f"Expected exactly one variant to be returned across 50 calls (bandit removed under #240); saw {contents_seen}"
     )
 
 
@@ -126,6 +118,7 @@ def test_startup_log_reports_templates_count(isolated_engine, caplog):
     _write_yaml_seed(isolated_engine["yaml_root"], "toolB", "default", "World {code}")
 
     import logging
+
     with caplog.at_level(logging.INFO):
         isolated_engine["factory"]()
 
