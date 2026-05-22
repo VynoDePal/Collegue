@@ -1,6 +1,7 @@
 """
 Code Parser - Analyse syntaxique du code pour différents langages
 """
+
 import ast
 import re
 from typing import Any, Dict, List
@@ -45,7 +46,7 @@ class CodeParser:
             php_score += 3
         if "->" in code or "::" in code:
             php_score += 2
-        
+
         # ... existing python detection ...
         if "def " in code:
             python_score += 2
@@ -94,13 +95,8 @@ class CodeParser:
 
         ts_score += js_score // 2
 
-        scores = {
-            "python": python_score,
-            "javascript": js_score,
-            "typescript": ts_score,
-            "php": php_score
-        }
-        
+        scores = {"python": python_score, "javascript": js_score, "typescript": ts_score, "php": php_score}
+
         max_lang = max(scores, key=scores.get)
         if scores[max_lang] > 0:
             return max_lang
@@ -132,10 +128,9 @@ class CodeParser:
                 "classes": classes,
                 "variables": variables,
                 "raw": code,
-                "ast_valid": True
+                "ast_valid": True,
             }
         except SyntaxError:
-
             return {
                 "language": "python",
                 "imports": self._extract_python_imports(code),
@@ -144,7 +139,7 @@ class CodeParser:
                 "variables": [],
                 "raw": code,
                 "ast_valid": False,
-                "error": "Erreur de syntaxe dans le code Python"
+                "error": "Erreur de syntaxe dans le code Python",
             }
 
     def _extract_python_imports(self, code: str) -> List[Dict[str, Any]]:
@@ -152,19 +147,12 @@ class CodeParser:
         for i, line in enumerate(code.split("\n")):
             line = line.strip()
             if line.startswith("import "):
-                imports.append({
-                    "type": "import",
-                    "name": line[7:].strip(),
-                    "line": i + 1
-                })
+                imports.append({"type": "import", "name": line[7:].strip(), "line": i + 1})
             elif line.startswith("from ") and " import " in line:
                 parts = line.split(" import ")
-                imports.append({
-                    "type": "from_import",
-                    "module": parts[0][5:].strip(),
-                    "name": parts[1].strip(),
-                    "line": i + 1
-                })
+                imports.append(
+                    {"type": "from_import", "module": parts[0][5:].strip(), "name": parts[1].strip(), "line": i + 1}
+                )
         return imports
 
     def _extract_python_functions(self, code: str) -> List[Dict[str, Any]]:
@@ -174,11 +162,7 @@ class CodeParser:
             line = line.strip()
             if line.startswith("def "):
                 name = line.split("def ")[1].split("(")[0].strip()
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line
-                })
+                functions.append({"name": name, "line": i + 1, "signature": line})
         return functions
 
     def _extract_python_classes(self, code: str) -> List[Dict[str, Any]]:
@@ -188,11 +172,7 @@ class CodeParser:
             line = line.strip()
             if line.startswith("class "):
                 name = line.split("class ")[1].split("(")[0].split(":")[0].strip()
-                classes.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line
-                })
+                classes.append({"name": name, "line": i + 1, "signature": line})
         return classes
 
     def _parse_php(self, code: str) -> Dict[str, Any]:
@@ -209,7 +189,7 @@ class CodeParser:
                 "classes": classes,
                 "variables": variables,
                 "raw": code,
-                "syntax_valid": True
+                "syntax_valid": True,
             }
         except Exception as e:
             return {
@@ -220,39 +200,33 @@ class CodeParser:
                 "variables": [],
                 "raw": code,
                 "syntax_valid": False,
-                "error": f"Erreur lors de l'analyse du code PHP: {str(e)}"
+                "error": f"Erreur lors de l'analyse du code PHP: {str(e)}",
             }
 
     def _extract_php_imports(self, code: str) -> List[Dict[str, Any]]:
         imports = []
         lines = code.split("\n")
-        
+
         # Pattern pour les imports PHP: use Namespace\Class; ou use Namespace\Class as Alias;
         import_pattern = r"^use\s+([a-zA-Z0-9_\\]+)(?:\s+as\s+([a-zA-Z0-9_]+))?\s*;"
-        
+
         for i, line in enumerate(lines):
             line = line.strip()
             match = re.search(import_pattern, line)
             if match:
                 name = match.group(1)
                 alias = match.group(2)
-                imports.append({
-                    "type": "use",
-                    "name": name,
-                    "alias": alias,
-                    "line": i + 1,
-                    "statement": line
-                })
+                imports.append({"type": "use", "name": name, "alias": alias, "line": i + 1, "statement": line})
         return imports
 
     def _extract_php_functions(self, code: str) -> List[Dict[str, Any]]:
         functions = []
         lines = code.split("\n")
-        
+
         # Pattern pour les fonctions: function name(...) {
         # Pattern pour les méthodes: visibility function name(...) {
         function_pattern = r"(?:(public|protected|private|static)\s+)*function\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)(?:\s*:\s*([a-zA-Z0-9_\\\?]+))?\s*\{?"
-        
+
         for i, line in enumerate(lines):
             line = line.strip()
             match = re.search(function_pattern, line)
@@ -261,113 +235,94 @@ class CodeParser:
                 name = match.group(2)
                 params = match.group(3).strip()
                 return_type = match.group(4)
-                
+
                 func_info = {
                     "name": name,
                     "line": i + 1,
                     "signature": line,
                     "params": params,
-                    "return_type": return_type if return_type else "mixed"
+                    "return_type": return_type if return_type else "mixed",
                 }
-                
+
                 if visibility:
                     func_info["type"] = "method"
                     func_info["visibility"] = visibility
                 else:
                     func_info["type"] = "function"
-                    
+
                 functions.append(func_info)
         return functions
 
     def _extract_php_classes(self, code: str) -> List[Dict[str, Any]]:
         classes = []
         lines = code.split("\n")
-        
+
         # Pattern: class Name extends Parent implements Interface {
         class_pattern = r"(?:abstract\s+|final\s+)?class\s+([a-zA-Z0-9_]+)(?:\s+extends\s+([a-zA-Z0-9_\\]+))?(?:\s+implements\s+([a-zA-Z0-9_\\,\s]+))?\s*\{?"
         interface_pattern = r"interface\s+([a-zA-Z0-9_]+)(?:\s+extends\s+([a-zA-Z0-9_\\,\s]+))?\s*\{?"
         trait_pattern = r"trait\s+([a-zA-Z0-9_]+)\s*\{?"
-        
+
         for i, line in enumerate(lines):
             line = line.strip()
-            
+
             # Class detection
             match = re.search(class_pattern, line)
             if match:
                 name = match.group(1)
                 parent = match.group(2)
                 interfaces = match.group(3)
-                
-                class_info = {
-                    "type": "class",
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line
-                }
+
+                class_info = {"type": "class", "name": name, "line": i + 1, "signature": line}
                 if parent:
                     class_info["extends"] = parent
                 if interfaces:
                     class_info["implements"] = [i.strip() for i in interfaces.split(",")]
-                
+
                 classes.append(class_info)
                 continue
-                
+
             # Interface detection
             match = re.search(interface_pattern, line)
             if match:
                 name = match.group(1)
                 parents = match.group(2)
-                
-                interface_info = {
-                    "type": "interface",
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line
-                }
+
+                interface_info = {"type": "interface", "name": name, "line": i + 1, "signature": line}
                 if parents:
                     interface_info["extends"] = [p.strip() for p in parents.split(",")]
-                
+
                 classes.append(interface_info)
                 continue
-                
+
             # Trait detection
             match = re.search(trait_pattern, line)
             if match:
                 name = match.group(1)
-                classes.append({
-                    "type": "trait",
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line
-                })
-                
+                classes.append({"type": "trait", "name": name, "line": i + 1, "signature": line})
+
         return classes
 
     def _extract_php_variables(self, code: str) -> List[Dict[str, Any]]:
         variables = []
         lines = code.split("\n")
-        
+
         # Pattern: $name = value;
         # Exclut les variables dans les paramètres de fonction ou les boucles si pas d'assignation directe
         var_pattern = r"(\$[a-zA-Z0-9_]+)\s*=\s*(.+?);"
-        
+
         for i, line in enumerate(lines):
             line = line.strip()
             # Ignorer les lignes de commentaires
             if line.startswith("//") or line.startswith("#") or line.startswith("*"):
                 continue
-                
+
             match = re.search(var_pattern, line)
             if match:
                 name = match.group(1)
                 value = match.group(2).strip()
-                
-                variables.append({
-                    "name": name,
-                    "line": i + 1,
-                    "value": value
-                })
-                
+
+                variables.append({"name": name, "line": i + 1, "value": value})
+
         return variables
 
     def _parse_javascript(self, code: str) -> Dict[str, Any]:
@@ -384,7 +339,7 @@ class CodeParser:
                 "classes": classes,
                 "variables": variables,
                 "raw": code,
-                "syntax_valid": True
+                "syntax_valid": True,
             }
         except Exception as e:
             return {
@@ -395,7 +350,7 @@ class CodeParser:
                 "variables": [],
                 "raw": code,
                 "syntax_valid": False,
-                "error": f"Erreur lors de l'analyse du code JavaScript: {str(e)}"
+                "error": f"Erreur lors de l'analyse du code JavaScript: {str(e)}",
             }
 
     def _extract_js_imports(self, code: str) -> List[Dict[str, Any]]:
@@ -403,17 +358,9 @@ class CodeParser:
         for i, line in enumerate(code.split("\n")):
             line = line.strip()
             if line.startswith("import "):
-                imports.append({
-                    "type": "es6_import",
-                    "statement": line,
-                    "line": i + 1
-                })
+                imports.append({"type": "es6_import", "statement": line, "line": i + 1})
             elif "require(" in line:
-                imports.append({
-                    "type": "commonjs_require",
-                    "statement": line,
-                    "line": i + 1
-                })
+                imports.append({"type": "commonjs_require", "statement": line, "line": i + 1})
         return imports
 
     def _extract_js_functions(self, code: str) -> List[Dict[str, Any]]:
@@ -421,12 +368,9 @@ class CodeParser:
         lines = code.split("\n")
 
         function_patterns = [
-
             r"function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(([^)]*)\)",
-
             r"([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(([^)]*)\)\s*{",
-
-            r"(const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*\(([^)]*)\)\s*=>"
+            r"(const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*\(([^)]*)\)\s*=>",
         ]
 
         for i, line in enumerate(lines):
@@ -436,26 +380,16 @@ class CodeParser:
             if match:
                 name = match.group(1)
                 params = match.group(2).strip()
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "type": "function_declaration",
-                    "params": params
-                })
+                functions.append(
+                    {"name": name, "line": i + 1, "signature": line, "type": "function_declaration", "params": params}
+                )
                 continue
 
             match = re.search(function_patterns[1], line)
             if match and not line.startswith("function") and not line.startswith("if") and not line.startswith("while"):
                 name = match.group(1)
                 params = match.group(2).strip()
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "type": "method",
-                    "params": params
-                })
+                functions.append({"name": name, "line": i + 1, "signature": line, "type": "method", "params": params})
                 continue
 
             match = re.search(function_patterns[2], line)
@@ -463,14 +397,16 @@ class CodeParser:
                 declaration_type = match.group(1)
                 name = match.group(2)
                 params = match.group(3).strip()
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "type": "arrow_function",
-                    "declaration_type": declaration_type,
-                    "params": params
-                })
+                functions.append(
+                    {
+                        "name": name,
+                        "line": i + 1,
+                        "signature": line,
+                        "type": "arrow_function",
+                        "declaration_type": declaration_type,
+                        "params": params,
+                    }
+                )
 
         return functions
 
@@ -486,12 +422,7 @@ class CodeParser:
             if match:
                 name = match.group(1)
                 parent = match.group(2)
-                classes.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "extends": parent
-                })
+                classes.append({"name": name, "line": i + 1, "signature": line, "extends": parent})
 
         return classes
 
@@ -508,12 +439,7 @@ class CodeParser:
                 declaration_type = match.group(1)
                 name = match.group(2)
                 value = match.group(3).strip()
-                variables.append({
-                    "name": name,
-                    "line": i + 1,
-                    "declaration_type": declaration_type,
-                    "value": value
-                })
+                variables.append({"name": name, "line": i + 1, "declaration_type": declaration_type, "value": value})
 
         return variables
 
@@ -535,7 +461,7 @@ class CodeParser:
                 "types": types,
                 "variables": variables,
                 "raw": code,
-                "syntax_valid": True
+                "syntax_valid": True,
             }
         except Exception as e:
             return {
@@ -548,7 +474,7 @@ class CodeParser:
                 "variables": [],
                 "raw": code,
                 "syntax_valid": False,
-                "error": f"Erreur lors de l'analyse du code TypeScript: {str(e)}"
+                "error": f"Erreur lors de l'analyse du code TypeScript: {str(e)}",
             }
 
     def _extract_ts_imports(self, code: str) -> List[Dict[str, Any]]:
@@ -556,31 +482,19 @@ class CodeParser:
         for i, line in enumerate(code.split("\n")):
             line = line.strip()
             if line.startswith("import "):
-                imports.append({
-                    "type": "es6_import",
-                    "statement": line,
-                    "line": i + 1
-                })
+                imports.append({"type": "es6_import", "statement": line, "line": i + 1})
             elif "require(" in line:
-                imports.append({
-                    "type": "commonjs_require",
-                    "statement": line,
-                    "line": i + 1
-                })
+                imports.append({"type": "commonjs_require", "statement": line, "line": i + 1})
         return imports
 
     def _extract_ts_functions(self, code: str) -> List[Dict[str, Any]]:
         functions = []
         lines = code.split("\n")
 
-
         function_patterns = [
-
             r"function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([a-zA-Z_$][a-zA-Z0-9_$<>\.]*))?\s*{?",
-
             r"(?:public|private|protected)?\s*(?:static)?\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([a-zA-Z_$][a-zA-Z0-9_$<>\.]*))?\s*{?",
-
-            r"(const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([a-zA-Z_$][a-zA-Z0-9_$<>\.]*))?\s*=>"
+            r"(const|let|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*=\s*(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([a-zA-Z_$][a-zA-Z0-9_$<>\.]*))?\s*=>",
         ]
 
         for i, line in enumerate(lines):
@@ -591,14 +505,16 @@ class CodeParser:
                 name = match.group(1)
                 params = match.group(2).strip()
                 return_type = match.group(3) if match.group(3) else "any"
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "type": "function_declaration",
-                    "params": params,
-                    "return_type": return_type
-                })
+                functions.append(
+                    {
+                        "name": name,
+                        "line": i + 1,
+                        "signature": line,
+                        "type": "function_declaration",
+                        "params": params,
+                        "return_type": return_type,
+                    }
+                )
                 continue
 
             match = re.search(function_patterns[1], line)
@@ -606,14 +522,16 @@ class CodeParser:
                 name = match.group(1)
                 params = match.group(2).strip()
                 return_type = match.group(3) if match.group(3) else "any"
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "type": "method",
-                    "params": params,
-                    "return_type": return_type
-                })
+                functions.append(
+                    {
+                        "name": name,
+                        "line": i + 1,
+                        "signature": line,
+                        "type": "method",
+                        "params": params,
+                        "return_type": return_type,
+                    }
+                )
                 continue
 
             match = re.search(function_patterns[2], line)
@@ -622,15 +540,17 @@ class CodeParser:
                 name = match.group(2)
                 params = match.group(3).strip()
                 return_type = match.group(4) if match.group(4) else "any"
-                functions.append({
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "type": "arrow_function",
-                    "declaration_type": declaration_type,
-                    "params": params,
-                    "return_type": return_type
-                })
+                functions.append(
+                    {
+                        "name": name,
+                        "line": i + 1,
+                        "signature": line,
+                        "type": "arrow_function",
+                        "declaration_type": declaration_type,
+                        "params": params,
+                        "return_type": return_type,
+                    }
+                )
 
         return functions
 
@@ -709,12 +629,7 @@ class CodeParser:
                 generics = match.group(2)
                 definition = match.group(3)
 
-                type_info = {
-                    "name": name,
-                    "line": i + 1,
-                    "signature": line,
-                    "definition": definition.strip()
-                }
+                type_info = {"name": name, "line": i + 1, "signature": line, "definition": definition.strip()}
 
                 if generics:
                     type_info["generics"] = generics.strip()
@@ -738,12 +653,7 @@ class CodeParser:
                 var_type = match.group(3)
                 value = match.group(4).strip()
 
-                var_info = {
-                    "name": name,
-                    "line": i + 1,
-                    "declaration_type": declaration_type,
-                    "value": value
-                }
+                var_info = {"name": name, "line": i + 1, "declaration_type": declaration_type, "value": value}
 
                 if var_type:
                     var_info["type"] = var_type
@@ -758,22 +668,19 @@ class CodeParser:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for name in node.names:
-                    imports.append({
-                        "type": "import",
-                        "name": name.name,
-                        "alias": name.asname,
-                        "line": node.lineno
-                    })
+                    imports.append({"type": "import", "name": name.name, "alias": name.asname, "line": node.lineno})
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 for name in node.names:
-                    imports.append({
-                        "type": "from_import",
-                        "module": module,
-                        "name": name.name,
-                        "alias": name.asname,
-                        "line": node.lineno
-                    })
+                    imports.append(
+                        {
+                            "type": "from_import",
+                            "module": module,
+                            "name": name.name,
+                            "alias": name.asname,
+                            "line": node.lineno,
+                        }
+                    )
 
         return imports
 
@@ -786,11 +693,7 @@ class CodeParser:
                 defaults = [None] * (len(node.args.args) - len(node.args.defaults)) + list(node.args.defaults)
 
                 for arg, default in zip(node.args.args, defaults, strict=False):
-                    param_info = {
-                        "name": arg.arg,
-                        "type": None,
-                        "default": None
-                    }
+                    param_info = {"name": arg.arg, "type": None, "default": None}
 
                     if arg.annotation:
                         if isinstance(arg.annotation, ast.Name):
@@ -819,18 +722,20 @@ class CodeParser:
                 if len(node.body) > 0:
                     start_line = node.body[0].lineno
                     end_line = node.body[-1].lineno
-                    function_body_lines = code.split('\n')[start_line-1:end_line]
-                    function_body = '\n'.join(function_body_lines)
+                    function_body_lines = code.split("\n")[start_line - 1 : end_line]
+                    function_body = "\n".join(function_body_lines)
 
-                functions.append({
-                    "name": node.name,
-                    "params": params,
-                    "return_type": return_type,
-                    "docstring": docstring,
-                    "line": node.lineno,
-                    "body": function_body,
-                    "is_method": False
-                })
+                functions.append(
+                    {
+                        "name": node.name,
+                        "params": params,
+                        "return_type": return_type,
+                        "docstring": docstring,
+                        "line": node.lineno,
+                        "body": function_body,
+                        "is_method": False,
+                    }
+                )
 
         return functions
 
@@ -850,17 +755,15 @@ class CodeParser:
                 for child in node.body:
                     if isinstance(child, ast.FunctionDef):
                         params = []
-                        defaults = [None] * (len(child.args.args) - len(child.args.defaults)) + list(child.args.defaults)
+                        defaults = [None] * (len(child.args.args) - len(child.args.defaults)) + list(
+                            child.args.defaults
+                        )
 
                         for i, (arg, default) in enumerate(zip(child.args.args, defaults, strict=False)):
-                            if i == 0 and arg.arg == 'self':
+                            if i == 0 and arg.arg == "self":
                                 continue
 
-                            param_info = {
-                                "name": arg.arg,
-                                "type": None,
-                                "default": None
-                            }
+                            param_info = {"name": arg.arg, "type": None, "default": None}
 
                             if arg.annotation:
                                 if isinstance(arg.annotation, ast.Name):
@@ -885,35 +788,36 @@ class CodeParser:
 
                         docstring = ast.get_docstring(child)
 
-                        methods.append({
-                            "name": child.name,
-                            "params": params,
-                            "return_type": return_type,
-                            "docstring": docstring,
-                            "line": child.lineno,
-                            "is_method": True
-                        })
+                        methods.append(
+                            {
+                                "name": child.name,
+                                "params": params,
+                                "return_type": return_type,
+                                "docstring": docstring,
+                                "line": child.lineno,
+                                "is_method": True,
+                            }
+                        )
 
                 attributes = []
                 for child in node.body:
                     if isinstance(child, ast.Assign):
                         for target in child.targets:
                             if isinstance(target, ast.Name):
-                                attributes.append({
-                                    "name": target.id,
-                                    "line": child.lineno
-                                })
+                                attributes.append({"name": target.id, "line": child.lineno})
 
                 docstring = ast.get_docstring(node)
 
-                classes.append({
-                    "name": node.name,
-                    "bases": bases,
-                    "methods": methods,
-                    "attributes": attributes,
-                    "docstring": docstring,
-                    "line": node.lineno
-                })
+                classes.append(
+                    {
+                        "name": node.name,
+                        "bases": bases,
+                        "methods": methods,
+                        "attributes": attributes,
+                        "docstring": docstring,
+                        "line": node.lineno,
+                    }
+                )
 
         return classes
 
@@ -924,12 +828,7 @@ class CodeParser:
             if isinstance(node, ast.Assign):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
-                        var_info = {
-                            "name": target.id,
-                            "line": node.lineno,
-                            "value": None
-                        }
-
+                        var_info = {"name": target.id, "line": node.lineno, "value": None}
 
                         if isinstance(node.value, ast.Constant):
                             var_info["value"] = node.value.value

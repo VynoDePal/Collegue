@@ -3,6 +3,7 @@ Branch Commands for GitHub Operations.
 
 Handles branch listing, creation, and commit operations.
 """
+
 from typing import List, Optional
 
 from pydantic import BaseModel
@@ -12,69 +13,58 @@ from ..clients import GitHubClient
 
 
 class BranchInfo(BaseModel):
-	name: str
-	commit_sha: str
-	protected: bool = False
+    name: str
+    commit_sha: str
+    protected: bool = False
 
 
 class CommitInfo(BaseModel):
-	sha: str
-	message: str
-	author: str
-	date: str
-	html_url: str
+    sha: str
+    message: str
+    author: str
+    date: str
+    html_url: str
 
 
 class BranchCommands(GitHubClient):
+    def list_branches(self, owner: str, repo: str, limit: int = 30) -> List[BranchInfo]:
+        data = self._api_get(f"/repos/{owner}/{repo}/branches", {"per_page": limit})
+        return [
+            BranchInfo(name=b["name"], commit_sha=b["commit"]["sha"], protected=b.get("protected", False))
+            for b in data[:limit]
+        ]
 
-	def list_branches(self, owner: str, repo: str, limit: int = 30) -> List[BranchInfo]:
-		data = self._api_get(
-			f"/repos/{owner}/{repo}/branches",
-			{"per_page": limit}
-		)
-		return [BranchInfo(
-			name=b['name'],
-			commit_sha=b['commit']['sha'],
-			protected=b.get('protected', False)
-		) for b in data[:limit]]
+    def list_commits(self, owner: str, repo: str, branch: Optional[str] = None, limit: int = 30) -> List[CommitInfo]:
+        params = {"per_page": limit}
+        if branch:
+            params["sha"] = branch
 
-	def list_commits(self, owner: str, repo: str, branch: Optional[str] = None,
-				   limit: int = 30) -> List[CommitInfo]:
-		params = {"per_page": limit}
-		if branch:
-			params["sha"] = branch
+        data = self._api_get(f"/repos/{owner}/{repo}/commits", params)
+        return [
+            CommitInfo(
+                sha=c["sha"],
+                message=c["commit"]["message"],
+                author=c["commit"]["author"]["name"],
+                date=c["commit"]["author"]["date"],
+                html_url=c["html_url"],
+            )
+            for c in data[:limit]
+        ]
 
-		data = self._api_get(f"/repos/{owner}/{repo}/commits", params)
-		return [CommitInfo(
-			sha=c['sha'],
-			message=c['commit']['message'],
-			author=c['commit']['author']['name'],
-			date=c['commit']['author']['date'],
-			html_url=c['html_url']
-		) for c in data[:limit]]
+    def _get_branch_sha(self, owner: str, repo: str, branch: str) -> str:
+        try:
+            resp = self._api_get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
+            return resp["object"]["sha"]
+        except ToolExecutionError as e:
+            raise ToolExecutionError(f"Source branch '{branch}' not found") from e
 
-	def _get_branch_sha(self, owner: str, repo: str, branch: str) -> str:
-		try:
-			resp = self._api_get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
-			return resp['object']['sha']
-		except ToolExecutionError as e:
-			raise ToolExecutionError(f"Source branch '{branch}' not found") from e
+    def create_branch(self, owner: str, repo: str, branch: str, from_branch: Optional[str] = None) -> BranchInfo:
+        if not from_branch:
+            repo_info = self._api_get(f"/repos/{owner}/{repo}")
+            from_branch = repo_info.get("default_branch", "main")
 
-	def create_branch(self, owner: str, repo: str, branch: str,
-					  from_branch: Optional[str] = None) -> BranchInfo:
-		if not from_branch:
-			repo_info = self._api_get(f"/repos/{owner}/{repo}")
-			from_branch = repo_info.get('default_branch', 'main')
+        sha = self._get_branch_sha(owner, repo, from_branch)
 
-		sha = self._get_branch_sha(owner, repo, from_branch)
-
-		data = {
-			"ref": f"refs/heads/{branch}",
-			"sha": sha
-		}
-		resp = self._api_post(f"/repos/{owner}/{repo}/git/refs", data)
-		return BranchInfo(
-			name=branch,
-			commit_sha=resp['object']['sha'],
-			protected=False
-		)
+        data = {"ref": f"refs/heads/{branch}", "sha": sha}
+        resp = self._api_post(f"/repos/{owner}/{repo}/git/refs", data)
+        return BranchInfo(name=branch, commit_sha=resp["object"]["sha"], protected=False)

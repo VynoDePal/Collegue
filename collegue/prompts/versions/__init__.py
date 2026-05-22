@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-
 def get_versions_file() -> Path:
     """
     Récupère le chemin du fichier de versions.

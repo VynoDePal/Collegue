@@ -3,6 +3,7 @@ Ressources pour les bonnes pratiques TypeScript.
 
 Ce module fournit des recommandations et bonnes pratiques pour le développement TypeScript.
 """
+
 import json
 
 from fastmcp import FastMCP
@@ -26,7 +27,7 @@ function getLength(text: string | null | undefined) {
   }
   return text.length;
 }
-"""
+""",
     },
     "avoid_any": {
         "title": "Éviter le type any",
@@ -40,7 +41,7 @@ function process(data: any) {
 function process(data: string[] | string) {
   return data.length; // TypeScript vérifie que data a une propriété length
 }
-"""
+""",
     },
     "use_interfaces": {
         "title": "Utiliser des interfaces pour les objets",
@@ -60,7 +61,7 @@ interface User {
 function updateUser(user: User) {
   user.name = "Nouveau nom";
 }
-"""
+""",
     },
     "use_type_aliases": {
         "title": "Utiliser des alias de type pour les types complexes",
@@ -78,7 +79,7 @@ type DataType = string | number | boolean | null | undefined;
 function processData(data: DataType) {
   // Traitement...
 }
-"""
+""",
     },
     "readonly_properties": {
         "title": "Utiliser readonly pour les propriétés immuables",
@@ -103,8 +104,8 @@ function processUser(user: User) {
   // user.id = 456; // Erreur de compilation
   user.name = "Nouveau nom"; // OK
 }
-"""
-    }
+""",
+    },
 }
 
 FUNCTION_BEST_PRACTICES = {
@@ -120,7 +121,7 @@ function add(a: number, b: number) {
 function add(a: number, b: number): number {
   return a + b;
 }
-"""
+""",
     },
     "function_overloads": {
         "title": "Utiliser les surcharges de fonctions pour les comportements complexes",
@@ -144,7 +145,7 @@ function process(input: string | number): string | number {
     return input * 2;
   }
 }
-"""
+""",
     },
     "optional_parameters": {
         "title": "Utiliser des paramètres optionnels ou des valeurs par défaut",
@@ -165,8 +166,8 @@ function greet(name: string, greeting?: string): string {
 function greetWithDefault(name: string, greeting: string = 'Hello'): string {
   return `${greeting}, ${name}!`;
 }
-"""
-    }
+""",
+    },
 }
 
 CLASS_BEST_PRACTICES = {
@@ -202,7 +203,7 @@ class User {
     return true;
   }
 }
-"""
+""",
     },
     "parameter_properties": {
         "title": "Utiliser les propriétés de paramètres dans les constructeurs",
@@ -225,7 +226,7 @@ class User {
     public name: string
   ) {}
 }
-"""
+""",
     },
     "implement_interfaces": {
         "title": "Implémenter des interfaces pour les classes",
@@ -251,8 +252,8 @@ class UserService implements IUserService {
     return { id, name: 'User' };
   }
 }
-"""
-    }
+""",
+    },
 }
 
 GENERICS_BEST_PRACTICES = {
@@ -272,7 +273,7 @@ function first<T>(arr: T[]): T | undefined {
 // Usage:
 const num = first<number>([1, 2, 3]); // Type: number | undefined
 const str = first(['a', 'b', 'c']); // Type inféré: string | undefined
-"""
+""",
     },
     "constrain_generics": {
         "title": "Contraindre les génériques quand nécessaire",
@@ -291,8 +292,8 @@ function getProperty<T, K extends keyof T>(obj: T, key: K): T[K] {
 const user = { id: 1, name: 'Alice' };
 const name = getProperty(user, 'name'); // Type: string
 // const invalid = getProperty(user, 'age'); // Erreur de compilation
-"""
-    }
+""",
+    },
 }
 
 TOOLING_BEST_PRACTICES = {
@@ -306,7 +307,7 @@ TOOLING_BEST_PRACTICES = {
     "strict": true
   }
 }
-"""
+""",
     },
     "eslint": {
         "title": "Utiliser ESLint avec TypeScript",
@@ -325,7 +326,7 @@ module.exports = {
     '@typescript-eslint/no-explicit-any': 'error'
   }
 };
-"""
+""",
     },
     "prettier": {
         "title": "Utiliser Prettier pour le formatage",
@@ -338,7 +339,7 @@ module.exports = {
   "tabWidth": 2,
   "trailingComma": "es5"
 }
-"""
+""",
     },
     "path_aliases": {
         "title": "Configurer des alias de chemins",
@@ -359,9 +360,10 @@ module.exports = {
 // Usage:
 import { Button } from '@components/Button';
 import { formatDate } from '@utils/date';
-"""
-    }
+""",
+    },
 }
+
 
 def register(app: FastMCP, app_state: dict):
     """
@@ -371,6 +373,7 @@ def register(app: FastMCP, app_state: dict):
         app: L'application FastMCP
         app_state: L'état de l'application
     """
+
     @app.resource("collegue://typescript/best_practices/general")
     def typescript_general_best_practices() -> str:
         """Fournit des bonnes pratiques générales pour TypeScript."""
@@ -406,11 +409,12 @@ def register(app: FastMCP, app_state: dict):
             practice_id: Identifiant de la bonne pratique
         """
         if not category:
-            return json.dumps({
-                "error": "Category is required",
-                "available_categories": ["general", "function", "class", "generics", "tooling"]
-            })
-
+            return json.dumps(
+                {
+                    "error": "Category is required",
+                    "available_categories": ["general", "function", "class", "generics", "tooling"],
+                }
+            )
 
         if category.lower() == "general":
             practices = GENERAL_BEST_PRACTICES
@@ -423,20 +427,22 @@ def register(app: FastMCP, app_state: dict):
         elif category.lower() == "tooling":
             practices = TOOLING_BEST_PRACTICES
         else:
-            return json.dumps({
-                "error": f"Category '{category}' not found",
-                "available_categories": ["general", "function", "class", "generics", "tooling"]
-            })
-
+            return json.dumps(
+                {
+                    "error": f"Category '{category}' not found",
+                    "available_categories": ["general", "function", "class", "generics", "tooling"],
+                }
+            )
 
         if practice_id:
             if practice_id in practices:
                 return json.dumps(practices[practice_id])
             else:
-                return json.dumps({
-                    "error": f"Practice '{practice_id}' not found in category '{category}'",
-                    "available_practices": list(practices.keys())
-                })
-
+                return json.dumps(
+                    {
+                        "error": f"Practice '{practice_id}' not found in category '{category}'",
+                        "available_practices": list(practices.keys()),
+                    }
+                )
 
         return json.dumps(practices)

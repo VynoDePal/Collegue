@@ -10,14 +10,9 @@ Ce module a été refactorisé pour respecter l'architecture modulaire:
 Usage:
     from collegue.tools.refactoring import RefactoringTool, RefactoringRequest, RefactoringResponse
 """
+
 from .engine import RefactoringEngine
 from .models import LLMRefactoringResult, RefactoringRequest, RefactoringResponse
 from .tool import RefactoringTool
 
-__all__ = [
-    'RefactoringTool',
-    'RefactoringRequest',
-    'RefactoringResponse',
-    'LLMRefactoringResult',
-    'RefactoringEngine'
-]
+__all__ = ["RefactoringTool", "RefactoringRequest", "RefactoringResponse", "LLMRefactoringResult", "RefactoringEngine"]

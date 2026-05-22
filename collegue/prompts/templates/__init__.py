@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-
 def get_template_path(tool_name: str, version: str = "default") -> Optional[Path]:
     """
     Récupère le chemin d'un template pour un outil donné.

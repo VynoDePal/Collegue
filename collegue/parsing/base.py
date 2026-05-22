@@ -13,6 +13,8 @@ class ImportType(Enum):
     SIDE_EFFECT = "side_effect"
     REQUIRE = "require"
     DYNAMIC = "dynamic"
+
+
 class DeclarationType(Enum):
     VARIABLE = "variable"
     FUNCTION = "function"
@@ -20,6 +22,8 @@ class DeclarationType(Enum):
     INTERFACE = "interface"
     TYPE = "type"
     ENUM = "enum"
+
+
 @dataclass
 class Import:
     source: str
@@ -28,9 +32,12 @@ class Import:
     column: int = 0
     import_type: ImportType = ImportType.IMPORT
     is_relative: bool = False
+
     def __post_init__(self):
         if not self.is_relative:
-            self.is_relative = self.source.startswith(('./', '../'))
+            self.is_relative = self.source.startswith(("./", "../"))
+
+
 @dataclass
 class Declaration:
     name: str
@@ -39,6 +46,8 @@ class Declaration:
     column: int = 0
     kind: str = ""
     signature: str = ""
+
+
 @dataclass
 class ParseResult:
     language: str = ""
@@ -48,20 +57,26 @@ class ParseResult:
     ast_valid: bool = True
     errors: List[str] = field(default_factory=list)
     raw: str = ""
+
+
 class BaseParser(ABC):
     def __init__(self, content: str, filename: Optional[str] = None):
         self.content = content
         self.filename = filename or ""
-        self.lines = content.split('\n')
+        self.lines = content.split("\n")
+
     @abstractmethod
     def find_imports(self) -> List[Import]:
         pass
+
     @abstractmethod
     def find_declarations(self) -> Dict[str, Declaration]:
         pass
+
     @abstractmethod
     def find_identifiers(self) -> List[Tuple[int, str]]:
         pass
+
     def parse(self) -> ParseResult:
         return ParseResult(
             language=self._detect_language(),
@@ -70,11 +85,14 @@ class BaseParser(ABC):
             identifiers=self.find_identifiers(),
             raw=self.content,
         )
+
     @abstractmethod
     def _detect_language(self) -> str:
         pass
+
     def _get_line_at_position(self, pos: int) -> int:
-        return self.content[:pos].count('\n') + 1
+        return self.content[:pos].count("\n") + 1
+
     def _get_column_at_position(self, pos: int) -> int:
-        line_start = self.content.rfind('\n', 0, pos) + 1
+        line_start = self.content.rfind("\n", 0, pos) + 1
         return pos - line_start + 1
