@@ -88,17 +88,18 @@ class RealGeminiContext:
 
 # ─── Test 1: code_refactoring ────────────────────────────────────────
 
+
 @skip_no_key
 @pytest.mark.asyncio
 async def test_real_refactoring():
     """Test agentique: refactoring d'un code Python complexe."""
-    from collegue.tools.refactoring.tool import RefactoringTool
     from collegue.tools.refactoring.models import RefactoringRequest
+    from collegue.tools.refactoring.tool import RefactoringTool
 
     tool = RefactoringTool()
     ctx = RealGeminiContext()
 
-    code = '''
+    code = """
 import os
 import sys
 import json
@@ -127,7 +128,7 @@ def process_data(data, flag, mode, extra=None):
         else:
             result = list(data)
     return result
-'''
+"""
 
     request = RefactoringRequest(
         code=code,
@@ -151,12 +152,13 @@ def process_data(data, flag, mode, extra=None):
 
 # ─── Test 2: test_generation ─────────────────────────────────────────
 
+
 @skip_no_key
 @pytest.mark.asyncio
 async def test_real_test_generation():
     """Test agentique: génération de tests pour une fonction multi-branches."""
-    from collegue.tools.test_generation.tool import TestGenerationTool
     from collegue.tools.test_generation.models import TestGenerationRequest
+    from collegue.tools.test_generation.tool import TestGenerationTool
 
     tool = TestGenerationTool()
     ctx = RealGeminiContext()
@@ -216,17 +218,18 @@ def calculate_price(base_price, quantity, discount_code=None, is_member=False):
 
 # ─── Test 3: code_documentation ──────────────────────────────────────
 
+
 @skip_no_key
 @pytest.mark.asyncio
 async def test_real_documentation():
     """Test agentique: documentation d'une classe Python."""
-    from collegue.tools.code_documentation.tool import DocumentationTool
     from collegue.tools.code_documentation.models import DocumentationRequest
+    from collegue.tools.code_documentation.tool import DocumentationTool
 
     tool = DocumentationTool()
     ctx = RealGeminiContext()
 
-    code = '''
+    code = """
 class UserManager:
     def __init__(self, db_connection, cache_ttl=300):
         self.db = db_connection
@@ -253,7 +256,7 @@ class UserManager:
 
     def list_users(self, limit: int = 100) -> list:
         return self.db.query(f"SELECT * FROM users LIMIT {limit}")
-'''
+"""
 
     request = DocumentationRequest(
         code=code,
@@ -278,12 +281,13 @@ class UserManager:
 
 # ─── Test 4: repo_consistency_check ──────────────────────────────────
 
+
 @skip_no_key
 @pytest.mark.asyncio
 async def test_real_consistency_check():
     """Test agentique: analyse deep d'incohérences de code."""
-    from collegue.tools.repo_consistency_check.tool import RepoConsistencyCheckTool
     from collegue.tools.repo_consistency_check.models import ConsistencyCheckRequest
+    from collegue.tools.repo_consistency_check.tool import RepoConsistencyCheckTool
 
     tool = RepoConsistencyCheckTool()
     ctx = RealGeminiContext()
@@ -353,12 +357,13 @@ if __name__ == "__main__":
 
 # ─── Test 5: impact_analysis ─────────────────────────────────────────
 
+
 @skip_no_key
 @pytest.mark.asyncio
 async def test_real_impact_analysis():
     """Test agentique: analyse d'impact d'un renommage."""
-    from collegue.tools.impact_analysis.tool import ImpactAnalysisTool
     from collegue.tools.impact_analysis.models import ImpactAnalysisRequest
+    from collegue.tools.impact_analysis.tool import ImpactAnalysisTool
 
     tool = ImpactAnalysisTool()
     ctx = RealGeminiContext()
@@ -428,12 +433,13 @@ def test_login():
 
 # ─── Test 6: iac_guardrails_scan ─────────────────────────────────────
 
+
 @skip_no_key
 @pytest.mark.asyncio
 async def test_real_iac_scan():
     """Test agentique: scan de sécurité IaC sur un Dockerfile."""
-    from collegue.tools.iac_guardrails_scan.tool import IacGuardrailsScanTool
     from collegue.tools.iac_guardrails_scan.models import IacGuardrailsRequest
+    from collegue.tools.iac_guardrails_scan.tool import IacGuardrailsScanTool
 
     tool = IacGuardrailsScanTool()
     ctx = RealGeminiContext()
@@ -462,7 +468,7 @@ CMD ["python", "app.py"]
         print(f"Findings: {len(response.findings)}")
         print(f"Security score: {response.security_score}")
         for f in response.findings[:5]:
-            title = getattr(f, 'title', '') or getattr(f, 'message', '') or str(f)
+            title = getattr(f, "title", "") or getattr(f, "message", "") or str(f)
             print(f"  - [{f.severity}] {f.rule_id}: {title[:80]}")
 
         assert len(response.findings) > 0, "Doit détecter des problèmes de sécurité"
