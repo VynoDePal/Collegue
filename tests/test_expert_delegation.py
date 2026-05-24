@@ -354,9 +354,7 @@ class TestExpertDelegationEngine:
         tasks = [DelegationTask(rule=rule, target_tool="tool_b", params={})]
 
         # Start with a timestamp in the past to simulate timeout
-        results = await engine.execute_delegation_chain(
-            tasks, registry, chain_start_time=time.time() - 1.0
-        )
+        results = await engine.execute_delegation_chain(tasks, registry, chain_start_time=time.time() - 1.0)
         assert len(results) == 1
         assert results[0].success is False
         assert "Timeout" in results[0].error
@@ -418,9 +416,7 @@ class TestExpertDelegationEngine:
 
     def test_clear_history(self):
         engine = ExpertDelegationEngine()
-        engine._chain_history = [
-            DelegationResult(source_tool="a", target_tool="b", success=True, depth=1)
-        ]
+        engine._chain_history = [DelegationResult(source_tool="a", target_tool="b", success=True, depth=1)]
         engine.clear_history()
         assert len(engine._chain_history) == 0
 

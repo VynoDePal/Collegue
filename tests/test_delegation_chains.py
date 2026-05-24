@@ -69,31 +69,37 @@ class TestDelegationChainsUnit:
 
         registry = {
             "code_refactoring": {
-                "class": _make_tool_class({
-                    "refactored_code": "def clean(): pass",
-                    "original_code": "def dirty(): pass",
-                    "changes": [{"type": "clean"}],
-                    "language": "python",
-                    "explanation": "Nettoyé",
-                }),
+                "class": _make_tool_class(
+                    {
+                        "refactored_code": "def clean(): pass",
+                        "original_code": "def dirty(): pass",
+                        "changes": [{"type": "clean"}],
+                        "language": "python",
+                        "explanation": "Nettoyé",
+                    }
+                ),
             },
             "code_documentation": {
-                "class": _make_tool_class({
-                    "documentation": "# Docs",
-                    "language": "python",
-                    "format": "markdown",
-                    "documented_elements": [],
-                    "coverage": 1.0,
-                }),
+                "class": _make_tool_class(
+                    {
+                        "documentation": "# Docs",
+                        "language": "python",
+                        "format": "markdown",
+                        "documented_elements": [],
+                        "coverage": 1.0,
+                    }
+                ),
             },
             "test_generation": {
-                "class": _make_tool_class({
-                    "test_code": "def test_clean(): pass",
-                    "language": "python",
-                    "framework": "pytest",
-                    "estimated_coverage": 0.85,
-                    "tested_elements": [],
-                }),
+                "class": _make_tool_class(
+                    {
+                        "test_code": "def test_clean(): pass",
+                        "language": "python",
+                        "framework": "pytest",
+                        "estimated_coverage": 0.85,
+                        "tested_elements": [],
+                    }
+                ),
             },
         }
 
@@ -135,24 +141,28 @@ class TestDelegationChainsUnit:
 
         registry = {
             "test_generation": {
-                "class": _make_tool_class({
-                    "test_code": "def test_impact(): pass",
-                    "language": "python",
-                    "framework": "pytest",
-                    "estimated_coverage": 0.7,
-                    "tested_elements": [],
-                }),
+                "class": _make_tool_class(
+                    {
+                        "test_code": "def test_impact(): pass",
+                        "language": "python",
+                        "framework": "pytest",
+                        "estimated_coverage": 0.7,
+                        "tested_elements": [],
+                    }
+                ),
             },
             "iac_guardrails_scan": {
-                "class": _make_tool_class({
-                    "passed": True,
-                    "summary": {"total": 0},
-                    "findings": [],
-                    "security_score": 0.9,
-                    "files_scanned": 1,
-                    "rules_evaluated": 10,
-                    "scan_summary": "OK",
-                }),
+                "class": _make_tool_class(
+                    {
+                        "passed": True,
+                        "summary": {"total": 0},
+                        "findings": [],
+                        "security_score": 0.9,
+                        "files_scanned": 1,
+                        "rules_evaluated": 10,
+                        "scan_summary": "OK",
+                    }
+                ),
             },
         }
 
@@ -182,30 +192,36 @@ class TestDelegationChainsUnit:
         # → doc → fin (doc n'a pas de règle sortante)
         registry = {
             "code_refactoring": {
-                "class": _make_tool_class({
-                    "refactored_code": "fixed",
-                    "original_code": "broken",
-                    "changes": [{"type": "fix"}],
-                    "language": "python",
-                }),
+                "class": _make_tool_class(
+                    {
+                        "refactored_code": "fixed",
+                        "original_code": "broken",
+                        "changes": [{"type": "fix"}],
+                        "language": "python",
+                    }
+                ),
             },
             "code_documentation": {
-                "class": _make_tool_class({
-                    "documentation": "# Fixed docs",
-                    "language": "python",
-                    "format": "markdown",
-                    "documented_elements": [],
-                    "coverage": 1.0,
-                }),
+                "class": _make_tool_class(
+                    {
+                        "documentation": "# Fixed docs",
+                        "language": "python",
+                        "format": "markdown",
+                        "documented_elements": [],
+                        "coverage": 1.0,
+                    }
+                ),
             },
             "test_generation": {
-                "class": _make_tool_class({
-                    "test_code": "def test(): pass",
-                    "language": "python",
-                    "framework": "pytest",
-                    "estimated_coverage": 0.8,
-                    "tested_elements": [],
-                }),
+                "class": _make_tool_class(
+                    {
+                        "test_code": "def test(): pass",
+                        "language": "python",
+                        "framework": "pytest",
+                        "estimated_coverage": 0.8,
+                        "tested_elements": [],
+                    }
+                ),
             },
         }
 

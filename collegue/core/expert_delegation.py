@@ -269,9 +269,7 @@ class ExpertDelegationEngine:
                 continue
 
             # Exécution du tool cible
-            delegation_result = await self._execute_single_delegation(
-                task, tool_registry, ctx, tool_kwargs
-            )
+            delegation_result = await self._execute_single_delegation(task, tool_registry, ctx, tool_kwargs)
             delegation_result.depth = current_depth
 
             # Évaluer les sous-délégations si l'exécution a réussi
@@ -336,8 +334,10 @@ class ExpertDelegationEngine:
 
             result = await tool_instance.execute_async(req_obj, **kwargs)
 
-            result_dict = result.model_dump() if hasattr(result, "model_dump") else (
-                result.dict() if hasattr(result, "dict") else str(result)
+            result_dict = (
+                result.model_dump()
+                if hasattr(result, "model_dump")
+                else (result.dict() if hasattr(result, "dict") else str(result))
             )
 
             execution_time = time.time() - start_time
@@ -404,9 +404,7 @@ class ExpertDelegationEngine:
             )
 
         total_time = sum(r.execution_time for r in self._chain_history)
-        all_completed = all(
-            r.success or r.error is not None for r in self._chain_history
-        )
+        all_completed = all(r.success or r.error is not None for r in self._chain_history)
 
         return DelegationChainReport(
             source_tool=source_tool,
@@ -460,9 +458,7 @@ def _impact_has_iac_files(result: Dict[str, Any]) -> bool:
     return False
 
 
-def _build_refactoring_params_from_consistency(
-    source_tool: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat de consistency check."""
     actions = result.get("suggested_actions", [])
     if actions:
@@ -492,9 +488,7 @@ def _build_refactoring_params_from_consistency(
     }
 
 
-def _build_documentation_params_from_refactoring(
-    source_tool: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de documentation depuis un résultat de refactoring."""
     return {
         "code": result.get("refactored_code", ""),
@@ -504,9 +498,7 @@ def _build_documentation_params_from_refactoring(
     }
 
 
-def _build_test_params_from_refactoring(
-    source_tool: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis un résultat de refactoring."""
     return {
         "code": result.get("refactored_code", ""),
@@ -517,9 +509,7 @@ def _build_test_params_from_refactoring(
     }
 
 
-def _build_test_params_from_impact(
-    source_tool: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _build_test_params_from_impact(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test depuis un résultat d'impact analysis."""
     impacted = result.get("impacted_files", [])
     risks = result.get("risk_notes", [])
@@ -542,9 +532,7 @@ def _build_test_params_from_impact(
     }
 
 
-def _build_iac_params_from_impact(
-    source_tool: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _build_iac_params_from_impact(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de scan IaC depuis un résultat d'impact analysis."""
     iac_extensions = {".tf", ".yaml", ".yml", ".json", ".hcl"}
     impacted = result.get("impacted_files", [])
@@ -566,9 +554,7 @@ def _build_iac_params_from_impact(
     }
 
 
-def _build_refactoring_params_from_iac(
-    source_tool: str, result: Dict[str, Any]
-) -> Dict[str, Any]:
+def _build_refactoring_params_from_iac(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat IaC."""
     findings = result.get("findings", [])
     summary = "# Security findings to remediate\n"

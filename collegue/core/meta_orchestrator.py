@@ -321,8 +321,10 @@ RÈGLES :
                 # Exécution avec injection correcte des dépendances
                 result = await tool_instance.execute_async(req_obj, **tool_kwargs)
 
-                res_dict = result.model_dump() if hasattr(result, "model_dump") else (
-                    result.dict() if hasattr(result, "dict") else str(result)
+                res_dict = (
+                    result.model_dump()
+                    if hasattr(result, "model_dump")
+                    else (result.dict() if hasattr(result, "dict") else str(result))
                 )
 
                 # Évaluer les délégations inter-experts
@@ -332,9 +334,7 @@ RÈGLES :
                         delegation_engine.clear_history()
                         tasks = await delegation_engine.evaluate_delegations(tool_name, res_dict)
                         if tasks:
-                            await ctx.info(
-                                f"🔗 {len(tasks)} délégation(s) déclenchée(s) par {tool_name}"
-                            )
+                            await ctx.info(f"🔗 {len(tasks)} délégation(s) déclenchée(s) par {tool_name}")
                             del_results = await delegation_engine.execute_delegation_chain(
                                 tasks, available_tools, ctx=ctx, tool_kwargs=tool_kwargs
                             )

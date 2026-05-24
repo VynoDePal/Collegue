@@ -121,7 +121,9 @@ class ImpactAnalysisResponse(BaseModel):
     agent_iterations: int = Field(default=0, description="Itérations agentiques")
     agent_best_score: Optional[float] = Field(default=None, description="Meilleur score agentique")
     agent_converged: Optional[bool] = Field(default=None, description="True si l'agent a convergé")
-    delegation_triggered: bool = Field(default=False, description="True si une délégation inter-experts a été déclenchée")
+    delegation_triggered: bool = Field(
+        default=False, description="True si une délégation inter-experts a été déclenchée"
+    )
     delegation_results: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Résultats des délégations inter-experts"
     )

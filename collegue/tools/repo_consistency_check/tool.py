@@ -485,14 +485,11 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                         update={
                             "refactoring_score": refactoring_score,
                             "suggested_actions": [
-                                a.model_dump() if hasattr(a, "model_dump") else a
-                                for a in suggested_actions
+                                a.model_dump() if hasattr(a, "model_dump") else a for a in suggested_actions
                             ],
                         }
                     ).model_dump()
-                    tasks = await delegation_engine.evaluate_delegations(
-                        self.tool_name, result_dict
-                    )
+                    tasks = await delegation_engine.evaluate_delegations(self.tool_name, result_dict)
                     if tasks:
                         tool_registry = kwargs.get("tool_registry", {})
                         tool_kw = {
@@ -504,9 +501,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                             tasks, tool_registry, ctx=ctx, tool_kwargs=tool_kw
                         )
                         delegation_triggered = True
-                        delegation_results_list = [
-                            r.model_dump() for r in del_results
-                        ]
+                        delegation_results_list = [r.model_dump() for r in del_results]
                 except Exception as e:
                     self.logger.warning(f"Erreur délégation: {e}")
 
