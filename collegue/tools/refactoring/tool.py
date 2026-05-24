@@ -354,10 +354,14 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
         original_metrics = self._engine.analyze_code_metrics(request.code, request.language)
 
         prompt = await self.prepare_prompt(request, f"refactoring_{request.refactoring_type}")
-        system_prompt = (
-            f"Tu es un expert en refactoring de code {request.language}.\n"
-            f"Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.\n"
-            "Réponds UNIQUEMENT avec le code refactoré, sans explications."
+        sys_prompt = (
+            None
+            if self._last_prompt_template_id
+            else (
+                f"Tu es un expert en refactoring de code {request.language}.\n"
+                f"Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.\n"
+                "Réponds UNIQUEMENT avec le code refactoré, sans explications."
+            )
         )
 
         if not ctx:
@@ -368,7 +372,7 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
             agent_result = await self.agent_execute(
                 initial_prompt=prompt,
-                system_prompt=system_prompt,
+                system_prompt=sys_prompt,
                 ctx=ctx,
                 context={
                     "language": request.language,

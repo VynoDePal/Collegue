@@ -108,7 +108,7 @@ class DocumentationTool(AgentLoopMixin, BaseTool):
         if not formatted.strip():
             return 0.0
 
-        content_score = min(1.0, len(formatted) / 200)
+        content_score = 1.0 if len(formatted.strip()) > 10 else min(1.0, len(formatted) / 50)
 
         coverage_score = 0.5
         if code_elements:
@@ -329,14 +329,19 @@ class DocumentationTool(AgentLoopMixin, BaseTool):
         prompt = await self.prepare_prompt(request, template_name="documentation")
 
         try:
-            agent_result = await self.agent_execute(
-                initial_prompt=prompt,
-                system_prompt=(
+            sys_prompt = (
+                None
+                if self._last_prompt_template_id
+                else (
                     f"Tu es un expert en documentation de code {request.language}.\n"
                     f"Génère une documentation {request.doc_format or 'markdown'} "
                     f"en style '{request.doc_style or 'standard'}'.\n"
                     "Documente TOUS les éléments du code."
-                ),
+                )
+            )
+            agent_result = await self.agent_execute(
+                initial_prompt=prompt,
+                system_prompt=sys_prompt,
                 ctx=ctx,
                 context={
                     "language": request.language,
@@ -347,6 +352,13 @@ class DocumentationTool(AgentLoopMixin, BaseTool):
             )
 
             generated_docs = self._strip_outer_fence(agent_result.best_output)
+
+            self.track_last_prompt_performance(
+                execution_time=0.0,
+                tokens_used=len(generated_docs) // 4,
+                success=bool(generated_docs),
+            )
+
             formatted_docs = self._engine.format_documentation(
                 generated_docs, request.doc_format or "markdown", request.language
             )

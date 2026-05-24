@@ -163,12 +163,14 @@ class AgentLoopMixin:
 
             # 1. Appel LLM
             try:
-                result = await ctx.sample(
-                    messages=current_prompt,
-                    system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                sample_kwargs: Dict[str, Any] = {
+                    "messages": current_prompt,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if system_prompt is not None:
+                    sample_kwargs["system_prompt"] = system_prompt
+                result = await ctx.sample(**sample_kwargs)
                 raw_output = result.text or ""
             except Exception as e:
                 logger.error(f"Erreur LLM à l'itération {i + 1}: {e}")

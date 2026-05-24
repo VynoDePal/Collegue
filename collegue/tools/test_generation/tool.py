@@ -89,9 +89,9 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
         elements = context.get("elements", [])
         if elements and test_count > 0:
             estimated = self._engine.estimate_coverage(elements, test_count)
-            if estimated < coverage_target * 100:
+            if estimated < coverage_target:
                 errors.append(
-                    f"Couverture estimée ({estimated:.0f}%) < cible ({coverage_target * 100:.0f}%). "
+                    f"Couverture estimée ({estimated * 100:.0f}%) < cible ({coverage_target * 100:.0f}%). "
                     f"Génère plus de tests pour couvrir les {len(elements)} éléments."
                 )
 
@@ -120,7 +120,7 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
         coverage_target = context.get("coverage_target", 0.8)
         if elements and test_count > 0:
             estimated = self._engine.estimate_coverage(elements, test_count)
-            coverage_score = min(1.0, estimated / (coverage_target * 100))
+            coverage_score = min(1.0, estimated / coverage_target)
         else:
             coverage_score = 0.3 if test_count > 0 else 0.0
 
@@ -354,13 +354,18 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
         prompt = await self.prepare_prompt(request, template_name="test_generation")
 
         try:
-            agent_result = await self.agent_execute(
-                initial_prompt=prompt,
-                system_prompt=(
+            sys_prompt = (
+                None
+                if self._last_prompt_template_id
+                else (
                     f"Tu es un expert en tests unitaires {request.language} avec {framework}.\n"
                     "Génère des tests complets et exécutables. "
                     "Réponds UNIQUEMENT avec le code de test."
-                ),
+                )
+            )
+            agent_result = await self.agent_execute(
+                initial_prompt=prompt,
+                system_prompt=sys_prompt,
                 ctx=ctx,
                 context={
                     "language": request.language,
@@ -372,6 +377,12 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
             )
 
             test_code = self._extract_test_code_block(agent_result.best_output)
+
+            self.track_last_prompt_performance(
+                execution_time=0.0,
+                tokens_used=len(test_code) // 4,
+                success=bool(test_code),
+            )
 
             test_count = test_code.count("def test_") + test_code.count("@Test")
             estimated_coverage = self._engine.estimate_coverage(elements, test_count)
