@@ -156,18 +156,21 @@ class AgentLoopMixin:
             )
 
             if ctx:
-                await ctx.report_progress(progress=i, total=config.max_iterations)
+                if hasattr(ctx, "report_progress"):
+                    await ctx.report_progress(progress=i, total=config.max_iterations)
                 if config.max_iterations > 1:
                     await ctx.info(f"🔄 Itération {i + 1}/{config.max_iterations} (température: {temperature:.2f})")
 
             # 1. Appel LLM
             try:
-                result = await ctx.sample(
-                    messages=current_prompt,
-                    system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                sample_kwargs: Dict[str, Any] = {
+                    "messages": current_prompt,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if system_prompt is not None:
+                    sample_kwargs["system_prompt"] = system_prompt
+                result = await ctx.sample(**sample_kwargs)
                 raw_output = result.text or ""
             except Exception as e:
                 logger.error(f"Erreur LLM à l'itération {i + 1}: {e}")
@@ -241,7 +244,7 @@ class AgentLoopMixin:
             iterations.append(iteration)
 
         # Progression finale
-        if ctx:
+        if ctx and hasattr(ctx, "report_progress"):
             await ctx.report_progress(
                 progress=config.max_iterations,
                 total=config.max_iterations,

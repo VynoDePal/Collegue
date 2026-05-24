@@ -118,3 +118,6 @@ class ImpactAnalysisResponse(BaseModel):
     llm_insights: Optional[List[LLMInsight]] = Field(None, description="Insights IA (mode deep)")
     semantic_summary: Optional[str] = Field(None, description="Résumé sémantique (mode deep)")
     analysis_depth_used: str = Field("fast", description="Profondeur d'analyse utilisée")
+    agent_iterations: int = Field(default=0, description="Itérations agentiques")
+    agent_best_score: Optional[float] = Field(default=None, description="Meilleur score agentique")
+    agent_converged: Optional[bool] = Field(default=None, description="True si l'agent a convergé")

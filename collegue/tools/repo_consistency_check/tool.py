@@ -16,6 +16,7 @@ import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.shared import aggregate_severities, parse_llm_json_response
+from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..analyzers.javascript import JavaScriptAnalyzer
 from ..analyzers.php import PHPAnalyzer
 from ..analyzers.python import PythonAnalyzer
@@ -30,7 +31,7 @@ from .models import (
 )
 
 
-class RepoConsistencyCheckTool(BaseTool):
+class RepoConsistencyCheckTool(AgentLoopMixin, BaseTool):
     """
     Outil de détection d'incohérences dans le code.
 
@@ -62,12 +63,80 @@ class RepoConsistencyCheckTool(BaseTool):
     supported_languages = ["python", "typescript", "javascript", "php", "auto"]
     long_running = False
 
+    agent_config = AgentLoopConfig(
+        max_iterations=2,
+        initial_temperature=0.5,
+        temperature_decay=0.15,
+        min_temperature=0.3,
+    )
+
     def __init__(self, config=None, app_state=None):
         super().__init__(config, app_state)
         self._engine = ConsistencyAnalysisEngine(logger=self.logger)
         self._python_analyzer = PythonAnalyzer(logger=self.logger)
         self._js_analyzer = JavaScriptAnalyzer(logger=self.logger)
         self._php_analyzer = PHPAnalyzer(logger=self.logger)
+
+    # --- AgentLoopMixin hooks ---
+
+    async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
+        """Valide la réponse JSON du LLM pour le scoring deep."""
+        errors = []
+        try:
+            data = parse_llm_json_response(output)
+        except Exception:
+            errors.append("Réponse non-JSON ou JSON invalide")
+            return errors
+
+        if "refactoring_score" not in data:
+            errors.append("Champ 'refactoring_score' manquant")
+        else:
+            score = data["refactoring_score"]
+            if not isinstance(score, (int, float)) or score < 0 or score > 1:
+                errors.append(f"refactoring_score invalide: {score} (attendu 0.0-1.0)")
+
+        insights = data.get("insights", [])
+        if not insights:
+            errors.append("Aucun insight fourni")
+        else:
+            for i, item in enumerate(insights[:10]):
+                if not isinstance(item, dict) or "insight" not in item:
+                    errors.append(f"insight[{i}] invalide: 'insight' manquant")
+
+        return errors
+
+    async def assess_agent_quality(self, output: str, context: Dict[str, Any]) -> float:
+        """Évalue la qualité du scoring/insights LLM."""
+        try:
+            data = parse_llm_json_response(output)
+        except Exception:
+            return 0.0
+
+        has_score = "refactoring_score" in data
+        insights = data.get("insights", [])
+        valid_insights = [i for i in insights if isinstance(i, dict) and "insight" in i]
+        issues_count = context.get("issues_count", 1)
+        insight_coverage = min(1.0, len(valid_insights) / max(issues_count / 3, 1))
+
+        return (0.3 if has_score else 0.0) + insight_coverage * 0.7
+
+    async def build_agent_feedback(
+        self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
+    ) -> str:
+        """Construit un feedback pour améliorer l'analyse deep."""
+        parts = []
+        for error in errors:
+            if "non-JSON" in error:
+                parts.append("Réponds UNIQUEMENT avec du JSON valide, sans markdown.")
+            elif "manquant" in error:
+                parts.append(f"ERREUR: {error}. Ajoute ce champ.")
+            elif "invalide" in error:
+                parts.append(f"ERREUR: {error}. Corrige la valeur.")
+            elif "Aucun insight" in error:
+                parts.append(
+                    "Fournis au moins 2-3 insights sur les patterns, l'architecture ou la dette technique détectés."
+                )
+        return "\n".join(parts) if parts else "Améliore la précision du scoring et des insights."
 
     def get_usage_description(self) -> str:
         return (
@@ -166,7 +235,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
     async def _deep_analysis_with_llm(
         self, request: ConsistencyCheckRequest, issues: List, ctx=None
     ) -> Tuple[Optional[List[LLMInsight]], float, str]:
-        """Effectue l'analyse approfondie avec le LLM."""
+        """Effectue l'analyse approfondie avec boucle agentique."""
         if ctx is None:
             self.logger.warning("ctx non disponible pour analyse deep")
             score, priority = self._engine.calculate_refactoring_score(issues)
@@ -174,8 +243,18 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
         try:
             prompt = self._build_prompt(request, issues)
-            result = await ctx.sample(messages=prompt, temperature=0.5, max_tokens=2000)
-            response = result.text
+
+            agent_result = await self.agent_execute(
+                initial_prompt=prompt,
+                system_prompt=(
+                    "Tu es un expert en qualité de code. Réponds UNIQUEMENT avec du JSON strict sans markdown."
+                ),
+                ctx=ctx,
+                context={"issues_count": len(issues)},
+                max_tokens=2000,
+            )
+
+            response = agent_result.best_output
 
             if not response:
                 score, priority = self._engine.calculate_refactoring_score(issues)

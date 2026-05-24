@@ -15,6 +15,7 @@ import asyncio
 from typing import Any, Dict, List
 
 from ...core.shared import aggregate_severities, load_rules
+from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool
 from ..scanners.dockerfile import DockerfileScanner
 from ..scanners.kubernetes import KubernetesScanner
@@ -32,7 +33,7 @@ from .models import (
 )
 
 
-class IacGuardrailsScanTool(BaseTool):
+class IacGuardrailsScanTool(AgentLoopMixin, BaseTool):
     """Tool de scan de sécurité IaC."""
 
     # Chargement des règles YAML
@@ -67,6 +68,14 @@ class IacGuardrailsScanTool(BaseTool):
     response_model = IacGuardrailsResponse
     supported_languages = ["terraform", "kubernetes", "dockerfile", "yaml", "hcl", "tf"]
     long_running = False
+
+    agent_config = AgentLoopConfig(
+        max_iterations=2,
+        initial_temperature=0.5,
+        temperature_decay=0.15,
+        min_temperature=0.3,
+        abort_on_regression=True,
+    )
 
     def __init__(self, config=None, app_state=None):
         super().__init__(config, app_state)
@@ -458,10 +467,16 @@ class IacGuardrailsScanTool(BaseTool):
         # Génération des actions de remédiation
         suggested_remediations = self._generate_remediation_actions(response.findings, request.files, security_score)
 
-        # Auto-remediation si activée et score bas
+        # Auto-remediation agentique si activée et score bas
         if request.auto_chain and security_score < request.remediation_threshold:
-            # TODO: Implémenter l'auto-remediation complète
-            pass
+            try:
+                auto_remediation_triggered = True
+                auto_remediation_result = await self._agent_auto_remediation(
+                    request, response.findings, security_score, ctx
+                )
+            except Exception as e:
+                self.logger.warning(f"Auto-remediation échouée: {e}")
+                auto_remediation_result = {"error": str(e), "status": "failed"}
 
         # Mise à jour du résumé pour le mode deep
         if request.analysis_depth == "deep":
@@ -484,3 +499,87 @@ class IacGuardrailsScanTool(BaseTool):
                 "scan_summary": scan_summary,
             }
         )
+
+    # --- AgentLoopMixin hooks ---
+
+    async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
+        """Valide la sortie de remédiation LLM."""
+        errors = []
+        if not output.strip():
+            errors.append("Remédiation vide")
+        if "```" not in output:
+            errors.append("Aucun bloc de code trouvé dans la remédiation")
+        return errors
+
+    async def assess_agent_quality(self, output: str, context: Dict[str, Any]) -> float:
+        """Évalue la qualité de la remédiation proposée."""
+        if not output.strip():
+            return 0.0
+        findings_count = context.get("findings_count", 0)
+        addressed = sum(1 for f in context.get("findings_rules", []) if f.lower() in output.lower())
+        rule_score = addressed / max(findings_count, 1)
+        has_code = 1.0 if "```" in output else 0.0
+        return has_code * 0.4 + rule_score * 0.6
+
+    async def build_agent_feedback(
+        self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
+    ) -> str:
+        """Construit un feedback pour améliorer la remédiation."""
+        parts = []
+        for error in errors:
+            parts.append(f"ERREUR: {error}")
+        if quality < 0.5:
+            missing = [r for r in context.get("findings_rules", []) if r.lower() not in output.lower()]
+            if missing:
+                parts.append(f"Findings non adressés: {', '.join(missing[:5])}")
+        return "\n".join(parts) if parts else "Améliore la couverture de la remédiation."
+
+    async def _agent_auto_remediation(
+        self,
+        request: IacGuardrailsRequest,
+        findings: List[IacFinding],
+        security_score: float,
+        ctx: Any,
+    ) -> Dict[str, Any]:
+        """Utilise la boucle agentique pour générer des patches de remédiation."""
+        critical_high = [f for f in findings if f.severity in ("critical", "high")][:10]
+        if not critical_high:
+            return {"status": "skipped", "reason": "No critical/high findings"}
+
+        findings_text = "\n".join(
+            f"- [{f.severity.upper()}] {f.rule_id}: {f.title} @ {f.path}:{f.line}\n  Remediation: {f.remediation}"
+            for f in critical_high
+        )
+
+        files_text = "\n".join(f"### {f.path}\n```\n{f.content[:1000]}\n```" for f in request.files[:3])
+
+        prompt = (
+            f"Score sécurité actuel: {security_score:.0%}\n\n"
+            f"Findings critiques/high:\n{findings_text}\n\n"
+            f"Fichiers IaC:\n{files_text}\n\n"
+            "Génère les patches de remédiation pour corriger les findings ci-dessus."
+        )
+
+        agent_result = await self.agent_execute(
+            initial_prompt=prompt,
+            system_prompt=(
+                "Tu es un expert en sécurité Infrastructure as Code.\n"
+                "Génère des patches concrets pour corriger les vulnérabilités détectées.\n"
+                "Pour chaque finding, fournis le code corrigé dans un bloc ```."
+            ),
+            ctx=ctx,
+            context={
+                "findings_count": len(critical_high),
+                "findings_rules": [f.rule_id for f in critical_high],
+            },
+            max_tokens=3000,
+        )
+
+        return {
+            "status": "completed",
+            "iterations": agent_result.total_iterations,
+            "converged": agent_result.converged,
+            "best_score": agent_result.best_score,
+            "remediation_output": agent_result.best_output,
+            "findings_addressed": len(critical_high),
+        }

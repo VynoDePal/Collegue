@@ -11,13 +11,14 @@ import time
 from typing import Any, Dict, List
 
 from ...core.shared import run_async_from_sync
+from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool, ToolError
 from .config import FORMAT_DESCRIPTIONS, STYLE_DESCRIPTIONS
 from .engine import DocumentationEngine
 from .models import DocumentationRequest, DocumentationResponse
 
 
-class DocumentationTool(BaseTool):
+class DocumentationTool(AgentLoopMixin, BaseTool):
     """
     Outil de génération automatique de documentation.
 
@@ -60,9 +61,73 @@ class DocumentationTool(BaseTool):
     ]
     long_running = True
 
+    agent_config = AgentLoopConfig(
+        max_iterations=3,
+        initial_temperature=0.7,
+        temperature_decay=0.15,
+        min_temperature=0.3,
+    )
+
     def __init__(self, config=None, app_state=None):
         super().__init__(config, app_state)
         self._engine = DocumentationEngine(logger=self.logger)
+
+    # --- AgentLoopMixin hooks ---
+
+    async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
+        """Valide la documentation : non vide + couverture des éléments."""
+        errors = []
+        doc_format = context.get("doc_format", "markdown")
+        language = context.get("language", "python")
+        code_elements = context.get("code_elements", [])
+
+        cleaned = self._strip_outer_fence(output)
+        formatted = self._engine.format_documentation(cleaned, doc_format, language)
+
+        if not formatted.strip():
+            errors.append("Documentation vide")
+            return errors
+
+        if code_elements:
+            coverage = self._engine.calculate_coverage(code_elements, formatted)
+            if coverage < 90.0:
+                undocumented = [e["name"] for e in code_elements if e["name"].lower() not in formatted.lower()]
+                errors.append(f"Couverture: {coverage:.0f}% (< 90%). Éléments manquants: {', '.join(undocumented[:5])}")
+
+        return errors
+
+    async def assess_agent_quality(self, output: str, context: Dict[str, Any]) -> float:
+        """Évalue la qualité : non-vide + couverture documentaire."""
+        doc_format = context.get("doc_format", "markdown")
+        language = context.get("language", "python")
+        code_elements = context.get("code_elements", [])
+
+        cleaned = self._strip_outer_fence(output)
+        formatted = self._engine.format_documentation(cleaned, doc_format, language)
+
+        if not formatted.strip():
+            return 0.0
+
+        content_score = 1.0 if len(formatted.strip()) > 10 else min(1.0, len(formatted) / 50)
+
+        coverage_score = 0.5
+        if code_elements:
+            coverage = self._engine.calculate_coverage(code_elements, formatted)
+            coverage_score = coverage / 100.0
+
+        return content_score * 0.3 + coverage_score * 0.7
+
+    async def build_agent_feedback(
+        self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
+    ) -> str:
+        """Construit un feedback spécifique pour compléter la documentation."""
+        parts = []
+        for error in errors:
+            if "Documentation vide" in error:
+                parts.append("La documentation est vide. Génère la documentation complète.")
+            elif "Couverture" in error:
+                parts.append(f"{error}. Documente tous les éléments manquants.")
+        return "\n".join(parts) if parts else "Améliore la couverture et la qualité de la documentation."
 
     def get_supported_formats(self) -> List[str]:
         """Retourne les formats de documentation supportés."""
@@ -250,41 +315,50 @@ class DocumentationTool(BaseTool):
             return self._generate_fallback_response(request, code_elements)
 
     async def _execute_core_logic_async(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
-        """Version asynchrone de la génération de documentation."""
+        """Version asynchrone avec boucle agentique itérative."""
         ctx = kwargs.get("ctx")
         parser = kwargs.get("parser")
 
-        if ctx:
-            await ctx.info("Analyse du code...")
-
-        # Analyser les éléments du code
         code_elements = self._engine.analyze_code_elements(request.code, request.language, parser)
 
-        # Préparer le prompt via le pipeline template (#233).
+        if not ctx:
+            return self._generate_fallback_response(request, code_elements)
+
+        await ctx.info("Génération agentique de documentation...")
+
         prompt = await self.prepare_prompt(request, template_name="documentation")
 
-        if ctx:
-            await ctx.info("Génération de la documentation via LLM...")
-
         try:
-            started = time.monotonic()
-            result = await ctx.sample(
-                messages=prompt,
-                temperature=0.5,
+            sys_prompt = (
+                None
+                if self._last_prompt_template_id
+                else (
+                    f"Tu es un expert en documentation de code {request.language}.\n"
+                    f"Génère une documentation {request.doc_format or 'markdown'} "
+                    f"en style '{request.doc_style or 'standard'}'.\n"
+                    "Documente TOUS les éléments du code."
+                )
+            )
+            agent_result = await self.agent_execute(
+                initial_prompt=prompt,
+                system_prompt=sys_prompt,
+                ctx=ctx,
+                context={
+                    "language": request.language,
+                    "doc_format": request.doc_format or "markdown",
+                    "code_elements": code_elements,
+                },
                 max_tokens=2000,
             )
-            elapsed = time.monotonic() - started
-            generated_docs = self._strip_outer_fence(result.text or "")
+
+            generated_docs = self._strip_outer_fence(agent_result.best_output)
+
             self.track_last_prompt_performance(
-                execution_time=elapsed,
+                execution_time=0.0,
                 tokens_used=len(generated_docs) // 4,
                 success=bool(generated_docs),
             )
 
-            if ctx:
-                await ctx.info("Documentation générée, formatage...")
-
-            # Formater et finaliser
             formatted_docs = self._engine.format_documentation(
                 generated_docs, request.doc_format or "markdown", request.language
             )
@@ -305,6 +379,9 @@ class DocumentationTool(BaseTool):
                 documented_elements=code_elements,
                 coverage=coverage,
                 suggestions=suggestions,
+                agent_iterations=agent_result.total_iterations,
+                agent_best_score=agent_result.best_score,
+                agent_converged=agent_result.converged,
             )
 
         except Exception as e:

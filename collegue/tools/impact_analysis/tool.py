@@ -13,6 +13,7 @@ Refactorisé: Le fichier original faisait 680 lignes, maintenant ~200 lignes.
 from typing import Any, Dict, List
 
 from ...core.shared import parse_llm_json_response
+from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool, ToolValidationError
 from .config import CONFIDENCE_THRESHOLDS
 from .engine import ImpactAnalysisEngine
@@ -28,7 +29,7 @@ from .models import (
 )
 
 
-class ImpactAnalysisTool(BaseTool):
+class ImpactAnalysisTool(AgentLoopMixin, BaseTool):
     """
     Outil d'analyse d'impact des changements de code.
 
@@ -70,9 +71,71 @@ class ImpactAnalysisTool(BaseTool):
     ]
     long_running = False
 
+    agent_config = AgentLoopConfig(
+        max_iterations=2,
+        initial_temperature=0.5,
+        temperature_decay=0.15,
+        min_temperature=0.3,
+    )
+
     def __init__(self, config=None, app_state=None):
         super().__init__(config, app_state)
         self._engine = ImpactAnalysisEngine(logger=self.logger)
+
+    # --- AgentLoopMixin hooks ---
+
+    async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
+        """Valide la réponse JSON du LLM pour l'analyse deep."""
+        errors: List[str] = []
+        try:
+            data = parse_llm_json_response(output)
+        except Exception:
+            errors.append("Réponse non-JSON ou JSON invalide")
+            return errors
+
+        if "insights" not in data:
+            errors.append("Champ 'insights' manquant")
+        else:
+            insights = data["insights"]
+            if not insights:
+                errors.append("Aucun insight fourni")
+            else:
+                for i, item in enumerate(insights[:10]):
+                    if not isinstance(item, dict) or "insight" not in item:
+                        errors.append(f"insight[{i}] invalide: 'insight' manquant")
+
+        return errors
+
+    async def assess_agent_quality(self, output: str, context: Dict[str, Any]) -> float:
+        """Évalue la qualité de l'analyse deep."""
+        try:
+            data = parse_llm_json_response(output)
+        except Exception:
+            return 0.0
+
+        has_summary = bool(data.get("semantic_summary"))
+        insights = data.get("insights", [])
+        valid_insights = [i for i in insights if isinstance(i, dict) and "insight" in i]
+        impacted_count = context.get("impacted_count", 1)
+        insight_coverage = min(1.0, len(valid_insights) / max(impacted_count / 2, 1))
+
+        return (0.3 if has_summary else 0.0) + insight_coverage * 0.7
+
+    async def build_agent_feedback(
+        self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
+    ) -> str:
+        """Construit un feedback pour améliorer l'analyse."""
+        parts: List[str] = []
+        for error in errors:
+            if "non-JSON" in error:
+                parts.append("Réponds UNIQUEMENT avec du JSON valide, sans markdown.")
+            elif "manquant" in error:
+                parts.append(f"ERREUR: {error}. Ajoute ce champ.")
+            elif "Aucun insight" in error:
+                parts.append(
+                    "Fournis au moins 2-3 insights sur l'impact sémantique, architectural ou business du changement."
+                )
+        return "\n".join(parts) if parts else "Améliore la profondeur des insights."
 
     def get_usage_description(self) -> str:
         return (
@@ -248,8 +311,7 @@ class ImpactAnalysisTool(BaseTool):
 
         if ctx and request.analysis_depth == "deep":
             try:
-                if ctx:
-                    await ctx.info("Analyse sémantique en cours...")
+                await ctx.info("Analyse sémantique agentique en cours...")
 
                 prompt = self._build_deep_analysis_prompt(
                     request,
@@ -257,11 +319,19 @@ class ImpactAnalysisTool(BaseTool):
                     [r.model_dump() for r in response.risk_notes],
                 )
 
-                result = await ctx.sample(messages=prompt, temperature=0.5, max_tokens=1500)
+                agent_result = await self.agent_execute(
+                    initial_prompt=prompt,
+                    system_prompt=(
+                        "Tu es un expert en analyse d'impact de code. "
+                        "Réponds UNIQUEMENT avec du JSON strict sans markdown."
+                    ),
+                    ctx=ctx,
+                    context={"impacted_count": len(response.impacted_files)},
+                    max_tokens=1500,
+                )
 
-                # Parser la réponse JSON
                 try:
-                    data = parse_llm_json_response(result.text)
+                    data = parse_llm_json_response(agent_result.best_output)
 
                     insights = []
                     for item in data.get("insights", []):
@@ -272,6 +342,9 @@ class ImpactAnalysisTool(BaseTool):
                             "llm_insights": insights,
                             "semantic_summary": data.get("semantic_summary"),
                             "analysis_depth_used": "deep",
+                            "agent_iterations": agent_result.total_iterations,
+                            "agent_best_score": agent_result.best_score,
+                            "agent_converged": agent_result.converged,
                         }
                     )
 
