@@ -384,35 +384,56 @@ class ExpertDelegationEngine:
         """Retourne l'historique de la chaîne en cours."""
         return list(self._chain_history)
 
-    def build_chain_report(self, source_tool: str) -> DelegationChainReport:
-        """Construit un rapport de la chaîne de délégation."""
+    def build_chain_report(
+        self,
+        source_tool: str,
+        results: Optional[List[DelegationResult]] = None,
+    ) -> DelegationChainReport:
+        """Construit un rapport de la chaîne de délégation.
 
-        def _count_experts(results: List[DelegationResult]) -> int:
+        Args:
+            source_tool: Nom du tool initiateur.
+            results: Résultats de la chaîne (top-level). Si fourni, le rapport
+                est construit à partir de ces résultats plutôt que de l'historique
+                interne partagé, ce qui le rend safe pour les appels concurrents.
+        """
+        chain_results = results if results is not None else self._chain_history
+
+        def _count_experts(res_list: List[DelegationResult]) -> int:
             count = 0
-            for r in results:
+            for r in res_list:
                 if r.success:
                     count += 1
                 count += _count_experts(r.sub_delegations)
             return count
 
-        def _max_depth(results: List[DelegationResult]) -> int:
-            if not results:
+        def _max_depth(res_list: List[DelegationResult]) -> int:
+            if not res_list:
                 return 0
             return max(
-                max(r.depth for r in results),
-                max((_max_depth(r.sub_delegations) for r in results), default=0),
+                max(r.depth for r in res_list),
+                max((_max_depth(r.sub_delegations) for r in res_list), default=0),
             )
 
-        total_time = sum(r.execution_time for r in self._chain_history)
-        all_completed = all(r.success or r.error is not None for r in self._chain_history)
+        total_time = sum(r.execution_time for r in chain_results)
+
+        abort_reason: Optional[str] = None
+        chain_completed = True
+        for r in chain_results:
+            if not r.success and r.error:
+                if "Profondeur maximale" in r.error or "Timeout" in r.error:
+                    chain_completed = False
+                    abort_reason = r.error
+                    break
 
         return DelegationChainReport(
             source_tool=source_tool,
-            total_experts_activated=_count_experts(self._chain_history),
-            max_depth_reached=_max_depth(self._chain_history),
-            results=list(self._chain_history),
+            total_experts_activated=_count_experts(chain_results),
+            max_depth_reached=_max_depth(chain_results),
+            results=list(chain_results),
             total_time=total_time,
-            chain_completed=all_completed,
+            chain_completed=chain_completed,
+            abort_reason=abort_reason,
         )
 
     def get_rules_for_tool(self, tool_name: str) -> List[DelegationRule]:

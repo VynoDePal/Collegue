@@ -331,14 +331,13 @@ RÈGLES :
                 step_delegations = []
                 if delegation_engine and isinstance(res_dict, dict):
                     try:
-                        delegation_engine.clear_history()
                         tasks = await delegation_engine.evaluate_delegations(tool_name, res_dict)
                         if tasks:
                             await ctx.info(f"🔗 {len(tasks)} délégation(s) déclenchée(s) par {tool_name}")
                             del_results = await delegation_engine.execute_delegation_chain(
                                 tasks, available_tools, ctx=ctx, tool_kwargs=tool_kwargs
                             )
-                            report = delegation_engine.build_chain_report(tool_name)
+                            report = delegation_engine.build_chain_report(tool_name, results=del_results)
                             step_delegations = [r.model_dump() for r in del_results]
                             total_experts_via_delegation += report.total_experts_activated
                             all_delegation_chains.append(report.model_dump())

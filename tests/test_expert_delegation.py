@@ -11,10 +11,8 @@ Couvre :
 - Règles par défaut
 """
 
-import asyncio
 import time
 from typing import Any, Dict, List
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -94,22 +92,10 @@ def make_tool_registry(tools: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Crée un registre de tools factice."""
     registry = {}
     for name, response_data in tools.items():
-        tool = FakeTool(name, response_data)
         registry[name] = {
-            "class": lambda resp=response_data: FakeTool(name, resp),
+            "class": _make_fake_tool_class(response_data),
             "description": f"Fake {name}",
         }
-        # Fix: capture the response data properly
-        registry[name]["class"] = type(
-            f"Fake{name}",
-            (),
-            {
-                "__init__": lambda self, config=None, resp=response_data: setattr(self, "_resp", resp),
-                "get_request_model": lambda self: FakeRequestModel,
-                "execute_async": lambda self, req, **kw: asyncio.coroutine(lambda: FakeResponse(self._resp))(),
-                "cleanup": lambda self: None,
-            },
-        )
     return registry
 
 
@@ -556,8 +542,8 @@ class TestDelegationChainIntegration:
         # Sub-delegations: refactoring → doc + tests
         assert len(results[0].sub_delegations) == 2
 
-        report = engine.build_chain_report("repo_consistency_check")
-        assert report.total_experts_activated >= 1
+        report = engine.build_chain_report("repo_consistency_check", results=results)
+        assert report.total_experts_activated == 3
 
     @pytest.mark.asyncio
     async def test_no_delegation_when_conditions_not_met(self):

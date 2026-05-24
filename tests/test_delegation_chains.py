@@ -130,8 +130,8 @@ class TestDelegationChainsUnit:
         assert all(s.success for s in sub)
 
         # Rapport
-        report = engine.build_chain_report("repo_consistency_check")
-        assert report.total_experts_activated >= 3
+        report = engine.build_chain_report("repo_consistency_check", results=results)
+        assert report.total_experts_activated == 3
         assert report.chain_completed is True
 
     @pytest.mark.asyncio
@@ -301,6 +301,7 @@ class TestDelegationChainsUnit:
 
 
 @skip_no_key
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_delegation_consistency_to_refactoring():
     """Test réel: consistency détecte un problème → refactoring se déclenche via délégation."""
@@ -363,6 +364,7 @@ class OldClass:
 
 
 @skip_no_key
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_delegation_engine_evaluation():
     """Test réel: évaluation des règles de délégation avec des résultats réalistes."""
