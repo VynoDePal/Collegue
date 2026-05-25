@@ -360,6 +360,7 @@ class IacGuardrailsScanTool(AgentLoopMixin, BaseTool):
 
     def _execute_core_logic(self, request: IacGuardrailsRequest, **kwargs) -> IacGuardrailsResponse:
         """Logique principale du scan."""
+        self._recall_from_memory()
         self.logger.info(f"Scan IaC de {len(request.files)} fichier(s) avec profil '{request.policy_profile}'")
 
         all_findings = []

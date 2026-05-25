@@ -298,6 +298,7 @@ class RefactoringTool(AgentLoopMixin, BaseTool):
 
     def _execute_core_logic(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         """Exécute le refactoring (synchrone)."""
+        self._recall_from_memory(language=request.language)
         ctx = kwargs.get("ctx")
 
         original_metrics = self._engine.analyze_code_metrics(request.code, request.language)
@@ -398,7 +399,7 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
             )
             explanation = self._engine.generate_explanation(request.refactoring_type, changes, improvement_metrics)
 
-            return RefactoringResponse(
+            response = RefactoringResponse(
                 refactored_code=refactored_code,
                 original_code=request.code,
                 language=request.language,
@@ -410,6 +411,17 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
                 agent_errors_fixed=agent_result.errors_fixed,
                 agent_converged=agent_result.converged,
             )
+
+            self._store_to_memory(
+                entry_type="fix_applied",
+                category=request.refactoring_type,
+                title=f"Refactoring {request.refactoring_type}: {len(changes)} changements",
+                data={"changes_count": len(changes), "improvements": improvement_metrics},
+                score=agent_result.best_score,
+                language=request.language,
+            )
+
+            return response
 
         except Exception as e:
             self.logger.warning(f"Erreur LLM async, utilisation du fallback: {e}")

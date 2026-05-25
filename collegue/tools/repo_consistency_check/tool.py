@@ -358,6 +358,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
 
     def _execute_core_logic(self, request: ConsistencyCheckRequest, **kwargs) -> ConsistencyCheckResponse:
         """Exécute la vérification de cohérence (synchrone)."""
+        self._recall_from_memory()
         self.logger.info(f"Vérification de cohérence sur {len(request.files)} fichier(s)")
 
         checks = request.checks or ALL_CHECKS

@@ -173,6 +173,8 @@ Réponds en JSON avec cette structure exacte:
 
     def _execute_core_logic(self, request: ArchitectureAnalysisRequest, **kwargs) -> ArchitectureAnalysisResponse:
         """Exécute l'analyse architecturale (synchrone)."""
+        self._recall_from_memory(language=request.language)
+
         all_issues: List[ArchitecturalIssue] = []
         analysis = request.analysis_types
 
@@ -224,7 +226,7 @@ Réponds en JSON avec cette structure exacte:
             f"Patterns: {', '.join(patterns) if patterns else 'aucun détecté'}."
         )
 
-        return ArchitectureAnalysisResponse(
+        response = ArchitectureAnalysisResponse(
             architecture_score=arch_score,
             detected_patterns=patterns,
             dependencies=dependencies,
@@ -235,6 +237,26 @@ Réponds en JSON avec cette structure exacte:
             summary=summary,
             language=request.language,
         )
+
+        self._store_to_memory(
+            entry_type="expert_result",
+            category="architecture",
+            title=f"Architecture: score {arch_score:.2f}, dette {debt_score:.2f}",
+            data={"patterns": patterns, "issues_count": len(all_issues), "debt_score": debt_score},
+            score=arch_score,
+            language=request.language,
+        )
+        for pattern in patterns:
+            self._store_to_memory(
+                entry_type="pattern_learned",
+                category="architecture_pattern",
+                title=pattern,
+                data={"source": "static_analysis"},
+                score=arch_score,
+                language=request.language,
+            )
+
+        return response
 
     async def _execute_core_logic_async(
         self, request: ArchitectureAnalysisRequest, **kwargs
@@ -256,7 +278,12 @@ Réponds en JSON avec cette structure exacte:
             if ctx:
                 await ctx.info("Analyse architecturale agentique en cours...")
 
+            memory_ctx = self._recall_from_memory(language=request.language)
             prompt = self._build_analysis_prompt(request)
+            if memory_ctx:
+                memory_info = "\n".join(f"- {k}: {v}" for k, v in memory_ctx.items())
+                prompt += f"\n\nContexte historique du projet:\n{memory_info}"
+
             sys_prompt = (
                 f"Tu es un architecte logiciel senior expert en {request.language}. "
                 "Tu analyses l'architecture, les patterns et la dette technique. "
