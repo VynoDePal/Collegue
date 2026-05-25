@@ -34,6 +34,12 @@ class RefactoringResponse(BaseModel):
     agent_best_score: Optional[float] = Field(default=None, description="Meilleur score de qualité atteint (0.0-1.0)")
     agent_errors_fixed: List[str] = Field(default_factory=list, description="Erreurs corrigées par la boucle agentique")
     agent_converged: Optional[bool] = Field(default=None, description="True si la boucle a convergé")
+    delegation_triggered: bool = Field(
+        default=False, description="True si une délégation inter-experts a été déclenchée"
+    )
+    delegation_results: Optional[List[Dict[str, Any]]] = Field(
+        default=None, description="Résultats des délégations inter-experts"
+    )
 
 
 class LLMRefactoringResult(BaseModel):

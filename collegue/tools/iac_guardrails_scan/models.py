@@ -135,3 +135,7 @@ class IacGuardrailsResponse(BaseModel):
     auto_remediation_result: Optional[Dict[str, Any]] = Field(
         None, description="Résultat de la remédiation automatique (si déclenchée)"
     )
+    delegation_triggered: bool = Field(False, description="True si une délégation inter-experts a été déclenchée")
+    delegation_results: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Résultats des délégations inter-experts"
+    )

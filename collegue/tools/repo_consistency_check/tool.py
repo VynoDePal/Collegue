@@ -472,16 +472,49 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
             self._engine.detect_language,
         )
 
-        # Auto-chain si activé
+        # Auto-chain si activé (legacy) ou délégation inter-experts
+        delegation_triggered = False
+        delegation_results_list = None
+
         if request.auto_chain and refactoring_score >= request.refactoring_threshold and suggested_actions:
-            try:
-                auto_refactoring_result = await self._execute_auto_chain_refactoring(
-                    request, response.issues, suggested_actions, ctx=ctx
-                )
-                if auto_refactoring_result:
-                    auto_refactoring_triggered = True
-            except Exception as e:
-                self.logger.warning(f"Erreur auto-chain: {e}")
+            # Essayer d'abord la délégation inter-experts
+            delegation_engine = kwargs.get("delegation_engine")
+            if delegation_engine is not None:
+                try:
+                    result_dict = response.model_copy(
+                        update={
+                            "refactoring_score": refactoring_score,
+                            "suggested_actions": [
+                                a.model_dump() if hasattr(a, "model_dump") else a for a in suggested_actions
+                            ],
+                        }
+                    ).model_dump()
+                    tasks = await delegation_engine.evaluate_delegations(self.tool_name, result_dict)
+                    if tasks:
+                        tool_registry = kwargs.get("tool_registry", {})
+                        tool_kw = {
+                            "parser": kwargs.get("parser"),
+                            "prompt_engine": kwargs.get("prompt_engine"),
+                            "context_manager": kwargs.get("context_manager"),
+                        }
+                        del_results = await delegation_engine.execute_delegation_chain(
+                            tasks, tool_registry, ctx=ctx, tool_kwargs=tool_kw
+                        )
+                        delegation_triggered = True
+                        delegation_results_list = [r.model_dump() for r in del_results]
+                except Exception as e:
+                    self.logger.warning(f"Erreur délégation: {e}")
+
+            # Fallback: auto-chain legacy si pas de delegation engine
+            if not delegation_triggered:
+                try:
+                    auto_refactoring_result = await self._execute_auto_chain_refactoring(
+                        request, response.issues, suggested_actions, ctx=ctx
+                    )
+                    if auto_refactoring_result:
+                        auto_refactoring_triggered = True
+                except Exception as e:
+                    self.logger.warning(f"Erreur auto-chain: {e}")
 
         # Mettre à jour le résumé
         analysis_summary = self._engine.build_analysis_summary(
@@ -505,5 +538,7 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 "analysis_summary": analysis_summary,
                 "auto_refactoring_triggered": auto_refactoring_triggered,
                 "auto_refactoring_result": auto_refactoring_result,
+                "delegation_triggered": delegation_triggered,
+                "delegation_results": delegation_results_list,
             }
         )
