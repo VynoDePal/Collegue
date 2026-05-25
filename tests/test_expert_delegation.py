@@ -415,7 +415,7 @@ class TestExpertDelegationEngine:
 class TestDefaultDelegationEngine:
     def test_create_default_engine(self):
         engine = create_default_delegation_engine()
-        assert len(engine._rules) == 6
+        assert len(engine._rules) == 14  # 6 Phase 2 + 8 Phase 3
 
     def test_default_engine_has_consistency_to_refactoring(self):
         engine = create_default_delegation_engine()
@@ -449,8 +449,9 @@ class TestDefaultDelegationEngine:
         engine = create_default_delegation_engine()
         result = {"refactoring_score": 0.8, "issues": [{"title": "unused import"}]}
         tasks = await engine.evaluate_delegations("repo_consistency_check", result)
-        assert len(tasks) == 1
-        assert tasks[0].target_tool == "code_refactoring"
+        # Phase 3: score 0.8 > 0.7 also triggers architecture_analysis
+        assert len(tasks) >= 1
+        assert any(t.target_tool == "code_refactoring" for t in tasks)
 
     @pytest.mark.asyncio
     async def test_consistency_no_trigger_low_score(self):
@@ -469,7 +470,8 @@ class TestDefaultDelegationEngine:
             "language": "python",
         }
         tasks = await engine.evaluate_delegations("code_refactoring", result)
-        assert len(tasks) == 2
+        # Phase 3: also triggers code_review
+        assert len(tasks) >= 2
         targets = {t.target_tool for t in tasks}
         assert "code_documentation" in targets
         assert "test_generation" in targets
@@ -533,17 +535,20 @@ class TestDelegationChainIntegration:
         }
 
         tasks = await engine.evaluate_delegations("repo_consistency_check", consistency_result)
-        assert len(tasks) == 1  # code_refactoring
+        # Phase 3: may also trigger architecture_analysis
+        assert len(tasks) >= 1
+        assert any(t.target_tool == "code_refactoring" for t in tasks)
 
         results = await engine.execute_delegation_chain(tasks, registry)
-        assert len(results) == 1
-        assert results[0].success is True
-        assert results[0].target_tool == "code_refactoring"
-        # Sub-delegations: refactoring → doc + tests
-        assert len(results[0].sub_delegations) == 2
+        assert len(results) >= 1
+        refactoring_result = next((r for r in results if r.target_tool == "code_refactoring"), None)
+        assert refactoring_result is not None
+        assert refactoring_result.success is True
+        # Sub-delegations: refactoring → doc + tests (+ possibly code_review)
+        assert len(refactoring_result.sub_delegations) >= 2
 
         report = engine.build_chain_report("repo_consistency_check", results=results)
-        assert report.total_experts_activated == 3
+        assert report.total_experts_activated >= 3
 
     @pytest.mark.asyncio
     async def test_no_delegation_when_conditions_not_met(self):

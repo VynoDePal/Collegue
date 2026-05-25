@@ -593,6 +593,195 @@ def _build_refactoring_params_from_iac(source_tool: str, result: Dict[str, Any])
     }
 
 
+# --- Phase 3: Conditions et builders pour les nouveaux experts ---
+
+
+def _refactoring_needs_review(result: Dict[str, Any]) -> bool:
+    """Condition: le refactoring a produit des changements → déclencher une revue."""
+    return _refactoring_has_changes(result)
+
+
+def _review_quality_low(result: Dict[str, Any]) -> bool:
+    """Condition: le score de qualité de la revue est trop bas → déclencher un refactoring."""
+    return result.get("quality_score", 1.0) < 0.5
+
+
+def _consistency_has_architectural_issues(result: Dict[str, Any]) -> bool:
+    """Condition: le consistency check détecte des problèmes architecturaux."""
+    issues = result.get("issues", [])
+    for issue in issues:
+        if isinstance(issue, dict):
+            msg = issue.get("title", issue.get("message", "")).lower()
+            if any(kw in msg for kw in ("architecture", "structure", "coupling", "cohesion", "circular", "dependency")):
+                return True
+    return result.get("refactoring_score", 0.0) > 0.7
+
+
+def _architecture_has_debt(result: Dict[str, Any]) -> bool:
+    """Condition: l'analyse architecturale a détecté de la dette technique."""
+    return result.get("debt_score", 0.0) > 0.5
+
+
+def _architecture_needs_impact(result: Dict[str, Any]) -> bool:
+    """Condition: l'analyse architecturale recommande un refactoring important."""
+    issues = result.get("issues", [])
+    critical = sum(1 for i in issues if isinstance(i, dict) and i.get("severity") in ("error", "critical"))
+    return critical > 0
+
+
+def _consistency_has_performance_issues(result: Dict[str, Any]) -> bool:
+    """Condition: le consistency check détecte des problèmes de performance."""
+    issues = result.get("issues", [])
+    for issue in issues:
+        if isinstance(issue, dict):
+            msg = issue.get("title", issue.get("message", "")).lower()
+            if any(kw in msg for kw in ("performance", "slow", "complexity", "o(n", "bottleneck", "inefficient")):
+                return True
+    return False
+
+
+def _performance_needs_refactoring(result: Dict[str, Any]) -> bool:
+    """Condition: l'analyse de performance détecte des problèmes à corriger."""
+    return result.get("performance_score", 1.0) < 0.5
+
+
+def _performance_needs_tests(result: Dict[str, Any]) -> bool:
+    """Condition: l'analyse de performance a proposé des optimisations → tester."""
+    optimizations = result.get("optimizations", [])
+    return len(optimizations) > 0
+
+
+def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres de code review depuis un résultat de refactoring."""
+    return {
+        "code": result.get("refactored_code", ""),
+        "language": result.get("language", "python"),
+        "review_standards": ["naming", "complexity", "security", "dry", "solid"],
+        "severity_threshold": "warning",
+        "context": "auto-delegated from code_refactoring — vérifier la qualité du refactoring",
+    }
+
+
+def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres de refactoring depuis un résultat de code review."""
+    findings = result.get("findings", [])
+    summary = "# Code Review Findings to Fix\n"
+    for f in findings[:10]:
+        if isinstance(f, dict):
+            summary += f"- [{f.get('severity', 'info')}] {f.get('title', '')}: {f.get('description', '')}\n"
+            if f.get("suggestion"):
+                summary += f"  Suggestion: {f['suggestion']}\n"
+
+    return {
+        "code": summary,
+        "language": result.get("language", "python"),
+        "refactoring_type": "clean",
+        "parameters": {"context": "auto-delegated from code_review (quality < 0.5)"},
+    }
+
+
+def _build_architecture_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres d'analyse architecturale depuis un consistency check."""
+    issues = result.get("issues", [])
+    summary = "# Consistency Check — Architectural Issues\n"
+    for issue in issues[:10]:
+        if isinstance(issue, dict):
+            summary += f"- {issue.get('title', issue.get('message', str(issue)))}\n"
+
+    return {
+        "code": summary,
+        "language": "python",
+        "analysis_types": ["dependencies", "coupling", "cohesion", "patterns", "debt"],
+        "context": "auto-delegated from repo_consistency_check",
+    }
+
+
+def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres de refactoring depuis une analyse architecturale."""
+    issues = result.get("issues", [])
+    summary = "# Architectural Issues to Fix\n"
+    for i in issues[:10]:
+        if isinstance(i, dict):
+            summary += f"- [{i.get('severity', 'info')}] {i.get('title', '')}\n"
+            if i.get("recommendation"):
+                summary += f"  Recommandation: {i['recommendation']}\n"
+
+    return {
+        "code": summary,
+        "language": result.get("language", "python"),
+        "refactoring_type": "clean",
+        "parameters": {"context": "auto-delegated from architecture_analysis (dette technique)"},
+    }
+
+
+def _build_impact_params_from_architecture(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres d'impact analysis depuis une analyse architecturale."""
+    modules = []
+    for issue in result.get("issues", []):
+        if isinstance(issue, dict):
+            modules.extend(issue.get("affected_modules", []))
+
+    return {
+        "description": f"Impact des refactorings architecturaux recommandés ({len(modules)} modules)",
+        "change_type": "refactoring",
+        "files_changed": [{"path": m, "change_type": "refactoring"} for m in modules[:10]],
+        "parameters": {"context": "auto-delegated from architecture_analysis"},
+    }
+
+
+def _build_performance_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres d'analyse performance depuis un consistency check."""
+    issues = result.get("issues", [])
+    summary = "# Consistency Check — Performance Issues\n"
+    for issue in issues[:10]:
+        if isinstance(issue, dict):
+            summary += f"- {issue.get('title', issue.get('message', str(issue)))}\n"
+
+    return {
+        "code": summary,
+        "language": "python",
+        "analysis_categories": ["cpu", "memory", "io", "algorithmic"],
+        "context": "auto-delegated from repo_consistency_check",
+    }
+
+
+def _build_refactoring_params_from_performance(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres de refactoring depuis une analyse performance."""
+    issues = result.get("issues", [])
+    summary = "# Performance Issues to Optimize\n"
+    for i in issues[:10]:
+        if isinstance(i, dict):
+            summary += f"- [{i.get('severity', 'info')}] {i.get('title', '')}"
+            if i.get("estimated_complexity"):
+                summary += f" ({i['estimated_complexity']})"
+            summary += "\n"
+            if i.get("suggestion"):
+                summary += f"  Suggestion: {i['suggestion']}\n"
+
+    return {
+        "code": summary,
+        "language": result.get("language", "python"),
+        "refactoring_type": "optimize",
+        "parameters": {"context": "auto-delegated from performance_analysis"},
+    }
+
+
+def _build_test_params_from_performance(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Construit les paramètres de test_generation depuis une analyse performance."""
+    optimizations = result.get("optimizations", [])
+    summary = "# Performance Optimizations to Test\n"
+    for opt in optimizations[:10]:
+        summary += f"- {opt}\n"
+
+    return {
+        "code": summary,
+        "language": result.get("language", "python"),
+        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "coverage_target": 80,
+        "parameters": {"context": "auto-delegated from performance_analysis"},
+    }
+
+
 def create_default_delegation_engine(
     max_chain_depth: int = 5,
     chain_timeout: float = 300.0,
@@ -600,12 +789,20 @@ def create_default_delegation_engine(
     """Crée un ExpertDelegationEngine avec les règles par défaut.
 
     Matrice de délégation :
-        repo_consistency_check → code_refactoring  (si score > 0.5)
-        code_refactoring → code_documentation       (si changements > 0)
-        code_refactoring → test_generation           (si changements > 0)
-        impact_analysis → test_generation            (si risques > 0)
-        impact_analysis → iac_guardrails_scan        (si fichiers IaC impactés)
-        iac_guardrails_scan → code_refactoring       (si score sécurité < 0.5)
+        repo_consistency_check → code_refactoring     (si score > 0.5)
+        repo_consistency_check → architecture_analysis (si problèmes architecturaux)
+        repo_consistency_check → performance_analysis  (si problèmes de performance)
+        code_refactoring → code_documentation          (si changements > 0)
+        code_refactoring → test_generation             (si changements > 0)
+        code_refactoring → code_review                 (si changements > 0)
+        code_review → code_refactoring                 (si quality_score < 0.5)
+        architecture_analysis → code_refactoring       (si dette > 0.5)
+        architecture_analysis → impact_analysis        (si issues critiques)
+        performance_analysis → code_refactoring        (si perf_score < 0.5)
+        performance_analysis → test_generation         (si optimisations proposées)
+        impact_analysis → test_generation              (si risques > 0)
+        impact_analysis → iac_guardrails_scan          (si fichiers IaC impactés)
+        iac_guardrails_scan → code_refactoring         (si score sécurité < 0.5)
     """
     engine = ExpertDelegationEngine(
         max_chain_depth=max_chain_depth,
@@ -663,6 +860,80 @@ def create_default_delegation_engine(
         condition=_iac_needs_remediation,
         params_builder=_build_refactoring_params_from_iac,
         condition_name="score sécurité < 0.5",
+        priority=10,
+    )
+
+    # --- Phase 3: Nouveaux experts ---
+
+    engine.register_rule(
+        source_tool="code_refactoring",
+        target_tool="code_review",
+        condition=_refactoring_needs_review,
+        params_builder=_build_review_params_from_refactoring,
+        condition_name="changements effectués → revue qualité",
+        priority=15,
+    )
+
+    engine.register_rule(
+        source_tool="code_review",
+        target_tool="code_refactoring",
+        condition=_review_quality_low,
+        params_builder=_build_refactoring_params_from_review,
+        condition_name="quality_score < 0.5 → auto-correction",
+        priority=5,
+    )
+
+    engine.register_rule(
+        source_tool="repo_consistency_check",
+        target_tool="architecture_analysis",
+        condition=_consistency_has_architectural_issues,
+        params_builder=_build_architecture_params_from_consistency,
+        condition_name="problèmes architecturaux détectés",
+        priority=10,
+    )
+
+    engine.register_rule(
+        source_tool="architecture_analysis",
+        target_tool="code_refactoring",
+        condition=_architecture_has_debt,
+        params_builder=_build_refactoring_params_from_architecture,
+        condition_name="dette technique > 0.5",
+        priority=5,
+    )
+
+    engine.register_rule(
+        source_tool="architecture_analysis",
+        target_tool="impact_analysis",
+        condition=_architecture_needs_impact,
+        params_builder=_build_impact_params_from_architecture,
+        condition_name="issues critiques → évaluer impact",
+        priority=10,
+    )
+
+    engine.register_rule(
+        source_tool="repo_consistency_check",
+        target_tool="performance_analysis",
+        condition=_consistency_has_performance_issues,
+        params_builder=_build_performance_params_from_consistency,
+        condition_name="problèmes de performance détectés",
+        priority=10,
+    )
+
+    engine.register_rule(
+        source_tool="performance_analysis",
+        target_tool="code_refactoring",
+        condition=_performance_needs_refactoring,
+        params_builder=_build_refactoring_params_from_performance,
+        condition_name="performance_score < 0.5 → optimiser",
+        priority=5,
+    )
+
+    engine.register_rule(
+        source_tool="performance_analysis",
+        target_tool="test_generation",
+        condition=_performance_needs_tests,
+        params_builder=_build_test_params_from_performance,
+        condition_name="optimisations proposées → tester",
         priority=10,
     )
 
