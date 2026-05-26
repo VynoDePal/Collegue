@@ -163,8 +163,9 @@ class TestChangeDetector:
     @patch("subprocess.run")
     def test_detect_changes_parses_output(self, mock_run):
         mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="HEAD~1\n", stderr=""),  # rev-parse --verify
             MagicMock(returncode=0, stdout="M\tsrc/app.py\nA\tsrc/new.js\nD\told.txt\n", stderr=""),
-            MagicMock(returncode=0, stdout="abc123\n", stderr=""),
+            MagicMock(returncode=0, stdout="abc123\n", stderr=""),  # rev-parse HEAD
         ]
         detector = ChangeDetector("/fake/repo")
         changes = detector.detect_changes()

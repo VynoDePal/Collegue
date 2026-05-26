@@ -247,7 +247,7 @@ Réponds en JSON avec cette structure exacte:
         for pattern in patterns:
             self._store_to_memory(
                 entry_type="pattern_learned",
-                category="architecture_pattern",
+                category="architecture",
                 title=pattern,
                 data={"source": "static_analysis"},
                 score=arch_score,

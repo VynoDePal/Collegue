@@ -130,8 +130,14 @@ class ProjectMemory:
         file_path: Optional[str] = None,
         language: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
+        auto_save: bool = True,
     ) -> MemoryEntry:
-        """Ajoute une entrée dans la mémoire."""
+        """Ajoute une entrée dans la mémoire.
+
+        Args:
+            auto_save: Si True (défaut), persiste immédiatement sur disque.
+                Passer False pour du batch (appeler save() manuellement après).
+        """
         if ttl_seconds is None:
             ttl_seconds = DEFAULT_TTL.get(entry_type)
 
@@ -155,7 +161,8 @@ class ProjectMemory:
             if len(self._entries) > self._max_total:
                 self._prune_locked()
 
-        self.save()
+        if auto_save:
+            self.save()
         return entry
 
     def recall(
@@ -217,8 +224,16 @@ class ProjectMemory:
         """Construit un contexte mémoire pour un expert donné.
 
         Retourne un dict prêt à être injecté dans le prompt LLM.
+        Sélectionne par type d'entrée (tri par timestamp) pour ne pas
+        évincer les project_profile/fix_applied de score 0.
         """
-        entries = self.recall(expert=expert, language=language, limit=10)
+        # Chercher par type pour éviter que le tri par score évince les entrées à score 0
+        patterns_entries = self.recall(expert=expert, entry_type="pattern_learned", language=language, limit=5)
+        issues_entries = self.recall(expert=expert, entry_type="issue_found", language=language, limit=5)
+        fixes_entries = self.recall(expert=expert, entry_type="fix_applied", language=language, limit=3)
+        profile_entries = self.recall(entry_type="project_profile", language=language, limit=3)
+
+        entries = patterns_entries + issues_entries + fixes_entries + profile_entries
         if not entries:
             return {}
 

@@ -122,6 +122,18 @@ class ChangeDetector:
         """Détecte les changements depuis le dernier commit scanné."""
         try:
             ref = since_commit or self._last_commit or "HEAD~1"
+
+            # Vérifier que la ref existe (évite le bruit dans un repo avec 0/1 commit)
+            verify = subprocess.run(
+                ["git", "rev-parse", "--verify", ref],
+                capture_output=True,
+                text=True,
+                cwd=self._repo_path,
+                timeout=10,
+            )
+            if verify.returncode != 0:
+                return []
+
             result = subprocess.run(
                 ["git", "diff", "--name-status", ref, "HEAD"],
                 capture_output=True,
