@@ -283,7 +283,6 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
 
     def _execute_core_logic(self, request: TestGenerationRequest, **kwargs) -> TestGenerationResponse:
         """Exécute la génération de tests (synchrone)."""
-        self._recall_from_memory(language=request.language)
         ctx = kwargs.get("ctx")
 
         # Détecter le framework

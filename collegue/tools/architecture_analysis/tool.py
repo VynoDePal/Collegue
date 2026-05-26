@@ -173,8 +173,6 @@ Réponds en JSON avec cette structure exacte:
 
     def _execute_core_logic(self, request: ArchitectureAnalysisRequest, **kwargs) -> ArchitectureAnalysisResponse:
         """Exécute l'analyse architecturale (synchrone)."""
-        self._recall_from_memory(language=request.language)
-
         all_issues: List[ArchitecturalIssue] = []
         analysis = request.analysis_types
 

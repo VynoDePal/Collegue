@@ -258,7 +258,6 @@ class DocumentationTool(AgentLoopMixin, BaseTool):
 
     def _execute_core_logic(self, request: DocumentationRequest, **kwargs) -> DocumentationResponse:
         """Exécute la génération de documentation (synchrone)."""
-        self._recall_from_memory(language=request.language)
         ctx = kwargs.get("ctx")
         parser = kwargs.get("parser")
 

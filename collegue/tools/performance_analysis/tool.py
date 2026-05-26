@@ -165,8 +165,6 @@ Réponds en JSON avec cette structure exacte:
 
     def _execute_core_logic(self, request: PerformanceAnalysisRequest, **kwargs) -> PerformanceAnalysisResponse:
         """Exécute l'analyse de performance (synchrone)."""
-        self._recall_from_memory(language=request.language)
-
         total_lines = len(request.code.split("\n"))
         all_issues: List[PerformanceIssue] = []
         categories = request.analysis_categories

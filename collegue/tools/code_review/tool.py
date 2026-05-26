@@ -173,8 +173,6 @@ Réponds en JSON avec cette structure exacte:
 
     def _execute_core_logic(self, request: CodeReviewRequest, **kwargs) -> CodeReviewResponse:
         """Exécute la revue de code (synchrone)."""
-        self._recall_from_memory(language=request.language)
-
         total_lines = len(request.code.split("\n"))
 
         # Analyse statique locale

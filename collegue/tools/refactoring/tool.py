@@ -298,7 +298,6 @@ class RefactoringTool(AgentLoopMixin, BaseTool):
 
     def _execute_core_logic(self, request: RefactoringRequest, **kwargs) -> RefactoringResponse:
         """Exécute le refactoring (synchrone)."""
-        self._recall_from_memory(language=request.language)
         ctx = kwargs.get("ctx")
 
         original_metrics = self._engine.analyze_code_metrics(request.code, request.language)

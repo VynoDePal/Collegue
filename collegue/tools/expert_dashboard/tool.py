@@ -90,9 +90,9 @@ class ExpertDashboardTool(BaseTool):
 
         # Charger les stats du moniteur proactif
         try:
-            from ...autonomous.proactive_monitor import ProactiveMonitor
+            from ...autonomous.proactive_monitor import get_proactive_monitor
 
-            monitor = ProactiveMonitor()
+            monitor = get_proactive_monitor()
             monitor_stats = monitor.get_stats()
         except Exception:
             pass

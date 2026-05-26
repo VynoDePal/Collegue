@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,6 +194,10 @@ class ChangeDetector:
                 status = line[:2].strip()
                 filepath = line[3:].strip()
 
+                # Handle renamed files: "old -> new" format
+                if " -> " in filepath:
+                    filepath = filepath.split(" -> ")[-1]
+
                 change_type = "modified"
                 if "A" in status or "?" in status:
                     change_type = "added"
@@ -359,7 +364,28 @@ class ProactiveMonitor:
             "total_triggers": sum(r.triggers_decided for r in self._scan_history),
             "config": {
                 "scan_interval": self._config.scan_interval,
-                "enabled_experts": list(self._config.enabled_experts),
+                "enabled_experts": sorted(self._config.enabled_experts),
                 "min_changes_to_trigger": self._config.min_changes_to_trigger,
             },
         }
+
+
+# Singleton global
+_proactive_monitor: Optional[ProactiveMonitor] = None
+_pm_lock = threading.Lock()
+
+
+def get_proactive_monitor(config: Optional[MonitorConfig] = None) -> ProactiveMonitor:
+    """Retourne le singleton ProactiveMonitor."""
+    global _proactive_monitor
+    with _pm_lock:
+        if _proactive_monitor is None:
+            _proactive_monitor = ProactiveMonitor(config=config)
+        return _proactive_monitor
+
+
+def reset_proactive_monitor() -> None:
+    """Réinitialise le singleton (pour les tests)."""
+    global _proactive_monitor
+    with _pm_lock:
+        _proactive_monitor = None
