@@ -154,25 +154,32 @@ class DashboardEngine:
         )
 
     def build_delegation_activity(self, delegation_engine=None) -> DelegationActivity:
-        """Construit l'activité de délégation."""
+        """Construit l'activité de délégation via les APIs publiques du moteur."""
         if delegation_engine is None:
             return DelegationActivity()
 
-        rules = getattr(delegation_engine, "_rules", [])
-        total_rules = len(rules)
+        # Utiliser get_chain_history() (API publique) pour total_chains
+        chain_history = delegation_engine.get_chain_history()
+        total_chains = len(chain_history)
 
+        # Compter les règles par expert source/cible via les statuts connus
         source_counts: Dict[str, int] = {}
         target_counts: Dict[str, int] = {}
-        for rule in rules:
-            src = getattr(rule, "source_tool", "")
-            tgt = getattr(rule, "target_tool", "")
-            source_counts[src] = source_counts.get(src, 0) + 1
-            target_counts[tgt] = target_counts.get(tgt, 0) + 1
+        total_rules = 0
+        for expert in KNOWN_EXPERTS:
+            rules_for_tool = delegation_engine.get_rules_for_tool(expert)
+            total_rules += len(rules_for_tool)
+            if rules_for_tool:
+                source_counts[expert] = len(rules_for_tool)
+            for rule in rules_for_tool:
+                tgt = rule.target_tool
+                target_counts[tgt] = target_counts.get(tgt, 0) + 1
 
         most_source = max(source_counts, key=source_counts.get) if source_counts else None
         most_target = max(target_counts, key=target_counts.get) if target_counts else None
 
         return DelegationActivity(
+            total_chains=total_chains,
             total_rules=total_rules,
             most_active_source=most_source,
             most_active_target=most_target,

@@ -13,7 +13,6 @@ class DashboardRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="Identifiant de session")
     include_memory: bool = Field(True, description="Inclure les données de la mémoire projet")
     include_recommendations: bool = Field(True, description="Inclure les recommandations")
-    include_history: bool = Field(True, description="Inclure l'historique des activités")
     top_recommendations: int = Field(10, description="Nombre max de recommandations")
     language_filter: Optional[str] = Field(None, description="Filtrer par langage")
 

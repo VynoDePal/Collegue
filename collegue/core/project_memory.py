@@ -8,6 +8,8 @@ avec le contexte historique mémorisé.
 
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -62,7 +64,7 @@ class ProjectMemory:
     """Mémoire persistante du projet.
 
     Stocke les entrées sur disque dans un répertoire `.collegue/memory/`.
-    Thread-safe, avec index inversé pour recherche rapide.
+    Thread-safe avec filtrage par expert/type/catégorie/langage.
     """
 
     def __init__(self, memory_dir: Optional[str] = None, max_total: int = MAX_TOTAL_ENTRIES):
@@ -97,15 +99,23 @@ class ProjectMemory:
             self._entries = []
 
     def save(self) -> None:
-        """Persiste la mémoire sur disque."""
+        """Persiste la mémoire sur disque (écriture atomique via fichier temporaire)."""
         with self._lock:
             if not self._dirty:
                 return
             self._ensure_dir()
             path = self._storage_path()
             try:
-                with open(path, "w") as f:
-                    json.dump([e.to_dict() for e in self._entries], f, indent=2, default=str)
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=str(self._memory_dir), suffix=".tmp", prefix="memory_"
+                )
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump([e.to_dict() for e in self._entries], f, indent=2, default=str)
+                    os.replace(tmp_path, str(path))
+                except BaseException:
+                    os.unlink(tmp_path)
+                    raise
                 self._dirty = False
                 logger.debug("ProjectMemory: sauvegardé %d entrées vers %s", len(self._entries), path)
             except Exception as exc:
@@ -322,6 +332,12 @@ def get_project_memory(memory_dir: Optional[str] = None) -> ProjectMemory:
     with _pm_lock:
         if _project_memory is None:
             _project_memory = ProjectMemory(memory_dir=memory_dir)
+        elif memory_dir is not None and str(_project_memory.memory_dir) != str(Path(memory_dir)):
+            logger.warning(
+                "ProjectMemory: memory_dir demandé '%s' ignoré, singleton déjà initialisé avec '%s'",
+                memory_dir,
+                _project_memory.memory_dir,
+            )
         return _project_memory
 
 

@@ -314,7 +314,7 @@ Réponds en JSON avec cette structure exacte:
                 f"({len(local_result.findings)} statique + {len(llm_findings)} LLM)."
             )
 
-            return CodeReviewResponse(
+            response = CodeReviewResponse(
                 quality_score=quality_score,
                 findings=merged_findings,
                 summary=summary,
@@ -327,6 +327,27 @@ Réponds en JSON avec cette structure exacte:
                 agent_best_score=agent_result.best_score,
                 agent_converged=agent_result.converged,
             )
+
+            # Stocker le résultat final (enrichi LLM) en mémoire
+            self._store_to_memory(
+                entry_type="expert_result",
+                category="code_review",
+                title=f"Revue agentique: {total_lines} lignes, score {quality_score:.2f}",
+                data={"findings_count": len(merged_findings), "category_scores": category_scores},
+                score=quality_score,
+                language=request.language,
+            )
+            for finding in merged_findings:
+                if finding.severity in ("critical", "error"):
+                    self._store_to_memory(
+                        entry_type="issue_found",
+                        category=finding.category,
+                        title=finding.title,
+                        data={"severity": finding.severity, "description": finding.description},
+                        language=request.language,
+                    )
+
+            return response
 
         except Exception as e:
             self.logger.warning(f"Fallback revue statique suite à erreur LLM: {e}")

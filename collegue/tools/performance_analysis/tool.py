@@ -302,7 +302,7 @@ Réponds en JSON avec cette structure exacte:
                 f"({len(local_result.issues)} statique + {len(llm_issues)} LLM)."
             )
 
-            return PerformanceAnalysisResponse(
+            response = PerformanceAnalysisResponse(
                 performance_score=perf_score,
                 issues=merged_issues,
                 category_scores=cat_scores,
@@ -315,6 +315,27 @@ Réponds en JSON avec cette structure exacte:
                 agent_best_score=agent_result.best_score,
                 agent_converged=agent_result.converged,
             )
+
+            # Stocker le résultat final (enrichi LLM) en mémoire
+            self._store_to_memory(
+                entry_type="expert_result",
+                category="performance",
+                title=f"Analyse perf agentique: score {perf_score:.2f}",
+                data={"issues_count": len(merged_issues), "category_scores": cat_scores},
+                score=perf_score,
+                language=request.language,
+            )
+            for issue in merged_issues:
+                if issue.severity in ("critical", "error"):
+                    self._store_to_memory(
+                        entry_type="issue_found",
+                        category=issue.category,
+                        title=issue.title,
+                        data={"severity": issue.severity, "description": issue.description},
+                        language=request.language,
+                    )
+
+            return response
 
         except Exception as e:
             self.logger.warning(f"Fallback analyse statique suite à erreur LLM: {e}")

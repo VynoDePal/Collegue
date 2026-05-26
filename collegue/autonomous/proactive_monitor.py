@@ -306,6 +306,14 @@ class ProactiveMonitor:
     def is_running(self) -> bool:
         return self._running
 
+    def start(self) -> None:
+        """Marque le moniteur comme actif."""
+        self._running = True
+
+    def stop(self) -> None:
+        """Marque le moniteur comme inactif."""
+        self._running = False
+
     def set_repo_path(self, path: str) -> None:
         self._config.repo_path = path
         self._detector = ChangeDetector(path)
