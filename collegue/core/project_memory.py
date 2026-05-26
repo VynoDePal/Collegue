@@ -106,9 +106,7 @@ class ProjectMemory:
             self._ensure_dir()
             path = self._storage_path()
             try:
-                fd, tmp_path = tempfile.mkstemp(
-                    dir=str(self._memory_dir), suffix=".tmp", prefix="memory_"
-                )
+                fd, tmp_path = tempfile.mkstemp(dir=str(self._memory_dir), suffix=".tmp", prefix="memory_")
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as f:
                         json.dump([e.to_dict() for e in self._entries], f, indent=2, default=str)
