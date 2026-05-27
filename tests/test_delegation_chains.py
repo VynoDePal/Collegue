@@ -403,7 +403,6 @@ async def test_real_delegation_engine_evaluation():
     assert test_task.params["test_framework"] == "pytest"
 
 
-
 def test_empty_code_delegation_builders():
     """Verify delegation builders handle empty refactored_code without crashing."""
     from collegue.core.expert_delegation import (
