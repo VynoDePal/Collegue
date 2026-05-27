@@ -525,7 +525,7 @@ def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]
         "code": result.get("refactored_code", ""),
         "language": result.get("language", "python"),
         "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
-        "coverage_target": 80,
+        "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from code_refactoring"},
     }
 
@@ -548,7 +548,7 @@ def _build_test_params_from_impact(source_tool: str, result: Dict[str, Any]) -> 
         "code": code_summary,
         "language": "python",
         "test_framework": "pytest",
-        "coverage_target": 80,
+        "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from impact_analysis"},
     }
 
@@ -777,7 +777,7 @@ def _build_test_params_from_performance(source_tool: str, result: Dict[str, Any]
         "code": summary,
         "language": result.get("language", "python"),
         "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
-        "coverage_target": 80,
+        "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from performance_analysis"},
     }
 

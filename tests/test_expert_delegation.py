@@ -22,6 +22,9 @@ from collegue.core.expert_delegation import (
     DelegationRule,
     DelegationTask,
     ExpertDelegationEngine,
+    _build_test_params_from_impact,
+    _build_test_params_from_performance,
+    _build_test_params_from_refactoring,
     _consistency_needs_refactoring,
     _iac_needs_remediation,
     _impact_has_iac_files,
@@ -29,6 +32,7 @@ from collegue.core.expert_delegation import (
     _refactoring_has_changes,
     create_default_delegation_engine,
 )
+from collegue.tools.test_generation.models import TestGenerationRequest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -558,6 +562,34 @@ class TestDelegationChainIntegration:
         result = {"refactoring_score": 0.1, "issues": []}
         tasks = await engine.evaluate_delegations("repo_consistency_check", result)
         assert len(tasks) == 0
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+
+class TestDelegationParamsValidation:
+    """Validate that delegation builders produce valid tool params."""
+
+    def test_coverage_target_is_float_between_0_and_1(self):
+        """coverage_target must be 0.0-1.0, not 0-100 (regression test for #300)."""
+        # Test from refactoring
+        params = _build_test_params_from_refactoring(
+            "code_refactoring", {"refactored_code": "def foo(): pass", "language": "python"}
+        )
+        assert 0.0 <= params["coverage_target"] <= 1.0
+        TestGenerationRequest(**params)  # Should not raise
+
+        # Test from impact
+        params = _build_test_params_from_impact("impact_analysis", {"impacted_files": [], "risk_notes": []})
+        assert 0.0 <= params["coverage_target"] <= 1.0
+        TestGenerationRequest(**params)  # Should not raise
+
+        # Test from performance
+        params = _build_test_params_from_performance("performance_analysis", {"optimizations": ["use a set"]})
+        assert 0.0 <= params["coverage_target"] <= 1.0
+        TestGenerationRequest(**params)  # Should not raise
 
 
 # ---------------------------------------------------------------------------
