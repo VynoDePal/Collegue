@@ -466,27 +466,13 @@ async def test_conditions_and_builders_handle_none_list_fields():
     assert not _refactoring_has_changes({"changes": None, "refactored_code": None})
 
     # Builders must return a dict without crashing
-    assert isinstance(
-        _build_refactoring_params_from_review("x", {"findings": None, "language": "python"}), dict
-    )
-    assert isinstance(
-        _build_refactoring_params_from_architecture("x", {"issues": None, "language": "python"}), dict
-    )
-    assert isinstance(
-        _build_architecture_params_from_consistency("x", {"issues": None}), dict
-    )
-    assert isinstance(
-        _build_performance_params_from_consistency("x", {"issues": None}), dict
-    )
-    assert isinstance(
-        _build_refactoring_params_from_performance("x", {"issues": None, "language": "python"}), dict
-    )
-    assert isinstance(
-        _build_impact_params_from_architecture("x", {"issues": None}), dict
-    )
+    assert isinstance(_build_refactoring_params_from_review("x", {"findings": None, "language": "python"}), dict)
+    assert isinstance(_build_refactoring_params_from_architecture("x", {"issues": None, "language": "python"}), dict)
+    assert isinstance(_build_architecture_params_from_consistency("x", {"issues": None}), dict)
+    assert isinstance(_build_performance_params_from_consistency("x", {"issues": None}), dict)
+    assert isinstance(_build_refactoring_params_from_performance("x", {"issues": None, "language": "python"}), dict)
+    assert isinstance(_build_impact_params_from_architecture("x", {"issues": None}), dict)
     assert isinstance(
         _build_refactoring_params_from_consistency("x", {"suggested_actions": None, "issues": None}), dict
     )
-    assert isinstance(
-        _build_test_params_from_performance("x", {"optimizations": None, "language": "python"}), dict
-    )
+    assert isinstance(_build_test_params_from_performance("x", {"optimizations": None, "language": "python"}), dict)
