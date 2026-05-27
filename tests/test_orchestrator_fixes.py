@@ -165,3 +165,136 @@ async def test_orchestrator_enriches_params_from_context():
     assert captured_params.get("file_path") == "main.py"
     # Verify LLM param was NOT overridden
     assert captured_params.get("code") == "def foo(): pass"
+
+
+def test_parse_plan_from_text_fenced_json():
+    """Fallback parser extracts plan from fenced JSON code block."""
+    from collegue.core.meta_orchestrator import _parse_plan_from_text
+
+    text = """Here is my plan:
+
+```json
+{
+  "steps": [
+    {"tool": "code_review", "reason": "Check quality", "params": {"code": "x=1"}}
+  ]
+}
+```
+"""
+    plan = _parse_plan_from_text(text)
+    assert plan is not None
+    assert len(plan.steps) == 1
+    assert plan.steps[0].tool == "code_review"
+
+
+def test_parse_plan_from_text_inline_json():
+    """Fallback parser extracts plan from inline JSON (no fences)."""
+    from collegue.core.meta_orchestrator import _parse_plan_from_text
+
+    text = 'I will use code_review. {"steps": [{"tool": "code_review", "reason": "Review", "params": {"code": "y=2"}}]}'
+    plan = _parse_plan_from_text(text)
+    assert plan is not None
+    assert len(plan.steps) == 1
+    assert plan.steps[0].tool == "code_review"
+
+
+def test_parse_plan_from_text_steps_array():
+    """Fallback parser extracts plan from a bare JSON array of steps."""
+    from collegue.core.meta_orchestrator import _parse_plan_from_text
+
+    text = '[{"tool": "code_review", "reason": "Review", "params": {"code": "z=3"}}]'
+    plan = _parse_plan_from_text(text)
+    assert plan is not None
+    assert len(plan.steps) == 1
+
+
+def test_parse_plan_from_text_empty():
+    """Fallback parser returns None for empty/nonsense text."""
+    from collegue.core.meta_orchestrator import _parse_plan_from_text
+
+    assert _parse_plan_from_text("") is None
+    assert _parse_plan_from_text("no json here at all") is None
+    assert _parse_plan_from_text(None) is None
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_uses_fallback_parser_when_structured_output_fails():
+    """Orchestrator parses plan from LLM text when result_type returns None."""
+    app = MagicMock()
+    register_meta_orchestrator(app)
+
+    tool_decorator = app.tool.return_value
+    smart_orchestrator_func = tool_decorator.call_args[0][0]
+
+    captured_params = {}
+
+    class RecordingModel:
+        def __init__(self, **kwargs):
+            captured_params.update(kwargs)
+
+    class RecordingTool:
+        def __init__(self, config=None):
+            pass
+
+        def get_request_model(self):
+            return RecordingModel
+
+        async def execute_async(self, req, **kwargs):
+            class Result:
+                def model_dump(self):
+                    return {"status": "ok"}
+
+            return Result()
+
+        def cleanup(self):
+            pass
+
+    mock_tools_cache = {
+        "code_review": {
+            "class": lambda x=None: RecordingTool(),
+            "description": "Code review",
+            "prompt_desc": "code_review: Reviews code quality",
+            "schema": {},
+        }
+    }
+
+    mock_ctx = MockContext()
+    mock_ctx.lifespan_context = {"tools_registry": mock_tools_cache}
+
+    call_count = [0]
+
+    async def mock_sample(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # Planning: return text (not structured) with embedded JSON
+            class TextResult:
+                result = None  # Structured output failed
+                text = (
+                    "Here is the plan:\n"
+                    "```json\n"
+                    '{"steps": [{"tool": "code_review", "reason": "Review code",'
+                    ' "params": {"code": "def foo(): pass"}}]}\n'
+                    "```"
+                )
+
+            return TextResult()
+        else:
+
+            class SynthResult:
+                text = "Review complete"
+                result = None
+
+            return SynthResult()
+
+    mock_ctx.sample = mock_sample
+
+    request = OrchestratorRequest(
+        query="Review this code",
+        context={"language": "python"},
+    )
+
+    response = await smart_orchestrator_func(request, mock_ctx)
+
+    # Should have used the fallback parser and executed code_review
+    assert "code_review" in response.tools_used
+    assert response.confidence > 0

@@ -112,6 +112,60 @@ class _OrchestratorSynthesisAgent(AgentLoopMixin):
 _synthesis_agent = _OrchestratorSynthesisAgent()
 
 
+def _parse_plan_from_text(text: str) -> Optional[OrchestratorPlan]:
+    """Extract an OrchestratorPlan from free-form LLM text.
+
+    Models that do not support native structured output (e.g. Gemma 4 26B)
+    typically embed a JSON object inside a fenced code block or inline.
+    This helper tries several extraction strategies before giving up.
+    """
+    import json as _json
+    import re as _re
+
+    if not text or not text.strip():
+        return None
+
+    # Strategy 1: extract from fenced code block (```json ... ```)
+    fence_match = _re.search(r"```(?:json)?\s*\n?(.*?)```", text, _re.DOTALL)
+    candidates = []
+    if fence_match:
+        candidates.append(fence_match.group(1).strip())
+
+    # Strategy 2: find the outermost { ... } that looks like JSON
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start != -1 and brace_end > brace_start:
+        candidates.append(text[brace_start : brace_end + 1])
+
+    # Strategy 3: find the outermost [ ... ] (array of steps)
+    bracket_start = text.find("[")
+    bracket_end = text.rfind("]")
+    if bracket_start != -1 and bracket_end > bracket_start:
+        candidates.append(text[bracket_start : bracket_end + 1])
+
+    for candidate in candidates:
+        try:
+            data = _json.loads(candidate)
+        except (_json.JSONDecodeError, ValueError):
+            continue
+
+        # If data is a dict with "steps", parse directly
+        if isinstance(data, dict) and "steps" in data:
+            try:
+                return OrchestratorPlan(**data)
+            except Exception:
+                continue
+
+        # If data is a list, treat as steps array
+        if isinstance(data, list):
+            try:
+                return OrchestratorPlan(steps=data)
+            except Exception:
+                continue
+
+    return None
+
+
 def register_meta_orchestrator(app: FastMCP):
 
     @app.tool(
@@ -247,10 +301,20 @@ RÈGLES :
                 steps = plan_result.result.steps
                 await ctx.info(f"Plan généré: {len(steps)} étapes")
             else:
-                # Fallback texte si le modèle ne supporte pas structured output
+                # Fallback: parse JSON from the LLM text response when the
+                # model does not support native structured output (e.g.
+                # Gemma 4 26B returns plain text with embedded JSON).
                 await ctx.warning("Structured output non supporté, fallback parsing manuel")
-                # ... (code parsing simplifié si besoin, mais on suppose un modèle capable ici)
-                raise ValueError("Le modèle n'a pas retourné un plan structuré")
+                raw_text = getattr(plan_result, "text", "") or ""
+                parsed_plan = _parse_plan_from_text(raw_text)
+                if parsed_plan and parsed_plan.steps:
+                    steps = parsed_plan.steps
+                    await ctx.info(f"Plan extrait du texte: {len(steps)} étapes")
+                else:
+                    raise ValueError(
+                        "Le modèle n'a pas retourné un plan structuré "
+                        "et le texte ne contient pas de JSON exploitable"
+                    )
 
         except Exception as e:
             await ctx.error(f"Echec planification: {e}")
