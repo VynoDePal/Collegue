@@ -521,10 +521,11 @@ def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[
 
 def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis un résultat de refactoring."""
+    lang = result.get("language", "python").lower()
     return {
         "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
-        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "language": lang,
+        "test_framework": "pytest" if lang == "python" else "jest",
         "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from code_refactoring"},
     }
@@ -776,10 +777,11 @@ def _build_test_params_from_performance(source_tool: str, result: Dict[str, Any]
     for opt in optimizations[:10]:
         summary += f"- {opt}\n"
 
+    lang = result.get("language", "python").lower()
     return {
         "code": summary,
-        "language": result.get("language", "python"),
-        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "language": lang,
+        "test_framework": "pytest" if lang == "python" else "jest",
         "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from performance_analysis"},
     }
