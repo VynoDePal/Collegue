@@ -377,6 +377,28 @@ class TestExpertDelegationEngine:
         assert report.total_time == pytest.approx(3.5)
         assert report.chain_completed is True
 
+    def test_build_chain_report_counts_failed_experts(self):
+        """total_experts_activated must count all activated experts, not just successful ones."""
+        engine = ExpertDelegationEngine()
+        results = [
+            DelegationResult(
+                source_tool="review",
+                target_tool="refactoring",
+                success=True,
+                result={"ok": True},
+                execution_time=1.0,
+            ),
+            DelegationResult(
+                source_tool="refactoring",
+                target_tool="tests",
+                success=False,
+                error="timeout",
+                execution_time=0.5,
+            ),
+        ]
+        report = engine.build_chain_report("review", results)
+        assert report.total_experts_activated == 2
+
     def test_get_rules_for_tool(self):
         engine = ExpertDelegationEngine()
         engine.register_rule(
