@@ -315,8 +315,18 @@ RÈGLES :
                 tool_instance = tool_class({})  # Nouvelle instance propre
                 req_model = tool_instance.get_request_model()
 
+                # Enrich params with context data as fallback values.
+                # The LLM often omits required fields (e.g. 'language') that
+                # are available in request.context. We inject them as defaults
+                # so validation succeeds without overriding explicit LLM choices.
+                enriched_params = dict(params)
+                if request.context:
+                    for key, value in request.context.items():
+                        if key not in enriched_params:
+                            enriched_params[key] = value
+
                 # Validation Pydantic
-                req_obj = req_model(**params)
+                req_obj = req_model(**enriched_params)
 
                 # Exécution avec injection correcte des dépendances
                 result = await tool_instance.execute_async(req_obj, **tool_kwargs)
