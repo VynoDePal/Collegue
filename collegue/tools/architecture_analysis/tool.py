@@ -224,7 +224,7 @@ Réponds en JSON avec cette structure exacte:
             f"Patterns: {', '.join(patterns) if patterns else 'aucun détecté'}."
         )
 
-        return ArchitectureAnalysisResponse(
+        response = ArchitectureAnalysisResponse(
             architecture_score=arch_score,
             detected_patterns=patterns,
             dependencies=dependencies,
@@ -235,6 +235,26 @@ Réponds en JSON avec cette structure exacte:
             summary=summary,
             language=request.language,
         )
+
+        self._store_to_memory(
+            entry_type="expert_result",
+            category="architecture",
+            title=f"Architecture: score {arch_score:.2f}, dette {debt_score:.2f}",
+            data={"patterns": patterns, "issues_count": len(all_issues), "debt_score": debt_score},
+            score=arch_score,
+            language=request.language,
+        )
+        for pattern in patterns:
+            self._store_to_memory(
+                entry_type="pattern_learned",
+                category="architecture",
+                title=pattern,
+                data={"source": "static_analysis"},
+                score=arch_score,
+                language=request.language,
+            )
+
+        return response
 
     async def _execute_core_logic_async(
         self, request: ArchitectureAnalysisRequest, **kwargs
@@ -256,7 +276,12 @@ Réponds en JSON avec cette structure exacte:
             if ctx:
                 await ctx.info("Analyse architecturale agentique en cours...")
 
+            memory_ctx = self._recall_from_memory(language=request.language)
             prompt = self._build_analysis_prompt(request)
+            if memory_ctx:
+                memory_info = "\n".join(f"- {k}: {v}" for k, v in memory_ctx.items())
+                prompt += f"\n\nContexte historique du projet:\n{memory_info}"
+
             sys_prompt = (
                 f"Tu es un architecte logiciel senior expert en {request.language}. "
                 "Tu analyses l'architecture, les patterns et la dette technique. "
@@ -303,7 +328,7 @@ Réponds en JSON avec cette structure exacte:
                 f"Patterns: {', '.join(merged_patterns) if merged_patterns else 'aucun'}."
             )
 
-            return ArchitectureAnalysisResponse(
+            response = ArchitectureAnalysisResponse(
                 architecture_score=arch_score,
                 detected_patterns=merged_patterns,
                 dependencies=local_result.dependencies,
@@ -317,6 +342,27 @@ Réponds en JSON avec cette structure exacte:
                 agent_best_score=agent_result.best_score,
                 agent_converged=agent_result.converged,
             )
+
+            # Stocker le résultat final (enrichi LLM) en mémoire
+            self._store_to_memory(
+                entry_type="expert_result",
+                category="architecture",
+                title=f"Analyse arch agentique: score {arch_score:.2f}",
+                data={"patterns": merged_patterns, "issues_count": len(merged_issues), "debt_score": debt_score},
+                score=arch_score,
+                language=request.language,
+            )
+            for pattern in merged_patterns:
+                self._store_to_memory(
+                    entry_type="pattern_learned",
+                    category="architecture",
+                    title=pattern,
+                    data={"source": "architecture_analysis"},
+                    score=arch_score,
+                    language=request.language,
+                )
+
+            return response
 
         except Exception as e:
             self.logger.warning(f"Fallback analyse statique suite à erreur LLM: {e}")

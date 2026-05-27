@@ -212,7 +212,7 @@ Réponds en JSON avec cette structure exacte:
             f"{len(all_findings)} problème(s) détecté(s)."
         )
 
-        return CodeReviewResponse(
+        response = CodeReviewResponse(
             quality_score=quality_score,
             findings=all_findings,
             summary=summary,
@@ -222,6 +222,27 @@ Réponds en JSON avec cette structure exacte:
             language=request.language,
             lines_reviewed=total_lines,
         )
+
+        # Stocker les résultats en mémoire
+        self._store_to_memory(
+            entry_type="expert_result",
+            category="code_review",
+            title=f"Revue: {total_lines} lignes, score {quality_score:.2f}",
+            data={"findings_count": len(all_findings), "category_scores": category_scores},
+            score=quality_score,
+            language=request.language,
+        )
+        for finding in all_findings:
+            if finding.severity in ("critical", "error"):
+                self._store_to_memory(
+                    entry_type="issue_found",
+                    category=finding.category,
+                    title=finding.title,
+                    data={"severity": finding.severity, "description": finding.description},
+                    language=request.language,
+                )
+
+        return response
 
     async def _execute_core_logic_async(self, request: CodeReviewRequest, **kwargs) -> CodeReviewResponse:
         """Version asynchrone avec boucle agentique."""
@@ -243,7 +264,12 @@ Réponds en JSON avec cette structure exacte:
             if ctx:
                 await ctx.info("Revue agentique en cours...")
 
+            # Enrichir le prompt avec le contexte mémoire
+            memory_ctx = self._recall_from_memory(language=request.language)
             prompt = self._build_review_prompt(request)
+            if memory_ctx:
+                memory_info = "\n".join(f"- {k}: {v}" for k, v in memory_ctx.items())
+                prompt += f"\n\nContexte historique du projet:\n{memory_info}"
             sys_prompt = (
                 f"Tu es un expert senior en revue de code {request.language}. "
                 "Tu effectues des revues rigoureuses et constructives. "
@@ -288,7 +314,7 @@ Réponds en JSON avec cette structure exacte:
                 f"({len(local_result.findings)} statique + {len(llm_findings)} LLM)."
             )
 
-            return CodeReviewResponse(
+            response = CodeReviewResponse(
                 quality_score=quality_score,
                 findings=merged_findings,
                 summary=summary,
@@ -301,6 +327,27 @@ Réponds en JSON avec cette structure exacte:
                 agent_best_score=agent_result.best_score,
                 agent_converged=agent_result.converged,
             )
+
+            # Stocker le résultat final (enrichi LLM) en mémoire
+            self._store_to_memory(
+                entry_type="expert_result",
+                category="code_review",
+                title=f"Revue agentique: {total_lines} lignes, score {quality_score:.2f}",
+                data={"findings_count": len(merged_findings), "category_scores": category_scores},
+                score=quality_score,
+                language=request.language,
+            )
+            for finding in merged_findings:
+                if finding.severity in ("critical", "error"):
+                    self._store_to_memory(
+                        entry_type="issue_found",
+                        category=finding.category,
+                        title=finding.title,
+                        data={"severity": finding.severity, "description": finding.description},
+                        language=request.language,
+                    )
+
+            return response
 
         except Exception as e:
             self.logger.warning(f"Fallback revue statique suite à erreur LLM: {e}")

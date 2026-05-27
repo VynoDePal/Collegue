@@ -10,7 +10,7 @@ authors = [
 ]
 dependencies = [
     "fastmcp[tasks,openai]>=3.0.0b2,<4.0.0",
-    "fastapi>=0.116.1",
+    "fastapi>=0.116.1,!=0.136.3",
     "uvicorn>=0.35.0",
     "pydantic>=2.12.0,<3.0.0",
     "pydantic-core>=2.41.0,<3.0.0",

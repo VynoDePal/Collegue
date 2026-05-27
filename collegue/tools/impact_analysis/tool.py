@@ -242,7 +242,6 @@ class ImpactAnalysisTool(AgentLoopMixin, BaseTool):
 
     def _execute_core_logic(self, request: ImpactAnalysisRequest, **kwargs) -> ImpactAnalysisResponse:
         """Exécute l'analyse d'impact (synchrone)."""
-
         # 1. Extraire les identifiants
         identifiers = self._engine.extract_identifiers(request.change_intent)
 

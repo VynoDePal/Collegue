@@ -204,7 +204,7 @@ Réponds en JSON avec cette structure exacte:
             f"{len(all_issues)} problème(s), {len(hotspots)} hotspot(s)."
         )
 
-        return PerformanceAnalysisResponse(
+        response = PerformanceAnalysisResponse(
             performance_score=perf_score,
             issues=all_issues,
             category_scores=cat_scores,
@@ -214,6 +214,26 @@ Réponds en JSON avec cette structure exacte:
             language=request.language,
             lines_analyzed=total_lines,
         )
+
+        self._store_to_memory(
+            entry_type="expert_result",
+            category="performance",
+            title=f"Performance: score {perf_score:.2f}, {len(all_issues)} issues",
+            data={"issues_count": len(all_issues), "hotspots_count": len(hotspots)},
+            score=perf_score,
+            language=request.language,
+        )
+        for issue in all_issues:
+            if issue.severity in ("critical", "error"):
+                self._store_to_memory(
+                    entry_type="issue_found",
+                    category=issue.category,
+                    title=issue.title,
+                    data={"severity": issue.severity, "complexity": issue.estimated_complexity},
+                    language=request.language,
+                )
+
+        return response
 
     async def _execute_core_logic_async(
         self, request: PerformanceAnalysisRequest, **kwargs
@@ -235,7 +255,12 @@ Réponds en JSON avec cette structure exacte:
             if ctx:
                 await ctx.info("Analyse de performance agentique en cours...")
 
+            memory_ctx = self._recall_from_memory(language=request.language)
             prompt = self._build_performance_prompt(request)
+            if memory_ctx:
+                memory_info = "\n".join(f"- {k}: {v}" for k, v in memory_ctx.items())
+                prompt += f"\n\nContexte historique du projet:\n{memory_info}"
+
             sys_prompt = (
                 f"Tu es un expert senior en optimisation de performance {request.language}. "
                 "Tu détectes les bottlenecks, analyses la complexité Big-O et proposes des optimisations. "
@@ -277,7 +302,7 @@ Réponds en JSON avec cette structure exacte:
                 f"({len(local_result.issues)} statique + {len(llm_issues)} LLM)."
             )
 
-            return PerformanceAnalysisResponse(
+            response = PerformanceAnalysisResponse(
                 performance_score=perf_score,
                 issues=merged_issues,
                 category_scores=cat_scores,
@@ -290,6 +315,27 @@ Réponds en JSON avec cette structure exacte:
                 agent_best_score=agent_result.best_score,
                 agent_converged=agent_result.converged,
             )
+
+            # Stocker le résultat final (enrichi LLM) en mémoire
+            self._store_to_memory(
+                entry_type="expert_result",
+                category="performance",
+                title=f"Analyse perf agentique: score {perf_score:.2f}",
+                data={"issues_count": len(merged_issues), "category_scores": cat_scores},
+                score=perf_score,
+                language=request.language,
+            )
+            for issue in merged_issues:
+                if issue.severity in ("critical", "error"):
+                    self._store_to_memory(
+                        entry_type="issue_found",
+                        category=issue.category,
+                        title=issue.title,
+                        data={"severity": issue.severity, "description": issue.description},
+                        language=request.language,
+                    )
+
+            return response
 
         except Exception as e:
             self.logger.warning(f"Fallback analyse statique suite à erreur LLM: {e}")

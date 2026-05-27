@@ -261,6 +261,48 @@ class AgentLoopMixin:
             errors_fixed=errors_fixed,
         )
 
+    # --- Hooks mémoire projet ---
+
+    def _store_to_memory(
+        self,
+        entry_type: str,
+        category: str,
+        title: str,
+        data: Dict[str, Any],
+        score: float = 0.0,
+        file_path: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> None:
+        """Stocke une entrée dans la mémoire projet (si disponible)."""
+        try:
+            from ..core.project_memory import get_project_memory
+
+            memory = get_project_memory()
+            tool_name = getattr(self, "tool_name", self.__class__.__name__)
+            memory.store(
+                expert=tool_name,
+                entry_type=entry_type,
+                category=category,
+                title=title,
+                data=data,
+                score=score,
+                file_path=file_path,
+                language=language,
+            )
+        except Exception as exc:
+            logger.debug("Mémoire projet non disponible: %s", exc)
+
+    def _recall_from_memory(self, language: Optional[str] = None) -> Dict[str, Any]:
+        """Rappelle le contexte mémoire pour cet expert."""
+        try:
+            from ..core.project_memory import get_project_memory
+
+            memory = get_project_memory()
+            tool_name = getattr(self, "tool_name", self.__class__.__name__)
+            return memory.get_context_for(tool_name, language=language)
+        except Exception:
+            return {}
+
     # --- Méthodes abstraites à implémenter par chaque tool ---
 
     async def validate_agent_output(self, output: str, context: Dict[str, Any]) -> List[str]:
