@@ -511,8 +511,9 @@ def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[st
 
 def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de documentation depuis un résultat de refactoring."""
+    code = result.get("refactored_code", "") or "# No refactored code available"
     return {
-        "code": result.get("refactored_code", ""),
+        "code": code,
         "language": result.get("language", "python"),
         "documentation_type": "auto",
         "parameters": {"context": "auto-delegated from code_refactoring"},
@@ -521,8 +522,9 @@ def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[
 
 def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis un résultat de refactoring."""
+    code = result.get("refactored_code", "") or "# No refactored code available"
     return {
-        "code": result.get("refactored_code", ""),
+        "code": code,
         "language": result.get("language", "python"),
         "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
         "coverage_target": 0.80,
@@ -653,8 +655,9 @@ def _performance_needs_tests(result: Dict[str, Any]) -> bool:
 
 def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de code review depuis un résultat de refactoring."""
+    code = result.get("refactored_code", "") or "# No refactored code available"
     return {
-        "code": result.get("refactored_code", ""),
+        "code": code,
         "language": result.get("language", "python"),
         "review_standards": ["naming", "complexity", "security", "dry", "solid"],
         "severity_threshold": "warning",

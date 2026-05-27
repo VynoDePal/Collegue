@@ -401,3 +401,30 @@ async def test_real_delegation_engine_evaluation():
     test_task = next(t for t in tasks if t.target_tool == "test_generation")
     assert test_task.params["code"] == refactoring_result["refactored_code"]
     assert test_task.params["test_framework"] == "pytest"
+
+
+@pytest.mark.asyncio
+async def test_empty_code_delegation_builders():
+    """Verify delegation builders handle empty refactored_code without crashing."""
+    from collegue.core.expert_delegation import (
+        _build_documentation_params_from_refactoring,
+        _build_review_params_from_refactoring,
+        _build_test_params_from_refactoring,
+    )
+    from collegue.tools.code_documentation.models import DocumentationRequest
+    from collegue.tools.code_review.models import CodeReviewRequest
+    from collegue.tools.test_generation.models import TestGenerationRequest
+
+    empty_result = {"refactored_code": "", "language": "python"}
+
+    params = _build_test_params_from_refactoring("code_refactoring", empty_result)
+    req = TestGenerationRequest(**params)
+    assert len(req.code) >= 1
+
+    params = _build_review_params_from_refactoring("code_refactoring", empty_result)
+    req = CodeReviewRequest(**params)
+    assert len(req.code) >= 1
+
+    params = _build_documentation_params_from_refactoring("code_refactoring", empty_result)
+    req = DocumentationRequest(**params)
+    assert len(req.code) >= 1
