@@ -117,6 +117,7 @@ async def test_orchestrator_enriches_params_from_context():
             class Result:
                 def model_dump(self):
                     return {"status": "success"}
+
             return Result()
 
         def cleanup(self):
@@ -137,11 +138,13 @@ async def test_orchestrator_enriches_params_from_context():
     # LLM generates plan with only "code" param, omitting "language"
     plan_response = MagicMock()
     plan_response.result = OrchestratorPlan(
-        steps=[OrchestratorStep(
-            tool="code_review",
-            reason="Review code quality",
-            params={"code": "def foo(): pass"},
-        )]
+        steps=[
+            OrchestratorStep(
+                tool="code_review",
+                reason="Review code quality",
+                params={"code": "def foo(): pass"},
+            )
+        ]
     )
 
     synth_response = MagicMock()
