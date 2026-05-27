@@ -224,13 +224,16 @@ class ProjectMemory:
         """Construit un contexte mémoire pour un expert donné.
 
         Retourne un dict prêt à être injecté dans le prompt LLM.
-        Sélectionne par type d'entrée (tri par timestamp) pour ne pas
-        évincer les project_profile/fix_applied de score 0.
+        Les entrées pattern_learned, issue_found et fix_applied sont partagées
+        entre tous les experts (pas de filtre expert) car la délégation
+        inter-experts exige que chaque expert ait accès aux découvertes des
+        autres. Seul expert_result reste spécifique à l'expert.
         """
-        # Chercher par type pour éviter que le tri par score évince les entrées à score 0
-        patterns_entries = self.recall(expert=expert, entry_type="pattern_learned", language=language, limit=5)
-        issues_entries = self.recall(expert=expert, entry_type="issue_found", language=language, limit=5)
-        fixes_entries = self.recall(expert=expert, entry_type="fix_applied", language=language, limit=3)
+        # Ne PAS filtrer par expert pour les types cross-expert : un code_refactoring
+        # doit voir les issue_found d'un code_review pour savoir quoi corriger.
+        patterns_entries = self.recall(entry_type="pattern_learned", language=language, limit=5)
+        issues_entries = self.recall(entry_type="issue_found", language=language, limit=5)
+        fixes_entries = self.recall(entry_type="fix_applied", language=language, limit=3)
         profile_entries = self.recall(entry_type="project_profile", language=language, limit=3)
 
         entries = patterns_entries + issues_entries + fixes_entries + profile_entries
