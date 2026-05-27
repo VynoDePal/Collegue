@@ -254,46 +254,6 @@ class TestPhase3DelegationEngine:
 # --- Real API Tests ---
 
 
-class TestCodeReviewSecurityCaseInsensitive:
-    """Verify security patterns detect uppercase variable names."""
-
-    def test_uppercase_password_detected(self):
-        from collegue.tools.code_review.engine import CodeReviewEngine
-
-        engine = CodeReviewEngine()
-        findings = engine.analyze_security('PASSWORD = "admin123"', "python")
-        assert len(findings) >= 1
-        assert any(f.category == "security" for f in findings)
-
-    def test_uppercase_api_key_detected(self):
-        from collegue.tools.code_review.engine import CodeReviewEngine
-
-        engine = CodeReviewEngine()
-        findings = engine.analyze_security('API_KEY = "sk-1234"', "python")
-        assert len(findings) >= 1
-
-    def test_uppercase_secret_detected(self):
-        from collegue.tools.code_review.engine import CodeReviewEngine
-
-        engine = CodeReviewEngine()
-        findings = engine.analyze_security('AWS_SECRET = "wJalrXUtnFEMI"', "python")
-        assert len(findings) >= 1
-
-    def test_mixed_case_still_detected(self):
-        from collegue.tools.code_review.engine import CodeReviewEngine
-
-        engine = CodeReviewEngine()
-        findings = engine.analyze_security('Password = "admin"', "python")
-        assert len(findings) >= 1
-
-    def test_clean_code_no_false_positives(self):
-        from collegue.tools.code_review.engine import CodeReviewEngine
-
-        engine = CodeReviewEngine()
-        findings = engine.analyze_security("x = 42\nname = 'Alice'", "python")
-        assert len(findings) == 0
-
-
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 

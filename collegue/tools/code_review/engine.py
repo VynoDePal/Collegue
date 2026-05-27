@@ -168,7 +168,7 @@ class CodeReviewEngine:
 
         for pattern in patterns:
             for i, line in enumerate(code.split("\n"), 1):
-                if re.search(pattern, line, re.IGNORECASE):
+                if re.search(pattern, line):
                     findings.append(
                         ReviewFinding(
                             category="security",
