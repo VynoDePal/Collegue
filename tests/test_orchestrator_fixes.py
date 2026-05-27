@@ -88,3 +88,80 @@ async def test_orchestrator_planning_and_execution():
 
     assert mock_ctx.sample.call_count == 2
     mock_ctx.info.assert_any_call("Phase 1: Planification...")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_enriches_params_from_context():
+    """When the LLM plan omits required fields, context data fills them in."""
+    app = MagicMock()
+    register_meta_orchestrator(app)
+
+    tool_decorator = app.tool.return_value
+    smart_orchestrator_func = tool_decorator.call_args[0][0]
+
+    # Tool that records received params
+    captured_params = {}
+
+    class RecordingModel:
+        def __init__(self, **kwargs):
+            captured_params.update(kwargs)
+
+    class RecordingTool:
+        def __init__(self, config=None):
+            pass
+
+        def get_request_model(self):
+            return RecordingModel
+
+        async def execute_async(self, req, **kwargs):
+            class Result:
+                def model_dump(self):
+                    return {"status": "success"}
+
+            return Result()
+
+        def cleanup(self):
+            pass
+
+    mock_tools_cache = {
+        "code_review": {
+            "class": lambda x=None: RecordingTool(),
+            "description": "Code review",
+            "prompt_desc": "code_review: Reviews code quality",
+            "schema": {},
+        }
+    }
+
+    mock_ctx = MockContext()
+    mock_ctx.lifespan_context = {"tools_registry": mock_tools_cache}
+
+    # LLM generates plan with only "code" param, omitting "language"
+    plan_response = MagicMock()
+    plan_response.result = OrchestratorPlan(
+        steps=[
+            OrchestratorStep(
+                tool="code_review",
+                reason="Review code quality",
+                params={"code": "def foo(): pass"},
+            )
+        ]
+    )
+
+    synth_response = MagicMock()
+    synth_response.text = "Code review done"
+
+    mock_ctx.sample.side_effect = [plan_response, synth_response]
+
+    # User provides context with language info
+    request = OrchestratorRequest(
+        query="Review this code",
+        context={"language": "python", "file_path": "main.py"},
+    )
+
+    response = await smart_orchestrator_func(request, mock_ctx)
+
+    # Verify context values were injected as fallback
+    assert captured_params.get("language") == "python"
+    assert captured_params.get("file_path") == "main.py"
+    # Verify LLM param was NOT overridden
+    assert captured_params.get("code") == "def foo(): pass"
