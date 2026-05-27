@@ -96,6 +96,30 @@ class TestSecurityAnalysis:
         findings = engine.analyze_security(code, "python")
         assert len(findings) == 0
 
+    def test_uppercase_password_detected(self, engine):
+        findings = engine.analyze_security('PASSWORD = "admin123"', "python")
+        assert len(findings) >= 1
+        assert any(f.category == "security" and f.severity == "critical" for f in findings)
+
+    def test_uppercase_api_key_detected(self, engine):
+        findings = engine.analyze_security('API_KEY = "sk-1234"', "python")
+        assert len(findings) >= 1
+        assert any(f.category == "security" for f in findings)
+
+    def test_uppercase_secret_detected(self, engine):
+        findings = engine.analyze_security('AWS_SECRET = "wJalrXUtnFEMI"', "python")
+        assert len(findings) >= 1
+        assert any(f.category == "security" and f.severity == "critical" for f in findings)
+
+    def test_mixed_case_password_detected(self, engine):
+        findings = engine.analyze_security('Password = "admin"', "python")
+        assert len(findings) >= 1
+        assert any(f.category == "security" and f.severity == "critical" for f in findings)
+
+    def test_eval_not_case_insensitive(self, engine):
+        findings = engine.analyze_security("EVAL(x)", "python")
+        assert len(findings) == 0
+
 
 # --- Engine: DRY ---
 

@@ -56,16 +56,16 @@ SECURITY_PATTERNS = {
         r"exec\s*\(",
         r"os\.system\s*\(",
         r"subprocess\.call\s*\(.*shell\s*=\s*True",
-        r"password\s*=\s*['\"]",
-        r"api_key\s*=\s*['\"]",
-        r"secret\s*=\s*['\"]",
+        r"(?i)password\s*=\s*['\"]",
+        r"(?i)api_key\s*=\s*['\"]",
+        r"(?i)secret\s*=\s*['\"]",
     ],
     "javascript": [
         r"eval\s*\(",
         r"innerHTML\s*=",
         r"document\.write\s*\(",
-        r"password\s*[=:]\s*['\"]",
-        r"apiKey\s*[=:]\s*['\"]",
+        r"(?i)password\s*[=:]\s*['\"]",
+        r"(?i)apiKey\s*[=:]\s*['\"]",
     ],
 }
 
