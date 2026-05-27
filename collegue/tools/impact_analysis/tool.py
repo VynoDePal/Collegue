@@ -350,6 +350,14 @@ class ImpactAnalysisTool(AgentLoopMixin, BaseTool):
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"Erreur parsing insights LLM: {e}")
+                    response = response.model_copy(
+                        update={
+                            "analysis_depth_used": "deep",
+                            "agent_iterations": agent_result.total_iterations,
+                            "agent_best_score": agent_result.best_score,
+                            "agent_converged": agent_result.converged,
+                        }
+                    )
 
             except Exception as e:
                 if self.logger:
