@@ -51,6 +51,12 @@ class TestIneffientPatterns:
         concat_issues = [i for i in issues if "concat" in i.title.lower() or "concaténation" in i.description.lower()]
         assert len(concat_issues) == 0
 
+    def test_numeric_assign_plus_not_flagged(self, engine):
+        code = "for v in items:\n    total = total + 1"
+        issues = engine.detect_inefficient_patterns(code, "python")
+        concat_issues = [i for i in issues if "concat" in i.title.lower() or "concaténation" in i.description.lower()]
+        assert len(concat_issues) == 0
+
     def test_no_patterns(self, engine):
         code = "x = [i for i in range(10)]"
         issues = engine.detect_inefficient_patterns(code, "python")
