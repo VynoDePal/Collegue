@@ -403,8 +403,7 @@ async def test_real_delegation_engine_evaluation():
     assert test_task.params["test_framework"] == "pytest"
 
 
-@pytest.mark.asyncio
-async def test_empty_code_delegation_builders():
+def test_empty_code_delegation_builders():
     """Verify delegation builders handle empty refactored_code without crashing."""
     from collegue.core.expert_delegation import (
         _build_documentation_params_from_refactoring,
@@ -415,16 +414,24 @@ async def test_empty_code_delegation_builders():
     from collegue.tools.code_review.models import CodeReviewRequest
     from collegue.tools.test_generation.models import TestGenerationRequest
 
-    empty_result = {"refactored_code": "", "language": "python"}
+    for code_val in ["", "   ", None]:
+        result = {"refactored_code": code_val, "language": "python"}
 
-    params = _build_test_params_from_refactoring("code_refactoring", empty_result)
-    req = TestGenerationRequest(**params)
-    assert len(req.code) >= 1
+        params = _build_test_params_from_refactoring("code_refactoring", result)
+        req = TestGenerationRequest(**params)
+        assert len(req.code) >= 1
 
-    params = _build_review_params_from_refactoring("code_refactoring", empty_result)
-    req = CodeReviewRequest(**params)
-    assert len(req.code) >= 1
+        params = _build_review_params_from_refactoring("code_refactoring", result)
+        req = CodeReviewRequest(**params)
+        assert len(req.code) >= 1
 
-    params = _build_documentation_params_from_refactoring("code_refactoring", empty_result)
-    req = DocumentationRequest(**params)
-    assert len(req.code) >= 1
+        params = _build_documentation_params_from_refactoring("code_refactoring", result)
+        req = DocumentationRequest(**params)
+        assert len(req.code) >= 1
+
+    # JS language uses // comment marker
+    js_result = {"refactored_code": "", "language": "JavaScript"}
+    params = _build_test_params_from_refactoring("code_refactoring", js_result)
+    assert params["code"].startswith("//")
+    assert params["language"] == "javascript"
+    assert params["test_framework"] == "jest"
