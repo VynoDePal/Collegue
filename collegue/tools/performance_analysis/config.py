@@ -27,7 +27,7 @@ INEFFICIENT_PATTERNS = {
             "severity": "info",
         },
         "string_concat_loop": {
-            "pattern": r"for\s+\w+\s+in\s+[^\n]+:\n(?:[ \t]+[^\n]*\n){0,3}[ \t]+\w+\s*\+=\s*['\"]",
+            "pattern": r"for\s+\w+\s+in\s+[^\n]+:\n(?:[ \t]+[^\n]*\n){0,3}[ \t]+\w+\s*(?:\+\s*=\s*(?:str\b|f?['\"]|\w+\s*\+)|=\s*\w+\s*\+\s*(?:str\b|f?['\"]|\w+\s*\+))",
             "description": "Concaténation de chaînes dans une boucle (préférer join())",
             "category": "memory",
             "severity": "warning",
