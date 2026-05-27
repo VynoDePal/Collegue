@@ -312,8 +312,7 @@ RÈGLES :
                     await ctx.info(f"Plan extrait du texte: {len(steps)} étapes")
                 else:
                     raise ValueError(
-                        "Le modèle n'a pas retourné un plan structuré "
-                        "et le texte ne contient pas de JSON exploitable"
+                        "Le modèle n'a pas retourné un plan structuré et le texte ne contient pas de JSON exploitable"
                     )
 
         except Exception as e:
