@@ -565,6 +565,45 @@ class TestDelegationChainIntegration:
 # ---------------------------------------------------------------------------
 
 
+class TestDelegationParamsValidation:
+    """Validate that delegation builders produce valid tool params."""
+
+    def test_coverage_target_is_float_between_0_and_1(self):
+        """coverage_target must be 0.0-1.0, not 0-100 (regression test for #300)."""
+        from collegue.core.expert_delegation import (
+            _build_test_params_from_refactoring,
+            _build_test_params_from_impact,
+            _build_test_params_from_performance,
+        )
+        from collegue.tools.test_generation.models import TestGenerationRequest
+
+        # Test from refactoring
+        params = _build_test_params_from_refactoring(
+            "code_refactoring", {"refactored_code": "def foo(): pass", "language": "python"}
+        )
+        assert 0.0 <= params["coverage_target"] <= 1.0
+        TestGenerationRequest(**params)  # Should not raise
+
+        # Test from impact
+        params = _build_test_params_from_impact(
+            "impact_analysis", {"impacted_files": [], "risk_notes": []}
+        )
+        assert 0.0 <= params["coverage_target"] <= 1.0
+        TestGenerationRequest(**params)  # Should not raise
+
+        # Test from performance
+        params = _build_test_params_from_performance(
+            "performance_analysis", {"optimizations": ["use a set"]}
+        )
+        assert 0.0 <= params["coverage_target"] <= 1.0
+        TestGenerationRequest(**params)  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+
 def _max_depth_in_results(results: List[DelegationResult]) -> int:
     if not results:
         return 0
