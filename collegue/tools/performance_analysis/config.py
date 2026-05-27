@@ -21,19 +21,19 @@ INEFFICIENT_PATTERNS = {
             "severity": "warning",
         },
         "list_in_loop": {
-            "pattern": r"for\s+\w+\s+in\s+.*:\s*\n(?:\s+.*\n)*\s+\w+\.append\(",
+            "pattern": r"for\s+\w+\s+in\s+[^\n]+:\n(?:[ \t]+[^\n]*\n){0,3}[ \t]+\w+\.append\(",
             "description": "Construction de liste par append dans une boucle (préférer list comprehension)",
             "category": "cpu",
             "severity": "info",
         },
         "string_concat_loop": {
-            "pattern": r"for\s+.*:\s*\n(?:\s+.*\n)*\s+\w+\s*\+=\s*['\"]",
+            "pattern": r"for\s+\w+\s+in\s+[^\n]+:\n(?:[ \t]+[^\n]*\n){0,3}[ \t]+\w+\s*\+=\s*['\"]",
             "description": "Concaténation de chaînes dans une boucle (préférer join())",
             "category": "memory",
             "severity": "warning",
         },
         "global_import_in_func": {
-            "pattern": r"def\s+\w+\(.*\).*:\s*\n(?:\s+.*\n)*\s+import\s+",
+            "pattern": r"def\s+\w+\([^\n]*\)[^\n]*:\n(?:[ \t]+[^\n]*\n){0,3}[ \t]+import\s+",
             "description": "Import à l'intérieur d'une fonction (coût à chaque appel)",
             "category": "cpu",
             "severity": "info",
