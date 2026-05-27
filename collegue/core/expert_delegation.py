@@ -734,11 +734,14 @@ def _build_impact_params_from_architecture(source_tool: str, result: Dict[str, A
         if isinstance(issue, dict):
             modules.extend(issue.get("affected_modules", []))
 
+    issues_summary = "; ".join(i.get("title", "") for i in result.get("issues", []) if isinstance(i, dict))
+
     return {
-        "description": f"Impact des refactorings architecturaux recommandés ({len(modules)} modules)",
-        "change_type": "refactoring",
-        "files_changed": [{"path": m, "change_type": "refactoring"} for m in modules[:10]],
-        "parameters": {"context": "auto-delegated from architecture_analysis"},
+        "change_intent": f"Refactoring architectural recommandé: {issues_summary}"
+        if issues_summary
+        else "Refactoring architectural",
+        "files": [{"path": m, "content": f"# Module impacté: {m}", "language": "python"} for m in modules[:10]]
+        or [{"path": "unknown", "content": "# Aucun module identifié", "language": "python"}],
     }
 
 

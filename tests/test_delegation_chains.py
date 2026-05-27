@@ -403,6 +403,7 @@ async def test_real_delegation_engine_evaluation():
     assert test_task.params["test_framework"] == "pytest"
 
 
+
 def test_empty_code_delegation_builders():
     """Verify delegation builders handle empty refactored_code without crashing."""
     from collegue.core.expert_delegation import (
@@ -435,3 +436,35 @@ def test_empty_code_delegation_builders():
     assert params["code"].startswith("//")
     assert params["language"] == "javascript"
     assert params["test_framework"] == "jest"
+
+
+@pytest.mark.asyncio
+async def test_architecture_to_impact_delegation_params():
+    """Verify architecture→impact delegation builds valid ImpactAnalysisRequest params."""
+    from collegue.core.expert_delegation import _build_impact_params_from_architecture
+    from collegue.tools.impact_analysis.models import ImpactAnalysisRequest
+
+    # With affected modules
+    params = _build_impact_params_from_architecture(
+        "architecture_analysis",
+        {
+            "issues": [
+                {"severity": "error", "title": "Circular dependency", "affected_modules": ["core/a.py", "core/b.py"]},
+            ],
+        },
+    )
+    req = ImpactAnalysisRequest(**params)
+    assert "Circular dependency" in req.change_intent
+    assert len(req.files) == 2
+    assert req.files[0].path == "core/a.py"
+
+    # Without affected modules (fallback to placeholder)
+    params2 = _build_impact_params_from_architecture(
+        "architecture_analysis",
+        {
+            "issues": [{"title": "Bad pattern"}],
+        },
+    )
+    req2 = ImpactAnalysisRequest(**params2)
+    assert "Bad pattern" in req2.change_intent
+    assert len(req2.files) >= 1

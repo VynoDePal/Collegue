@@ -35,6 +35,28 @@ class TestIneffientPatterns:
         issues = engine.detect_inefficient_patterns(code, "python")
         assert any("concat" in i.title.lower() or "concaténation" in i.description.lower() for i in issues)
 
+    def test_string_concat_assign_plus(self, engine):
+        code = "for item in items:\n    result = result + str(item)"
+        issues = engine.detect_inefficient_patterns(code, "python")
+        assert any("concat" in i.title.lower() or "concaténation" in i.description.lower() for i in issues)
+
+    def test_string_concat_plus_equals_str(self, engine):
+        code = "for item in items:\n    result += str(item)"
+        issues = engine.detect_inefficient_patterns(code, "python")
+        assert any("concat" in i.title.lower() or "concaténation" in i.description.lower() for i in issues)
+
+    def test_numeric_increment_not_flagged(self, engine):
+        code = "for i in range(10):\n    count += 1"
+        issues = engine.detect_inefficient_patterns(code, "python")
+        concat_issues = [i for i in issues if "concat" in i.title.lower() or "concaténation" in i.description.lower()]
+        assert len(concat_issues) == 0
+
+    def test_numeric_assign_plus_not_flagged(self, engine):
+        code = "for v in items:\n    total = total + 1"
+        issues = engine.detect_inefficient_patterns(code, "python")
+        concat_issues = [i for i in issues if "concat" in i.title.lower() or "concaténation" in i.description.lower()]
+        assert len(concat_issues) == 0
+
     def test_no_patterns(self, engine):
         code = "x = [i for i in range(10)]"
         issues = engine.detect_inefficient_patterns(code, "python")
