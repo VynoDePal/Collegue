@@ -298,3 +298,27 @@ async def test_orchestrator_uses_fallback_parser_when_structured_output_fails():
     # Should have used the fallback parser and executed code_review
     assert "code_review" in response.tools_used
     assert response.confidence > 0
+
+
+def test_parse_plan_normalizes_field_aliases():
+    """Verify _parse_plan_from_text normalizes tool_name/description to tool/reason."""
+    from collegue.core.meta_orchestrator import _parse_plan_from_text
+
+    # tool_name + description (common LLM output)
+    plan = _parse_plan_from_text(
+        '{"steps": [{"tool_name": "code_review", "description": "Review", "params": {"code": "x"}}]}'
+    )
+    assert plan is not None
+    assert plan.steps[0].tool == "code_review"
+    assert plan.steps[0].reason == "Review"
+
+    # name + rationale
+    plan = _parse_plan_from_text('[{"name": "test_generation", "rationale": "Generate tests"}]')
+    assert plan is not None
+    assert plan.steps[0].tool == "test_generation"
+    assert plan.steps[0].params == {}
+
+    # Correct fields still work
+    plan = _parse_plan_from_text('{"steps": [{"tool": "code_review", "reason": "R", "params": {}}]}')
+    assert plan is not None
+    assert plan.steps[0].tool == "code_review"

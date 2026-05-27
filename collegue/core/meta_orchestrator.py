@@ -143,6 +143,23 @@ def _parse_plan_from_text(text: str) -> Optional[OrchestratorPlan]:
     if bracket_start != -1 and bracket_end > bracket_start:
         candidates.append(text[bracket_start : bracket_end + 1])
 
+    def _normalize_step(step: dict) -> dict:
+        """Normalize common LLM field aliases to OrchestratorStep fields."""
+        normalized = dict(step)
+        if "tool" not in normalized:
+            for alias in ("tool_name", "name"):
+                if alias in normalized:
+                    normalized["tool"] = normalized.pop(alias)
+                    break
+        if "reason" not in normalized:
+            for alias in ("description", "rationale"):
+                if alias in normalized:
+                    normalized["reason"] = normalized.pop(alias)
+                    break
+        if "params" not in normalized:
+            normalized["params"] = {}
+        return normalized
+
     for candidate in candidates:
         try:
             data = _json.loads(candidate)
@@ -152,14 +169,16 @@ def _parse_plan_from_text(text: str) -> Optional[OrchestratorPlan]:
         # If data is a dict with "steps", parse directly
         if isinstance(data, dict) and "steps" in data:
             try:
-                return OrchestratorPlan(**data)
+                steps = [_normalize_step(s) if isinstance(s, dict) else s for s in data["steps"]]
+                return OrchestratorPlan(steps=steps)
             except Exception:
                 continue
 
         # If data is a list, treat as steps array
         if isinstance(data, list):
             try:
-                return OrchestratorPlan(steps=data)
+                steps = [_normalize_step(s) if isinstance(s, dict) else s for s in data]
+                return OrchestratorPlan(steps=steps)
             except Exception:
                 continue
 
