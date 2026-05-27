@@ -4,7 +4,7 @@
 
 [![Tests](https://github.com/VynoDePal/Collegue/actions/workflows/tests.yml/badge.svg)](https://github.com/VynoDePal/Collegue/actions/workflows/tests.yml)
 
-Un assistant de développement intelligent et serveur MCP (Model Context Protocol) fournissant des outils d'analyse, de refactoring, de documentation, d'analyse de risques, sécurité et bien plus.
+Un **collectif d'experts IA spécialisés** sous forme de serveur MCP (Model Context Protocol). Chaque outil est un agent expert dans son domaine — analyse de code, refactoring, tests, sécurité, architecture — et ils travaillent ensemble via un système de délégation automatique, mémoire persistante et monitoring proactif.
 
 ## 🚀 Utilisation Rapide (Client NPM)
 
@@ -29,24 +29,84 @@ Ajoutez ceci à votre configuration `mcpServers` (souvent dans `~/.codeium/winds
 
 ## ✨ Fonctionnalités (Outils MCP)
 
-### 🔧 Outils d'Analyse de Code
+### 🧠 Experts IA (Agents Intelligents)
 
-*   **🛡️ IaC Guardrails Scan** : Sécurisation de l'Infrastructure as Code (Terraform, Kubernetes, Dockerfile) contre les mauvaises configurations et privilèges excessifs.
-*   **🎯 Impact Analysis** : Analyse prédictive des risques et impacts d'un changement de code avant son application.
-*   **🔍 Repo Consistency Check** : Détection d'incohérences subtiles, code mort et hallucinations silencieuses dans le codebase.
-*   **📦 Dependency Guard** : Audit de sécurité des dépendances (Supply Chain) pour éviter typosquatting et paquets malveillants/vulnérables.
-*   **🔐 Secret Scan** : Détection proactive de secrets, clés API et tokens exposés dans le code.
-*   **🧪 Run Tests** : Exécution de tests unitaires (Python/JS/TS) avec rapports structurés intégrés au contexte.
-*   **♻️ Refactoring** : Outils automatisés pour nettoyer, optimiser et restructurer le code existant.
-*   **📚 Documentation** : Génération automatique de documentation technique et docstrings.
-*   **⚡ Test Generation** : Création intelligente de tests unitaires validés par exécution.
+Chaque expert utilise un LLM en backend, itère sur sa sortie via une **boucle agentique** (validation → correction → re-exécution), et peut **déléguer automatiquement** à d'autres experts.
 
-### 🔌 Outils d'Intégration (NEW)
+*   **🔍 Code Review** : Revue qualité complète — naming, complexité, sécurité, DRY, SOLID, error handling. Score de qualité + findings détaillés.
+*   **🏗️ Architecture Analysis** : Analyse des patterns, dépendances, cycles, couplage/cohésion. Détection de dette technique.
+*   **⚡ Performance Analysis** : Détection de complexité O(n²), I/O bloquant, concat en boucle, hotspots. Score de performance.
+*   **♻️ Code Refactoring** : Restructure et optimise le code existant. Valide la syntaxe AST et compare les métriques avant/après.
+*   **🧪 Test Generation** : Génère des tests unitaires exécutables. Parse et valide les tests générés avant de les retourner.
+*   **📚 Code Documentation** : Génère docstrings et documentation technique avec couverture mesurée.
+*   **🛡️ IaC Guardrails Scan** : Sécurisation IaC (Terraform, Kubernetes, Dockerfile) avec scoring de conformité.
+*   **🎯 Impact Analysis** : Analyse prédictive des risques d'un changement de code. Insights sémantiques en mode deep.
+*   **🔍 Repo Consistency Check** : Détection d'incohérences, code mort, hallucinations. Délégation automatique vers refactoring.
+*   **🎛️ Smart Orchestrator** : Reçoit une requête complexe, planifie les experts nécessaires, exécute, synthétise la réponse.
 
-*   **🐘 PostgreSQL Database** : Inspection de schéma, requêtes SQL (lecture seule), statistiques de tables, clés étrangères et index.
-*   **🐙 GitHub Operations** : Gestion des repos, PRs, issues, branches, workflows CI/CD et recherche de code.
-*   **🚨 Sentry Monitor** : Récupération des erreurs, stacktraces, statistiques de projet et releases pour prioriser le debugging.
-*   **☸️ Kubernetes Operations** : Inspection des pods, logs, déploiements, services, événements et ressources du cluster.
+### 🔧 Outils Statiques
+
+*   **📦 Dependency Guard** : Audit de sécurité des dépendances (Supply Chain) — typosquatting, vulnérabilités.
+*   **🔐 Secret Scan** : Détection proactive de secrets, clés API et tokens exposés.
+*   **🧪 Run Tests** : Exécution de tests unitaires (Python/JS/TS) avec rapports structurés.
+
+### 🔌 Outils d'Intégration
+
+*   **🐘 PostgreSQL Database** : Inspection de schéma, requêtes SQL (lecture seule), statistiques de tables.
+*   **🐙 GitHub Operations** : Gestion des repos, PRs, issues, branches, workflows CI/CD.
+*   **🚨 Sentry Monitor** : Récupération des erreurs, stacktraces, statistiques de projet.
+*   **☸️ Kubernetes Operations** : Inspection des pods, logs, déploiements, services, événements.
+
+---
+
+## 🤖 Système Multi-Agents / Collectif d'Experts
+
+Collègue n'est pas un simple serveur d'outils — c'est un **collectif d'experts IA** qui collaborent automatiquement.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Collègue MCP Server                       │
+│                                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │  Code    │  │  Archi   │  │  Perf    │  │ Refactor │   │
+│  │  Review  │──│ Analysis │──│ Analysis │──│  Expert  │   │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘   │
+│       │              │              │              │         │
+│  ┌────▼─────┐  ┌────▼─────┐  ┌────▼─────┐  ┌────▼─────┐   │
+│  │  Test    │  │   Doc    │  │   IaC    │  │ Impact  │   │
+│  │   Gen    │  │  Expert  │  │  Scan    │  │ Analysis│   │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  ExpertDelegation · ProjectMemory · ProactiveMonitor│   │
+│  │  ExpertDashboard · SmartOrchestrator                │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Composants clés
+
+| Composant | Rôle |
+|-----------|------|
+| **Boucle Agentique** | Chaque expert itère sur sa sortie (exécute → valide → corrige → re-exécute) jusqu'à convergence |
+| **Délégation Inter-Experts** | 14 règles automatiques : un expert peut déclencher d'autres experts (ex: `code_review` → `refactoring` si score < 0.5) |
+| **Mémoire Persistante** | Les experts stockent leurs résultats dans `.collegue/memory/` et rappellent le contexte aux sessions suivantes |
+| **Moniteur Proactif** | Détecte les fichiers modifiés et décide quels experts déclencher (`.py` → code_review, `Dockerfile` → iac_scan) |
+| **Tableau de Bord** | Agrège les scores qualité/architecture/performance/sécurité avec recommandations priorisées |
+
+### Exemple de chaîne d'experts
+
+```
+repo_consistency_check (score=0.8)
+  → code_refactoring (restructure le code)
+    → code_review (vérifie la qualité)
+    → code_documentation (met à jour la doc)
+    → test_generation (génère les tests)
+```
+
+> 📖 **Guide complet** : [docs/multi_agent_expert_system.md](docs/multi_agent_expert_system.md)
 
 ---
 
