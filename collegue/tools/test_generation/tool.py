@@ -312,6 +312,10 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
                     success=bool(test_code),
                 )
 
+                if not test_code:
+                    self.logger.warning("LLM produced no extractable test code, using fallback")
+                    return self._generate_fallback_response(request, framework, elements)
+
                 # Compter les tests générés
                 test_count = test_code.count("def test_") + test_code.count("@Test")
 
@@ -383,6 +387,10 @@ class TestGenerationTool(AgentLoopMixin, BaseTool):
                 tokens_used=len(test_code) // 4,
                 success=bool(test_code),
             )
+
+            if not test_code:
+                self.logger.warning("Agent loop produced no extractable test code, using fallback")
+                return self._generate_fallback_response(request, framework, elements)
 
             test_count = test_code.count("def test_") + test_code.count("@Test")
             estimated_coverage = self._engine.estimate_coverage(elements, test_count)
