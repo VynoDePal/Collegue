@@ -140,7 +140,8 @@ class TestArchitectureParamsBuilders:
             ]
         }
         params = _build_impact_params_from_architecture("architecture_analysis", result)
-        assert len(params["files_changed"]) == 2
+        assert len(params["files"]) == 2
+        assert "Cycle" in params["change_intent"]
 
 
 class TestPerformanceParamsBuilders:
