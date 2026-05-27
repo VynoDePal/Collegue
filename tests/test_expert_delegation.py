@@ -22,6 +22,9 @@ from collegue.core.expert_delegation import (
     DelegationRule,
     DelegationTask,
     ExpertDelegationEngine,
+    _build_test_params_from_impact,
+    _build_test_params_from_performance,
+    _build_test_params_from_refactoring,
     _consistency_needs_refactoring,
     _iac_needs_remediation,
     _impact_has_iac_files,
@@ -29,6 +32,7 @@ from collegue.core.expert_delegation import (
     _refactoring_has_changes,
     create_default_delegation_engine,
 )
+from collegue.tools.test_generation.models import TestGenerationRequest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -570,13 +574,6 @@ class TestDelegationParamsValidation:
 
     def test_coverage_target_is_float_between_0_and_1(self):
         """coverage_target must be 0.0-1.0, not 0-100 (regression test for #300)."""
-        from collegue.core.expert_delegation import (
-            _build_test_params_from_refactoring,
-            _build_test_params_from_impact,
-            _build_test_params_from_performance,
-        )
-        from collegue.tools.test_generation.models import TestGenerationRequest
-
         # Test from refactoring
         params = _build_test_params_from_refactoring(
             "code_refactoring", {"refactored_code": "def foo(): pass", "language": "python"}
