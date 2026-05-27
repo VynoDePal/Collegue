@@ -582,16 +582,12 @@ class TestDelegationParamsValidation:
         TestGenerationRequest(**params)  # Should not raise
 
         # Test from impact
-        params = _build_test_params_from_impact(
-            "impact_analysis", {"impacted_files": [], "risk_notes": []}
-        )
+        params = _build_test_params_from_impact("impact_analysis", {"impacted_files": [], "risk_notes": []})
         assert 0.0 <= params["coverage_target"] <= 1.0
         TestGenerationRequest(**params)  # Should not raise
 
         # Test from performance
-        params = _build_test_params_from_performance(
-            "performance_analysis", {"optimizations": ["use a set"]}
-        )
+        params = _build_test_params_from_performance("performance_analysis", {"optimizations": ["use a set"]})
         assert 0.0 <= params["coverage_target"] <= 1.0
         TestGenerationRequest(**params)  # Should not raise
 
