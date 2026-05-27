@@ -220,6 +220,77 @@ class TestTestGenerationRequest:
             TestGenerationRequest(code="def hello(): pass", language="python", coverage_target=1.5)
 
 
+class TestTestGenerationFallback:
+    """Tests for fallback when LLM returns no extractable code."""
+
+    @pytest.mark.asyncio
+    async def test_async_fallback_on_empty_code_block(self):
+        """Agent loop output with no code block triggers fallback response."""
+        from unittest.mock import AsyncMock
+
+        from collegue.tools.agent_loop import AgentIteration, AgentLoopResult
+
+        tool = TestGenerationTool({})
+        req = TestGenerationRequest(
+            code="def hello():\n    return 'world'",
+            language="python",
+            coverage_target=0.80,
+        )
+
+        mock_ctx = AsyncMock()
+
+        # Fake agent_execute that returns text without a code block
+        agent_result = AgentLoopResult(
+            iterations=[
+                AgentIteration(
+                    iteration=1,
+                    validation_passed=False,
+                    validation_errors=["No code found"],
+                    quality_score=0.0,
+                    temperature_used=0.5,
+                    output="No code here",
+                )
+            ],
+            best_output="No code fences at all, just plain text",
+            best_score=0.0,
+            total_iterations=1,
+            converged=False,
+        )
+        tool.agent_execute = AsyncMock(return_value=agent_result)
+        tool.prepare_prompt = AsyncMock(return_value="prompt")
+
+        result = await tool.execute_async(req, ctx=mock_ctx)
+        result_dict = result.model_dump()
+
+        # Should have fallen back to template-based generation
+        assert result_dict["test_code"], "test_code should not be empty after fallback"
+        assert "def test_" in result_dict["test_code"], "Fallback should generate test functions"
+
+    def test_sync_fallback_on_empty_code_block(self):
+        """Sync LLM output with no code block triggers fallback response."""
+        from unittest.mock import AsyncMock
+
+        tool = TestGenerationTool({})
+        req = TestGenerationRequest(
+            code="def greet(name):\n    return f'Hello {name}'",
+            language="python",
+            coverage_target=0.80,
+        )
+
+        mock_ctx = MagicMock()
+
+        class FakeSampleResult:
+            text = "I cannot generate proper tests for this code."
+
+        mock_ctx.sample = AsyncMock(return_value=FakeSampleResult())
+
+        result = tool.execute(req, ctx=mock_ctx)
+        result_dict = result.model_dump()
+
+        # Should have fallen back to template-based generation
+        assert result_dict["test_code"], "test_code should not be empty after fallback"
+
+
 class TestTestGenerationResponse:
     """Tests pour le modèle TestGenerationResponse."""
 

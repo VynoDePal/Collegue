@@ -359,6 +359,10 @@ class DocumentationTool(AgentLoopMixin, BaseTool):
                 success=bool(generated_docs),
             )
 
+            if not generated_docs:
+                self.logger.warning("Agent loop produced no extractable docs, using fallback")
+                return self._generate_fallback_response(request, code_elements)
+
             formatted_docs = self._engine.format_documentation(
                 generated_docs, request.doc_format or "markdown", request.language
             )
