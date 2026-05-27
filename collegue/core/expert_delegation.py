@@ -447,9 +447,9 @@ class ExpertDelegationEngine:
 
 def _refactoring_has_changes(result: Dict[str, Any]) -> bool:
     """Condition: le refactoring a effectué des changements."""
-    changes = result.get("changes", [])
-    refactored = result.get("refactored_code", "")
-    original = result.get("original_code", "")
+    changes = result.get("changes") or []
+    refactored = result.get("refactored_code") or ""
+    original = result.get("original_code") or ""
     return bool(changes) or (refactored and original and refactored != original)
 
 
@@ -465,13 +465,13 @@ def _iac_needs_remediation(result: Dict[str, Any]) -> bool:
 
 def _impact_has_risks(result: Dict[str, Any]) -> bool:
     """Condition: l'analyse d'impact a détecté des risques."""
-    return len(result.get("risk_notes", [])) > 0
+    return len(result.get("risk_notes") or []) > 0
 
 
 def _impact_has_iac_files(result: Dict[str, Any]) -> bool:
     """Condition: l'impact touche des fichiers IaC."""
     iac_extensions = {".tf", ".yaml", ".yml", ".json", ".hcl"}
-    impacted = result.get("impacted_files", [])
+    impacted = result.get("impacted_files") or []
     for f in impacted:
         path = f.get("path", "") if isinstance(f, dict) else ""
         if any(path.endswith(ext) for ext in iac_extensions):
@@ -481,7 +481,7 @@ def _impact_has_iac_files(result: Dict[str, Any]) -> bool:
 
 def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat de consistency check."""
-    actions = result.get("suggested_actions", [])
+    actions = result.get("suggested_actions") or []
     if actions:
         best = max(actions, key=lambda a: a.get("score", 0) if isinstance(a, dict) else 0)
         params = best.get("params", {}) if isinstance(best, dict) else {}
@@ -493,7 +493,7 @@ def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[st
                 "parameters": {"context": "auto-delegated from repo_consistency_check"},
             }
 
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = f"# Issues détectées: {len(issues)}\n"
     for issue in issues[:5]:
         if isinstance(issue, dict):
@@ -532,8 +532,8 @@ def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]
 
 def _build_test_params_from_impact(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test depuis un résultat d'impact analysis."""
-    impacted = result.get("impacted_files", [])
-    risks = result.get("risk_notes", [])
+    impacted = result.get("impacted_files") or []
+    risks = result.get("risk_notes") or []
     code_summary = "# Impact Analysis Results\n"
     code_summary += f"## {len(impacted)} fichiers impactés\n"
     for f in impacted[:5]:
@@ -556,7 +556,7 @@ def _build_test_params_from_impact(source_tool: str, result: Dict[str, Any]) -> 
 def _build_iac_params_from_impact(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de scan IaC depuis un résultat d'impact analysis."""
     iac_extensions = {".tf", ".yaml", ".yml", ".json", ".hcl"}
-    impacted = result.get("impacted_files", [])
+    impacted = result.get("impacted_files") or []
     iac_files = []
     for f in impacted:
         if isinstance(f, dict):
@@ -577,7 +577,7 @@ def _build_iac_params_from_impact(source_tool: str, result: Dict[str, Any]) -> D
 
 def _build_refactoring_params_from_iac(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat IaC."""
-    findings = result.get("findings", [])
+    findings = result.get("findings") or []
     summary = "# Security findings to remediate\n"
     for f in findings[:10]:
         if isinstance(f, dict):
@@ -608,7 +608,7 @@ def _review_quality_low(result: Dict[str, Any]) -> bool:
 
 def _consistency_has_architectural_issues(result: Dict[str, Any]) -> bool:
     """Condition: le consistency check détecte des problèmes architecturaux."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     for issue in issues:
         if isinstance(issue, dict):
             msg = issue.get("title", issue.get("message", "")).lower()
@@ -624,14 +624,14 @@ def _architecture_has_debt(result: Dict[str, Any]) -> bool:
 
 def _architecture_needs_impact(result: Dict[str, Any]) -> bool:
     """Condition: l'analyse architecturale recommande un refactoring important."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     critical = sum(1 for i in issues if isinstance(i, dict) and i.get("severity") in ("error", "critical"))
     return critical > 0
 
 
 def _consistency_has_performance_issues(result: Dict[str, Any]) -> bool:
     """Condition: le consistency check détecte des problèmes de performance."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     for issue in issues:
         if isinstance(issue, dict):
             msg = issue.get("title", issue.get("message", "")).lower()
@@ -647,7 +647,7 @@ def _performance_needs_refactoring(result: Dict[str, Any]) -> bool:
 
 def _performance_needs_tests(result: Dict[str, Any]) -> bool:
     """Condition: l'analyse de performance a proposé des optimisations → tester."""
-    optimizations = result.get("optimizations", [])
+    optimizations = result.get("optimizations") or []
     return len(optimizations) > 0
 
 
@@ -664,7 +664,7 @@ def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, An
 
 def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat de code review."""
-    findings = result.get("findings", [])
+    findings = result.get("findings") or []
     summary = "# Code Review Findings to Fix\n"
     for f in findings[:10]:
         if isinstance(f, dict):
@@ -682,7 +682,7 @@ def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, An
 
 def _build_architecture_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres d'analyse architecturale depuis un consistency check."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Consistency Check — Architectural Issues\n"
     for issue in issues[:10]:
         if isinstance(issue, dict):
@@ -698,7 +698,7 @@ def _build_architecture_params_from_consistency(source_tool: str, result: Dict[s
 
 def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis une analyse architecturale."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Architectural Issues to Fix\n"
     for i in issues[:10]:
         if isinstance(i, dict):
@@ -717,11 +717,11 @@ def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[s
 def _build_impact_params_from_architecture(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres d'impact analysis depuis une analyse architecturale."""
     modules = []
-    for issue in result.get("issues", []):
+    for issue in result.get("issues") or []:
         if isinstance(issue, dict):
-            modules.extend(issue.get("affected_modules", []))
+            modules.extend(issue.get("affected_modules") or [])
 
-    issues_summary = "; ".join(i.get("title", "") for i in result.get("issues", []) if isinstance(i, dict))
+    issues_summary = "; ".join(i.get("title", "") for i in (result.get("issues") or []) if isinstance(i, dict))
 
     return {
         "change_intent": f"Refactoring architectural recommandé: {issues_summary}"
@@ -734,7 +734,7 @@ def _build_impact_params_from_architecture(source_tool: str, result: Dict[str, A
 
 def _build_performance_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres d'analyse performance depuis un consistency check."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Consistency Check — Performance Issues\n"
     for issue in issues[:10]:
         if isinstance(issue, dict):
@@ -750,7 +750,7 @@ def _build_performance_params_from_consistency(source_tool: str, result: Dict[st
 
 def _build_refactoring_params_from_performance(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis une analyse performance."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Performance Issues to Optimize\n"
     for i in issues[:10]:
         if isinstance(i, dict):
@@ -771,7 +771,7 @@ def _build_refactoring_params_from_performance(source_tool: str, result: Dict[st
 
 def _build_test_params_from_performance(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis une analyse performance."""
-    optimizations = result.get("optimizations", [])
+    optimizations = result.get("optimizations") or []
     summary = "# Performance Optimizations to Test\n"
     for opt in optimizations[:10]:
         summary += f"- {opt}\n"

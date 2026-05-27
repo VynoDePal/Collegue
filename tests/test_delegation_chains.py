@@ -433,3 +433,60 @@ async def test_architecture_to_impact_delegation_params():
     req2 = ImpactAnalysisRequest(**params2)
     assert "Bad pattern" in req2.change_intent
     assert len(req2.files) >= 1
+
+
+@pytest.mark.asyncio
+async def test_conditions_and_builders_handle_none_list_fields():
+    """All conditions and builders must survive result dicts with None-valued list fields."""
+    from collegue.core.expert_delegation import (
+        _architecture_needs_impact,
+        _build_architecture_params_from_consistency,
+        _build_impact_params_from_architecture,
+        _build_performance_params_from_consistency,
+        _build_refactoring_params_from_architecture,
+        _build_refactoring_params_from_consistency,
+        _build_refactoring_params_from_performance,
+        _build_refactoring_params_from_review,
+        _build_test_params_from_performance,
+        _consistency_has_architectural_issues,
+        _consistency_has_performance_issues,
+        _impact_has_iac_files,
+        _impact_has_risks,
+        _performance_needs_tests,
+        _refactoring_has_changes,
+    )
+
+    # Conditions must return bool without crashing
+    assert _impact_has_risks({"risk_notes": None}) is False
+    assert _impact_has_iac_files({"impacted_files": None}) is False
+    assert _performance_needs_tests({"optimizations": None}) is False
+    assert _consistency_has_architectural_issues({"issues": None}) is False
+    assert _consistency_has_performance_issues({"issues": None}) is False
+    assert _architecture_needs_impact({"issues": None}) is False
+    assert not _refactoring_has_changes({"changes": None, "refactored_code": None})
+
+    # Builders must return a dict without crashing
+    assert isinstance(
+        _build_refactoring_params_from_review("x", {"findings": None, "language": "python"}), dict
+    )
+    assert isinstance(
+        _build_refactoring_params_from_architecture("x", {"issues": None, "language": "python"}), dict
+    )
+    assert isinstance(
+        _build_architecture_params_from_consistency("x", {"issues": None}), dict
+    )
+    assert isinstance(
+        _build_performance_params_from_consistency("x", {"issues": None}), dict
+    )
+    assert isinstance(
+        _build_refactoring_params_from_performance("x", {"issues": None, "language": "python"}), dict
+    )
+    assert isinstance(
+        _build_impact_params_from_architecture("x", {"issues": None}), dict
+    )
+    assert isinstance(
+        _build_refactoring_params_from_consistency("x", {"suggested_actions": None, "issues": None}), dict
+    )
+    assert isinstance(
+        _build_test_params_from_performance("x", {"optimizations": None, "language": "python"}), dict
+    )
