@@ -433,3 +433,44 @@ async def test_architecture_to_impact_delegation_params():
     req2 = ImpactAnalysisRequest(**params2)
     assert "Bad pattern" in req2.change_intent
     assert len(req2.files) >= 1
+
+
+def test_builders_handle_none_fields():
+    """All delegation builders must survive result dicts with None-valued fields."""
+    from collegue.core.expert_delegation import (
+        _build_architecture_params_from_consistency,
+        _build_documentation_params_from_refactoring,
+        _build_iac_params_from_impact,
+        _build_impact_params_from_architecture,
+        _build_performance_params_from_consistency,
+        _build_refactoring_params_from_architecture,
+        _build_refactoring_params_from_consistency,
+        _build_refactoring_params_from_iac,
+        _build_refactoring_params_from_performance,
+        _build_refactoring_params_from_review,
+        _build_review_params_from_refactoring,
+        _build_test_params_from_impact,
+        _build_test_params_from_performance,
+        _build_test_params_from_refactoring,
+    )
+
+    cases = [
+        (_build_test_params_from_refactoring, {"language": None, "refactored_code": None}),
+        (_build_test_params_from_performance, {"language": None, "optimizations": None}),
+        (_build_documentation_params_from_refactoring, {"refactored_code": None, "language": None}),
+        (_build_review_params_from_refactoring, {"refactored_code": None, "language": None}),
+        (_build_refactoring_params_from_review, {"findings": None, "language": None}),
+        (_build_refactoring_params_from_architecture, {"issues": None, "language": None}),
+        (_build_refactoring_params_from_performance, {"issues": None, "language": None}),
+        (_build_refactoring_params_from_iac, {"findings": None}),
+        (_build_impact_params_from_architecture, {"issues": None}),
+        (_build_architecture_params_from_consistency, {"issues": None}),
+        (_build_performance_params_from_consistency, {"issues": None}),
+        (_build_iac_params_from_impact, {"impacted_files": None}),
+        (_build_test_params_from_impact, {"impacted_files": None, "risk_notes": None}),
+        (_build_refactoring_params_from_consistency, {"issues": None, "suggested_actions": None}),
+    ]
+
+    for func, result_dict in cases:
+        params = func("test_source", result_dict)
+        assert isinstance(params, dict), f"{func.__name__} did not return a dict"

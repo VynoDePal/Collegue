@@ -481,19 +481,19 @@ def _impact_has_iac_files(result: Dict[str, Any]) -> bool:
 
 def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat de consistency check."""
-    actions = result.get("suggested_actions", [])
+    actions = result.get("suggested_actions") or []
     if actions:
         best = max(actions, key=lambda a: a.get("score", 0) if isinstance(a, dict) else 0)
         params = best.get("params", {}) if isinstance(best, dict) else {}
         if params.get("code"):
             return {
                 "code": params["code"],
-                "language": params.get("language", "python"),
-                "refactoring_type": params.get("refactoring_type", "clean"),
+                "language": params.get("language") or "python",
+                "refactoring_type": params.get("refactoring_type") or "clean",
                 "parameters": {"context": "auto-delegated from repo_consistency_check"},
             }
 
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = f"# Issues détectées: {len(issues)}\n"
     for issue in issues[:5]:
         if isinstance(issue, dict):
@@ -512,8 +512,8 @@ def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[st
 def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de documentation depuis un résultat de refactoring."""
     return {
-        "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
+        "code": result.get("refactored_code") or "",
+        "language": result.get("language") or "python",
         "documentation_type": "auto",
         "parameters": {"context": "auto-delegated from code_refactoring"},
     }
@@ -521,10 +521,11 @@ def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[
 
 def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis un résultat de refactoring."""
+    lang = (result.get("language") or "python").lower()
     return {
-        "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
-        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "code": result.get("refactored_code") or "",
+        "language": lang,
+        "test_framework": "pytest" if lang == "python" else "jest",
         "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from code_refactoring"},
     }
@@ -532,8 +533,8 @@ def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]
 
 def _build_test_params_from_impact(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test depuis un résultat d'impact analysis."""
-    impacted = result.get("impacted_files", [])
-    risks = result.get("risk_notes", [])
+    impacted = result.get("impacted_files") or []
+    risks = result.get("risk_notes") or []
     code_summary = "# Impact Analysis Results\n"
     code_summary += f"## {len(impacted)} fichiers impactés\n"
     for f in impacted[:5]:
@@ -556,7 +557,7 @@ def _build_test_params_from_impact(source_tool: str, result: Dict[str, Any]) -> 
 def _build_iac_params_from_impact(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de scan IaC depuis un résultat d'impact analysis."""
     iac_extensions = {".tf", ".yaml", ".yml", ".json", ".hcl"}
-    impacted = result.get("impacted_files", [])
+    impacted = result.get("impacted_files") or []
     iac_files = []
     for f in impacted:
         if isinstance(f, dict):
@@ -577,7 +578,7 @@ def _build_iac_params_from_impact(source_tool: str, result: Dict[str, Any]) -> D
 
 def _build_refactoring_params_from_iac(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat IaC."""
-    findings = result.get("findings", [])
+    findings = result.get("findings") or []
     summary = "# Security findings to remediate\n"
     for f in findings[:10]:
         if isinstance(f, dict):
@@ -647,15 +648,15 @@ def _performance_needs_refactoring(result: Dict[str, Any]) -> bool:
 
 def _performance_needs_tests(result: Dict[str, Any]) -> bool:
     """Condition: l'analyse de performance a proposé des optimisations → tester."""
-    optimizations = result.get("optimizations", [])
+    optimizations = result.get("optimizations") or []
     return len(optimizations) > 0
 
 
 def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de code review depuis un résultat de refactoring."""
     return {
-        "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
+        "code": result.get("refactored_code") or "",
+        "language": result.get("language") or "python",
         "review_standards": ["naming", "complexity", "security", "dry", "solid"],
         "severity_threshold": "warning",
         "context": "auto-delegated from code_refactoring — vérifier la qualité du refactoring",
@@ -664,7 +665,7 @@ def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, An
 
 def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis un résultat de code review."""
-    findings = result.get("findings", [])
+    findings = result.get("findings") or []
     summary = "# Code Review Findings to Fix\n"
     for f in findings[:10]:
         if isinstance(f, dict):
@@ -674,7 +675,7 @@ def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, An
 
     return {
         "code": summary,
-        "language": result.get("language", "python"),
+        "language": result.get("language") or "python",
         "refactoring_type": "clean",
         "parameters": {"context": "auto-delegated from code_review (quality < 0.5)"},
     }
@@ -682,7 +683,7 @@ def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, An
 
 def _build_architecture_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres d'analyse architecturale depuis un consistency check."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Consistency Check — Architectural Issues\n"
     for issue in issues[:10]:
         if isinstance(issue, dict):
@@ -698,7 +699,7 @@ def _build_architecture_params_from_consistency(source_tool: str, result: Dict[s
 
 def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis une analyse architecturale."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Architectural Issues to Fix\n"
     for i in issues[:10]:
         if isinstance(i, dict):
@@ -708,7 +709,7 @@ def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[s
 
     return {
         "code": summary,
-        "language": result.get("language", "python"),
+        "language": result.get("language") or "python",
         "refactoring_type": "clean",
         "parameters": {"context": "auto-delegated from architecture_analysis (dette technique)"},
     }
@@ -717,11 +718,11 @@ def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[s
 def _build_impact_params_from_architecture(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres d'impact analysis depuis une analyse architecturale."""
     modules = []
-    for issue in result.get("issues", []):
+    for issue in result.get("issues") or []:
         if isinstance(issue, dict):
-            modules.extend(issue.get("affected_modules", []))
+            modules.extend(issue.get("affected_modules") or [])
 
-    issues_summary = "; ".join(i.get("title", "") for i in result.get("issues", []) if isinstance(i, dict))
+    issues_summary = "; ".join(i.get("title", "") for i in (result.get("issues") or []) if isinstance(i, dict))
 
     return {
         "change_intent": f"Refactoring architectural recommandé: {issues_summary}"
@@ -734,7 +735,7 @@ def _build_impact_params_from_architecture(source_tool: str, result: Dict[str, A
 
 def _build_performance_params_from_consistency(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres d'analyse performance depuis un consistency check."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Consistency Check — Performance Issues\n"
     for issue in issues[:10]:
         if isinstance(issue, dict):
@@ -750,7 +751,7 @@ def _build_performance_params_from_consistency(source_tool: str, result: Dict[st
 
 def _build_refactoring_params_from_performance(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de refactoring depuis une analyse performance."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     summary = "# Performance Issues to Optimize\n"
     for i in issues[:10]:
         if isinstance(i, dict):
@@ -763,7 +764,7 @@ def _build_refactoring_params_from_performance(source_tool: str, result: Dict[st
 
     return {
         "code": summary,
-        "language": result.get("language", "python"),
+        "language": result.get("language") or "python",
         "refactoring_type": "optimize",
         "parameters": {"context": "auto-delegated from performance_analysis"},
     }
@@ -771,15 +772,16 @@ def _build_refactoring_params_from_performance(source_tool: str, result: Dict[st
 
 def _build_test_params_from_performance(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis une analyse performance."""
-    optimizations = result.get("optimizations", [])
+    optimizations = result.get("optimizations") or []
     summary = "# Performance Optimizations to Test\n"
     for opt in optimizations[:10]:
         summary += f"- {opt}\n"
 
+    lang = (result.get("language") or "python").lower()
     return {
         "code": summary,
-        "language": result.get("language", "python"),
-        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "language": lang,
+        "test_framework": "pytest" if lang == "python" else "jest",
         "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from performance_analysis"},
     }
