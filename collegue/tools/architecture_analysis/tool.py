@@ -7,7 +7,7 @@ identifie les patterns et évalue le couplage/cohésion.
 
 from typing import Any, Dict, List
 
-from ...core.shared import parse_llm_json_response
+from ...core.llm_response_parser import LLMArchitectureResponse, parse_llm_response_strict
 from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool
 from .config import ANALYSIS_TYPES
@@ -375,35 +375,23 @@ Réponds en JSON avec cette structure exacte:
         debt_score = 0.0
         recommendations: list[str] = []
 
-        try:
-            data = parse_llm_json_response(output)
-            if not isinstance(data, dict):
-                return issues, patterns, debt_score, recommendations
+        parsed = parse_llm_response_strict(output, LLMArchitectureResponse)
 
-            debt_score = float(data.get("debt_score", 0.0))
+        debt_score = parsed.debt_score
 
-            for i in data.get("issues", []):
-                if isinstance(i, dict) and "title" in i:
-                    issues.append(
-                        ArchitecturalIssue(
-                            category=i.get("category", "missing_abstraction"),
-                            severity=i.get("severity", "info"),
-                            title=i["title"],
-                            description=i.get("description", ""),
-                            affected_modules=i.get("affected_modules", []),
-                            recommendation=i.get("recommendation"),
-                        )
-                    )
+        for i in parsed.issues:
+            issues.append(
+                ArchitecturalIssue(
+                    category=i.category,
+                    severity=i.severity,
+                    title=i.title,
+                    description=i.description,
+                    affected_modules=i.affected_modules,
+                    recommendation=i.recommendation,
+                )
+            )
 
-            patterns = data.get("detected_patterns", [])
-            if not isinstance(patterns, list):
-                patterns = []
-
-            recommendations = data.get("recommendations", [])
-            if not isinstance(recommendations, list):
-                recommendations = []
-
-        except Exception:
-            pass
+        patterns = parsed.detected_patterns
+        recommendations = parsed.recommendations
 
         return issues, patterns, debt_score, recommendations

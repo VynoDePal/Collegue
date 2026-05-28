@@ -115,6 +115,22 @@ def detect_language_from_extension(filepath: str) -> str:
 
 
 def parse_llm_json_response(raw: str) -> Dict[str, Any]:
+    """Parse LLM JSON response with multiple fallback strategies.
+
+    Strategies (in order):
+    1. Direct JSON parse after stripping code fences
+    2. Find first { ... } block that parses as valid JSON
+    3. Extract from ```json``` code blocks
+
+    Raises json.JSONDecodeError if no valid JSON found.
+    """
+    from .llm_response_parser import extract_json_from_llm_text
+
+    result = extract_json_from_llm_text(raw)
+    if result is not None:
+        return result
+
+    # Fallback to original logic for backward compat
     clean = raw.strip()
     if clean.startswith("```"):
         clean = clean.split("\n", 1)[1]

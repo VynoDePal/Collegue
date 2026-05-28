@@ -8,7 +8,7 @@ duplication et gestion des erreurs.
 
 from typing import Any, Dict, List
 
-from ...core.shared import parse_llm_json_response
+from ...core.llm_response_parser import LLMCodeReviewResponse, parse_llm_response_strict
 from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool
 from .config import REVIEW_STANDARDS
@@ -354,41 +354,20 @@ Réponds en JSON avec cette structure exacte:
             return local_result
 
     def _parse_llm_review(self, output: str) -> tuple[list[ReviewFinding], float, list[str], list[str]]:
-        """Parse le JSON de la revue LLM."""
+        """Parse le JSON de la revue LLM avec validation Pydantic stricte."""
+        parsed = parse_llm_response_strict(output, LLMCodeReviewResponse)
+
         findings = []
-        score = 0.5
-        strengths = []
-        recommendations = []
+        for f in parsed.findings:
+            findings.append(
+                ReviewFinding(
+                    category=f.category,
+                    severity=f.severity,
+                    line=f.line,
+                    title=f.title,
+                    description=f.description,
+                    suggestion=f.suggestion,
+                )
+            )
 
-        try:
-            data = parse_llm_json_response(output)
-            if not isinstance(data, dict):
-                return findings, score, strengths, recommendations
-
-            score = float(data.get("quality_score", 0.5))
-
-            for f in data.get("findings", []):
-                if isinstance(f, dict) and "title" in f:
-                    findings.append(
-                        ReviewFinding(
-                            category=f.get("category", "style"),
-                            severity=f.get("severity", "info"),
-                            line=f.get("line"),
-                            title=f["title"],
-                            description=f.get("description", ""),
-                            suggestion=f.get("suggestion"),
-                        )
-                    )
-
-            strengths = data.get("strengths", [])
-            if not isinstance(strengths, list):
-                strengths = []
-
-            recommendations = data.get("recommendations", [])
-            if not isinstance(recommendations, list):
-                recommendations = []
-
-        except Exception:
-            pass
-
-        return findings, score, strengths, recommendations
+        return findings, parsed.quality_score, parsed.strengths, parsed.recommendations

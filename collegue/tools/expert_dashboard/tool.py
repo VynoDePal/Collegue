@@ -114,6 +114,15 @@ class ExpertDashboardTool(BaseTool):
         except Exception:
             pass
 
+        # Métriques de performance
+        metrics_data: Dict[str, Any] = {}
+        try:
+            from ...monitoring.metrics import get_metrics_collector
+
+            metrics_data = get_metrics_collector().get_summary().to_dict()
+        except Exception:
+            pass
+
         summary = self._engine.build_summary(health, statuses, recommendations)
 
         return DashboardResponse(
@@ -123,6 +132,7 @@ class ExpertDashboardTool(BaseTool):
             delegation_activity=delegation,
             memory_stats=memory_stats,
             monitor_stats=monitor_stats,
+            metrics=metrics_data,
             summary=summary,
         )
 

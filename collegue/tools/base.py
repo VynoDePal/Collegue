@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 
 from ..core.security_logger import security_logger
+from ..monitoring.metrics import get_metrics_collector
 from .quotas import (
     QuotaExceeded,
     QuotaManager,
@@ -616,6 +617,9 @@ class BaseTool(ABC):
         if ctx:
             await ctx.report_progress(progress=1, total=total_steps)
 
+        metrics = get_metrics_collector()
+        self._last_input_tokens = 0
+        self._last_output_tokens = 0
         start_time = time.time()
         try:
             if hasattr(self, "_execute_core_logic_async"):
@@ -633,9 +637,30 @@ class BaseTool(ABC):
             if ctx:
                 await ctx.report_progress(progress=total_steps, total=total_steps)
 
+            # Record successful execution metrics
+            duration_ms = (time.time() - start_time) * 1000
+            input_tokens = getattr(self, "_last_input_tokens", 0)
+            output_tokens = getattr(self, "_last_output_tokens", 0)
+            metrics.record_execution(
+                expert_name=self.tool_name,
+                duration_ms=duration_ms,
+                success=True,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+
             return result
 
         except Exception as e:
+            # Record failed execution metrics
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_execution(
+                expert_name=self.tool_name,
+                duration_ms=duration_ms,
+                success=False,
+                error_type=type(e).__name__,
+                error_message=str(e)[:200],
+            )
             self.logger.error(f"Error in async execution of {self.tool_name}: {e}")
             raise
 
@@ -660,10 +685,16 @@ class BaseTool(ABC):
             total_chars = len(prompt)
             if system_prompt:
                 total_chars += len(system_prompt)
-            estimated_tokens = total_chars // 4
-            self._record_llm_tokens(estimated_tokens)
+            estimated_input_tokens = total_chars // 4
+            self._record_llm_tokens(estimated_input_tokens)
 
-            return result.result if result_type else (result.text or "")
+            # Track tokens for metrics (used by execute_async)
+            result_text = result.result if result_type else (result.text or "")
+            estimated_output_tokens = len(str(result_text)) // 4
+            self._last_input_tokens = getattr(self, "_last_input_tokens", 0) + estimated_input_tokens
+            self._last_output_tokens = getattr(self, "_last_output_tokens", 0) + estimated_output_tokens
+
+            return result_text
 
         raise ToolExecutionError("Aucun backend LLM disponible. Fournissez ctx (FastMCP).")
 
