@@ -64,7 +64,7 @@ st.markdown(
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("🤖 Collègue MCP")
+    st.title("Collègue MCP")
     st.caption("Monitoring Dashboard")
     st.divider()
 
@@ -81,11 +81,11 @@ with st.sidebar:
 
 # ─── Main Content ───────────────────────────────────────────────────────────
 
-st.title("📊 Dashboard Monitoring")
+st.title("Dashboard Monitoring")
 
 # Tabs
 tab_overview, tab_metrics, tab_delegation, tab_memory = st.tabs(
-    ["🏠 Vue d'ensemble", "📈 Métriques", "🔗 Délégation", "🧠 Mémoire"]
+    ["Vue d'ensemble", "Métriques", "Délégation", "Mémoire"]
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,11 +100,11 @@ with tab_overview:
     health = dashboard.get("project_health", {})
 
     col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("🎯 Global", f"{health.get('overall_score', 0):.0%}")
-    col2.metric("✨ Qualité", f"{health.get('quality_score', 0) or 0:.0%}")
-    col3.metric("🏗️ Architecture", f"{health.get('architecture_score', 0) or 0:.0%}")
-    col4.metric("⚡ Performance", f"{health.get('performance_score', 0) or 0:.0%}")
-    col5.metric("🛡️ Sécurité", f"{health.get('security_score', 0) or 0:.0%}")
+    col1.metric("Global", f"{health.get('overall_score', 0):.0%}")
+    col2.metric("Qualité", f"{health.get('quality_score', 0) or 0:.0%}")
+    col3.metric("Architecture", f"{health.get('architecture_score', 0) or 0:.0%}")
+    col4.metric("Performance", f"{health.get('performance_score', 0) or 0:.0%}")
+    col5.metric("Sécurité", f"{health.get('security_score', 0) or 0:.0%}")
 
     st.divider()
 
@@ -157,10 +157,10 @@ with tab_metrics:
     # Global metrics
     st.subheader("Métriques Globales")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("📊 Exécutions totales", summary.get("total_executions", 0))
-    col2.metric("💰 Coût total", f"${summary.get('total_cost_usd', 0):.4f}")
-    col3.metric("⚠️ Erreurs", summary.get("total_errors", 0))
-    col4.metric("⏱️ Latence moy.", f"{summary.get('avg_latency_ms', 0):.0f} ms")
+    col1.metric("Exécutions totales", summary.get("total_executions", 0))
+    col2.metric("Coût total", f"${summary.get('total_cost_usd', 0):.4f}")
+    col3.metric("Erreurs", summary.get("total_errors", 0))
+    col4.metric("Latence moy.", f"{summary.get('avg_latency_ms', 0):.0f} ms")
 
     st.divider()
 
@@ -224,10 +224,10 @@ with tab_delegation:
 
     st.subheader("Activité de Délégation")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("🔗 Chaînes exécutées", delegation.get("total_chains", 0))
-    col2.metric("📋 Règles actives", delegation.get("total_rules", 0))
-    col3.metric("📤 Source la + active", delegation.get("most_active_source", "—"))
-    col4.metric("📥 Cible la + active", delegation.get("most_active_target", "—"))
+    col1.metric("Chaînes exécutées", delegation.get("total_chains", 0))
+    col2.metric("Règles actives", delegation.get("total_rules", 0))
+    col3.metric("Source la + active", delegation.get("most_active_source", "—"))
+    col4.metric("Cible la + active", delegation.get("most_active_target", "—"))
 
     st.divider()
 
@@ -247,7 +247,7 @@ with tab_delegation:
     chain_history = delegation.get("chain_history", [])
     if chain_history:
         for chain in chain_history[-10:]:
-            st.write(f"🔗 `{chain.get('source', '?')}` → `{chain.get('target', '?')}` ({chain.get('status', '?')})")
+            st.write(f"`{chain.get('source', '?')}` → `{chain.get('target', '?')}` ({chain.get('status', '?')})")
     else:
         st.info("Aucune chaîne exécutée pour le moment.")
 
@@ -262,10 +262,10 @@ with tab_memory:
 
     stats = memory.get("stats", {})
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("📝 Entrées totales", stats.get("total_entries", 0))
-    col2.metric("🤖 Experts actifs", stats.get("experts_count", 0))
-    col3.metric("📂 Catégories", stats.get("categories_count", 0))
-    col4.metric("🌐 Langages", stats.get("languages_count", 0))
+    col1.metric("Entrées totales", stats.get("total_entries", 0))
+    col2.metric("Experts actifs", stats.get("experts_count", 0))
+    col3.metric("Catégories", stats.get("categories_count", 0))
+    col4.metric("Langages", stats.get("languages_count", 0))
 
     st.divider()
 
@@ -288,16 +288,7 @@ with tab_memory:
     recent = memory.get("recent_entries", [])
     if recent:
         for entry in recent[:10]:
-            icon = (
-                "💡"
-                if entry.get("entry_type") == "pattern_learned"
-                else "🐛"
-                if entry.get("entry_type") == "issue_found"
-                else "✅"
-            )
-            st.write(
-                f"{icon} **{entry.get('expert', '?')}** — {entry.get('entry_type', '?')} ({entry.get('language', '?')})"
-            )
+            st.write(f"**{entry.get('expert', '?')}** — {entry.get('entry_type', '?')} ({entry.get('language', '?')})")
             if entry.get("data"):
                 with st.expander("Détails"):
                     st.json(entry["data"])
