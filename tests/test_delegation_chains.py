@@ -469,6 +469,43 @@ async def test_architecture_to_impact_delegation_params():
     assert len(req2.files) >= 1
 
 
+def test_test_framework_case_insensitive():
+    """Verify delegation builders normalize language before selecting test_framework."""
+    from collegue.core.expert_delegation import (
+        _build_test_params_from_performance,
+        _build_test_params_from_refactoring,
+    )
+
+    for lang_val in ("Python", "PYTHON", "python"):
+        params = _build_test_params_from_refactoring(
+            "code_refactoring",
+            {"refactored_code": "x = 1", "language": lang_val},
+        )
+        assert params["test_framework"] == "pytest", (
+            f"language='{lang_val}' should select pytest, got {params['test_framework']}"
+        )
+        assert params["language"] == "python"
+
+        params = _build_test_params_from_performance(
+            "performance_analysis",
+            {"language": lang_val, "optimizations": ["opt"]},
+        )
+        assert params["test_framework"] == "pytest", (
+            f"language='{lang_val}' should select pytest, got {params['test_framework']}"
+        )
+        assert params["language"] == "python"
+
+    for lang_val in ("JavaScript", "JAVASCRIPT", "javascript"):
+        params = _build_test_params_from_refactoring(
+            "code_refactoring",
+            {"refactored_code": "let x = 1;", "language": lang_val},
+        )
+        assert params["test_framework"] == "jest", (
+            f"language='{lang_val}' should select jest, got {params['test_framework']}"
+        )
+        assert params["language"] == lang_val.lower()
+
+
 @pytest.mark.asyncio
 async def test_conditions_and_builders_handle_none_list_fields():
     """All conditions and builders must survive result dicts with None-valued list fields."""
