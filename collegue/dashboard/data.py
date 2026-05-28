@@ -1,11 +1,12 @@
 """
 Data access layer for the Streamlit dashboard.
 
-Reads from the same singletons used by the MCP server:
-- MetricsCollector (latency, tokens, costs, errors)
-- ProjectMemory (stored analysis results)
-- ExpertDelegation (rules, chain history)
-- ExpertDashboard (aggregated health scores)
+Reads from disk-backed stores so the dashboard (separate process)
+sees data written by the MCP server or test scripts:
+- MetricsCollector (latency, tokens, costs, errors) — .collegue/monitoring/metrics.json
+- ActivityLog (LLM calls, results, delegations) — .collegue/monitoring/activity.jsonl
+- ProjectMemory (stored analysis results) — .collegue/memory/project_memory.json
+- ExpertDelegation (rules, chain history) — in-memory (static rules)
 """
 
 import logging
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_metrics_data() -> Dict[str, Any]:
-    """Get metrics from the MetricsCollector singleton."""
+    """Get metrics from the MetricsCollector singleton (disk-backed)."""
     try:
         from collegue.monitoring.metrics import get_metrics_collector
 
@@ -47,7 +48,7 @@ def get_dashboard_data() -> Dict[str, Any]:
         health = engine.build_project_health(entries_raw)
         recommendations = engine.build_recommendations(entries_raw, limit=10)
 
-        # Metrics from collector
+        # Metrics from collector (disk-backed)
         metrics_data: Dict[str, Any] = {}
         try:
             from collegue.monitoring.metrics import get_metrics_collector
@@ -79,7 +80,7 @@ def get_dashboard_data() -> Dict[str, Any]:
 
 
 def get_delegation_data() -> Dict[str, Any]:
-    """Get delegation engine data (rules, history)."""
+    """Get delegation engine data (rules, history from activity log)."""
     try:
         from collegue.core.expert_delegation import create_default_delegation_engine
 
@@ -97,7 +98,18 @@ def get_delegation_data() -> Dict[str, Any]:
                 }
             )
 
-        # Get chain history (returns List[DelegationResult])
+        # Get delegation events from activity log (disk-backed)
+        delegation_events: List[Dict[str, Any]] = []
+        try:
+            from collegue.monitoring.activity_log import get_activity_log
+
+            delegation_events = get_activity_log().read_events(
+                event_type="delegation", limit=50
+            )
+        except Exception:
+            pass
+
+        # Also try in-memory chain history (same process)
         chain_results = engine.get_chain_history()
         chain_history: List[Dict[str, Any]] = []
         for result in chain_results:
@@ -107,6 +119,19 @@ def get_delegation_data() -> Dict[str, Any]:
                     "target": result.target_tool,
                     "status": "success" if result.success else "failed",
                     "duration": f"{result.execution_time:.1f}s",
+                }
+            )
+
+        # Merge delegation events from activity log
+        for ev in delegation_events:
+            chain_history.append(
+                {
+                    "source": ev.get("source", "?"),
+                    "target": ev.get("target", "?"),
+                    "status": "delegated",
+                    "reason": ev.get("reason", ""),
+                    "time": ev.get("time", ""),
+                    "params": ev.get("params", {}),
                 }
             )
 
@@ -173,13 +198,65 @@ def get_memory_stats() -> Dict[str, Any]:
             "entries_by_type": by_type,
         }
 
+        # Get memory write events from activity log
+        memory_writes: List[Dict[str, Any]] = []
+        try:
+            from collegue.monitoring.activity_log import get_activity_log
+
+            memory_writes = get_activity_log().read_events(
+                event_type="memory_write", limit=50
+            )
+        except Exception:
+            pass
+
         return {
             "stats": stats,
             "recent_entries": recent,
+            "memory_writes": memory_writes,
         }
     except Exception as exc:
         logger.warning("Cannot load memory stats: %s", exc)
         return {
             "stats": {},
             "recent_entries": [],
+            "memory_writes": [],
+        }
+
+
+def get_activity_data() -> Dict[str, Any]:
+    """Get activity log data (LLM calls, expert results, delegations, memory writes)."""
+    try:
+        from collegue.monitoring.activity_log import get_activity_log
+
+        log = get_activity_log()
+
+        llm_calls = log.read_events(event_type="llm_call", limit=100)
+        expert_results = log.read_events(event_type="expert_result", limit=100)
+        delegations = log.read_events(event_type="delegation", limit=50)
+        memory_writes = log.read_events(event_type="memory_write", limit=50)
+
+        # Get unique experts from LLM calls
+        experts_seen = sorted({ev.get("expert", "?") for ev in llm_calls})
+
+        return {
+            "llm_calls": llm_calls,
+            "expert_results": expert_results,
+            "delegations": delegations,
+            "memory_writes": memory_writes,
+            "experts_seen": experts_seen,
+            "total_llm_calls": len(llm_calls),
+            "total_results": len(expert_results),
+            "total_delegations": len(delegations),
+        }
+    except Exception as exc:
+        logger.warning("Cannot load activity data: %s", exc)
+        return {
+            "llm_calls": [],
+            "expert_results": [],
+            "delegations": [],
+            "memory_writes": [],
+            "experts_seen": [],
+            "total_llm_calls": 0,
+            "total_results": 0,
+            "total_delegations": 0,
         }

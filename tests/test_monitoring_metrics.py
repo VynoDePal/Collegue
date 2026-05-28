@@ -20,6 +20,7 @@ class TestMetricsCollector:
 
     def setup_method(self):
         self.collector = MetricsCollector()
+        self.collector.reset()
 
     def test_record_successful_execution(self):
         self.collector.record_execution(

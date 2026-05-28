@@ -164,6 +164,21 @@ class ProjectMemory:
 
         if auto_save:
             self.save()
+
+        # Activity log: memory write
+        try:
+            from collegue.monitoring.activity_log import get_activity_log
+
+            get_activity_log().log_memory_write(
+                expert=expert,
+                entry_type=entry_type,
+                category=category,
+                title=title,
+                score=score,
+            )
+        except Exception:
+            pass
+
         return entry
 
     def recall(

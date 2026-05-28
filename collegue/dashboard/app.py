@@ -1,17 +1,18 @@
 """
-Collègue MCP — Streamlit Monitoring Dashboard.
+Collegue MCP -- Streamlit Monitoring Dashboard.
 
 Provides a real-time web interface (port 4125) to visualize:
 - Expert system health (scores, activity)
+- LLM conversations (inputs/outputs per expert)
 - Metrics (latency, tokens, costs, errors)
-- Delegation chains and activity
-- Project memory statistics
+- Delegation chains and inter-expert communication
+- Project memory statistics and write history
 
-Connects to the running MCP server's internal state via shared singletons.
+All data is read from disk-backed stores so the dashboard
+(separate process) sees updates from the MCP server in real-time.
 """
 
 import sys
-import time
 from pathlib import Path
 
 import streamlit as st
@@ -22,22 +23,23 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from collegue.dashboard.data import (
+    get_activity_data,
     get_dashboard_data,
     get_delegation_data,
     get_memory_stats,
     get_metrics_data,
 )
 
-# ─── Page config ────────────────────────────────────────────────────────────
+# -- Page config ---------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Collègue MCP — Dashboard",
-    page_icon="🤖",
+    page_title="Collegue MCP -- Dashboard",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─── Custom CSS ─────────────────────────────────────────────────────────────
+# -- Custom CSS ----------------------------------------------------------------
 
 st.markdown(
     """
@@ -56,22 +58,29 @@ st.markdown(
         padding: 8px 20px;
         border-radius: 6px;
     }
+    .llm-prompt { background: #f0f4ff; border-left: 3px solid #4a90d9;
+                  padding: 8px 12px; margin: 4px 0; border-radius: 4px;
+                  font-size: 0.85rem; }
+    .llm-response { background: #f0fff0; border-left: 3px solid #4caf50;
+                    padding: 8px 12px; margin: 4px 0; border-radius: 4px;
+                    font-size: 0.85rem; }
+    .delegation-event { background: #fff8f0; border-left: 3px solid #ff9800;
+                        padding: 8px 12px; margin: 4px 0; border-radius: 4px; }
+    .memory-event { background: #f8f0ff; border-left: 3px solid #9c27b0;
+                    padding: 8px 12px; margin: 4px 0; border-radius: 4px; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# ─── Sidebar ────────────────────────────────────────────────────────────────
+# -- Sidebar -------------------------------------------------------------------
 
 with st.sidebar:
-    st.title("Collègue MCP")
+    st.title("Collegue MCP")
     st.caption("Monitoring Dashboard")
     st.divider()
 
-    auto_refresh = st.toggle("Auto-refresh (10s)", value=False)
-    if auto_refresh:
-        time.sleep(0.1)
-        st.rerun()
+    auto_refresh = st.toggle("Auto-refresh (5s)", value=False)
 
     st.divider()
     st.markdown("**Serveur MCP**")
@@ -79,32 +88,40 @@ with st.sidebar:
     st.markdown("**Dashboard**")
     st.code("http://localhost:4125", language=None)
 
-# ─── Main Content ───────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
+
+
+def _escape_html(text: str) -> str:
+    """Escape HTML special chars for safe display."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+
+
+# -- Main Content --------------------------------------------------------------
 
 st.title("Dashboard Monitoring")
 
 # Tabs
-tab_overview, tab_metrics, tab_delegation, tab_memory = st.tabs(
-    ["Vue d'ensemble", "Métriques", "Délégation", "Mémoire"]
+tab_overview, tab_activity, tab_metrics, tab_delegation, tab_memory = st.tabs(
+    ["Vue d'ensemble", "Activite LLM", "Metriques", "Delegation", "Memoire"]
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # TAB 1: Overview
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 with tab_overview:
     dashboard = get_dashboard_data()
 
     # Health scores
-    st.subheader("Santé du Projet")
+    st.subheader("Sante du Projet")
     health = dashboard.get("project_health", {})
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Global", f"{health.get('overall_score', 0):.0%}")
-    col2.metric("Qualité", f"{health.get('quality_score', 0) or 0:.0%}")
+    col2.metric("Qualite", f"{health.get('quality_score', 0) or 0:.0%}")
     col3.metric("Architecture", f"{health.get('architecture_score', 0) or 0:.0%}")
     col4.metric("Performance", f"{health.get('performance_score', 0) or 0:.0%}")
-    col5.metric("Sécurité", f"{health.get('security_score', 0) or 0:.0%}")
+    col5.metric("Securite", f"{health.get('security_score', 0) or 0:.0%}")
 
     st.divider()
 
@@ -117,15 +134,37 @@ with tab_overview:
         for i, expert in enumerate(statuses):
             with cols[i % 4]:
                 score = expert.get("last_score")
-                score_str = f"{score:.0%}" if score is not None else "—"
+                score_str = f"{score:.0%}" if score is not None else "--"
                 execs = expert.get("total_executions", 0)
                 st.metric(
                     label=expert.get("name", "?"),
                     value=score_str,
-                    delta=f"{execs} exécutions",
+                    delta=f"{execs} executions",
                 )
     else:
-        st.info("Aucune activité d'expert enregistrée. Lancez une analyse pour voir les résultats ici.")
+        st.info("Aucune activite d'expert enregistree.")
+
+    st.divider()
+
+    # Recent expert results from activity log
+    st.subheader("Resultats Recents")
+    activity = get_activity_data()
+    expert_results = activity.get("expert_results", [])
+    if expert_results:
+        for res in reversed(expert_results[-10:]):
+            status_icon = "OK" if res.get("status") == "success" else "ERR"
+            score_str = f" score={res['score']:.2f}" if res.get("score") is not None else ""
+            iters_str = f" iter={res['iterations']}" if res.get("iterations") else ""
+            findings_str = f" findings={res['findings_count']}" if res.get("findings_count") else ""
+            st.text(
+                f"[{res.get('time', '?')}] [{status_icon}] {res.get('expert', '?')} "
+                f"({res.get('duration_s', 0):.1f}s){score_str}{iters_str}{findings_str}"
+            )
+            if res.get("summary"):
+                with st.expander("Resume"):
+                    st.write(res["summary"])
+    else:
+        st.info("Aucun resultat d'expert enregistre.")
 
     st.divider()
 
@@ -144,9 +183,99 @@ with tab_overview:
     else:
         st.success("Aucune recommandation en attente.")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2: Metrics
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# TAB 2: LLM Activity (Conversations)
+# ==============================================================================
+
+with tab_activity:
+    activity = get_activity_data()
+    llm_calls = activity.get("llm_calls", [])
+    experts_seen = activity.get("experts_seen", [])
+
+    st.subheader("Conversations LLM")
+
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Appels LLM", activity.get("total_llm_calls", 0))
+    col2.metric("Resultats experts", activity.get("total_results", 0))
+    col3.metric("Delegations", activity.get("total_delegations", 0))
+
+    st.divider()
+
+    # Filter by expert
+    filter_expert = st.selectbox(
+        "Filtrer par expert",
+        ["Tous"] + experts_seen,
+        key="llm_filter",
+    )
+
+    filtered_calls = llm_calls
+    if filter_expert != "Tous":
+        filtered_calls = [c for c in llm_calls if c.get("expert") == filter_expert]
+
+    if filtered_calls:
+        for call in reversed(filtered_calls[-20:]):
+            expert_name = call.get("expert", "?")
+            duration = call.get("duration_s", 0)
+            iteration = call.get("iteration", 1)
+            time_str = call.get("time", "")
+
+            st.markdown(
+                f"**{expert_name}** -- iteration {iteration} "
+                f"({duration:.1f}s) [{time_str}]"
+            )
+
+            # Prompt
+            prompt = call.get("prompt", "")
+            if prompt:
+                st.markdown(
+                    f'<div class="llm-prompt"><strong>Prompt:</strong><br/>'
+                    f"{_escape_html(prompt[:300])}{'...' if len(prompt) > 300 else ''}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Response
+            response = call.get("response", "")
+            if response:
+                st.markdown(
+                    f'<div class="llm-response"><strong>Reponse LLM:</strong><br/>'
+                    f"{_escape_html(response[:500])}{'...' if len(response) > 500 else ''}</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Full details expander
+            with st.expander("Voir tout"):
+                st.text(f"Prompt complet:\n{prompt}")
+                st.divider()
+                st.text(f"Reponse complete:\n{response}")
+
+            st.divider()
+    else:
+        st.info("Aucun appel LLM enregistre. Lancez une analyse pour voir les conversations ici.")
+
+    # Delegation messages
+    delegations = activity.get("delegations", [])
+    if delegations:
+        st.subheader("Communications Inter-Experts")
+        for deleg in reversed(delegations[-10:]):
+            src = deleg.get("source", "?")
+            tgt = deleg.get("target", "?")
+            reason = deleg.get("reason", "")
+            time_str = deleg.get("time", "")
+            st.markdown(
+                f'<div class="delegation-event">'
+                f"<strong>{src}</strong> → <strong>{tgt}</strong> [{time_str}]<br/>"
+                f"Raison: {_escape_html(reason)}</div>",
+                unsafe_allow_html=True,
+            )
+            params = deleg.get("params", {})
+            if params:
+                with st.expander("Parametres"):
+                    st.json(params)
+
+# ==============================================================================
+# TAB 3: Metrics
+# ==============================================================================
 
 with tab_metrics:
     metrics = get_metrics_data()
@@ -155,17 +284,17 @@ with tab_metrics:
     experts_metrics = metrics.get("experts", {})
 
     # Global metrics
-    st.subheader("Métriques Globales")
+    st.subheader("Metriques Globales")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Exécutions totales", summary.get("total_executions", 0))
-    col2.metric("Coût total", f"${summary.get('total_cost_usd', 0):.4f}")
+    col1.metric("Executions totales", summary.get("total_executions", 0))
+    col2.metric("Cout total", f"${summary.get('total_cost_usd', 0):.4f}")
     col3.metric("Erreurs", summary.get("total_errors", 0))
     col4.metric("Latence moy.", f"{summary.get('avg_latency_ms', 0):.0f} ms")
 
     st.divider()
 
     # Per-expert metrics table
-    st.subheader("Métriques par Expert")
+    st.subheader("Metriques par Expert")
 
     if experts_metrics:
         import pandas as pd
@@ -175,13 +304,13 @@ with tab_metrics:
             rows.append(
                 {
                     "Expert": name,
-                    "Exécutions": data.get("total_executions", 0),
-                    "Succès": f"{data.get('success_rate', 0):.0%}",
+                    "Executions": data.get("total_executions", 0),
+                    "Succes": f"{data.get('success_rate', 0):.0%}",
                     "Latence moy.": f"{data.get('avg_latency_ms', 0):.0f} ms",
                     "P95": f"{data.get('p95_latency_ms', 0):.0f} ms",
                     "Tokens (in)": data.get("total_input_tokens", 0),
                     "Tokens (out)": data.get("total_output_tokens", 0),
-                    "Coût": f"${data.get('total_cost_usd', 0):.5f}",
+                    "Cout": f"${data.get('total_cost_usd', 0):.5f}",
                     "Erreurs": data.get("failed_executions", 0),
                 }
             )
@@ -194,12 +323,12 @@ with tab_metrics:
         st.bar_chart(latency_data)
 
         # Cost breakdown
-        st.subheader("Répartition des Coûts")
+        st.subheader("Repartition des Couts")
         cost_data = {name: data.get("total_cost_usd", 0) for name, data in experts_metrics.items()}
         if any(v > 0 for v in cost_data.values()):
             st.bar_chart(cost_data)
         else:
-            st.info("Aucun coût enregistré pour le moment.")
+            st.info("Aucun cout enregistre pour le moment.")
 
         # Error breakdown
         st.subheader("Erreurs par Type")
@@ -211,28 +340,28 @@ with tab_metrics:
         if all_errors:
             st.bar_chart(all_errors)
         else:
-            st.success("Aucune erreur enregistrée.")
+            st.success("Aucune erreur enregistree.")
     else:
-        st.info("Aucune métrique disponible. Les métriques s'afficheront après les premières exécutions d'experts.")
+        st.info("Aucune metrique disponible. Les metriques s'afficheront apres les premieres executions d'experts.")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3: Delegation
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# TAB 4: Delegation
+# ==============================================================================
 
 with tab_delegation:
     delegation = get_delegation_data()
 
-    st.subheader("Activité de Délégation")
+    st.subheader("Activite de Delegation")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Chaînes exécutées", delegation.get("total_chains", 0))
-    col2.metric("Règles actives", delegation.get("total_rules", 0))
-    col3.metric("Source la + active", delegation.get("most_active_source", "—"))
-    col4.metric("Cible la + active", delegation.get("most_active_target", "—"))
+    col1.metric("Chaines executees", delegation.get("total_chains", 0))
+    col2.metric("Regles actives", delegation.get("total_rules", 0))
+    col3.metric("Source la + active", delegation.get("most_active_source") or "--")
+    col4.metric("Cible la + active", delegation.get("most_active_target") or "--")
 
     st.divider()
 
     # Rules table
-    st.subheader("Règles de Délégation")
+    st.subheader("Regles de Delegation")
     rules = delegation.get("rules", [])
     if rules:
         import pandas as pd
@@ -240,57 +369,102 @@ with tab_delegation:
         rules_df = pd.DataFrame(rules)
         st.dataframe(rules_df, use_container_width=True, hide_index=True)
     else:
-        st.info("Aucune règle de délégation chargée.")
+        st.info("Aucune regle de delegation chargee.")
 
-    # Chain history
-    st.subheader("Historique des Chaînes")
+    # Chain history (now includes activity log events)
+    st.subheader("Historique des Delegations")
     chain_history = delegation.get("chain_history", [])
     if chain_history:
-        for chain in chain_history[-10:]:
-            st.write(f"`{chain.get('source', '?')}` → `{chain.get('target', '?')}` ({chain.get('status', '?')})")
+        for chain in reversed(chain_history[-15:]):
+            time_str = chain.get("time", "")
+            reason = chain.get("reason", "")
+            st.markdown(
+                f"`{chain.get('source', '?')}` → `{chain.get('target', '?')}` "
+                f"({chain.get('status', '?')}) {f'[{time_str}]' if time_str else ''}"
+            )
+            if reason:
+                st.caption(f"Raison: {reason}")
+            params = chain.get("params", {})
+            if params:
+                with st.expander("Parametres envoyes"):
+                    st.json(params)
     else:
-        st.info("Aucune chaîne exécutée pour le moment.")
+        st.info("Aucune delegation executee pour le moment.")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4: Memory
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# TAB 5: Memory
+# ==============================================================================
 
 with tab_memory:
     memory = get_memory_stats()
 
-    st.subheader("Statistiques de la Mémoire Projet")
+    st.subheader("Statistiques de la Memoire Projet")
 
     stats = memory.get("stats", {})
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Entrées totales", stats.get("total_entries", 0))
+    col1.metric("Entrees totales", stats.get("total_entries", 0))
     col2.metric("Experts actifs", stats.get("experts_count", 0))
-    col3.metric("Catégories", stats.get("categories_count", 0))
+    col3.metric("Categories", stats.get("categories_count", 0))
     col4.metric("Langages", stats.get("languages_count", 0))
 
     st.divider()
 
     # Entries by expert
-    st.subheader("Entrées par Expert")
+    st.subheader("Entrees par Expert")
     by_expert = stats.get("entries_by_expert", {})
     if by_expert:
         st.bar_chart(by_expert)
     else:
-        st.info("Aucune entrée en mémoire.")
+        st.info("Aucune entree en memoire.")
 
     # Entries by type
-    st.subheader("Entrées par Type")
+    st.subheader("Entrees par Type")
     by_type = stats.get("entries_by_type", {})
     if by_type:
         st.bar_chart(by_type)
 
-    # Recent entries
-    st.subheader("Entrées Récentes")
+    st.divider()
+
+    # Memory write events (who added what, when)
+    st.subheader("Ajouts Recents en Memoire")
+    memory_writes = memory.get("memory_writes", [])
+    if memory_writes:
+        for mw in reversed(memory_writes[-15:]):
+            expert_name = mw.get("expert", "?")
+            entry_type = mw.get("entry_type", "?")
+            title = mw.get("title", "?")
+            category = mw.get("category", "")
+            score = mw.get("score", 0)
+            time_str = mw.get("time", "")
+            st.markdown(
+                f'<div class="memory-event">'
+                f"<strong>{expert_name}</strong> a ajoute: "
+                f"<em>{title}</em> (type={entry_type}, cat={category}"
+                f"{f', score={score:.2f}' if score else ''}) [{time_str}]</div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("Aucun ajout en memoire enregistre dans le log d'activite.")
+
+    st.divider()
+
+    # Recent entries (from ProjectMemory)
+    st.subheader("Contenu de la Memoire")
     recent = memory.get("recent_entries", [])
     if recent:
         for entry in recent[:10]:
-            st.write(f"**{entry.get('expert', '?')}** — {entry.get('entry_type', '?')} ({entry.get('language', '?')})")
+            st.write(f"**{entry.get('expert', '?')}** -- {entry.get('entry_type', '?')} ({entry.get('language', '?')})")
             if entry.get("data"):
-                with st.expander("Détails"):
+                with st.expander("Details"):
                     st.json(entry["data"])
     else:
-        st.info("Aucune entrée récente en mémoire.")
+        st.info("Aucune entree recente en memoire.")
+
+
+# -- Auto-refresh at the end (after all data is loaded) ------------------------
+
+if auto_refresh:
+    import time as _time
+
+    _time.sleep(5)
+    st.rerun()
