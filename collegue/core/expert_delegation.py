@@ -402,8 +402,7 @@ class ExpertDelegationEngine:
         def _count_experts(res_list: List[DelegationResult]) -> int:
             count = 0
             for r in res_list:
-                if r.success:
-                    count += 1
+                count += 1
                 count += _count_experts(r.sub_delegations)
             return count
 
@@ -488,8 +487,8 @@ def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[st
         if params.get("code"):
             return {
                 "code": params["code"],
-                "language": params.get("language", "python"),
-                "refactoring_type": params.get("refactoring_type", "clean"),
+                "language": params.get("language") or "python",
+                "refactoring_type": params.get("refactoring_type") or "clean",
                 "parameters": {"context": "auto-delegated from repo_consistency_check"},
             }
 
@@ -509,11 +508,20 @@ def _build_refactoring_params_from_consistency(source_tool: str, result: Dict[st
     }
 
 
+def _empty_code_placeholder(language: str) -> str:
+    """Return a language-appropriate placeholder when code is empty."""
+    if language in ("javascript", "typescript"):
+        return "// No refactored code available"
+    return "# No refactored code available"
+
+
 def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de documentation depuis un résultat de refactoring."""
+    lang = (result.get("language") or "python").lower()
+    code = (result.get("refactored_code", "") or "").strip() or _empty_code_placeholder(lang)
     return {
-        "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
+        "code": code,
+        "language": lang,
         "documentation_type": "auto",
         "parameters": {"context": "auto-delegated from code_refactoring"},
     }
@@ -521,10 +529,12 @@ def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[
 
 def _build_test_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de test_generation depuis un résultat de refactoring."""
+    lang = (result.get("language") or "python").lower()
+    code = (result.get("refactored_code", "") or "").strip() or _empty_code_placeholder(lang)
     return {
-        "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
-        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "code": code,
+        "language": lang,
+        "test_framework": "pytest" if lang == "python" else "jest",
         "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from code_refactoring"},
     }
@@ -653,9 +663,11 @@ def _performance_needs_tests(result: Dict[str, Any]) -> bool:
 
 def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de code review depuis un résultat de refactoring."""
+    lang = (result.get("language") or "python").lower()
+    code = (result.get("refactored_code", "") or "").strip() or _empty_code_placeholder(lang)
     return {
-        "code": result.get("refactored_code", ""),
-        "language": result.get("language", "python"),
+        "code": code,
+        "language": lang,
         "review_standards": ["naming", "complexity", "security", "dry", "solid"],
         "severity_threshold": "warning",
         "context": "auto-delegated from code_refactoring — vérifier la qualité du refactoring",
@@ -674,7 +686,7 @@ def _build_refactoring_params_from_review(source_tool: str, result: Dict[str, An
 
     return {
         "code": summary,
-        "language": result.get("language", "python"),
+        "language": result.get("language") or "python",
         "refactoring_type": "clean",
         "parameters": {"context": "auto-delegated from code_review (quality < 0.5)"},
     }
@@ -708,7 +720,7 @@ def _build_refactoring_params_from_architecture(source_tool: str, result: Dict[s
 
     return {
         "code": summary,
-        "language": result.get("language", "python"),
+        "language": result.get("language") or "python",
         "refactoring_type": "clean",
         "parameters": {"context": "auto-delegated from architecture_analysis (dette technique)"},
     }
@@ -763,7 +775,7 @@ def _build_refactoring_params_from_performance(source_tool: str, result: Dict[st
 
     return {
         "code": summary,
-        "language": result.get("language", "python"),
+        "language": result.get("language") or "python",
         "refactoring_type": "optimize",
         "parameters": {"context": "auto-delegated from performance_analysis"},
     }
@@ -776,10 +788,11 @@ def _build_test_params_from_performance(source_tool: str, result: Dict[str, Any]
     for opt in optimizations[:10]:
         summary += f"- {opt}\n"
 
+    lang = (result.get("language") or "python").lower()
     return {
         "code": summary,
-        "language": result.get("language", "python"),
-        "test_framework": "pytest" if result.get("language", "python") == "python" else "jest",
+        "language": lang,
+        "test_framework": "pytest" if lang == "python" else "jest",
         "coverage_target": 0.80,
         "parameters": {"context": "auto-delegated from performance_analysis"},
     }

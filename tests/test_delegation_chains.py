@@ -403,6 +403,40 @@ async def test_real_delegation_engine_evaluation():
     assert test_task.params["test_framework"] == "pytest"
 
 
+def test_empty_code_delegation_builders():
+    """Verify delegation builders handle empty refactored_code without crashing."""
+    from collegue.core.expert_delegation import (
+        _build_documentation_params_from_refactoring,
+        _build_review_params_from_refactoring,
+        _build_test_params_from_refactoring,
+    )
+    from collegue.tools.code_documentation.models import DocumentationRequest
+    from collegue.tools.code_review.models import CodeReviewRequest
+    from collegue.tools.test_generation.models import TestGenerationRequest
+
+    for code_val in ["", "   ", None]:
+        result = {"refactored_code": code_val, "language": "python"}
+
+        params = _build_test_params_from_refactoring("code_refactoring", result)
+        req = TestGenerationRequest(**params)
+        assert len(req.code) >= 1
+
+        params = _build_review_params_from_refactoring("code_refactoring", result)
+        req = CodeReviewRequest(**params)
+        assert len(req.code) >= 1
+
+        params = _build_documentation_params_from_refactoring("code_refactoring", result)
+        req = DocumentationRequest(**params)
+        assert len(req.code) >= 1
+
+    # JS language uses // comment marker
+    js_result = {"refactored_code": "", "language": "JavaScript"}
+    params = _build_test_params_from_refactoring("code_refactoring", js_result)
+    assert params["code"].startswith("//")
+    assert params["language"] == "javascript"
+    assert params["test_framework"] == "jest"
+
+
 @pytest.mark.asyncio
 async def test_architecture_to_impact_delegation_params():
     """Verify architecture→impact delegation builds valid ImpactAnalysisRequest params."""
@@ -433,6 +467,7 @@ async def test_architecture_to_impact_delegation_params():
     req2 = ImpactAnalysisRequest(**params2)
     assert "Bad pattern" in req2.change_intent
     assert len(req2.files) >= 1
+
 
 
 @pytest.mark.asyncio
@@ -476,3 +511,44 @@ async def test_conditions_and_builders_handle_none_list_fields():
         _build_refactoring_params_from_consistency("x", {"suggested_actions": None, "issues": None}), dict
     )
     assert isinstance(_build_test_params_from_performance("x", {"optimizations": None, "language": "python"}), dict)
+
+
+def test_builders_handle_none_fields():
+    """All delegation builders must survive result dicts with None-valued fields."""
+    from collegue.core.expert_delegation import (
+        _build_architecture_params_from_consistency,
+        _build_documentation_params_from_refactoring,
+        _build_iac_params_from_impact,
+        _build_impact_params_from_architecture,
+        _build_performance_params_from_consistency,
+        _build_refactoring_params_from_architecture,
+        _build_refactoring_params_from_consistency,
+        _build_refactoring_params_from_iac,
+        _build_refactoring_params_from_performance,
+        _build_refactoring_params_from_review,
+        _build_review_params_from_refactoring,
+        _build_test_params_from_impact,
+        _build_test_params_from_performance,
+        _build_test_params_from_refactoring,
+    )
+
+    cases = [
+        (_build_test_params_from_refactoring, {"language": None, "refactored_code": None}),
+        (_build_test_params_from_performance, {"language": None, "optimizations": None}),
+        (_build_documentation_params_from_refactoring, {"refactored_code": None, "language": None}),
+        (_build_review_params_from_refactoring, {"refactored_code": None, "language": None}),
+        (_build_refactoring_params_from_review, {"findings": None, "language": None}),
+        (_build_refactoring_params_from_architecture, {"issues": None, "language": None}),
+        (_build_refactoring_params_from_performance, {"issues": None, "language": None}),
+        (_build_refactoring_params_from_iac, {"findings": None}),
+        (_build_impact_params_from_architecture, {"issues": None}),
+        (_build_architecture_params_from_consistency, {"issues": None}),
+        (_build_performance_params_from_consistency, {"issues": None}),
+        (_build_iac_params_from_impact, {"impacted_files": None}),
+        (_build_test_params_from_impact, {"impacted_files": None, "risk_notes": None}),
+        (_build_refactoring_params_from_consistency, {"issues": None, "suggested_actions": None}),
+    ]
+
+    for func, result_dict in cases:
+        params = func("test_source", result_dict)
+        assert isinstance(params, dict), f"{func.__name__} did not return a dict"

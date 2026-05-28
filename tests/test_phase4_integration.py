@@ -198,6 +198,30 @@ class TestMonitorTriggering:
         assert "iac_guardrails_scan" in expert_names
         assert "architecture_analysis" in expert_names
 
+    def test_language_map_completeness(self):
+        from collegue.autonomous.proactive_monitor import LANGUAGE_MAP
+
+        required = {
+            ".py": "python",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".yaml": "yaml",
+            ".yml": "yaml",
+            ".json": "json",
+            ".tf": "terraform",
+            ".html": "html",
+            ".css": "css",
+            ".sh": "shell",
+            ".sql": "sql",
+            ".md": "markdown",
+            ".c": "c",
+            ".cpp": "cpp",
+        }
+        for ext, expected_lang in required.items():
+            assert LANGUAGE_MAP.get(ext) == expected_lang, (
+                f"LANGUAGE_MAP['{ext}'] should be '{expected_lang}', got '{LANGUAGE_MAP.get(ext)}'"
+            )
+
 
 # --- Tests réels Gemma 4 26B ---
 
