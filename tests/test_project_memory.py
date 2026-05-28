@@ -298,6 +298,24 @@ class TestProjectMemoryPrune:
 
         assert len(memory) <= 5
 
+    def test_per_expert_limit_enforced_during_store(self, tmp_path):
+        """Store triggers pruning when a single expert exceeds MAX_ENTRIES_PER_EXPERT."""
+        from collegue.core.project_memory import MAX_ENTRIES_PER_EXPERT
+
+        memory = ProjectMemory(memory_dir=str(tmp_path / "mem"))
+
+        for i in range(MAX_ENTRIES_PER_EXPERT + 50):
+            memory.store(
+                expert="same_expert",
+                entry_type="issue_found",
+                category="a",
+                title=f"Item {i}",
+                data={"i": i},
+                auto_save=False,
+            )
+
+        assert len(memory) <= MAX_ENTRIES_PER_EXPERT
+
 
 class TestProjectMemoryContext:
     def test_get_context_for_empty(self, memory):
