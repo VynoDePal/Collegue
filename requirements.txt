@@ -16,3 +16,5 @@ kubernetes>=29.0.0
 sentry-sdk[opentelemetry]>=2.49.0,<3.0.0
 opentelemetry-sdk>=1.28.0
 opentelemetry-api>=1.28.0
+streamlit>=1.45.0
+pandas>=2.2.0
