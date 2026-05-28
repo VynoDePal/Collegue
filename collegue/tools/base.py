@@ -649,6 +649,38 @@ class BaseTool(ABC):
                 output_tokens=output_tokens,
             )
 
+            # Activity log: expert result
+            try:
+                from collegue.monitoring.activity_log import get_activity_log
+
+                score = None
+                summary = ""
+                findings = 0
+                iters = 0
+                if hasattr(result, "model_dump"):
+                    rd = result.model_dump()
+                    for k in ("quality_score", "performance_score", "score", "security_score"):
+                        if k in rd and rd[k] is not None:
+                            score = rd[k]
+                            break
+                    summary = rd.get("summary", "") or ""
+                    for k in ("findings", "issues"):
+                        if k in rd and isinstance(rd[k], list):
+                            findings = len(rd[k])
+                            break
+                    iters = rd.get("agent_iterations", 0) or 0
+                get_activity_log().log_expert_result(
+                    expert=self.tool_name,
+                    status="success",
+                    duration_s=duration_ms / 1000,
+                    score=score,
+                    summary=str(summary)[:300],
+                    iterations=iters,
+                    findings_count=findings,
+                )
+            except Exception:
+                pass
+
             return result
 
         except Exception as e:
@@ -661,6 +693,18 @@ class BaseTool(ABC):
                 error_type=type(e).__name__,
                 error_message=str(e)[:200],
             )
+            # Activity log: failed expert
+            try:
+                from collegue.monitoring.activity_log import get_activity_log
+
+                get_activity_log().log_expert_result(
+                    expert=self.tool_name,
+                    status="error",
+                    duration_s=duration_ms / 1000,
+                    summary=f"{type(e).__name__}: {e}"[:300],
+                )
+            except Exception:
+                pass
             self.logger.error(f"Error in async execution of {self.tool_name}: {e}")
             raise
 
@@ -678,6 +722,7 @@ class BaseTool(ABC):
             if system_prompt:
                 messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
 
+            _llm_start = time.time()
             result = await ctx.sample(messages=messages, result_type=result_type, temperature=temperature)
 
             # Estimer et enregistrer les tokens utilisés (approximation)
@@ -693,6 +738,21 @@ class BaseTool(ABC):
             estimated_output_tokens = len(str(result_text)) // 4
             self._last_input_tokens = getattr(self, "_last_input_tokens", 0) + estimated_input_tokens
             self._last_output_tokens = getattr(self, "_last_output_tokens", 0) + estimated_output_tokens
+
+            # Activity log: LLM call
+            try:
+                from collegue.monitoring.activity_log import get_activity_log
+
+                get_activity_log().log_llm_call(
+                    expert=self.tool_name,
+                    prompt_preview=prompt[:500],
+                    response_preview=str(result_text)[:1000],
+                    duration_s=time.time() - _llm_start,
+                    input_tokens=estimated_input_tokens,
+                    output_tokens=estimated_output_tokens,
+                )
+            except Exception:
+                pass
 
             return result_text
 

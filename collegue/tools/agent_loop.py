@@ -10,6 +10,7 @@ et build_feedback().
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -170,8 +171,24 @@ class AgentLoopMixin:
                 }
                 if system_prompt is not None:
                     sample_kwargs["system_prompt"] = system_prompt
+                _it_start = time.time()
                 result = await ctx.sample(**sample_kwargs)
                 raw_output = result.text or ""
+
+                # Activity log: agent loop LLM call
+                try:
+                    from collegue.monitoring.activity_log import get_activity_log
+
+                    tool_name = getattr(self, "tool_name", "unknown")
+                    get_activity_log().log_llm_call(
+                        expert=tool_name,
+                        prompt_preview=current_prompt[:500],
+                        response_preview=raw_output[:1000],
+                        duration_s=time.time() - _it_start,
+                        iteration=i + 1,
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Erreur LLM à l'itération {i + 1}: {e}")
                 iteration = AgentIteration(

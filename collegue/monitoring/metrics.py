@@ -8,11 +8,13 @@ Tracks per-expert:
 - Success/failure rates
 """
 
+import json
 import logging
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,9 @@ class MetricsCollector:
 
     MAX_LATENCY_SAMPLES = 1000
 
+    _PERSIST_DIR = Path(".collegue") / "monitoring"
+    _PERSIST_FILE = "metrics.json"
+
     def __init__(
         self,
         input_cost_per_token: float = DEFAULT_INPUT_COST_PER_TOKEN,
@@ -150,6 +155,7 @@ class MetricsCollector:
         self._experts: Dict[str, ExpertMetrics] = {}
         self._input_cost_per_token = input_cost_per_token
         self._output_cost_per_token = output_cost_per_token
+        self._load_from_disk()
 
     def _get_or_create_expert(self, expert_name: str) -> ExpertMetrics:
         if expert_name not in self._experts:
@@ -209,6 +215,8 @@ class MetricsCollector:
                 metrics.failed_executions += 1
                 if error_type:
                     metrics.errors_by_type[error_type] += 1
+
+            self._save_to_disk()
 
     def record_start(self, expert_name: str) -> float:
         """Record the start of an execution. Returns start timestamp."""
@@ -276,10 +284,53 @@ class MetricsCollector:
                 experts=experts_data,
             )
 
+    # ── disk persistence ───────────────────────────────────────────────────
+
+    def _persist_path(self) -> Path:
+        self._PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+        return self._PERSIST_DIR / self._PERSIST_FILE
+
+    def _save_to_disk(self) -> None:
+        """Persist current metrics to disk (called after each recording)."""
+        try:
+            data = {name: m.to_dict() for name, m in self._experts.items()}
+            path = self._persist_path()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+        except OSError as exc:
+            logger.debug("metrics persist error: %s", exc)
+
+    def _load_from_disk(self) -> None:
+        """Load metrics from disk on startup."""
+        path = self._persist_path()
+        if not path.exists():
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            for name, d in data.items():
+                m = ExpertMetrics(expert_name=name)
+                m.total_executions = d.get("total_executions", 0)
+                m.successful_executions = d.get("successful_executions", 0)
+                m.failed_executions = d.get("failed_executions", 0)
+                m.total_latency_ms = d.get("avg_latency_ms", 0) * m.total_executions
+                m.total_input_tokens = d.get("total_input_tokens", 0)
+                m.total_output_tokens = d.get("total_output_tokens", 0)
+                m.total_cost = d.get("total_cost_usd", 0)
+                m.last_execution_time = d.get("last_execution_time", 0)
+                min_lat = d.get("min_latency_ms", 0)
+                m.min_latency_ms = min_lat if min_lat > 0 else float("inf")
+                m.max_latency_ms = d.get("max_latency_ms", 0)
+                m.errors_by_type = defaultdict(int, d.get("errors_by_type", {}))
+                self._experts[name] = m
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("metrics load error: %s", exc)
+
     def reset(self) -> None:
         """Reset all metrics."""
         with self._lock:
             self._experts.clear()
+            self._save_to_disk()
 
     def reset_expert(self, expert_name: str) -> None:
         """Reset metrics for a specific expert."""

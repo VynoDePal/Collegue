@@ -200,6 +200,18 @@ class ExpertDelegationEngine:
                     rule.target_tool,
                     rule.condition_name,
                 )
+                # Activity log: delegation event
+                try:
+                    from collegue.monitoring.activity_log import get_activity_log
+
+                    get_activity_log().log_delegation(
+                        source=source_tool,
+                        target=rule.target_tool,
+                        reason=rule.condition_name,
+                        params_preview=params,
+                    )
+                except Exception:
+                    pass
 
         return tasks
 
