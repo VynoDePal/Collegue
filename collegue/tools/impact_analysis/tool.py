@@ -331,9 +331,7 @@ class ImpactAnalysisTool(AgentLoopMixin, BaseTool):
                 )
 
                 try:
-                    parsed = parse_llm_response_strict(
-                        agent_result.best_output, LLMImpactResponse
-                    )
+                    parsed = parse_llm_response_strict(agent_result.best_output, LLMImpactResponse)
 
                     insights = []
                     for item in parsed.insights:

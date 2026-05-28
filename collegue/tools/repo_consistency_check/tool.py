@@ -121,7 +121,6 @@ class RepoConsistencyCheckTool(AgentLoopMixin, BaseTool):
 
         return (0.3 if has_score else 0.0) + insight_coverage * 0.7
 
-
     async def build_agent_feedback(
         self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
     ) -> str:
