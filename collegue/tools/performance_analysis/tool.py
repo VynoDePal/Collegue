@@ -7,7 +7,7 @@ algorithmique et propose des optimisations.
 
 from typing import Any, Dict, List
 
-from ...core.shared import parse_llm_json_response
+from ...core.llm_response_parser import LLMPerformanceResponse, parse_llm_response_strict
 from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool
 from .config import ANALYSIS_CATEGORIES
@@ -342,39 +342,21 @@ Réponds en JSON avec cette structure exacte:
             return local_result
 
     def _parse_llm_performance(self, output: str) -> tuple[list[PerformanceIssue], list[dict], list[str]]:
-        """Parse le JSON de l'analyse LLM."""
+        """Parse le JSON de l'analyse LLM avec validation Pydantic stricte."""
+        parsed = parse_llm_response_strict(output, LLMPerformanceResponse)
+
         issues: list[PerformanceIssue] = []
-        hotspots: list[dict] = []
-        optimizations: list[str] = []
+        for i in parsed.issues:
+            issues.append(
+                PerformanceIssue(
+                    category=i.category,
+                    severity=i.severity,
+                    line=i.line,
+                    title=i.title,
+                    description=i.description,
+                    estimated_complexity=i.estimated_complexity,
+                    suggestion=i.suggestion,
+                )
+            )
 
-        try:
-            data = parse_llm_json_response(output)
-            if not isinstance(data, dict):
-                return issues, hotspots, optimizations
-
-            for i in data.get("issues", []):
-                if isinstance(i, dict) and "title" in i:
-                    issues.append(
-                        PerformanceIssue(
-                            category=i.get("category", "cpu"),
-                            severity=i.get("severity", "info"),
-                            line=i.get("line"),
-                            title=i["title"],
-                            description=i.get("description", ""),
-                            estimated_complexity=i.get("estimated_complexity"),
-                            suggestion=i.get("suggestion"),
-                        )
-                    )
-
-            hotspots = data.get("hotspots", [])
-            if not isinstance(hotspots, list):
-                hotspots = []
-
-            optimizations = data.get("optimizations", [])
-            if not isinstance(optimizations, list):
-                optimizations = []
-
-        except Exception:
-            pass
-
-        return issues, hotspots, optimizations
+        return issues, parsed.hotspots, parsed.optimizations

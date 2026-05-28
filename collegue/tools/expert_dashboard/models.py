@@ -70,4 +70,8 @@ class DashboardResponse(BaseModel):
     )
     memory_stats: Dict[str, Any] = Field(default_factory=dict, description="Statistiques de la mémoire")
     monitor_stats: Dict[str, Any] = Field(default_factory=dict, description="Statistiques du moniteur proactif")
+    metrics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Métriques de performance des experts (latence, coûts, erreurs)",
+    )
     summary: str = Field("", description="Résumé textuel")
