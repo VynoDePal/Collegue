@@ -469,7 +469,6 @@ async def test_architecture_to_impact_delegation_params():
     assert len(req2.files) >= 1
 
 
-
 def test_test_framework_case_insensitive():
     """Verify delegation builders normalize language before selecting test_framework."""
     from collegue.core.expert_delegation import (
