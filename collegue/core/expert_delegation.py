@@ -517,7 +517,7 @@ def _empty_code_placeholder(language: str) -> str:
 
 def _build_documentation_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de documentation depuis un résultat de refactoring."""
-    lang = result.get("language", "python").lower()
+    lang = (result.get("language") or "python").lower()
     code = (result.get("refactored_code", "") or "").strip() or _empty_code_placeholder(lang)
     return {
         "code": code,
@@ -663,7 +663,7 @@ def _performance_needs_tests(result: Dict[str, Any]) -> bool:
 
 def _build_review_params_from_refactoring(source_tool: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Construit les paramètres de code review depuis un résultat de refactoring."""
-    lang = result.get("language", "python").lower()
+    lang = (result.get("language") or "python").lower()
     code = (result.get("refactored_code", "") or "").strip() or _empty_code_placeholder(lang)
     return {
         "code": code,
