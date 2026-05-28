@@ -37,6 +37,28 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  collegue-dashboard:
+    build:
+      context: .
+      dockerfile: docker/collegue/Dockerfile
+    image: collegue-app:latest
+    restart: always
+    ports:
+      - "4125:4125"
+    environment:
+      PYTHONUNBUFFERED: 1
+    env_file:
+      - .env
+    command: ["streamlit", "run", "collegue/dashboard/app.py", "--server.port=4125", "--server.address=0.0.0.0", "--server.headless=true"]
+    depends_on:
+      collegue-app:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.3.2
     command: start-dev
