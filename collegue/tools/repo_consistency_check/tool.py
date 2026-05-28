@@ -15,6 +15,7 @@ Refactorisé: Le fichier original faisait 813 lignes, maintenant ~180 lignes.
 import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...core.llm_response_parser import LLMConsistencyResponse, parse_llm_response_strict
 from ...core.shared import aggregate_severities, parse_llm_json_response
 from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..analyzers.javascript import JavaScriptAnalyzer
@@ -119,6 +120,7 @@ class RepoConsistencyCheckTool(AgentLoopMixin, BaseTool):
         insight_coverage = min(1.0, len(valid_insights) / max(issues_count / 3, 1))
 
         return (0.3 if has_score else 0.0) + insight_coverage * 0.7
+
 
     async def build_agent_feedback(
         self, output: str, errors: List[str], quality: float, context: Dict[str, Any]
@@ -260,10 +262,9 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 score, priority = self._engine.calculate_refactoring_score(issues)
                 return None, score, priority
 
-            data = parse_llm_json_response(response)
+            parsed = parse_llm_response_strict(response, LLMConsistencyResponse)
 
-            llm_score = float(data.get("refactoring_score", 0.0))
-            llm_score = max(0.0, min(1.0, llm_score))
+            llm_score = parsed.refactoring_score
 
             heuristic_score, _ = self._engine.calculate_refactoring_score(issues)
             final_score = (llm_score * 0.6) + (heuristic_score * 0.4)
@@ -278,16 +279,15 @@ Réponds UNIQUEMENT avec le JSON, sans markdown ni explication."""
                 priority = "none"
 
             insights = []
-            for item in data.get("insights", [])[:10]:
-                if isinstance(item, dict) and "insight" in item:
-                    insights.append(
-                        LLMInsight(
-                            category=item.get("category", "suggestion"),
-                            insight=item["insight"],
-                            confidence=item.get("confidence", "medium"),
-                            affected_files=item.get("affected_files", []),
-                        )
+            for item in parsed.insights[:10]:
+                insights.append(
+                    LLMInsight(
+                        category=item.category,
+                        insight=item.insight,
+                        confidence=item.confidence,
+                        affected_files=item.affected_files,
                     )
+                )
 
             self.logger.info(f"Analyse deep: {len(insights)} insights, score={final_score:.2f}")
             return insights, final_score, priority
