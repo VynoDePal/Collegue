@@ -298,8 +298,8 @@ with tab_memory:
             st.write(
                 f"{icon} **{entry.get('expert', '?')}** — {entry.get('entry_type', '?')} ({entry.get('language', '?')})"
             )
-            if entry.get("content"):
+            if entry.get("data"):
                 with st.expander("Détails"):
-                    st.json(entry["content"])
+                    st.json(entry["data"])
     else:
         st.info("Aucune entrée récente en mémoire.")

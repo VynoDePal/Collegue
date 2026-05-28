@@ -57,9 +57,9 @@ def get_dashboard_data() -> Dict[str, Any]:
             pass
 
         return {
-            "project_health": health,
-            "expert_statuses": statuses,
-            "recommendations": recommendations,
+            "project_health": health.model_dump(),
+            "expert_statuses": [s.model_dump() for s in statuses],
+            "recommendations": [r.model_dump() for r in recommendations],
             "metrics": metrics_data,
         }
     except Exception as exc:
@@ -153,9 +153,25 @@ def get_memory_stats() -> Dict[str, Any]:
         from collegue.core.project_memory import get_project_memory
 
         memory = get_project_memory()
-        stats = memory.export_stats()
+        raw_stats = memory.export_stats()
         entries = memory.recall(limit=20)
         recent = [e.to_dict() for e in entries]
+
+        # Transform stats to match app.py expectations
+        by_expert = raw_stats.get("by_expert", {})
+        by_type = raw_stats.get("by_type", {})
+
+        # Compute languages from recent entries
+        languages = {e.language for e in memory.recall(limit=500) if e.language}
+
+        stats = {
+            "total_entries": raw_stats.get("total_entries", 0),
+            "experts_count": len(by_expert),
+            "categories_count": len(by_type),
+            "languages_count": len(languages),
+            "entries_by_expert": by_expert,
+            "entries_by_type": by_type,
+        }
 
         return {
             "stats": stats,
