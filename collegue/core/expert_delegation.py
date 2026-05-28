@@ -402,8 +402,7 @@ class ExpertDelegationEngine:
         def _count_experts(res_list: List[DelegationResult]) -> int:
             count = 0
             for r in res_list:
-                if r.success:
-                    count += 1
+                count += 1
                 count += _count_experts(r.sub_delegations)
             return count
 
