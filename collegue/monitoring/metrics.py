@@ -326,6 +326,12 @@ class MetricsCollector:
         except (OSError, json.JSONDecodeError) as exc:
             logger.debug("metrics load error: %s", exc)
 
+    def reload_from_disk(self) -> None:
+        """Re-read metrics from disk (useful for dashboard in separate process)."""
+        with self._lock:
+            self._experts.clear()
+            self._load_from_disk()
+
     def reset(self) -> None:
         """Reset all metrics."""
         with self._lock:

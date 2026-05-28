@@ -16,11 +16,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_metrics_data() -> Dict[str, Any]:
-    """Get metrics from the MetricsCollector singleton (disk-backed)."""
+    """Get metrics from the MetricsCollector singleton (disk-backed).
+
+    Forces a reload from disk so the dashboard (separate process)
+    always sees the latest data written by the MCP server.
+    """
     try:
         from collegue.monitoring.metrics import get_metrics_collector
 
         collector = get_metrics_collector()
+        collector.reload_from_disk()
         summary = collector.get_summary()
         all_metrics = collector.get_all_metrics()
 
@@ -48,12 +53,14 @@ def get_dashboard_data() -> Dict[str, Any]:
         health = engine.build_project_health(entries_raw)
         recommendations = engine.build_recommendations(entries_raw, limit=10)
 
-        # Metrics from collector (disk-backed)
+        # Metrics from collector (disk-backed, force reload)
         metrics_data: Dict[str, Any] = {}
         try:
             from collegue.monitoring.metrics import get_metrics_collector
 
-            metrics_data = get_metrics_collector().get_summary().to_dict()
+            collector = get_metrics_collector()
+            collector.reload_from_disk()
+            metrics_data = collector.get_summary().to_dict()
         except Exception:
             pass
 
