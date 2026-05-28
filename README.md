@@ -108,6 +108,15 @@ repo_consistency_check (score=0.8)
 
 > 📖 **Guide complet** : [docs/multi_agent_expert_system.md](docs/multi_agent_expert_system.md)
 
+### 📚 Documentation complète
+
+| Document | Description |
+|----------|-------------|
+| [Guide Utilisateur](docs/guide_utilisateur.md) | Installation, configuration, premiers pas, bonnes pratiques |
+| [Guide d'Intégration](docs/guide_integration.md) | Intégration dans Claude Desktop, Cursor, Windsurf, CI/CD |
+| [Référence des Experts](docs/reference_experts.md) | Paramètres, sorties et cas d'usage de chaque expert |
+| [Système Multi-Agents](docs/multi_agent_expert_system.md) | Architecture technique, délégation, mémoire |
+
 ---
 
 ## 🧪 Qualité des sorties LLM
