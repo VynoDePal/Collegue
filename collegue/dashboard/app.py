@@ -220,10 +220,7 @@ with tab_activity:
             iteration = call.get("iteration", 1)
             time_str = call.get("time", "")
 
-            st.markdown(
-                f"**{expert_name}** -- iteration {iteration} "
-                f"({duration:.1f}s) [{time_str}]"
-            )
+            st.markdown(f"**{expert_name}** -- iteration {iteration} ({duration:.1f}s) [{time_str}]")
 
             # Prompt
             prompt = call.get("prompt", "")

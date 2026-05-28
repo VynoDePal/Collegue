@@ -103,9 +103,7 @@ def get_delegation_data() -> Dict[str, Any]:
         try:
             from collegue.monitoring.activity_log import get_activity_log
 
-            delegation_events = get_activity_log().read_events(
-                event_type="delegation", limit=50
-            )
+            delegation_events = get_activity_log().read_events(event_type="delegation", limit=50)
         except Exception:
             pass
 
@@ -203,9 +201,7 @@ def get_memory_stats() -> Dict[str, Any]:
         try:
             from collegue.monitoring.activity_log import get_activity_log
 
-            memory_writes = get_activity_log().read_events(
-                event_type="memory_write", limit=50
-            )
+            memory_writes = get_activity_log().read_events(event_type="memory_write", limit=50)
         except Exception:
             pass
 
