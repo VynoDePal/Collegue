@@ -351,10 +351,11 @@ class LLMIacResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     security_score: float = Field(default=0.5)
+    compliance_score: float = Field(default=0.5)
     insights: List[LLMIacInsight] = Field(default_factory=list)
     remediation_actions: List[Dict[str, Any]] = Field(default_factory=list)
 
-    @field_validator("security_score", mode="before")
+    @field_validator("security_score", "compliance_score", mode="before")
     @classmethod
     def coerce_score(cls, v: Any) -> float:
         if v is None:
