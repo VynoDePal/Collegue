@@ -446,9 +446,9 @@ class ExpertDelegationEngine:
 
 def _refactoring_has_changes(result: Dict[str, Any]) -> bool:
     """Condition: le refactoring a effectué des changements."""
-    changes = result.get("changes", [])
-    refactored = result.get("refactored_code", "")
-    original = result.get("original_code", "")
+    changes = result.get("changes") or []
+    refactored = result.get("refactored_code") or ""
+    original = result.get("original_code") or ""
     return bool(changes) or (refactored and original and refactored != original)
 
 
@@ -464,13 +464,13 @@ def _iac_needs_remediation(result: Dict[str, Any]) -> bool:
 
 def _impact_has_risks(result: Dict[str, Any]) -> bool:
     """Condition: l'analyse d'impact a détecté des risques."""
-    return len(result.get("risk_notes", [])) > 0
+    return len(result.get("risk_notes") or []) > 0
 
 
 def _impact_has_iac_files(result: Dict[str, Any]) -> bool:
     """Condition: l'impact touche des fichiers IaC."""
     iac_extensions = {".tf", ".yaml", ".yml", ".json", ".hcl"}
-    impacted = result.get("impacted_files", [])
+    impacted = result.get("impacted_files") or []
     for f in impacted:
         path = f.get("path", "") if isinstance(f, dict) else ""
         if any(path.endswith(ext) for ext in iac_extensions):
@@ -618,7 +618,7 @@ def _review_quality_low(result: Dict[str, Any]) -> bool:
 
 def _consistency_has_architectural_issues(result: Dict[str, Any]) -> bool:
     """Condition: le consistency check détecte des problèmes architecturaux."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     for issue in issues:
         if isinstance(issue, dict):
             msg = issue.get("title", issue.get("message", "")).lower()
@@ -634,14 +634,14 @@ def _architecture_has_debt(result: Dict[str, Any]) -> bool:
 
 def _architecture_needs_impact(result: Dict[str, Any]) -> bool:
     """Condition: l'analyse architecturale recommande un refactoring important."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     critical = sum(1 for i in issues if isinstance(i, dict) and i.get("severity") in ("error", "critical"))
     return critical > 0
 
 
 def _consistency_has_performance_issues(result: Dict[str, Any]) -> bool:
     """Condition: le consistency check détecte des problèmes de performance."""
-    issues = result.get("issues", [])
+    issues = result.get("issues") or []
     for issue in issues:
         if isinstance(issue, dict):
             msg = issue.get("title", issue.get("message", "")).lower()
