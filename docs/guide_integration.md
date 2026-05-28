@@ -4,14 +4,32 @@
 
 ## Table des matières
 
-1. [Intégration avec Claude Desktop](#intégration-avec-claude-desktop)
-2. [Intégration avec Cursor](#intégration-avec-cursor)
-3. [Intégration avec Windsurf](#intégration-avec-windsurf)
-4. [Intégration avec Claude Code (CLI)](#intégration-avec-claude-code-cli)
-5. [Intégration dans un nouveau projet](#intégration-dans-un-nouveau-projet)
-6. [Intégration dans un projet existant](#intégration-dans-un-projet-existant)
-7. [Intégration CI/CD](#intégration-cicd)
-8. [Cas d'usage avancés](#cas-dusage-avancés)
+1. [Prérequis : lancer le serveur Docker](#prérequis--lancer-le-serveur-docker)
+2. [Intégration avec Claude Desktop](#intégration-avec-claude-desktop)
+3. [Intégration avec Cursor](#intégration-avec-cursor)
+4. [Intégration avec Windsurf](#intégration-avec-windsurf)
+5. [Intégration avec Claude Code (CLI)](#intégration-avec-claude-code-cli)
+6. [Intégration dans un nouveau projet](#intégration-dans-un-nouveau-projet)
+7. [Intégration dans un projet existant](#intégration-dans-un-projet-existant)
+8. [Intégration CI/CD](#intégration-cicd)
+9. [Cas d'usage avancés](#cas-dusage-avancés)
+
+---
+
+## Prérequis : lancer le serveur Docker
+
+Toutes les intégrations ci-dessous supposent que le serveur Collègue tourne en local via Docker :
+
+```bash
+git clone https://github.com/VynoDePal/Collegue.git
+cd Collegue
+cp .env.example .env   # renseigner LLM_API_KEY (Gemini)
+docker compose up -d
+```
+
+Le serveur est accessible sur `http://localhost:4121/mcp/`.
+
+> **Mode stdio** (alternative) : vous pouvez aussi laisser votre IDE spawner un container à la volée, voir le README pour la config `docker run`.
 
 ---
 
@@ -20,25 +38,6 @@
 ### Configuration
 
 Fichier : `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) ou `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
-
-#### Via NPM (plus simple)
-
-```json
-{
-  "mcpServers": {
-    "collegue": {
-      "command": "npx",
-      "args": ["-y", "@collegue/mcp@latest"],
-      "env": {
-        "LLM_API_KEY": "AIzaSy...",
-        "GITHUB_TOKEN": "ghp_..."
-      }
-    }
-  }
-}
-```
-
-#### Via serveur local (Docker)
 
 ```json
 {
@@ -59,7 +58,7 @@ Fichier : `~/Library/Application Support/Claude/claude_desktop_config.json` (mac
 2. Cliquer sur l'icône MCP (🔌) dans le champ de saisie
 3. Vérifier que "collegue" apparaît avec ses outils
 
-### Exemples d'utilisation dans Claude Desktop
+### Exemples d'utilisation
 
 ```
 Toi: Fais une revue de code de ce fichier Python :
@@ -80,22 +79,6 @@ Fichier : `.cursor/mcp.json` à la racine du projet ou `~/.cursor/mcp.json` glob
 {
   "mcpServers": {
     "collegue": {
-      "command": "npx",
-      "args": ["-y", "@collegue/mcp@latest"],
-      "env": {
-        "LLM_API_KEY": "AIzaSy..."
-      }
-    }
-  }
-}
-```
-
-Ou en mode serveur HTTP :
-
-```json
-{
-  "mcpServers": {
-    "collegue": {
       "serverUrl": "http://localhost:4121/mcp/"
     }
   }
@@ -108,7 +91,7 @@ Ou en mode serveur HTTP :
 2. Vérifier que le serveur "collegue" est listé et actif
 3. Dans le chat Cursor, les outils MCP seront disponibles automatiquement
 
-### Workflow typique dans Cursor
+### Workflow typique
 
 ```
 1. Sélectionner du code dans l'éditeur
@@ -130,19 +113,15 @@ Fichier : `~/.codeium/windsurf/mcp_config.json`
 {
   "mcpServers": {
     "collegue": {
-      "command": "npx",
-      "args": ["-y", "@collegue/mcp@latest"],
-      "env": {
-        "LLM_API_KEY": "AIzaSy..."
-      }
+      "serverUrl": "http://localhost:4121/mcp/"
     }
   }
 }
 ```
 
-### Utilisation dans Windsurf
+### Utilisation
 
-Windsurf (Cascade) utilise automatiquement les outils MCP quand c'est pertinent. Exemples :
+Windsurf (Cascade) utilise automatiquement les outils MCP quand c'est pertinent :
 
 - "Analyse ce code pour les problèmes de performance" → `performance_analysis`
 - "Refactorise cette fonction pour être plus lisible" → `code_refactoring`
@@ -155,10 +134,6 @@ Windsurf (Cascade) utilise automatiquement les outils MCP quand c'est pertinent.
 ### Configuration
 
 ```bash
-# Ajout du serveur MCP
-claude mcp add collegue -- npx -y @collegue/mcp@latest
-
-# Ou en mode HTTP local
 claude mcp add --transport http collegue http://localhost:4121/mcp/
 ```
 
@@ -183,19 +158,15 @@ mkdir mon-projet && cd mon-projet
 git init
 ```
 
-### Étape 2 : Configurer Collègue
+### Étape 2 : Configurer votre IDE
 
-Créer `.cursor/mcp.json` (ou équivalent pour votre IDE) :
+Créer `.cursor/mcp.json` (ou équivalent) :
 
 ```json
 {
   "mcpServers": {
     "collegue": {
-      "command": "npx",
-      "args": ["-y", "@collegue/mcp@latest"],
-      "env": {
-        "LLM_API_KEY": "AIzaSy..."
-      }
+      "serverUrl": "http://localhost:4121/mcp/"
     }
   }
 }
@@ -287,22 +258,22 @@ on:
 jobs:
   analysis:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Run Collegue analysis
+    services:
+      collegue:
+        image: collegue-mcp
         env:
           LLM_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MCP_TRANSPORT: http
+        ports:
+          - 4121:4121
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for Collegue server
         run: |
-          # Mode fast pour la CI (pas de LLM, heuristiques uniquement)
-          pip install -r requirements.txt
-          python -c "
-          from collegue.tools.code_review.tool import CodeReviewTool
-          from collegue.tools.code_review.models import CodeReviewRequest
-          
-          tool = CodeReviewTool()
-          # Analyser les fichiers modifiés...
-          "
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4121/mcp/ && break || sleep 2
+          done
 ```
 
 ### Pre-commit hook
@@ -367,16 +338,9 @@ Configurez votre CI pour appeler Collègue sur chaque PR et poster un commentair
 - Suggestions d'amélioration
 - Score de performance
 
-### 5. Détection de régression
-
-```
-"Compare ces deux versions du module et identifie les
-régressions potentielles de performance ou de qualité."
-```
-
 ---
 
-## Bonnes pratiques d'intégration
+## Bonnes pratiques
 
 ### Sécurité
 

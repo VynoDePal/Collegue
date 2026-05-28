@@ -29,20 +29,7 @@ Chaque expert utilise un LLM en backend et peut **déléguer automatiquement** �
 
 ## Installation
 
-### Option 1 : Via NPM (recommandé — aucune installation locale)
-
-```json
-{
-  "mcpServers": {
-    "collegue": {
-      "command": "npx",
-      "args": ["-y", "@collegue/mcp@latest"]
-    }
-  }
-}
-```
-
-### Option 2 : Docker Compose (serveur persistant)
+### Option 1 : Docker Compose (recommandé — serveur persistant)
 
 ```bash
 git clone https://github.com/VynoDePal/Collegue.git
@@ -54,7 +41,7 @@ docker compose up -d
 
 Puis configurer le client pour `http://localhost:4121/mcp/`.
 
-### Option 3 : Docker Run (à la volée)
+### Option 2 : Docker Run (à la volée, un container par session)
 
 ```json
 {
@@ -72,16 +59,7 @@ Puis configurer le client pour `http://localhost:4121/mcp/`.
 }
 ```
 
-### Option 4 : Développement local (Python)
-
-```bash
-git clone https://github.com/VynoDePal/Collegue.git
-cd Collegue
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m collegue.app
-```
+> Image à construire localement : `docker build -f docker/collegue/Dockerfile -t collegue-mcp .`
 
 ---
 
