@@ -157,8 +157,9 @@ class ProjectMemory:
             self._entries.append(entry)
             self._dirty = True
 
-            # Pruning si nécessaire
-            if len(self._entries) > self._max_total:
+            # Pruning si nécessaire (global ou per-expert)
+            expert_count = sum(1 for e in self._entries if e.expert == expert)
+            if len(self._entries) > self._max_total or expert_count > MAX_ENTRIES_PER_EXPERT:
                 self._prune_locked()
 
         if auto_save:
