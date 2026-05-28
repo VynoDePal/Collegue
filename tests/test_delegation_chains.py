@@ -469,7 +469,6 @@ async def test_architecture_to_impact_delegation_params():
     assert len(req2.files) >= 1
 
 
-
 @pytest.mark.asyncio
 async def test_conditions_and_builders_handle_none_list_fields():
     """All conditions and builders must survive result dicts with None-valued list fields."""
