@@ -306,7 +306,7 @@ class IacGuardrailsScanTool(AgentLoopMixin, BaseTool):
 
     async def _deep_analysis_with_llm(self, request: IacGuardrailsRequest, findings: List[IacFinding], ctx=None):
         """Effectue l'analyse approfondie avec le LLM."""
-        from ...core.shared import parse_llm_json_response
+        from ...core.llm_response_parser import LLMIacResponse, parse_llm_response_strict
 
         if ctx is None:
             self.logger.warning("ctx non disponible pour analyse deep")
@@ -320,10 +320,10 @@ class IacGuardrailsScanTool(AgentLoopMixin, BaseTool):
             if not response:
                 return None, *self._engine.calculate_security_scores(findings)
 
-            data = parse_llm_json_response(response)
+            parsed = parse_llm_response_strict(response, LLMIacResponse)
 
-            llm_security = float(data.get("security_score", 0.5))
-            llm_compliance = float(data.get("compliance_score", 0.5))
+            llm_security = parsed.security_score
+            llm_compliance = parsed.compliance_score
 
             heur_security, heur_compliance, _ = self._engine.calculate_security_scores(findings)
             final_security = (llm_security * 0.6) + (heur_security * 0.4)
@@ -339,17 +339,16 @@ class IacGuardrailsScanTool(AgentLoopMixin, BaseTool):
                 risk_level = "low"
 
             insights = []
-            for item in data.get("insights", [])[:10]:
-                if isinstance(item, dict) and "insight" in item:
-                    insights.append(
-                        LLMSecurityInsight(
-                            category=item.get("category", "best_practice"),
-                            insight=item["insight"],
-                            risk_level=item.get("risk_level", "medium"),
-                            affected_resources=item.get("affected_resources", []),
-                            compliance_frameworks=item.get("compliance_frameworks", []),
-                        )
+            for item in parsed.insights[:10]:
+                insights.append(
+                    LLMSecurityInsight(
+                        category=item.category,
+                        insight=item.insight,
+                        risk_level=item.risk_level,
+                        affected_resources=item.affected_resources,
+                        compliance_frameworks=item.compliance_frameworks,
                     )
+                )
 
             self.logger.info(f"Analyse deep: {len(insights)} insights, security={final_security:.2f}")
             return insights, final_security, final_compliance, risk_level

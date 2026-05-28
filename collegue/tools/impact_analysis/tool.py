@@ -12,6 +12,7 @@ Refactorisé: Le fichier original faisait 680 lignes, maintenant ~200 lignes.
 
 from typing import Any, Dict, List
 
+from ...core.llm_response_parser import LLMImpactResponse, parse_llm_response_strict
 from ...core.shared import parse_llm_json_response
 from ..agent_loop import AgentLoopConfig, AgentLoopMixin
 from ..base import BaseTool, ToolValidationError
@@ -330,16 +331,24 @@ class ImpactAnalysisTool(AgentLoopMixin, BaseTool):
                 )
 
                 try:
-                    data = parse_llm_json_response(agent_result.best_output)
+                    parsed = parse_llm_response_strict(
+                        agent_result.best_output, LLMImpactResponse
+                    )
 
                     insights = []
-                    for item in data.get("insights", []):
-                        insights.append(LLMInsight(**item))
+                    for item in parsed.insights:
+                        insights.append(
+                            LLMInsight(
+                                category=item.category,
+                                insight=item.insight,
+                                confidence=item.confidence,
+                            )
+                        )
 
                     response = response.model_copy(
                         update={
                             "llm_insights": insights,
-                            "semantic_summary": data.get("semantic_summary"),
+                            "semantic_summary": parsed.semantic_summary,
                             "analysis_depth_used": "deep",
                             "agent_iterations": agent_result.total_iterations,
                             "agent_best_score": agent_result.best_score,
