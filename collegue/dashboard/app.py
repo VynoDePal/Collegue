@@ -312,7 +312,7 @@ with tab_metrics:
                 }
             )
         df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
         # Latency chart
         st.subheader("Latence par Expert")
@@ -364,7 +364,7 @@ with tab_delegation:
         import pandas as pd
 
         rules_df = pd.DataFrame(rules)
-        st.dataframe(rules_df, use_container_width=True, hide_index=True)
+        st.dataframe(rules_df, width="stretch", hide_index=True)
     else:
         st.info("Aucune regle de delegation chargee.")
 

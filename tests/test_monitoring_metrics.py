@@ -80,15 +80,20 @@ class TestMetricsCollector:
         assert metrics["error_rate"] == 0.2
 
     def test_cost_calculation(self):
-        # Default rates: input $0.15/1M, output $0.60/1M
-        self.collector.record_execution(
+        # Explicit rates so the test is independent of the configured model:
+        # input $0.15/1M, output $0.60/1M.
+        collector = MetricsCollector(
+            input_cost_per_token=0.00000015,
+            output_cost_per_token=0.00000060,
+        )
+        collector.record_execution(
             expert_name="code_review",
             duration_ms=1000.0,
             success=True,
             input_tokens=1_000_000,  # 1M tokens
             output_tokens=1_000_000,  # 1M tokens
         )
-        metrics = self.collector.get_expert_metrics("code_review")
+        metrics = collector.get_expert_metrics("code_review")
         # Expected: 0.15 + 0.60 = 0.75
         assert abs(metrics["total_cost_usd"] - 0.75) < 0.001
 
@@ -107,6 +112,32 @@ class TestMetricsCollector:
         metrics = collector.get_expert_metrics("test")
         # Expected: 1000 * 0.0001 + 500 * 0.0002 = 0.1 + 0.1 = 0.2
         assert abs(metrics["total_cost_usd"] - 0.2) < 0.001
+
+    def test_model_pricing_resolution(self):
+        from collegue.monitoring.pricing import cost_per_token
+
+        # Tarif exact pour le modèle configuré par défaut.
+        in_tok, out_tok = cost_per_token("gemini-3.5-flash")
+        assert abs(in_tok - 1.50 / 1_000_000) < 1e-12
+        assert abs(out_tok - 9.00 / 1_000_000) < 1e-12
+        # Normalisation du préfixe models/ et des suffixes de version.
+        assert cost_per_token("models/gemini-3.5-flash") == (in_tok, out_tok)
+        assert cost_per_token("gemini-3.5-flash-05-2026") == (in_tok, out_tok)
+        # Repli pour un modèle inconnu.
+        assert cost_per_token("modele-inexistant") == (0.15 / 1_000_000, 0.60 / 1_000_000)
+
+    def test_collector_uses_model_pricing(self):
+        collector = MetricsCollector(model="gemini-2.5-flash")
+        collector.record_execution(
+            expert_name="x",
+            duration_ms=10.0,
+            success=True,
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+        )
+        m = collector.get_expert_metrics("x")
+        # gemini-2.5-flash : $0.30/1M in + $2.50/1M out = 2.80
+        assert abs(m["total_cost_usd"] - 2.80) < 0.001
 
     def test_p95_latency(self):
         # Record 100 executions with increasing latency

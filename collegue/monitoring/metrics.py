@@ -21,8 +21,8 @@ from collegue.core.paths import monitoring_dir
 
 logger = logging.getLogger(__name__)
 
-# Cost per token (approximation for Gemini models)
-# Gemma 4 26B via Gemini API: input ~$0.15/1M, output ~$0.60/1M
+# Tarif de repli par token si le modèle configuré est inconnu de la grille
+# (collegue/monitoring/pricing.py) : $0.15 / $0.60 par 1M tokens.
 DEFAULT_INPUT_COST_PER_TOKEN = 0.00000015
 DEFAULT_OUTPUT_COST_PER_TOKEN = 0.00000060
 
@@ -112,6 +112,8 @@ class ExpertMetrics:
             "error_rate": round(self.error_rate, 4),
             "errors_by_type": dict(self.errors_by_type),
             "last_execution_time": self.last_execution_time,
+            # Persisté pour que le P95 (recalculé) survive à reload_from_disk côté dashboard.
+            "latency_samples": self.latency_samples,
         }
 
 
@@ -150,14 +152,35 @@ class MetricsCollector:
 
     def __init__(
         self,
-        input_cost_per_token: float = DEFAULT_INPUT_COST_PER_TOKEN,
-        output_cost_per_token: float = DEFAULT_OUTPUT_COST_PER_TOKEN,
+        input_cost_per_token: Optional[float] = None,
+        output_cost_per_token: Optional[float] = None,
+        model: Optional[str] = None,
     ):
+        # Tarifs : valeurs explicites si fournies (tests), sinon grille par modèle
+        # selon le modèle configuré (LLM_MODEL), avec repli sur les défauts.
+        if input_cost_per_token is None or output_cost_per_token is None:
+            resolved_in, resolved_out = self._resolve_model_pricing(model)
+            input_cost_per_token = input_cost_per_token if input_cost_per_token is not None else resolved_in
+            output_cost_per_token = output_cost_per_token if output_cost_per_token is not None else resolved_out
         self._lock = threading.Lock()
         self._experts: Dict[str, ExpertMetrics] = {}
         self._input_cost_per_token = input_cost_per_token
         self._output_cost_per_token = output_cost_per_token
         self._load_from_disk()
+
+    @staticmethod
+    def _resolve_model_pricing(model: Optional[str]) -> tuple[float, float]:
+        """Tarifs (input, output) par token pour le modèle donné ou configuré."""
+        try:
+            from collegue.monitoring.pricing import cost_per_token
+
+            if not model:
+                from collegue.config import settings
+
+                model = settings.LLM_MODEL
+            return cost_per_token(model)
+        except Exception:
+            return DEFAULT_INPUT_COST_PER_TOKEN, DEFAULT_OUTPUT_COST_PER_TOKEN
 
     def _get_or_create_expert(self, expert_name: str) -> ExpertMetrics:
         if expert_name not in self._experts:
@@ -324,6 +347,7 @@ class MetricsCollector:
                 m.min_latency_ms = min_lat if min_lat > 0 else float("inf")
                 m.max_latency_ms = d.get("max_latency_ms", 0)
                 m.errors_by_type = defaultdict(int, d.get("errors_by_type", {}))
+                m.latency_samples = list(d.get("latency_samples", []))
                 self._experts[name] = m
         except (OSError, json.JSONDecodeError) as exc:
             logger.debug("metrics load error: %s", exc)

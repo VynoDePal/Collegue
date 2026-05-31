@@ -328,12 +328,38 @@ if settings.LLM_API_KEY:
         from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
         from openai import AsyncOpenAI
 
+        from collegue.monitoring.sampling_usage import record_usage
+
+        class UsageTrackingSamplingHandler(OpenAISamplingHandler):
+            """Capte les tokens réels du provider, perdus par le handler de base.
+
+            ``OpenAISamplingHandler`` ne propage pas ``response.usage`` dans le
+            ``CreateMessageResult``. On enveloppe le client pour lire l'``usage``
+            renvoyé par l'API et l'exposer aux outils via un ContextVar.
+            """
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                inner = self.client.chat.completions.create
+
+                async def _create(*a, **kw):
+                    response = await inner(*a, **kw)
+                    usage = getattr(response, "usage", None)
+                    if usage is not None:
+                        record_usage(
+                            getattr(usage, "prompt_tokens", 0) or 0,
+                            getattr(usage, "completion_tokens", 0) or 0,
+                        )
+                    return response
+
+                self.client.chat.completions.create = _create
+
         llm_api_key = settings.LLM_API_KEY
         gemini_client = AsyncOpenAI(
             api_key=llm_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
-        sampling_handler = OpenAISamplingHandler(
+        sampling_handler = UsageTrackingSamplingHandler(
             default_model=settings.LLM_MODEL,
             client=gemini_client,
         )
