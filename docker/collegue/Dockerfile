@@ -20,6 +20,8 @@ ENV PYTHONUNBUFFERED=1
 ENV PORT=4121
 ENV HEALTH_PORT=4122
 ENV PATH=/home/collegue/.local/bin:$PATH
+ENV PYTHONPATH=/app
+ENV COLLEGUE_HOME=/app/.collegue
 
 WORKDIR /app
 
@@ -43,6 +45,9 @@ COPY --chown=collegue:collegue ./collegue ./collegue
 COPY --chown=collegue:collegue ./skills ./skills
 
 EXPOSE ${PORT} ${HEALTH_PORT}
+
+# Répertoire des données persistantes, inscriptible par l'utilisateur non-root
+RUN mkdir -p /app/.collegue && chown -R collegue:collegue /app/.collegue
 
 USER collegue
 

@@ -385,6 +385,21 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
             refactored_code = self._engine.extract_code_block(agent_result.best_output, request.language)
 
+            final_errors = await self.validate_agent_output(
+                agent_result.best_output,
+                {"language": request.language, "original_code": request.code},
+            )
+            if final_errors:
+                self.logger.warning(
+                    "Refactoring agentique invalide (%s) — retour au refactoring local.",
+                    "; ".join(final_errors),
+                )
+                if ctx:
+                    await ctx.warning(
+                        "Code refactoré invalide (" + "; ".join(final_errors) + "). Retour au refactoring local sûr."
+                    )
+                return self._perform_local_refactoring(request)
+
             if ctx:
                 await ctx.info("Analyse des améliorations...")
 

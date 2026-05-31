@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from collegue.core import paths
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,7 +70,7 @@ class ProjectMemory:
     """
 
     def __init__(self, memory_dir: Optional[str] = None, max_total: int = MAX_TOTAL_ENTRIES):
-        self._memory_dir = Path(memory_dir or ".collegue/memory")
+        self._memory_dir = Path(memory_dir) if memory_dir else paths.memory_dir()
         self._max_total = max_total
         self._entries: List[MemoryEntry] = []
         self._lock = threading.RLock()
