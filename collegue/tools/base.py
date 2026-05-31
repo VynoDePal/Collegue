@@ -620,6 +620,12 @@ class BaseTool(ABC):
         metrics = get_metrics_collector()
         self._last_input_tokens = 0
         self._last_output_tokens = 0
+        # Réinitialisé à chaque exécution ; positionné à True par
+        # _store_to_memory() (AgentLoopMixin). Permet d'écrire une entrée mémoire
+        # générique de repli pour les experts qui ne persistent pas eux-mêmes,
+        # afin que l'onglet Mémoire reflète TOUS les experts actifs (pas seulement
+        # code_review / refactoring / architecture / performance).
+        self._memory_written = False
         start_time = time.time()
         try:
             if hasattr(self, "_execute_core_logic_async"):
@@ -659,11 +665,25 @@ class BaseTool(ABC):
                 iters = 0
                 if hasattr(result, "model_dump"):
                     rd = result.model_dump()
-                    for k in ("quality_score", "performance_score", "score", "security_score"):
+                    # agent_best_score ajouté pour les experts agentiques (doc,
+                    # test_generation…) dont le modèle n'expose pas quality_score.
+                    for k in ("quality_score", "performance_score", "score", "security_score", "agent_best_score"):
                         if k in rd and rd[k] is not None:
                             score = rd[k]
                             break
+                    # Résumé : 'summary' si présent, sinon un repli lisible selon
+                    # le contenu du résultat (utile pour code_documentation, qui
+                    # n'a pas de champ summary).
                     summary = rd.get("summary", "") or ""
+                    if not summary:
+                        if rd.get("documentation"):
+                            cov = rd.get("coverage")
+                            n_elem = len(rd.get("documented_elements") or [])
+                            # coverage est déjà un pourcentage (0-100).
+                            cov_str = f", couverture {cov:.0f}%" if isinstance(cov, (int, float)) else ""
+                            summary = f"Documentation générée: {n_elem} élément(s){cov_str}"
+                        elif rd.get("tests"):
+                            summary = f"{len(rd.get('tests') or [])} test(s) générés"
                     for k in ("findings", "issues"):
                         if k in rd and isinstance(rd[k], list):
                             findings = len(rd[k])
@@ -680,6 +700,26 @@ class BaseTool(ABC):
                 )
             except Exception:
                 pass
+
+            # Mémoire projet : repli générique si l'expert n'a rien persisté
+            # lui-même, pour que l'onglet Mémoire couvre tous les experts actifs.
+            if not getattr(self, "_memory_written", False):
+                try:
+                    from collegue.core.project_memory import get_project_memory
+
+                    lang = getattr(normalized_request, "language", None)
+                    get_project_memory().store(
+                        expert=self.tool_name,
+                        entry_type="expert_result",
+                        category=self.tool_name,
+                        title=f"{self.tool_name}: exécution réussie ({duration_ms / 1000:.1f}s)",
+                        data={"summary": str(summary)[:500]},
+                        score=float(score) if isinstance(score, (int, float)) else 0.0,
+                        file_path=getattr(normalized_request, "file_path", None),
+                        language=lang,
+                    )
+                except Exception:
+                    pass
 
             return result
 

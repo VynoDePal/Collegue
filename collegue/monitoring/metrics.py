@@ -112,6 +112,10 @@ class ExpertMetrics:
             "error_rate": round(self.error_rate, 4),
             "errors_by_type": dict(self.errors_by_type),
             "last_execution_time": self.last_execution_time,
+            # Persisté pour que le P95 survive à un reload_from_disk dans un
+            # autre processus (le dashboard). Sans cela, latency_samples est
+            # vide après rechargement et le P95 retombe systématiquement à 0.
+            "latency_samples": self.latency_samples,
         }
 
 
@@ -324,6 +328,9 @@ class MetricsCollector:
                 m.min_latency_ms = min_lat if min_lat > 0 else float("inf")
                 m.max_latency_ms = d.get("max_latency_ms", 0)
                 m.errors_by_type = defaultdict(int, d.get("errors_by_type", {}))
+                # Restaurer les échantillons de latence pour que le P95
+                # (propriété calculée) reste correct après rechargement disque.
+                m.latency_samples = list(d.get("latency_samples", []))
                 self._experts[name] = m
         except (OSError, json.JSONDecodeError) as exc:
             logger.debug("metrics load error: %s", exc)
