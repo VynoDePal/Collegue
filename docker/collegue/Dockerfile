@@ -20,10 +20,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PORT=4121
 ENV HEALTH_PORT=4122
 ENV PATH=/home/collegue/.local/bin:$PATH
-# `fastmcp run /app/collegue/app.py:app` met /app/collegue sur sys.path, pas /app :
-# sans PYTHONPATH, `import collegue` échoue (ModuleNotFoundError) au démarrage.
 ENV PYTHONPATH=/app
-# Racine des données persistantes, inscriptible par l'utilisateur non-root.
 ENV COLLEGUE_HOME=/app/.collegue
 
 WORKDIR /app
@@ -49,8 +46,7 @@ COPY --chown=collegue:collegue ./skills ./skills
 
 EXPOSE ${PORT} ${HEALTH_PORT}
 
-# Répertoire des données persistantes (mémoire, métriques, journaux), inscriptible
-# par l'utilisateur non-root — évite les PermissionError au runtime.
+# Répertoire des données persistantes, inscriptible par l'utilisateur non-root
 RUN mkdir -p /app/.collegue && chown -R collegue:collegue /app/.collegue
 
 USER collegue

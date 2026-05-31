@@ -1,18 +1,5 @@
-"""Résolution centralisée des chemins de persistance de Collègue.
-
-Tous les artefacts persistants (mémoire projet, métriques, journal d'activité)
-vivent sous un répertoire racine unique, configurable via la variable
-d'environnement ``COLLEGUE_HOME``.
-
-Pourquoi : historiquement chaque module créait un ``.collegue/...`` en chemin
-**relatif** au répertoire de travail courant. En conteneur, le cwd est ``/app``
-(propriété de root) alors que le process tourne en utilisateur non-root, d'où
-des ``PermissionError``. Centraliser ici permet de pointer ``COLLEGUE_HOME``
-vers un répertoire inscriptible (ex: ``/app/.collegue``) sans modifier le code.
-
-Le défaut reste ``.collegue`` (relatif) pour préserver le comportement existant
-et les tests.
-"""
+"""Chemins de persistance de Collègue, sous un répertoire racine configurable
+via la variable d'environnement ``COLLEGUE_HOME`` (défaut : ``.collegue``)."""
 
 from __future__ import annotations
 
