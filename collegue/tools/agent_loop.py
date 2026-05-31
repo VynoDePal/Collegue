@@ -175,11 +175,8 @@ class AgentLoopMixin:
                 result = await ctx.sample(**sample_kwargs)
                 raw_output = result.text or ""
 
-                # Estimation des tokens (~4 caractères/token). C'est ici que
-                # passe réellement le trafic LLM (et non dans BaseTool.sample_llm,
-                # qui n'est jamais appelé) : on accumule donc sur l'instance les
-                # compteurs que BaseTool.execute_async relit pour les métriques
-                # de coût/tokens du dashboard.
+                # Tokens estimés (~4 caractères/token) accumulés sur l'instance ;
+                # BaseTool.execute_async les relit pour les métriques de coût.
                 est_input_tokens = (len(current_prompt) + len(system_prompt or "")) // 4
                 est_output_tokens = len(raw_output) // 4
                 self._last_input_tokens = getattr(self, "_last_input_tokens", 0) + est_input_tokens
@@ -318,8 +315,7 @@ class AgentLoopMixin:
                 file_path=file_path,
                 language=language,
             )
-            # Signale à BaseTool.execute_async qu'une entrée mémoire a déjà été
-            # écrite, pour éviter une entrée de repli générique en double.
+            # Évite l'entrée de repli générique de BaseTool.execute_async.
             self._memory_written = True
         except Exception as exc:
             logger.debug("Mémoire projet non disponible: %s", exc)

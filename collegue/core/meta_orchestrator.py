@@ -72,8 +72,7 @@ class OrchestratorResponse(BaseModel):
 class _OrchestratorSynthesisAgent(AgentLoopMixin):
     """Agent interne pour la synthèse itérative de l'orchestrateur."""
 
-    # Permet à agent_loop d'attribuer les appels LLM de synthèse à
-    # "smart_orchestrator" plutôt qu'au fallback "unknown" sur le dashboard.
+    # Attribue les appels LLM de synthèse à "smart_orchestrator" (sinon "unknown").
     tool_name = "smart_orchestrator"
 
     agent_config = AgentLoopConfig(
@@ -225,8 +224,7 @@ def register_meta_orchestrator(app: FastMCP):
         start_time = time.time()
         await ctx.info(f"Démarrage orchestration (mode v4 robust): {request.query[:100]}...")
 
-        # Réinitialiser les compteurs de tokens de l'agent de synthèse (singleton)
-        # pour qu'ils reflètent uniquement cette orchestration.
+        # Compteurs de tokens propres à cette orchestration (agent singleton).
         _synthesis_agent._last_input_tokens = 0
         _synthesis_agent._last_output_tokens = 0
 
@@ -234,8 +232,7 @@ def register_meta_orchestrator(app: FastMCP):
             """Enregistre métriques + résultat d'expert pour l'orchestrateur lui-même.
 
             smart_orchestrator est un tool MCP enregistré (pas un BaseTool), il ne
-            passe donc pas par execute_async : sans ce hook, il n'apparaît jamais
-            dans l'onglet Métriques ni dans le Statut des experts du dashboard.
+            passe donc pas par execute_async qui s'en charge habituellement.
             """
             duration_ms = (time.time() - start_time) * 1000
             try:
@@ -439,10 +436,8 @@ RÈGLES :
 
             await ctx.info(f"Étape {i + 1}: {tool_name} ({step.reason})")
 
-            # Tracer la coordination orchestrateur → outil dans le log d'activité
-            # pour que l'onglet Délégation du dashboard reflète les étapes du plan.
-            # Le DelegationEngine (qui logue les délégations par règle) est court-circuité
-            # ici car l'orchestrateur appelle les outils directement.
+            # Tracer chaque étape du plan : l'orchestrateur appelle les outils
+            # directement, sans passer par le DelegationEngine qui logue d'habitude.
             try:
                 from collegue.monitoring.activity_log import get_activity_log
 
@@ -510,10 +505,8 @@ RÈGLES :
                 err_msg = f"Erreur exécution {tool_name}: {e}"
                 await ctx.error(err_msg)
                 execution_results.append({"step": i + 1, "error": err_msg})
-                # Comptabiliser l'échec intra-orchestration dans les métriques :
-                # sinon une étape qui plante avant d'entrer dans BaseTool.execute_async
-                # (ex. validation Pydantic des params générés par le plan) reste
-                # invisible sur le dashboard.
+                # Compter l'échec : une étape qui plante avant execute_async
+                # (ex. validation Pydantic des params du plan) ne serait pas mesurée.
                 try:
                     from collegue.monitoring.metrics import get_metrics_collector
 

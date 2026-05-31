@@ -18,9 +18,7 @@ services:
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
     env_file:
       - .env
-    # Données persistantes partagées avec le dashboard (métriques, activité, mémoire).
-    # Sans ce volume commun, le dashboard lit un répertoire vide et tous ses
-    # onglets restent vides en permanence.
+    # Store partagé avec le dashboard ; sans ce volume commun, ses onglets restent vides.
     volumes:
       - collegue_data:/app/.collegue
     deploy:
@@ -54,9 +52,7 @@ services:
       PYTHONUNBUFFERED: 1
     env_file:
       - .env
-    # Même volume que collegue-app : le dashboard lit les stores disque
-    # (monitoring/activity.jsonl, monitoring/metrics.json, memory/project_memory.json)
-    # écrits par le serveur MCP, pour un affichage temps réel.
+    # Même volume que collegue-app : lit les stores écrits par le serveur MCP.
     volumes:
       - collegue_data:/app/.collegue
     command: ["streamlit", "run", "collegue/dashboard/app.py", "--server.port=4125", "--server.address=0.0.0.0", "--server.headless=true"]

@@ -620,11 +620,8 @@ class BaseTool(ABC):
         metrics = get_metrics_collector()
         self._last_input_tokens = 0
         self._last_output_tokens = 0
-        # Réinitialisé à chaque exécution ; positionné à True par
-        # _store_to_memory() (AgentLoopMixin). Permet d'écrire une entrée mémoire
-        # générique de repli pour les experts qui ne persistent pas eux-mêmes,
-        # afin que l'onglet Mémoire reflète TOUS les experts actifs (pas seulement
-        # code_review / refactoring / architecture / performance).
+        # Passé à True par _store_to_memory() ; sinon une entrée de repli est
+        # écrite plus bas pour les experts qui ne persistent pas eux-mêmes.
         self._memory_written = False
         start_time = time.time()
         try:
@@ -665,21 +662,17 @@ class BaseTool(ABC):
                 iters = 0
                 if hasattr(result, "model_dump"):
                     rd = result.model_dump()
-                    # agent_best_score ajouté pour les experts agentiques (doc,
-                    # test_generation…) dont le modèle n'expose pas quality_score.
+                    # agent_best_score : repli pour les experts agentiques (doc, tests).
                     for k in ("quality_score", "performance_score", "score", "security_score", "agent_best_score"):
                         if k in rd and rd[k] is not None:
                             score = rd[k]
                             break
-                    # Résumé : 'summary' si présent, sinon un repli lisible selon
-                    # le contenu du résultat (utile pour code_documentation, qui
-                    # n'a pas de champ summary).
+                    # Résumé de repli pour les résultats sans champ 'summary'.
                     summary = rd.get("summary", "") or ""
                     if not summary:
                         if rd.get("documentation"):
-                            cov = rd.get("coverage")
+                            cov = rd.get("coverage")  # déjà un pourcentage (0-100)
                             n_elem = len(rd.get("documented_elements") or [])
-                            # coverage est déjà un pourcentage (0-100).
                             cov_str = f", couverture {cov:.0f}%" if isinstance(cov, (int, float)) else ""
                             summary = f"Documentation générée: {n_elem} élément(s){cov_str}"
                         elif rd.get("tests"):
@@ -701,8 +694,7 @@ class BaseTool(ABC):
             except Exception:
                 pass
 
-            # Mémoire projet : repli générique si l'expert n'a rien persisté
-            # lui-même, pour que l'onglet Mémoire couvre tous les experts actifs.
+            # Mémoire projet : entrée de repli si l'expert n'a rien persisté lui-même.
             if not getattr(self, "_memory_written", False):
                 try:
                     from collegue.core.project_memory import get_project_memory
