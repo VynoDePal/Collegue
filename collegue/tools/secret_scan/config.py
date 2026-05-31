@@ -77,8 +77,11 @@ SECRET_PATTERNS = [
     # Environment Variables
     (
         "env_secret",
-        r"(?i)(?:export\s+)?(?:API_KEY|SECRET_KEY|AUTH_TOKEN|DATABASE_PASSWORD|DB_PASSWORD)['\"]?\s*=\s*['\"]?([A-Za-z0-9\-_/+=]{16,})",
-        "medium",
+        # Constantes de secret nommées. Seuil abaissé de 16 à 8 caractères : un secret
+        # comme `SECRET_KEY = "supersecret123"` (14 c) échappait à la détection.
+        # Séparateur `:` ou `=` accepté (assignations Python et clés YAML/JSON).
+        r"(?i)(?:export\s+)?(?:API[_\-]?KEY|SECRET[_\-]?KEY|AUTH[_\-]?TOKEN|ACCESS[_\-]?TOKEN|DATABASE[_\-]?PASSWORD|DB[_\-]?PASSWORD)['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9\-_/+=]{8,})",
+        "high",
         "Secret dans variable d'environnement",
     ),
 ]

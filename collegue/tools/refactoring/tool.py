@@ -385,6 +385,25 @@ Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
             refactored_code = self._engine.extract_code_block(agent_result.best_output, request.language)
 
+            # Garde-fou final : ne jamais renvoyer un code refactoré invalide
+            # (tronqué, syntaxe cassée). La boucle agentique peut "converger" sur
+            # un meilleur output qui reste invalide ; dans ce cas on retombe sur le
+            # refactoring local déterministe plutôt que de livrer du code cassé.
+            final_errors = await self.validate_agent_output(
+                agent_result.best_output,
+                {"language": request.language, "original_code": request.code},
+            )
+            if final_errors:
+                self.logger.warning(
+                    "Refactoring agentique invalide (%s) — retour au refactoring local.",
+                    "; ".join(final_errors),
+                )
+                if ctx:
+                    await ctx.warning(
+                        "Code refactoré invalide (" + "; ".join(final_errors) + "). Retour au refactoring local sûr."
+                    )
+                return self._perform_local_refactoring(request)
+
             if ctx:
                 await ctx.info("Analyse des améliorations...")
 

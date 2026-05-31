@@ -19,9 +19,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from collegue.core.paths import monitoring_dir
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DIR = Path(".collegue") / "monitoring"
+_DEFAULT_DIR = monitoring_dir()
 
 
 class ActivityLog:

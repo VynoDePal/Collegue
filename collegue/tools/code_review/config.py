@@ -5,7 +5,15 @@ Configuration et constantes pour l'outil Code Review.
 REVIEW_STANDARDS = {
     "naming": "Conventions de nommage (variables, fonctions, classes)",
     "complexity": "Complexité cyclomatique et imbrication excessive",
-    "security": "Vulnérabilités de sécurité (injection, exposition, hardcoded secrets)",
+    "security": (
+        "Vulnérabilités de sécurité — signale IMPÉRATIVEMENT le cas échéant : "
+        "injections SQL/commande (f-strings ou concaténation dans des requêtes), "
+        "secrets/clés/mots de passe codés en dur (ex: SECRET_KEY = \"...\"), "
+        "hachage de mot de passe faible ou non salé (MD5, SHA1, SHA-256 nu), "
+        "comparaison de mots de passe/jetons non à temps constant, "
+        "jetons d'authentification falsifiables (base64/JSON non signés), "
+        "validation des entrées manquante, contrôle d'autorisation absent"
+    ),
     "performance": "Patterns inefficaces (boucles O(n²), allocations inutiles)",
     "dry": "Duplication de code (Don't Repeat Yourself)",
     "solid": "Principes SOLID (Single Responsibility, Open/Closed, etc.)",
