@@ -8,7 +8,7 @@ REVIEW_STANDARDS = {
     "security": (
         "Vulnérabilités de sécurité — signale IMPÉRATIVEMENT le cas échéant : "
         "injections SQL/commande (f-strings ou concaténation dans des requêtes), "
-        "secrets/clés/mots de passe codés en dur (ex: SECRET_KEY = \"...\"), "
+        'secrets/clés/mots de passe codés en dur (ex: SECRET_KEY = "..."), '
         "hachage de mot de passe faible ou non salé (MD5, SHA1, SHA-256 nu), "
         "comparaison de mots de passe/jetons non à temps constant, "
         "jetons d'authentification falsifiables (base64/JSON non signés), "
