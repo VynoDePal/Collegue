@@ -77,6 +77,12 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      # pip-audit --strict audite tout l'environnement, pip/setuptools compris.
+      # Le pip par défaut du runner traîne des CVE déjà corrigées en amont :
+      # on l'upgrade d'abord pour ne pas bloquer sur des outils de build.
+      - name: Upgrade pip toolchain
+        run: python -m pip install --upgrade pip setuptools
+
       - name: Install pip-audit
         run: pip install pip-audit
 
