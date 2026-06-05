@@ -3,7 +3,7 @@ Configuration - Paramètres de configuration pour le MCP Collègue
 """
 
 import logging
-from typing import List, Optional, Union
+from typing import ClassVar, List, Optional, Union
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     LLM_API_KEY: Optional[str] = None
     LLM_MODEL: str = "gemini-3-flash-preview"
     LLM_PROVIDER: str = "gemini"
+    # URL de base pour les providers compatibles OpenAI (LM Studio, etc.).
+    # Laisser vide pour utiliser l'URL par défaut du provider.
+    LLM_BASE_URL: Optional[str] = None
 
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
@@ -96,6 +99,29 @@ class Settings(BaseSettings):
     @property
     def llm_api_key(self) -> Optional[str]:
         return self.LLM_API_KEY
+
+    # Providers locaux compatibles OpenAI (pas de clé requise, coût nul).
+    LOCAL_PROVIDERS: ClassVar[tuple] = ("lmstudio", "ollama")
+
+    @property
+    def is_local_provider(self) -> bool:
+        return self.LLM_PROVIDER.lower() in self.LOCAL_PROVIDERS
+
+    @property
+    def llm_base_url(self) -> Optional[str]:
+        """URL de base effective pour les clients compatibles OpenAI.
+
+        LLM_BASE_URL prime ; sinon, valeur par défaut connue pour le provider
+        local (LM Studio écoute sur http://localhost:1234/v1 par défaut).
+        """
+        if self.LLM_BASE_URL:
+            return self.LLM_BASE_URL
+        provider = self.LLM_PROVIDER.lower()
+        if provider == "lmstudio":
+            return "http://localhost:1234/v1"
+        if provider == "ollama":
+            return "http://localhost:11434/v1"
+        return None
 
 
 settings = Settings()
