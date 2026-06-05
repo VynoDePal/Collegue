@@ -177,6 +177,9 @@ class MetricsCollector:
             if not model:
                 from collegue.config import settings
 
+                # Providers locaux (LM Studio…) : exécution gratuite → coût nul.
+                if settings.is_local_provider:
+                    return 0.0, 0.0
                 model = settings.LLM_MODEL
             return cost_per_token(model)
         except Exception:

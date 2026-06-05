@@ -193,16 +193,43 @@ async def validate_llm_config():
     - ``gemini`` (défaut) — utilise ``google-genai``
     - ``openai`` — utilise ``openai``
     - ``anthropic`` — utilise ``anthropic``
+    - ``lmstudio`` — serveur local compatible OpenAI (clé non requise)
     """
-    if not settings.LLM_API_KEY:
+    provider = getattr(settings, "LLM_PROVIDER", "gemini").lower()
+
+    # Les providers locaux (LM Studio) n'exigent pas de clé API.
+    if not settings.LLM_API_KEY and not settings.is_local_provider:
         error_msg = "❌ Configuration LLM manquante : LLM_API_KEY n'est pas définie."
         logger.error(error_msg)
         raise ValueError(error_msg)
 
-    provider = getattr(settings, "LLM_PROVIDER", "gemini").lower()
     logger.info(f"🔍 Validation du modèle LLM '{settings.LLM_MODEL}' (provider={provider}) en cours...")
     try:
-        if provider == "gemini":
+        if provider == "lmstudio":
+            import openai
+
+            base_url = settings.llm_base_url
+            # LM Studio ignore la clé ; on en fournit une factice si absente.
+            client = openai.OpenAI(api_key=settings.LLM_API_KEY or "lm-studio", base_url=base_url)
+
+            def check_connection():
+                # Teste juste la connexion au serveur local et liste les modèles.
+                return list(client.models.list())
+
+            models = await asyncio.to_thread(check_connection)
+            available = [getattr(m, "id", "?") for m in models]
+            if settings.LLM_MODEL in available:
+                model_display = settings.LLM_MODEL
+            elif available:
+                # Modèle non listé (ou nom différent) : on n'échoue pas, le
+                # serveur peut charger le modèle à la demande.
+                model_display = f"{settings.LLM_MODEL} (modèles chargés: {', '.join(available[:3])})"
+            else:
+                model_display = f"{settings.LLM_MODEL} (aucun modèle chargé dans LM Studio)"
+            logger.info(f"✅ Connexion LM Studio OK ({base_url}). {model_display}")
+            return True
+
+        elif provider == "gemini":
             from google import genai
 
             client = genai.Client(api_key=settings.LLM_API_KEY)
@@ -323,7 +350,7 @@ async def core_lifespan(server):
 
 
 sampling_handler = None
-if settings.LLM_API_KEY:
+if settings.LLM_API_KEY or settings.is_local_provider:
     try:
         from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
         from openai import AsyncOpenAI
@@ -354,16 +381,25 @@ if settings.LLM_API_KEY:
 
                 self.client.chat.completions.create = _create
 
-        llm_api_key = settings.LLM_API_KEY
-        gemini_client = AsyncOpenAI(
-            api_key=llm_api_key,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        )
+        provider = settings.LLM_PROVIDER.lower()
+        # URL de base selon le provider : Gemini par défaut, ou l'endpoint
+        # compatible OpenAI du provider (LM Studio / OpenAI / base_url custom).
+        if provider in ("gemini", ""):
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        else:
+            base_url = settings.llm_base_url  # None pour OpenAI cloud → défaut SDK
+        # LM Studio ignore la clé : on en fournit une factice si absente.
+        api_key = settings.LLM_API_KEY or ("lm-studio" if settings.is_local_provider else None)
+
+        openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         sampling_handler = UsageTrackingSamplingHandler(
             default_model=settings.LLM_MODEL,
-            client=gemini_client,
+            client=openai_client,
         )
-        print(f"✅ Sampling handler configuré avec Google Gemini ({settings.LLM_MODEL})", file=sys.stderr)
+        print(
+            f"✅ Sampling handler configuré (provider={provider}, modèle={settings.LLM_MODEL})",
+            file=sys.stderr,
+        )
     except ImportError:
         print("⚠️ OpenAISamplingHandler non disponible - pip install 'fastmcp[openai]'", file=sys.stderr)
     except Exception as e:
