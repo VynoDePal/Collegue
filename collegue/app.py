@@ -193,11 +193,12 @@ async def validate_llm_config():
     - ``gemini`` (défaut) — utilise ``google-genai``
     - ``openai`` — utilise ``openai``
     - ``anthropic`` — utilise ``anthropic``
-    - ``lmstudio`` — serveur local compatible OpenAI (clé non requise)
+    - ``lmstudio`` / ``unsloth`` / ``ollama`` — serveur local compatible OpenAI
     """
     provider = getattr(settings, "LLM_PROVIDER", "gemini").lower()
 
-    # Les providers locaux (LM Studio) n'exigent pas de clé API.
+    # Les providers locaux exigent une clé API seulement si l'utilisateur en a
+    # configuré une (Unsloth en attend une, LM Studio/Ollama l'ignorent).
     if not settings.LLM_API_KEY and not settings.is_local_provider:
         error_msg = "❌ Configuration LLM manquante : LLM_API_KEY n'est pas définie."
         logger.error(error_msg)
@@ -205,15 +206,16 @@ async def validate_llm_config():
 
     logger.info(f"🔍 Validation du modèle LLM '{settings.LLM_MODEL}' (provider={provider}) en cours...")
     try:
-        if provider == "lmstudio":
+        if settings.is_local_provider:
             import openai
 
             base_url = settings.llm_base_url
-            # LM Studio ignore la clé ; on en fournit une factice si absente.
-            client = openai.OpenAI(api_key=settings.LLM_API_KEY or "lm-studio", base_url=base_url)
+            # Clé : celle fournie (requise par Unsloth) sinon une factice
+            # (LM Studio / Ollama l'ignorent mais le SDK OpenAI en exige une).
+            client = openai.OpenAI(api_key=settings.LLM_API_KEY or "local", base_url=base_url)
 
             def check_connection():
-                # Teste juste la connexion au serveur local et liste les modèles.
+                # Teste la connexion au serveur local et liste les modèles.
                 return list(client.models.list())
 
             models = await asyncio.to_thread(check_connection)
@@ -221,12 +223,12 @@ async def validate_llm_config():
             if settings.LLM_MODEL in available:
                 model_display = settings.LLM_MODEL
             elif available:
-                # Modèle non listé (ou nom différent) : on n'échoue pas, le
-                # serveur peut charger le modèle à la demande.
+                # Modèle non listé : on n'échoue pas, le serveur peut le charger
+                # à la demande.
                 model_display = f"{settings.LLM_MODEL} (modèles chargés: {', '.join(available[:3])})"
             else:
-                model_display = f"{settings.LLM_MODEL} (aucun modèle chargé dans LM Studio)"
-            logger.info(f"✅ Connexion LM Studio OK ({base_url}). {model_display}")
+                model_display = f"{settings.LLM_MODEL} (aucun modèle chargé)"
+            logger.info(f"✅ Connexion {provider} OK ({base_url}). {model_display}")
             return True
 
         elif provider == "gemini":
@@ -383,13 +385,14 @@ if settings.LLM_API_KEY or settings.is_local_provider:
 
         provider = settings.LLM_PROVIDER.lower()
         # URL de base selon le provider : Gemini par défaut, ou l'endpoint
-        # compatible OpenAI du provider (LM Studio / OpenAI / base_url custom).
+        # compatible OpenAI du provider (LM Studio / Unsloth / OpenAI / custom).
         if provider in ("gemini", ""):
             base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
         else:
             base_url = settings.llm_base_url  # None pour OpenAI cloud → défaut SDK
-        # LM Studio ignore la clé : on en fournit une factice si absente.
-        api_key = settings.LLM_API_KEY or ("lm-studio" if settings.is_local_provider else None)
+        # Clé fournie si présente (requise par Unsloth) ; factice pour les locaux
+        # qui l'ignorent (LM Studio / Ollama), car le SDK OpenAI en exige une.
+        api_key = settings.LLM_API_KEY or ("local" if settings.is_local_provider else None)
 
         openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         sampling_handler = UsageTrackingSamplingHandler(

@@ -100,8 +100,16 @@ class Settings(BaseSettings):
     def llm_api_key(self) -> Optional[str]:
         return self.LLM_API_KEY
 
-    # Providers locaux compatibles OpenAI (pas de clé requise, coût nul).
-    LOCAL_PROVIDERS: ClassVar[tuple] = ("lmstudio", "ollama")
+    # Providers locaux compatibles OpenAI (serveur sur la machine, coût nul).
+    # La clé API peut être requise (unsloth) ou non (lmstudio, ollama).
+    LOCAL_PROVIDERS: ClassVar[tuple] = ("lmstudio", "ollama", "unsloth")
+
+    # URL de base par défaut pour chaque provider local (endpoint /v1).
+    LOCAL_DEFAULT_BASE_URLS: ClassVar[dict] = {
+        "lmstudio": "http://localhost:1234/v1",
+        "ollama": "http://localhost:11434/v1",
+        "unsloth": "http://localhost:8888/v1",
+    }
 
     @property
     def is_local_provider(self) -> bool:
@@ -112,16 +120,11 @@ class Settings(BaseSettings):
         """URL de base effective pour les clients compatibles OpenAI.
 
         LLM_BASE_URL prime ; sinon, valeur par défaut connue pour le provider
-        local (LM Studio écoute sur http://localhost:1234/v1 par défaut).
+        local (ex. LM Studio :1234, Unsloth :8888).
         """
         if self.LLM_BASE_URL:
             return self.LLM_BASE_URL
-        provider = self.LLM_PROVIDER.lower()
-        if provider == "lmstudio":
-            return "http://localhost:1234/v1"
-        if provider == "ollama":
-            return "http://localhost:11434/v1"
-        return None
+        return self.LOCAL_DEFAULT_BASE_URLS.get(self.LLM_PROVIDER.lower())
 
 
 settings = Settings()

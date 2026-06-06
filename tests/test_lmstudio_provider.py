@@ -1,4 +1,4 @@
-"""Tests de la configuration du provider local LM Studio (compatible OpenAI)."""
+"""Tests des providers locaux compatibles OpenAI (LM Studio, Unsloth)."""
 
 from collegue.config import Settings
 from collegue.monitoring.metrics import MetricsCollector
@@ -11,9 +11,24 @@ def test_lmstudio_is_local_provider():
     assert Settings(LLM_PROVIDER="gemini").is_local_provider is False
 
 
+def test_unsloth_is_local_provider():
+    s = Settings(LLM_PROVIDER="unsloth", LLM_API_KEY="sk-unsloth-xxx")
+    assert s.is_local_provider is True
+
+
 def test_lmstudio_default_base_url():
     s = Settings(LLM_PROVIDER="lmstudio")
     assert s.llm_base_url == "http://localhost:1234/v1"
+
+
+def test_unsloth_default_base_url():
+    s = Settings(LLM_PROVIDER="unsloth")
+    assert s.llm_base_url == "http://localhost:8888/v1"
+
+
+def test_unsloth_explicit_base_url_overrides_default():
+    s = Settings(LLM_PROVIDER="unsloth", LLM_BASE_URL="http://localhost:8000/v1")
+    assert s.llm_base_url == "http://localhost:8000/v1"
 
 
 def test_explicit_base_url_overrides_default():
