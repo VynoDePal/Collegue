@@ -20,7 +20,6 @@ Module **isolé** : non câblé au runtime (le pilote Phase 3 fournira le ``ctx`
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, List, Optional
 
@@ -28,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from collegue.core.llm import LLMRole, model_preferences_for_role
 from collegue.core.llm.client import sample_with_timeout
+from collegue.planner._parsing import json_from_text
 
 # Statuts de projet partagés avec P5 (transition planned → approved au gate humain).
 PROJECT_STATUS_PLANNED = "planned"
@@ -96,35 +96,6 @@ class Spec(BaseModel):
         )
 
 
-def _json_from_text(text: str) -> Optional[dict]:
-    """Extrait le premier objet JSON exploitable d'un texte (fallback structured-output).
-
-    Scan brace-balanced via ``raw_decode`` depuis chaque ``{`` : on retourne le
-    PREMIER objet complet qui décode (gère les blocs multiples, les ```json fences
-    et la prose qui suit, contrairement à un ``{.*}`` glouton).
-    """
-    if not text:
-        return None
-    cleaned = text.strip()
-    try:
-        whole = json.loads(cleaned)
-        if isinstance(whole, dict):
-            return whole
-    except (ValueError, TypeError):
-        pass
-    decoder = json.JSONDecoder()
-    for idx, ch in enumerate(cleaned):
-        if ch != "{":
-            continue
-        try:
-            obj, _ = decoder.raw_decode(cleaned[idx:])
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            return obj
-    return None
-
-
 def _spec_from_dict(data: dict) -> Spec:
     """Valide un dict en Spec ; convertit ``ValidationError`` en ``ValueError`` (contrat du module)."""
     try:
@@ -141,10 +112,10 @@ def _extract_spec(result: Any) -> Spec:
     if isinstance(candidate, BaseModel):
         candidate = candidate.model_dump()
     if isinstance(candidate, str):
-        candidate = _json_from_text(candidate)
+        candidate = json_from_text(candidate)
     if isinstance(candidate, dict):
         return _spec_from_dict(candidate)
-    data = _json_from_text(getattr(result, "text", "") or "")
+    data = json_from_text(getattr(result, "text", "") or "")
     if data is None:
         raise ValueError("Le planificateur n'a pas retourné de SPEC exploitable (ni structuré ni JSON).")
     return _spec_from_dict(data)
