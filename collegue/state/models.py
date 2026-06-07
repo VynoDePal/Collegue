@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -128,6 +128,8 @@ class Metric(Base):
 
 class Checkpoint(Base):
     __tablename__ = "checkpoints"
+    # Un seul checkpoint par itération (la reprise doit pointer un état non ambigu).
+    __table_args__ = (UniqueConstraint("project_id", "iteration", name="uq_checkpoints_project_iteration"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
