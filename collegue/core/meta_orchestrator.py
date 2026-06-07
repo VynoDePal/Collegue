@@ -349,8 +349,12 @@ RÈGLES :
 
         steps = []
         try:
-            # Utilisation de structured output natif
-            plan_result = await ctx.sample(
+            # Utilisation de structured output natif. Timeout par appel (C5) :
+            # un planner pendu gèlerait l'orchestration avant toute étape.
+            from collegue.core.llm.client import sample_with_timeout
+
+            plan_result = await sample_with_timeout(
+                ctx,
                 messages=[user_prompt],
                 system_prompt=system_prompt,
                 result_type=OrchestratorPlan,

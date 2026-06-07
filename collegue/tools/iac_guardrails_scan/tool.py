@@ -314,7 +314,9 @@ class IacGuardrailsScanTool(AgentLoopMixin, BaseTool):
 
         try:
             prompt = self._build_deep_analysis_prompt(request, findings)
-            result = await ctx.sample(messages=prompt, temperature=0.5, max_tokens=2000)
+            from ...core.llm.client import sample_with_timeout
+
+            result = await sample_with_timeout(ctx, messages=prompt, temperature=0.5, max_tokens=2000)
             response = result.text
 
             if not response:

@@ -3,6 +3,7 @@ Configuration - Paramètres de configuration pour le MCP Collègue
 """
 
 import logging
+import math
 from typing import ClassVar, List, Optional, Union
 
 from pydantic import field_validator, model_validator
@@ -41,6 +42,23 @@ class Settings(BaseSettings):
 
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
+    # Timeout par appel LLM individuel (ctx.sample), en secondes. Un appel pendu
+    # (réseau bloqué, provider qui ne répond pas) serait sinon capable de figer une
+    # boucle agentique. <= 0 (défaut) = désactivé (opt-in ; aucun changement de
+    # comportement). Voir collegue.core.llm.client.sample_with_timeout.
+    LLM_CALL_TIMEOUT: float = 0.0
+
+    @field_validator("LLM_CALL_TIMEOUT", mode="before")
+    @classmethod
+    def _normalize_llm_call_timeout(cls, v):
+        # Pydantic v2 accepte nan/inf pour un float ; on les neutralise (→ 0 =
+        # désactivé) car ils feraient planter asyncio.wait_for. Idem négatif.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return f if math.isfinite(f) and f > 0 else 0.0
+
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0
     MAX_HISTORY_LENGTH: int = 20

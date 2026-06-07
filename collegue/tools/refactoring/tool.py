@@ -309,8 +309,11 @@ class RefactoringTool(AgentLoopMixin, BaseTool):
 Applique les meilleures pratiques de refactoring de type '{request.refactoring_type}'.
 Réponds UNIQUEMENT avec le code refactoré, sans explications."""
 
+                from ...core.llm.client import sample_with_timeout
+
                 result = run_async_from_sync(
-                    ctx.sample(
+                    sample_with_timeout(
+                        ctx,
                         messages=prompt,
                         system_prompt=system_prompt,
                         temperature=0.5,

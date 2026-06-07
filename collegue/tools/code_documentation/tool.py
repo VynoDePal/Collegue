@@ -270,8 +270,11 @@ class DocumentationTool(AgentLoopMixin, BaseTool):
                 prompt = run_async_from_sync(self.prepare_prompt(request, template_name="documentation"))
 
                 started = time.monotonic()
+                from ...core.llm.client import sample_with_timeout
+
                 result = run_async_from_sync(
-                    ctx.sample(
+                    sample_with_timeout(
+                        ctx,
                         messages=prompt,
                         temperature=0.5,
                         max_tokens=2000,
