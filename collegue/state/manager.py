@@ -19,10 +19,19 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Iterator, List, Optional
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from collegue.state.models import Base, Checkpoint, Decision, Metric, Project, Task
+
+
+def _like_escape(query: str) -> str:
+    """Échappe les métacaractères LIKE (``%``, ``_``, ``\\``) d'une requête utilisateur.
+
+    Sans cela, une recherche ``"%"`` matcherait tout et ``"100%"`` ne trouverait
+    pas le texte littéral « 100% ». À utiliser avec ``.ilike(pattern, escape="\\")``.
+    """
+    return query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class ProjectStateManager:
@@ -159,8 +168,42 @@ class ProjectStateManager:
             return decision.id
 
     def get_decisions(self, project_id: int) -> List[Decision]:
+        """Toutes les décisions d'un projet (délègue à :meth:`get_decision_journal`)."""
+        return self.get_decision_journal(project_id)
+
+    def record_decision(self, project_id: int, summary: str, rationale: Optional[str] = None) -> int:
+        """Journalise une décision (nom du brief C7 ; alias de :meth:`add_decision`)."""
+        return self.add_decision(project_id, summary, rationale)
+
+    def get_decision_journal(self, project_id: int, query: Optional[str] = None) -> List[Decision]:
+        """Journal de décisions, avec recherche optionnelle par sous-chaîne.
+
+        ``query`` filtre sur ``summary``/``rationale`` via ``ilike`` (métacaractères
+        LIKE échappés). Casse : insensible **ASCII** sur SQLite (``lower()`` ASCII),
+        selon la collation sur PostgreSQL — les caractères accentués peuvent donc
+        différer entre backends. Pas d'index dédié (un GIN pg_trgm serait l'optim
+        prod, différée : extension PG only, non applicable sur SQLite).
+        """
         with self.session() as s:
-            return list(s.scalars(select(Decision).where(Decision.project_id == project_id).order_by(Decision.id)))
+            stmt = select(Decision).where(Decision.project_id == project_id)
+            if query:
+                like = f"%{_like_escape(query)}%"
+                stmt = stmt.where(
+                    or_(Decision.summary.ilike(like, escape="\\"), Decision.rationale.ilike(like, escape="\\"))
+                )
+            return list(s.scalars(stmt.order_by(Decision.id)))
+
+    def search_tasks(self, project_id: int, query: str) -> List[Task]:
+        """Recherche de tâches par sous-chaîne sur titre/critère (cf. casse: get_decision_journal)."""
+        like = f"%{_like_escape(query)}%"
+        with self.session() as s:
+            stmt = (
+                select(Task)
+                .where(Task.project_id == project_id)
+                .where(or_(Task.title.ilike(like, escape="\\"), Task.acceptance.ilike(like, escape="\\")))
+                .order_by(Task.id)
+            )
+            return list(s.scalars(stmt))
 
     # ── metrics ─────────────────────────────────────────────────────────────────
 
@@ -181,7 +224,21 @@ class ProjectStateManager:
     # ── checkpoints ───────────────────────────────────────────────────────────────
 
     def save_checkpoint(self, project_id: int, iteration: int, state_json: Optional[dict] = None) -> int:
+        """Enregistre (upsert) le checkpoint d'une itération.
+
+        Un seul checkpoint par ``(project_id, iteration)`` : si l'itération existe
+        déjà (ex. itération relancée après crash), on met à jour son ``state_json``
+        au lieu d'insérer un doublon qui masquerait l'original. Garanti aussi au
+        niveau DB par une contrainte d'unicité (migration 0002).
+        """
         with self.session() as s:
+            existing = s.scalars(
+                select(Checkpoint).where(Checkpoint.project_id == project_id, Checkpoint.iteration == iteration)
+            ).first()
+            if existing is not None:
+                existing.state_json = state_json
+                s.flush()
+                return existing.id
             checkpoint = Checkpoint(project_id=project_id, iteration=iteration, state_json=state_json)
             s.add(checkpoint)
             s.flush()
@@ -194,6 +251,23 @@ class ProjectStateManager:
                 select(Checkpoint)
                 .where(Checkpoint.project_id == project_id)
                 .order_by(Checkpoint.iteration.desc(), Checkpoint.id.desc())
+                .limit(1)
+            )
+            return s.scalars(stmt).first()
+
+    def load_checkpoint(self, project_id: int, iteration: Optional[int] = None) -> Optional[Checkpoint]:
+        """Charge un checkpoint : celui de l'``iteration`` donnée, sinon le dernier.
+
+        Cœur de la **reprise** (C7) : après un redémarrage, on recharge l'état
+        depuis la DB pour repartir de la dernière itération checkpointée.
+        """
+        if iteration is None:
+            return self.get_latest_checkpoint(project_id)
+        with self.session() as s:
+            stmt = (
+                select(Checkpoint)
+                .where(Checkpoint.project_id == project_id, Checkpoint.iteration == iteration)
+                .order_by(Checkpoint.id.desc())
                 .limit(1)
             )
             return s.scalars(stmt).first()

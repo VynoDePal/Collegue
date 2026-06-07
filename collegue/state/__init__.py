@@ -5,6 +5,7 @@ l'outil read-only ``collegue/tools/postgres_db.py``. Module isolé, non câblé 
 runtime tant que le pilote (Phase 3) ne l'utilise pas.
 """
 
+from collegue.state.checkpoints import ProjectSnapshot, load_snapshot
 from collegue.state.manager import ProjectStateManager
 from collegue.state.models import Base, Checkpoint, Decision, Metric, Project, Task
 
@@ -16,4 +17,6 @@ __all__ = [
     "Metric",
     "Checkpoint",
     "ProjectStateManager",
+    "ProjectSnapshot",
+    "load_snapshot",
 ]
