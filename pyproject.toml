@@ -52,6 +52,23 @@ markers = [
     "integration: live runs requiring real credentials (Sentry, GitHub, LLM, Postgres, K8s) — skipped in CI",
 ]
 
+[tool.coverage.run]
+# Couverture honnête : on mesure tout le package applicatif, sans omettre de
+# code réel (omettre du code non testé gonflerait artificiellement le ratio).
+source = ["collegue"]
+
+[tool.coverage.report]
+# Le seuil bloquant vit dans la CI (--cov-fail-under, .github/workflows/tests.yml)
+# pour rester visible au niveau du gate ; ici on ne configure que l'affichage.
+show_missing = true
+# On n'exclut que les lignes jamais exécutées à l'exécution réelle. Pas de
+# "raise NotImplementedError" : les stubs abstraits sont de vraies branches non
+# testées — les masquer gonflerait le ratio juste avant de poser un gate dessus.
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"

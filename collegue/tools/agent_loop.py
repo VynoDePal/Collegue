@@ -187,7 +187,12 @@ class AgentLoopMixin:
                 except Exception as exc:
                     logger.debug("Routage par rôle ignoré: %s", exc)
                 _it_start = time.time()
-                result = await ctx.sample(**sample_kwargs)
+                # Timeout par appel LLM (C5) : un ctx.sample pendu est annulé
+                # proprement et lève LLMCallTimeout (capté plus bas comme une
+                # erreur d'itération). <= 0 / non défini = pas de timeout.
+                from collegue.core.llm.client import sample_with_timeout
+
+                result = await sample_with_timeout(ctx, **sample_kwargs)
                 raw_output = result.text or ""
 
                 # Tokens : vrais tokens du provider si le handler les a captés

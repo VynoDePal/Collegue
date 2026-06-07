@@ -55,7 +55,7 @@ jobs:
       - name: Run pytest with coverage
         env:
           PYTHONPATH: .
-        run: pytest tests/ --maxfail=5 --cov=collegue --cov-report=term-missing --cov-report=xml
+        run: pytest tests/ --maxfail=5 --cov=collegue --cov-report=term-missing --cov-report=xml --cov-fail-under=60
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12'
