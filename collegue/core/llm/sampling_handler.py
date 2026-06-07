@@ -40,6 +40,7 @@ def _make_handler_class():
                     record_usage(
                         getattr(usage, "prompt_tokens", 0) or 0,
                         getattr(usage, "completion_tokens", 0) or 0,
+                        getattr(response, "model", "") or "",
                     )
                 return response
 

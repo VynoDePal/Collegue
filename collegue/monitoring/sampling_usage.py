@@ -12,25 +12,32 @@ from __future__ import annotations
 import contextvars
 from typing import Optional, Tuple
 
-# (prompt_tokens, completion_tokens) du dernier appel LLM dans cette task, ou None.
-_last_usage: contextvars.ContextVar[Optional[Tuple[int, int]]] = contextvars.ContextVar(
+# (prompt_tokens, completion_tokens, model) du dernier appel LLM dans cette task,
+# ou None. Le modèle est celui réellement renvoyé par le provider.
+_last_usage: contextvars.ContextVar[Optional[Tuple[int, int, str]]] = contextvars.ContextVar(
     "collegue_last_sampling_usage", default=None
 )
 
 
-def record_usage(prompt_tokens: int, completion_tokens: int) -> None:
+def record_usage(prompt_tokens: int, completion_tokens: int, model: str = "") -> None:
     """Cumule les tokens réels d'un appel LLM (appelé par le handler).
 
-    On accumule plutôt qu'on n'écrase : un seul ``ctx.sample()`` peut déclencher
-    plusieurs appels LLM (boucle d'outils / structured output), et l'appelant ne
-    consomme la valeur qu'une fois via :func:`take_usage`.
+    On accumule les tokens plutôt qu'on n'écrase : un seul ``ctx.sample()`` peut
+    déclencher plusieurs appels LLM (boucle d'outils / structured output), et
+    l'appelant ne consomme la valeur qu'une fois via :func:`take_usage`. Le
+    modèle conservé est le dernier non vide rencontré.
     """
-    prev = _last_usage.get() or (0, 0)
-    _last_usage.set((prev[0] + int(prompt_tokens or 0), prev[1] + int(completion_tokens or 0)))
+    prev_p, prev_c, prev_m = _last_usage.get() or (0, 0, "")
+    model = model or prev_m
+    _last_usage.set((prev_p + int(prompt_tokens or 0), prev_c + int(completion_tokens or 0), model))
 
 
-def take_usage() -> Optional[Tuple[int, int]]:
-    """Récupère et remet à zéro les tokens cumulés (None si aucun appel suivi)."""
+def take_usage() -> Optional[Tuple[int, int, str]]:
+    """Récupère et remet à zéro l'usage cumulé.
+
+    Retourne ``(prompt_tokens, completion_tokens, model)`` ou ``None`` si aucun
+    appel n'a été suivi dans cette task.
+    """
     usage = _last_usage.get()
     _last_usage.set(None)
     return usage
