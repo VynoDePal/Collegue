@@ -351,34 +351,7 @@ async def core_lifespan(server):
 sampling_handler = None
 if settings.LLM_API_KEY or settings.is_local_provider:
     try:
-        from fastmcp.client.sampling.handlers.openai import OpenAISamplingHandler
-        from openai import AsyncOpenAI
-
-        from collegue.monitoring.sampling_usage import record_usage
-
-        class UsageTrackingSamplingHandler(OpenAISamplingHandler):
-            """Capte les tokens réels du provider, perdus par le handler de base.
-
-            ``OpenAISamplingHandler`` ne propage pas ``response.usage`` dans le
-            ``CreateMessageResult``. On enveloppe le client pour lire l'``usage``
-            renvoyé par l'API et l'exposer aux outils via un ContextVar.
-            """
-
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                inner = self.client.chat.completions.create
-
-                async def _create(*a, **kw):
-                    response = await inner(*a, **kw)
-                    usage = getattr(response, "usage", None)
-                    if usage is not None:
-                        record_usage(
-                            getattr(usage, "prompt_tokens", 0) or 0,
-                            getattr(usage, "completion_tokens", 0) or 0,
-                        )
-                    return response
-
-                self.client.chat.completions.create = _create
+        from collegue.core.llm.sampling_handler import build_sampling_handler
 
         provider = settings.LLM_PROVIDER.lower()
         # Gemini par défaut ; sinon l'endpoint OpenAI-compatible du provider.
@@ -389,17 +362,18 @@ if settings.LLM_API_KEY or settings.is_local_provider:
         # Clé factice pour les locaux qui l'ignorent (le SDK OpenAI en exige une).
         api_key = settings.LLM_API_KEY or ("local" if settings.is_local_provider else None)
 
-        openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        sampling_handler = UsageTrackingSamplingHandler(
+        sampling_handler = build_sampling_handler(
             default_model=settings.LLM_MODEL,
-            client=openai_client,
+            api_key=api_key,
+            base_url=base_url,
         )
-        print(
-            f"✅ Sampling handler configuré (provider={provider}, modèle={settings.LLM_MODEL})",
-            file=sys.stderr,
-        )
-    except ImportError:
-        print("⚠️ OpenAISamplingHandler non disponible - pip install 'fastmcp[openai]'", file=sys.stderr)
+        if sampling_handler is None:
+            print("⚠️ Sampling handler indisponible - pip install 'fastmcp[openai]'", file=sys.stderr)
+        else:
+            print(
+                f"✅ Sampling handler configuré (provider={provider}, modèle={settings.LLM_MODEL})",
+                file=sys.stderr,
+            )
     except Exception as e:
         print(f"⚠️ Impossible de configurer le sampling handler: {e}", file=sys.stderr)
 

@@ -120,6 +120,11 @@ class AgentLoopMixin:
 
     agent_config: AgentLoopConfig = AgentLoopConfig()
 
+    # Rôle LLM de cet expert (routage modèle par rôle, C2). Défaut DEFAULT =
+    # modèle global, comportement inchangé. Un expert peut le surcharger
+    # (ex. llm_role = LLMRole.CODER) pour viser un modèle dédié.
+    llm_role: str = "default"
+
     async def agent_execute(
         self,
         initial_prompt: str,
@@ -171,6 +176,16 @@ class AgentLoopMixin:
                 }
                 if system_prompt is not None:
                     sample_kwargs["system_prompt"] = system_prompt
+                # Routage par rôle (optionnel) : self.llm_role par défaut DEFAULT
+                # → préférence = modèle global, comportement inchangé.
+                try:
+                    from collegue.core.llm.client import model_preferences_for_role
+
+                    prefs = model_preferences_for_role(getattr(self, "llm_role", "default"))
+                    if prefs:
+                        sample_kwargs["model_preferences"] = prefs
+                except Exception as exc:
+                    logger.debug("Routage par rôle ignoré: %s", exc)
                 _it_start = time.time()
                 result = await ctx.sample(**sample_kwargs)
                 raw_output = result.text or ""

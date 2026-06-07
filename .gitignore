@@ -269,3 +269,5 @@ tests/stress/reports/
 tests/evals/reports/
 
 .claude
+# Données runtime Collègue (mémoire projet, monitoring) — jamais commitées
+.collegue/
