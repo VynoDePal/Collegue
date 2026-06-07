@@ -193,6 +193,7 @@ class AgentLoopMixin:
                 # Tokens : vrais tokens du provider si le handler les a captés
                 # (via ContextVar), sinon estimation ~4 caractères/token.
                 # BaseTool.execute_async les relit pour les métriques de coût.
+                used_model = ""
                 try:
                     from collegue.monitoring.sampling_usage import take_usage
 
@@ -200,7 +201,7 @@ class AgentLoopMixin:
                 except Exception:
                     real = None
                 if real is not None:
-                    est_input_tokens, est_output_tokens = real
+                    est_input_tokens, est_output_tokens, used_model = real
                 else:
                     est_input_tokens = (len(current_prompt) + len(system_prompt or "")) // 4
                     est_output_tokens = len(raw_output) // 4
@@ -220,6 +221,7 @@ class AgentLoopMixin:
                         input_tokens=est_input_tokens,
                         output_tokens=est_output_tokens,
                         iteration=i + 1,
+                        model=used_model,
                     )
                 except Exception:
                     pass
