@@ -747,6 +747,7 @@ class BaseTool(ABC):
         system_prompt: Optional[str] = None,
         result_type: Optional[Type[BaseModel]] = None,
         temperature: float = 0.7,
+        role: Optional[str] = None,
     ) -> Any:
 
         if ctx is not None:
@@ -754,8 +755,24 @@ class BaseTool(ABC):
             if system_prompt:
                 messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
 
+            # Routage par rôle (optionnel) : sans role, comportement inchangé.
+            sample_kwargs: Dict[str, Any] = {
+                "messages": messages,
+                "result_type": result_type,
+                "temperature": temperature,
+            }
+            if role is not None:
+                try:
+                    from collegue.core.llm.client import model_preferences_for_role
+
+                    prefs = model_preferences_for_role(role)
+                    if prefs:
+                        sample_kwargs["model_preferences"] = prefs
+                except Exception as exc:
+                    self.logger.debug("Routage par rôle ignoré: %s", exc)
+
             _llm_start = time.time()
-            result = await ctx.sample(messages=messages, result_type=result_type, temperature=temperature)
+            result = await ctx.sample(**sample_kwargs)
 
             # Estimer et enregistrer les tokens utilisés (approximation)
             # GPT-4 ~ 4 chars/token en moyenne
