@@ -10,6 +10,7 @@ Tracks per-expert:
 
 import json
 import logging
+import math
 import threading
 import time
 from collections import defaultdict
@@ -136,6 +137,16 @@ class MetricsSummary:
             "experts_count": len(self.experts),
             "experts": self.experts,
         }
+
+
+@dataclass
+class BudgetStatus:
+    """Résultat d'une vérification de budget dur (C4)."""
+
+    exceeded: bool
+    limit_type: str  # "cost" | "tokens"
+    current: float
+    limit: float
 
 
 class MetricsCollector:
@@ -310,6 +321,56 @@ class MetricsCollector:
                 experts=experts_data,
             )
 
+    # ── budget dur (C4) ──────────────────────────────────────────────────────
+
+    def _cumulative_totals(self) -> tuple[float, int]:
+        """(coût cumulé USD, tokens cumulés) sur tous les experts."""
+        with self._lock:
+            total_cost = sum(m.total_cost for m in self._experts.values())
+            total_tokens = sum(m.total_input_tokens + m.total_output_tokens for m in self._experts.values())
+        return total_cost, total_tokens
+
+    def would_exceed_budget(
+        self,
+        max_cost_usd: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Optional[BudgetStatus]:
+        """Retourne un :class:`BudgetStatus` si le budget dur est atteint, sinon ``None``.
+
+        Les plafonds sont résolus depuis ``settings`` (``MAX_COST_USD`` /
+        ``MAX_TOKENS_BUDGET``) s'ils ne sont pas fournis. Un plafond ``<= 0``
+        (ou non défini) est désactivé. La comparaison est ``>=`` : on bloque
+        l'appel suivant dès que la limite est atteinte.
+
+        Granularité (limitation connue, C4) : le coût cumulé est mis à jour à la
+        **fin de chaque exécution d'outil** (``record_execution``), pas par appel
+        LLM. Le dépassement est donc détecté entre outils — ce qui borne le
+        runaway « sur des heures » visé par le brief §6. À l'intérieur d'un seul
+        ``agent_execute``, le surcoût est borné par ``max_iterations`` (≤10) ×
+        ``max_tokens``. Un cap par-appel serait un raffinement ultérieur.
+
+        Providers locaux (LM Studio/Ollama/Unsloth) : coût toujours 0 → le cap
+        ``MAX_COST_USD`` est inerte ; seul ``MAX_TOKENS_BUDGET`` les protège.
+        """
+        if max_cost_usd is None or max_tokens is None:
+            try:
+                from collegue.config import settings
+
+                if max_cost_usd is None:
+                    max_cost_usd = settings.MAX_COST_USD
+                if max_tokens is None:
+                    max_tokens = settings.MAX_TOKENS_BUDGET
+            except Exception:
+                pass
+        total_cost, total_tokens = self._cumulative_totals()
+        # Fail-safe : un coût non fini (NaN/inf — ex. metrics.json corrompu) ne
+        # doit pas aveugler le cap (NaN >= x est False), on le traite en dépassement.
+        if max_cost_usd and max_cost_usd > 0 and (not math.isfinite(total_cost) or total_cost >= max_cost_usd):
+            return BudgetStatus(True, "cost", total_cost, float(max_cost_usd))
+        if max_tokens and max_tokens > 0 and total_tokens >= max_tokens:
+            return BudgetStatus(True, "tokens", float(total_tokens), float(max_tokens))
+        return None
+
     # ── disk persistence ───────────────────────────────────────────────────
 
     def _persist_path(self) -> Path:
@@ -384,3 +445,56 @@ def get_metrics_collector() -> MetricsCollector:
             if _metrics_collector is None:
                 _metrics_collector = MetricsCollector()
     return _metrics_collector
+
+
+def enforce_budget(
+    collector: Optional[MetricsCollector] = None,
+    settings_obj: Optional[Any] = None,
+) -> None:
+    """Garde budget dur (C4) : lève ``BudgetExceeded`` si le plafond $/tokens est atteint.
+
+    Appelée avant chaque appel LLM (au plus tôt). Comportement piloté par
+    ``BUDGET_EXHAUSTED_ACTION`` : ``"pause"`` (défaut) trace l'événement et lève
+    ``BudgetExceeded`` (les appels LLM s'arrêtent jusqu'à intervention humaine) ;
+    ``"warn"`` journalise sans bloquer. Plafonds à 0/non définis → no-op.
+
+    ``collector``/``settings_obj`` sont injectables pour les tests ; par défaut on
+    utilise le singleton et la configuration globale.
+    """
+    from collegue.tools.quotas import BudgetExceeded
+
+    if settings_obj is None:
+        try:
+            from collegue.config import settings as settings_obj
+        except Exception:
+            settings_obj = None
+
+    max_cost = getattr(settings_obj, "MAX_COST_USD", None)
+    max_tokens = getattr(settings_obj, "MAX_TOKENS_BUDGET", None)
+    action = str(getattr(settings_obj, "BUDGET_EXHAUSTED_ACTION", "pause") or "pause").strip().lower()
+
+    collector = collector or get_metrics_collector()
+    status = collector.would_exceed_budget(max_cost_usd=max_cost, max_tokens=max_tokens)
+    if status is None:
+        return
+
+    msg = f"Budget dur atteint ({status.limit_type}): {status.current:.4f} >= {status.limit:.4f}"
+
+    # Trace (journal d'activité pour le dashboard ; tolérant aux pannes).
+    try:
+        from collegue.monitoring.activity_log import get_activity_log
+
+        get_activity_log().log_budget_event(
+            limit_type=status.limit_type,
+            current=status.current,
+            limit=status.limit,
+            action=action,
+        )
+    except Exception:
+        pass
+
+    if action == "warn":
+        logger.warning("%s — action=warn, appels LLM non bloqués.", msg)
+        return
+    logger.error("%s — auto-pause des appels LLM (intervention humaine requise).", msg)
+    raise BudgetExceeded(status.limit_type, status.current, status.limit)
