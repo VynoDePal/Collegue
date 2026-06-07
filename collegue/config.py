@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     # Laisser vide pour utiliser l'URL par défaut du provider.
     LLM_BASE_URL: Optional[str] = None
 
+    # Modèle/provider par rôle (codeur fort, QA économique, planner…).
+    # Optionnels : si non définis, on retombe sur LLM_MODEL / LLM_PROVIDER.
+    # Résolus via collegue.core.llm.resolve_role().
+    LLM_MODEL_CODER: Optional[str] = None
+    LLM_PROVIDER_CODER: Optional[str] = None
+    LLM_MODEL_QA: Optional[str] = None
+    LLM_PROVIDER_QA: Optional[str] = None
+    LLM_MODEL_REVIEWER: Optional[str] = None
+    LLM_PROVIDER_REVIEWER: Optional[str] = None
+    LLM_MODEL_PLANNER: Optional[str] = None
+    LLM_PROVIDER_PLANNER: Optional[str] = None
+
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
     ENGINE_INIT_TIMEOUT: float = 10.0
