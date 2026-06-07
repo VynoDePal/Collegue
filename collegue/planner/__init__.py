@@ -8,6 +8,7 @@ Modules **isolés** : non câblés au runtime tant que le pilote (Phase 3) ne le
 enchaîne pas.
 """
 
+from collegue.planner.decomposer import decompose
 from collegue.planner.spec_generator import Spec, generate_spec, persist_spec
 
-__all__ = ["Spec", "generate_spec", "persist_spec"]
+__all__ = ["Spec", "generate_spec", "persist_spec", "decompose"]
