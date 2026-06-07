@@ -96,6 +96,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Image d'exécution du sandbox isolé (C8). Sous le profil "sandbox" : NON
+  # démarrée par `docker compose up` — l'exécuteur (collegue/sandbox/executor.py)
+  # lance des conteneurs éphémères à la demande via `docker run`. Cette entrée sert
+  # à builder l'image : `docker compose --profile sandbox build collegue-sandbox`.
+  collegue-sandbox:
+    build:
+      context: .
+      dockerfile: docker/sandbox/Dockerfile
+    image: collegue-sandbox:latest
+    profiles:
+      - sandbox
+    # Conteneur de référence sans rôle de service long-running.
+    restart: "no"
+    command: ["python", "--version"]
+
 volumes:
   nginx_logs:
   collegue_data:
