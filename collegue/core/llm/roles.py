@@ -32,6 +32,7 @@ def resolve_role(role: LLMRole | str = LLMRole.DEFAULT, settings_obj: Optional[o
     Priorité : config dédiée au rôle (``LLM_PROVIDER_<ROLE>`` / ``LLM_MODEL_<ROLE>``)
     si présente, sinon fallback sur le couple global ``LLM_PROVIDER`` / ``LLM_MODEL``.
     Chaque dimension (provider, model) retombe indépendamment sur le défaut.
+    Une valeur vide (``""``) est traitée comme « non définie » → fallback global.
 
     Args:
         role: rôle (``LLMRole`` ou sa valeur str). Inconnu → traité comme DEFAULT.
