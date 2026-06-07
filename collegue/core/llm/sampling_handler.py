@@ -10,6 +10,10 @@ importable et testable. Deux différences avec ``OpenAISamplingHandler`` :
    modèles OpenAI connus (``ChatModel``) et ignorerait silencieusement un modèle
    Gemini/local passé en préférence → le routage par rôle serait un no-op. Ici,
    toute préférence explicite non vide prime, sinon le modèle par défaut.
+3. **Garde budget dur (C4)** : avant chaque appel, ``enforce_budget()`` vérifie
+   le plafond $/tokens cumulé. C'est le chokepoint universel (tous les
+   ``ctx.sample()`` passent ici) → une boucle LLM emballée est stoppée (auto-pause)
+   au lieu de brûler tout le budget. No-op si les plafonds sont désactivés.
 
 ``build_sampling_handler`` est tolérant : il retourne ``None`` si ``fastmcp`` /
 ``openai`` ne sont pas disponibles, pour ne pas casser le démarrage.
@@ -34,6 +38,12 @@ def _make_handler_class():
             inner = self.client.chat.completions.create
 
             async def _create(*a, **kw):
+                # Garde budget dur (C4) : stoppe l'appel AVANT toute dépense si le
+                # plafond $/tokens cumulé est atteint. Chokepoint universel — tous
+                # les ctx.sample() transitent ici. No-op si plafonds désactivés.
+                from collegue.monitoring.metrics import enforce_budget
+
+                enforce_budget()
                 response = await inner(*a, **kw)
                 usage = getattr(response, "usage", None)
                 if usage is not None:

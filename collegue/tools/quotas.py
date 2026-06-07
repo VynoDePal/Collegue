@@ -30,6 +30,33 @@ class QuotaExceeded(Exception):
         super().__init__(message)
 
 
+class BudgetExceeded(BaseException):
+    """Plafond budget DUR atteint (coût $ ou tokens cumulés) → auto-pause des appels LLM.
+
+    Distinct de :class:`QuotaExceeded` (quotas per-session) : porte sur la dépense
+    cumulée globale (toutes sessions) et déclenche l'arrêt des appels LLM jusqu'à
+    intervention humaine (relever le plafond ou réinitialiser les métriques).
+
+    **Hérite de ``BaseException`` (pas ``Exception``) à dessein.** L'auto-pause est
+    un signal d'arrêt dur, au même titre que ``KeyboardInterrupt`` : les chemins
+    LLM (agent_loop, méta-orchestrateur, tools) enveloppent ``ctx.sample()`` dans
+    des ``except Exception`` génériques qui, sinon, dégraderaient le dépassement en
+    simple « erreur LLM » d'itération — la pause serait illusoire et la boucle
+    emballée continuerait. En héritant de ``BaseException``, le signal traverse ces
+    handlers et remonte jusqu'au sommet (intervention humaine requise). Les blocs
+    ``finally`` s'exécutent toujours, donc le nettoyage des ressources est préservé.
+    """
+
+    def __init__(self, budget_type: str, current: float, limit: float):
+        self.budget_type = budget_type
+        self.current = current
+        self.limit = limit
+        super().__init__(
+            f"Budget '{budget_type}' atteint: {current:.4f}/{limit:.4f} — "
+            "appels LLM en pause (intervention humaine requise)."
+        )
+
+
 class QuotaType(Enum):
     """Types de quotas disponibles."""
 

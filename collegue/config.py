@@ -56,6 +56,31 @@ class Settings(BaseSettings):
     LLM_RATE_LIMIT_PER_MINUTE: int = 15
     LLM_RATE_LIMIT_PER_DAY: int = 500
 
+    # --- Budget DUR global (coût $ / tokens) + auto-pause (garde-fou brief §6) ---
+    # Plafond DUR sur la dépense cumulée, distinct du rate limiter (fréquence) et
+    # des quotas per-session (collegue.tools.quotas). Quand le coût cumulé atteint
+    # MAX_COST_USD, ou le total de tokens atteint MAX_TOKENS_BUDGET, les appels LLM
+    # sont stoppés (auto-pause) — protège contre une boucle LLM emballée.
+    # 0 (ou non défini) = plafond désactivé (opt-in ; défaut = aucun changement).
+    # Portée : compteur cumulé du process serveur (le moteur autonome = 1 process ;
+    # le dashboard est un lecteur séparé). En multi-worker, le cap est par-worker.
+    # Providers locaux (LM Studio/Ollama/Unsloth) : coût = 0 → MAX_COST_USD inerte,
+    # seul MAX_TOKENS_BUDGET les protège.
+    MAX_COST_USD: float = 0.0
+    MAX_TOKENS_BUDGET: int = 0
+    # Action quand le budget est atteint : "pause" (défaut) = refuse les appels
+    # LLM et attend une intervention humaine (relever le plafond / réinitialiser
+    # les métriques) ; "warn" = journalise seulement sans bloquer.
+    BUDGET_EXHAUSTED_ACTION: str = "pause"
+
+    @field_validator("BUDGET_EXHAUSTED_ACTION", mode="before")
+    @classmethod
+    def _normalize_budget_action(cls, v):
+        if not v:
+            return "pause"
+        action = str(v).strip().lower()
+        return action if action in ("pause", "warn") else "pause"
+
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
 
     OAUTH_ENABLED: bool = False

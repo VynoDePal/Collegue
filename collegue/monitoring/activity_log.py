@@ -141,6 +141,24 @@ class ActivityLog:
             }
         )
 
+    def log_budget_event(
+        self,
+        limit_type: str,
+        current: float,
+        limit: float,
+        action: str,
+    ) -> None:
+        """Trace une auto-pause budget (plafond $ / tokens atteint)."""
+        self._append(
+            {
+                "type": "budget_exhausted",
+                "limit_type": limit_type,
+                "current": round(current, 6),
+                "limit": limit,
+                "action": action,
+            }
+        )
+
     # ── read ─────────────────────────────────────────────────────────────
 
     def read_events(
