@@ -122,6 +122,12 @@ class Settings(BaseSettings):
 
     OAUTH_PUBLIC_KEY: Optional[str] = None
 
+    # État projet durable (C6, brief §4.6) : URL de connexion du store d'état
+    # (PostgreSQL en prod, ex. "postgresql+psycopg2://user:pass@host:5432/db").
+    # None = store non configuré (le moteur autonome n'est pas encore câblé,
+    # Phase 3). Lu par les migrations Alembic et ProjectStateManager.from_url().
+    STATE_DATABASE_URL: Optional[str] = None
+
     SENTRY_DSN: Optional[str] = None
     SENTRY_ENVIRONMENT: str = "production"
 

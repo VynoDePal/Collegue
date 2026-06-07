@@ -12,6 +12,11 @@ pytest>=8.4.1
 google-genai>=1.62.0
 requests>=2.31.0
 psycopg2-binary>=2.9.9
+# État projet durable (C6) : store SQLAlchemy + migrations Alembic. Cible
+# PostgreSQL (via psycopg2) ; testable sur SQLite. Module isolé, non câblé au
+# runtime tant que le pilote (Phase 3) ne l'utilise pas.
+sqlalchemy>=2.0.0,<3.0.0
+alembic>=1.13.0,<2.0.0
 kubernetes>=29.0.0
 # Pin de sécurité (dépendance transitive de kubernetes) : aiohttp < 3.14.0 est
 # affecté par CVE-2026-34993 (RCE via CookieJar.load) et CVE-2026-47265 (fuite de
