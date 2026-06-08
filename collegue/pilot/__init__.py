@@ -16,6 +16,7 @@ from collegue.pilot.budget import (
     ContinueDecision,
 )
 from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
+from collegue.pilot.runtime import format_run_report, run_project_from_settings
 from collegue.pilot.scheduler import (
     SchedulerError,
     is_blocked,
@@ -41,4 +42,7 @@ __all__ = [
     "run_project",
     "ProjectRunResult",
     "TaskOutcome",
+    # F4 — câblage runtime
+    "run_project_from_settings",
+    "format_run_report",
 ]
