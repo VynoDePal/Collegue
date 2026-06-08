@@ -15,6 +15,7 @@ from collegue.pilot.budget import (
     BudgetTimeController,
     ContinueDecision,
 )
+from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
 from collegue.pilot.scheduler import (
     SchedulerError,
     is_blocked,
@@ -36,4 +37,8 @@ __all__ = [
     "ACTION_CONTINUE",
     "ACTION_PAUSED_BUDGET",
     "ACTION_DEADLINE",
+    # F3 — Project Driver
+    "run_project",
+    "ProjectRunResult",
+    "TaskOutcome",
 ]
