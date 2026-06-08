@@ -50,3 +50,26 @@ class FileCommands(GitHubClient):
 
         resp = self._api_put(f"/repos/{owner}/{repo}/contents/{path}", data)
         return {"content": resp.get("content", {}), "commit": resp.get("commit", {})}
+
+    def delete_file(
+        self, owner: str, repo: str, path: str, message: str, branch: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Delete a file from the repo. No-op (returns None) if the file is absent.
+
+        The Contents API requires the current blob ``sha`` to delete; we look it up
+        first and skip cleanly if the file does not exist on ``branch``.
+        """
+        try:
+            current = self.get_file_content(owner, repo, path, branch)
+        except ToolExecutionError:
+            return None
+        sha = current.get("sha")
+        if not sha:
+            return None
+
+        data: Dict[str, Any] = {"message": message, "sha": sha}
+        if branch:
+            data["branch"] = branch
+
+        resp = self._request_json("DELETE", f"/repos/{owner}/{repo}/contents/{path}", json_data=data)
+        return {"commit": (resp or {}).get("commit", {})}
