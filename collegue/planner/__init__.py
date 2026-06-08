@@ -9,6 +9,7 @@ enchaîne pas.
 """
 
 from collegue.planner.decomposer import decompose
+from collegue.planner.github_sync import SyncClients, SyncError, SyncResult, build_sync_preview, sync_plan
 from collegue.planner.plan_review import (
     PlanNotApproved,
     PlanPreview,
@@ -30,4 +31,9 @@ __all__ = [
     "approve_plan",
     "is_approved",
     "require_approved",
+    "sync_plan",
+    "build_sync_preview",
+    "SyncResult",
+    "SyncClients",
+    "SyncError",
 ]

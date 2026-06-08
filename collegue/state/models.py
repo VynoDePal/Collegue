@@ -91,6 +91,9 @@ class Project(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    # Un numéro d'issue GitHub ne mappe qu'une seule tâche (NULL multiples permis :
+    # tâches non encore synchronisées). Intégrité du mapping task↔issue (P4).
+    __table_args__ = (UniqueConstraint("project_id", "issue_number", name="uq_tasks_project_issue"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -99,6 +102,9 @@ class Task(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo", server_default="todo")
     # Liste d'IDs de tâches dont celle-ci dépend (graphe de tâches).
     depends_on: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Numéro d'issue GitHub une fois la tâche synchronisée (P4) ; NULL sinon.
+    # Sert de mapping task↔issue et de garde d'idempotence (ne pas recréer).
+    issue_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
     )

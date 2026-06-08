@@ -158,6 +158,17 @@ class ProjectStateManager:
             task.status = status
             return True
 
+    def update_task(self, task_id: int, **fields: Any) -> bool:
+        """Met à jour des champs d'une tâche (status, issue_number…). False si absente."""
+        with self.session() as s:
+            task = s.get(Task, task_id)
+            if task is None:
+                return False
+            for key, value in fields.items():
+                if hasattr(task, key):
+                    setattr(task, key, value)
+            return True
+
     # ── decisions ───────────────────────────────────────────────────────────────
 
     def add_decision(self, project_id: int, summary: str, rationale: Optional[str] = None) -> int:
