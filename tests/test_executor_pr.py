@@ -210,6 +210,17 @@ def test_build_pr_body_structure():
     assert exec_marker(5) in body
 
 
+def test_build_pr_body_closes_issue_flag():
+    # Défaut : ferme l'issue (comportement E5 inchangé).
+    assert "Closes #5" in build_pr_body(REPORT, ISSUE, closes_issue=True)
+    # closes_issue=False : pas de « Closes » (numéro ≠ vraie issue, ex. round G4),
+    # mais le marqueur + le rapport restent présents.
+    body = build_pr_body(REPORT, ISSUE, closes_issue=False)
+    assert "Closes #" not in body
+    assert exec_marker(5) in body
+    assert "## Gate qualité" in body
+
+
 # --- FileCommands.delete_file (ajout E4) ----------------------------------------
 
 

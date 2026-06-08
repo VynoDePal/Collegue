@@ -83,23 +83,27 @@ class PrResult:
     skipped: bool = False  # PR déjà existante (idempotence)
 
 
-def build_pr_body(quality_report: QualityReport, issue: IssueSpec) -> str:
-    """Corps de PR : contexte issue + rapport qualité (fencé) + ``Closes`` + marqueur."""
-    return "\n".join(
-        [
-            f"## Exécution automatique de l'issue #{int(issue.number)}",
-            "",
-            f"> {inline(issue.title)}",
-            "",
-            "_PR générée par l'exécuteur Collègue (Phase 2). Merge sous CI verte + approbation humaine._",
-            "",
-            quality_report.to_markdown(),
-            "",
-            f"Closes #{int(issue.number)}",
-            "",
-            exec_marker(issue.number),
-        ]
-    )
+def build_pr_body(quality_report: QualityReport, issue: IssueSpec, *, closes_issue: bool = True) -> str:
+    """Corps de PR : contexte issue + rapport qualité (fencé) + ``Closes`` + marqueur.
+
+    ``closes_issue=False`` omet la ligne ``Closes #N`` : à utiliser quand le numéro
+    ne référence PAS une vraie issue GitHub (ex. tâche d'amélioration G4, dont le
+    numéro est un compteur de round) — sinon on fermerait une issue sans rapport.
+    """
+    lines = [
+        f"## Exécution automatique de l'issue #{int(issue.number)}",
+        "",
+        f"> {inline(issue.title)}",
+        "",
+        "_PR générée par l'exécuteur Collègue (Phase 2). Merge sous CI verte + approbation humaine._",
+        "",
+        quality_report.to_markdown(),
+        "",
+    ]
+    if closes_issue:
+        lines += [f"Closes #{int(issue.number)}", ""]
+    lines.append(exec_marker(issue.number))
+    return "\n".join(lines)
 
 
 def open_pr(
@@ -115,6 +119,7 @@ def open_pr(
     dry_run: bool = True,
     manager: Optional[object] = None,
     project_id: Optional[int] = None,
+    closes_issue: bool = True,
 ) -> PrResult:
     """Ouvre (ou prévisualise) la PR de l'issue.
 
@@ -122,10 +127,11 @@ def open_pr(
     **sans aucune écriture**. Sinon : idempotence (PR ouverte existante retournée),
     création de branche, commit des fichiers (suppression incluse), ouverture de PR,
     et journalisation du numéro de PR si ``manager``+``project_id`` sont fournis.
+    ``closes_issue=False`` n'ajoute pas ``Closes #N`` (numéro ≠ vraie issue, ex. G4).
     """
     head = workspace.branch
     title = f"{inline(issue.title)} (issue #{int(issue.number)})"
-    body = build_pr_body(quality_report, issue)
+    body = build_pr_body(quality_report, issue, closes_issue=closes_issue)
 
     if dry_run:
         return PrResult(dry_run=True, title=title, head=head, base=base, body=body)
