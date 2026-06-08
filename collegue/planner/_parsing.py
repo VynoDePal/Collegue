@@ -8,7 +8,18 @@ prose ou de blocs ```json). Évite la duplication entre ``spec_generator`` et
 from __future__ import annotations
 
 import json
-from typing import Optional
+import re
+from typing import Any, Optional
+
+
+def inline(text: Any) -> str:
+    """Réduit une valeur à une seule ligne (anti-injection Markdown).
+
+    Écrase tout enchaînement d'espaces/sauts de ligne en une espace : un champ
+    issu du LLM ne peut donc pas démarrer une nouvelle ligne dans un document
+    rendu (pas de fausse section ``## ...`` ni de case ``- [x] ...``).
+    """
+    return re.sub(r"\s+", " ", str(text)).strip()
 
 
 def json_from_text(text: str) -> Optional[dict]:
