@@ -9,6 +9,7 @@ G1 pose la mesure des métriques. Module **isolé** tant que la boucle (G4) ne
 câble pas l'exécuteur + le budget.
 """
 
+from collegue.improve.gate import DEFAULT_MIN_GAIN, GateDecision, evaluate
 from collegue.improve.metrics import (
     DEFAULT_WEIGHTS,
     CompositeWeights,
@@ -20,6 +21,7 @@ from collegue.improve.metrics import (
 )
 
 __all__ = [
+    # G1 — métriques
     "ProjectQualityMetrics",
     "CompositeWeights",
     "DEFAULT_WEIGHTS",
@@ -27,4 +29,8 @@ __all__ = [
     "composite_score",
     "measure",
     "persist",
+    # G2 — gate
+    "GateDecision",
+    "evaluate",
+    "DEFAULT_MIN_GAIN",
 ]
