@@ -14,6 +14,7 @@ reste donc importable partout sans installer OpenHands.
 from collegue.executor.agent import AgentResult, CodeAgent, FakeCodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner, LocalCommandRunner
 from collegue.executor.openhands_agent import OpenHandsAgent
+from collegue.executor.pipeline import ExecutionOutcome, execute_issue
 from collegue.executor.pr import PrClients, PrResult, build_pr_body, exec_marker, open_pr
 from collegue.executor.quality_gate import (
     ExpertReviewer,
@@ -59,4 +60,7 @@ __all__ = [
     "open_pr",
     "build_pr_body",
     "exec_marker",
+    # E5 — assemblage du pipeline
+    "execute_issue",
+    "ExecutionOutcome",
 ]
