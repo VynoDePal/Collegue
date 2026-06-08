@@ -83,8 +83,7 @@ class CodeAgent(Protocol):
     :class:`FakeCodeAgent` (CI) et ``OpenHandsAgent`` (réel, derrière ``integration``).
     """
 
-    def implement_issue(self, workspace: str, issue: IssueSpec) -> AgentResult:
-        ...
+    def implement_issue(self, workspace: str, issue: IssueSpec) -> AgentResult: ...
 
 
 def _safe_join(workspace: str, relative: str) -> str:
