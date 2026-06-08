@@ -8,6 +8,13 @@ F1 pose l'ordonnanceur (sélection des tâches prêtes). Module **isolé** tant 
 le câblage runtime (F4) n'expose pas le pilote.
 """
 
+from collegue.pilot.budget import (
+    ACTION_CONTINUE,
+    ACTION_DEADLINE,
+    ACTION_PAUSED_BUDGET,
+    BudgetTimeController,
+    ContinueDecision,
+)
 from collegue.pilot.scheduler import (
     SchedulerError,
     is_blocked,
@@ -17,9 +24,16 @@ from collegue.pilot.scheduler import (
 )
 
 __all__ = [
+    # F1 — ordonnanceur
     "SchedulerError",
     "ready_tasks",
     "next_task",
     "remaining_tasks",
     "is_blocked",
+    # F2 — contrôleur budget-temps
+    "BudgetTimeController",
+    "ContinueDecision",
+    "ACTION_CONTINUE",
+    "ACTION_PAUSED_BUDGET",
+    "ACTION_DEADLINE",
 ]
