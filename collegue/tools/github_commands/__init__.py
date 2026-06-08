@@ -13,6 +13,9 @@ from ..clients import GitHubClient
 from .branches import BranchCommands, BranchInfo, CommitInfo
 from .files import FileCommands
 from .issues import IssueCommands, IssueInfo
+from .labels import LabelCommands, LabelInfo
+from .milestones import MilestoneCommands, MilestoneInfo
+from .projects import ProjectCommands, ProjectInfo
 from .prs import Comment, FileChange, PRCommands, PRInfo
 from .repos import RepoCommands, RepoInfo
 from .search import SearchCommands, SearchResult
@@ -36,4 +39,10 @@ __all__ = [
     "WorkflowRun",
     "SearchCommands",
     "SearchResult",
+    "LabelCommands",
+    "LabelInfo",
+    "MilestoneCommands",
+    "MilestoneInfo",
+    "ProjectCommands",
+    "ProjectInfo",
 ]
