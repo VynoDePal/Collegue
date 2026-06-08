@@ -10,6 +10,11 @@ câble pas l'exécuteur + le budget.
 """
 
 from collegue.improve.gate import DEFAULT_MIN_GAIN, GateDecision, evaluate
+from collegue.improve.loop import (
+    ImprovementResult,
+    PromotedImprovement,
+    run_improvement,
+)
 from collegue.improve.metrics import (
     DEFAULT_WEIGHTS,
     CompositeWeights,
@@ -46,4 +51,8 @@ __all__ = [
     "next_dimension",
     "build_improvement_task",
     "COVERAGE_TARGET",
+    # G4 — boucle d'amélioration
+    "run_improvement",
+    "ImprovementResult",
+    "PromotedImprovement",
 ]
