@@ -68,3 +68,27 @@ class BranchCommands(GitHubClient):
         data = {"ref": f"refs/heads/{branch}", "sha": sha}
         resp = self._api_post(f"/repos/{owner}/{repo}/git/refs", data)
         return BranchInfo(name=branch, commit_sha=resp["object"]["sha"], protected=False)
+
+    def _branch_sha_or_none(self, owner: str, repo: str, branch: str) -> Optional[str]:
+        """SHA de la branche, ou None si elle n'existe pas (variante non-levante)."""
+        try:
+            return self._get_branch_sha(owner, repo, branch)
+        except ToolExecutionError:
+            return None
+
+    def ensure_branch(self, owner: str, repo: str, branch: str, from_branch: Optional[str] = None) -> BranchInfo:
+        """Retourne la branche existante ou la crée depuis ``from_branch``. Idempotent.
+
+        Évite le 422 « Reference already exists » lors d'un retry (ex. reprise après
+        échec partiel) et gère la course création (re-vérifie avant de propager).
+        """
+        existing = self._branch_sha_or_none(owner, repo, branch)
+        if existing is not None:
+            return BranchInfo(name=branch, commit_sha=existing, protected=False)
+        try:
+            return self.create_branch(owner, repo, branch, from_branch)
+        except ToolExecutionError:
+            again = self._branch_sha_or_none(owner, repo, branch)
+            if again is not None:
+                return BranchInfo(name=branch, commit_sha=again, protected=False)
+            raise

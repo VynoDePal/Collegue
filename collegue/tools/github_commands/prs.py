@@ -87,6 +87,37 @@ class PRCommands(GitHubClient):
             for pr in data[:limit]
         ]
 
+    def find_pr_by_head(
+        self, owner: str, repo: str, head: str, base: Optional[str] = None, state: str = "open"
+    ) -> Optional[PRInfo]:
+        """PR filtrée nativement par branche ``head`` (``owner:branch``), ou None.
+
+        Idempotence fiable (vs scanner ``list_prs`` borné) : interroge directement
+        l'API avec le filtre ``head`` pour retrouver une PR déjà ouverte.
+        """
+        # head = "owner:branch" : on suppose une PR intra-dépôt (head sur le même
+        # owner). Un head cross-fork (autre owner) ne serait pas retrouvé ici.
+        params = {"head": f"{owner}:{head}", "state": state}
+        if base:
+            params["base"] = base
+        data = self._api_get(f"/repos/{owner}/{repo}/pulls", params)
+        if not data:
+            return None
+        pr = data[0]
+        return PRInfo(
+            number=pr["number"],
+            title=pr["title"],
+            state=pr["state"],
+            html_url=pr["html_url"],
+            user=pr["user"]["login"],
+            base_branch=pr["base"]["ref"],
+            head_branch=pr["head"]["ref"],
+            created_at=pr["created_at"],
+            updated_at=pr["updated_at"],
+            labels=[label["name"] for label in pr.get("labels", [])],
+            draft=pr.get("draft", False),
+        )
+
     def get_pr(self, owner: str, repo: str, pr_number: int) -> PRInfo:
         data = self._api_get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
         return PRInfo(
