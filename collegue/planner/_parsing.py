@@ -8,18 +8,14 @@ prose ou de blocs ```json). Évite la duplication entre ``spec_generator`` et
 from __future__ import annotations
 
 import json
-import re
-from typing import Any, Optional
+from typing import Optional
 
+# ``inline`` vit dans un module léger et sans dépendance (importable hors planner,
+# ex. par l'exécuteur Phase 2) ; on le ré-exporte ici pour ne pas changer la
+# surface publique de ``_parsing`` (les modules du planner l'importent d'ici).
+from collegue.textnorm import inline
 
-def inline(text: Any) -> str:
-    """Réduit une valeur à une seule ligne (anti-injection Markdown).
-
-    Écrase tout enchaînement d'espaces/sauts de ligne en une espace : un champ
-    issu du LLM ne peut donc pas démarrer une nouvelle ligne dans un document
-    rendu (pas de fausse section ``## ...`` ni de case ``- [x] ...``).
-    """
-    return re.sub(r"\s+", " ", str(text)).strip()
+__all__ = ["inline", "json_from_text"]
 
 
 def json_from_text(text: str) -> Optional[dict]:
