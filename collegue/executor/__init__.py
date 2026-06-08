@@ -14,6 +14,16 @@ reste donc importable partout sans installer OpenHands.
 from collegue.executor.agent import AgentResult, CodeAgent, FakeCodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner, LocalCommandRunner
 from collegue.executor.openhands_agent import OpenHandsAgent
+from collegue.executor.quality_gate import (
+    ExpertReviewer,
+    FakeReviewer,
+    QualityReport,
+    Reviewer,
+    ReviewFindingLite,
+    ReviewOutcome,
+    outcome_from_review,
+    run_quality_gate,
+)
 from collegue.executor.runner import ExecutionResult, run_issue
 from collegue.executor.workspace import Workspace, WorkspaceError, branch_for_issue, prepare_workspace
 
@@ -33,4 +43,13 @@ __all__ = [
     "prepare_workspace",
     "ExecutionResult",
     "run_issue",
+    # E3 — gate qualité
+    "Reviewer",
+    "ReviewOutcome",
+    "ReviewFindingLite",
+    "FakeReviewer",
+    "ExpertReviewer",
+    "QualityReport",
+    "run_quality_gate",
+    "outcome_from_review",
 ]
