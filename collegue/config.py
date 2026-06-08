@@ -59,6 +59,22 @@ class Settings(BaseSettings):
             return 0.0
         return f if math.isfinite(f) and f > 0 else 0.0
 
+    # Budget-temps du pilote (Phase 3) : durée mur max d'un run de projet, en
+    # secondes. À l'échéance, le pilote s'arrête (livraison). <= 0 (défaut) =
+    # pas de deadline. Voir collegue.pilot.budget.BudgetTimeController.
+    COLLEGUE_RUN_DEADLINE_SECONDS: float = 0.0
+
+    @field_validator("COLLEGUE_RUN_DEADLINE_SECONDS", mode="before")
+    @classmethod
+    def _normalize_run_deadline(cls, v):
+        # Même garde que LLM_CALL_TIMEOUT : nan/inf/négatif → 0 (désactivé), pour
+        # ne pas produire une deadline absurde.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return f if math.isfinite(f) and f > 0 else 0.0
+
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0
     MAX_HISTORY_LENGTH: int = 20
