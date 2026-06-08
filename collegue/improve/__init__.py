@@ -19,6 +19,13 @@ from collegue.improve.metrics import (
     parse_coverage,
     persist,
 )
+from collegue.improve.proposer import (
+    COVERAGE_TARGET,
+    AttemptRecord,
+    Dimension,
+    build_improvement_task,
+    next_dimension,
+)
 
 __all__ = [
     # G1 — métriques
@@ -33,4 +40,10 @@ __all__ = [
     "GateDecision",
     "evaluate",
     "DEFAULT_MIN_GAIN",
+    # G3 — proposeur
+    "Dimension",
+    "AttemptRecord",
+    "next_dimension",
+    "build_improvement_task",
+    "COVERAGE_TARGET",
 ]
