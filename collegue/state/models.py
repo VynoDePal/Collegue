@@ -75,6 +75,10 @@ class Project(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow, server_default=func.now()
     )
+    # Empreinte du plan (SPEC + tâches) au moment de l'approbation humaine (P5).
+    # Lie l'approbation à un contenu précis : toute mutation ultérieure du plan
+    # invalide le gate (anti-TOCTOU). NULL tant que non approuvé.
+    approved_plan_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Cascade gérée par l'ORM (cascade="all, delete-orphan") : marche partout.
     # ondelete="CASCADE" reste sur la FK pour PostgreSQL (défense en profondeur ;

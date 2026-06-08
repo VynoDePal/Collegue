@@ -20,17 +20,14 @@ Module **isolé** : non câblé au runtime (le pilote Phase 3 fournira le ``ctx`
 
 from __future__ import annotations
 
-import re
 from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
 from collegue.core.llm import LLMRole, model_preferences_for_role
 from collegue.core.llm.client import sample_with_timeout
-from collegue.planner._parsing import json_from_text
-
-# Statuts de projet partagés avec P5 (transition planned → approved au gate humain).
-PROJECT_STATUS_PLANNED = "planned"
+from collegue.planner._parsing import inline, json_from_text
+from collegue.planner.status import PROJECT_STATUS_PLANNED
 
 SPEC_SYSTEM_PROMPT = """Tu es un planificateur logiciel senior. À partir d'une problématique \
 (souvent une seule phrase), tu produis un contrat de projet clair et actionnable.
@@ -52,16 +49,6 @@ explicites dans "assumptions" et avance.
 - Reste concis et concret."""
 
 
-def _inline(text: Any) -> str:
-    """Réduit une valeur à une seule ligne (anti-injection Markdown).
-
-    Écrase tout enchaînement d'espaces/sauts de ligne en une espace : un champ LLM
-    ne peut donc pas démarrer une nouvelle ligne, donc pas de fausse section
-    (``## ...``) ni de case déjà cochée (``- [x] ...``) dans le SPEC rendu.
-    """
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
 class Spec(BaseModel):
     """Contrat de projet structuré, rendu en SPEC.md."""
 
@@ -78,18 +65,18 @@ class Spec(BaseModel):
         toutes les sections sont présentes (les vides portent une note)."""
 
         def bullets(items: List[str], placeholder: str) -> str:
-            cleaned = [_inline(i) for i in (items or []) if str(i).strip()]
+            cleaned = [inline(i) for i in (items or []) if str(i).strip()]
             return "\n".join(f"- {i}" for i in cleaned) if cleaned else f"_{placeholder}_"
 
         def checks(items: List[str], placeholder: str) -> str:
-            cleaned = [_inline(i) for i in (items or []) if str(i).strip()]
+            cleaned = [inline(i) for i in (items or []) if str(i).strip()]
             return "\n".join(f"- [ ] {i}" for i in cleaned) if cleaned else f"_{placeholder}_"
 
         return (
-            f"# {_inline(self.title)}\n\n"
-            f"{_inline(self.summary)}\n\n"
+            f"# {inline(self.title)}\n\n"
+            f"{inline(self.summary)}\n\n"
             f"## Objectifs\n{bullets(self.objectives, 'À préciser.')}\n\n"
-            f"## Périmètre\n{_inline(self.scope) or '_À préciser._'}\n\n"
+            f"## Périmètre\n{inline(self.scope) or '_À préciser._'}\n\n"
             f"## Contraintes\n{bullets(self.constraints, 'Aucune contrainte identifiée.')}\n\n"
             f"## Hypothèses\n{bullets(self.assumptions, 'Aucune hypothèse (problématique non ambiguë).')}\n\n"
             f"## Critères d'acceptation\n{checks(self.acceptance_criteria, 'À préciser.')}\n"

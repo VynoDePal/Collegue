@@ -9,6 +9,25 @@ enchaîne pas.
 """
 
 from collegue.planner.decomposer import decompose
+from collegue.planner.plan_review import (
+    PlanNotApproved,
+    PlanPreview,
+    approve_plan,
+    build_plan_preview,
+    is_approved,
+    require_approved,
+)
 from collegue.planner.spec_generator import Spec, generate_spec, persist_spec
 
-__all__ = ["Spec", "generate_spec", "persist_spec", "decompose"]
+__all__ = [
+    "Spec",
+    "generate_spec",
+    "persist_spec",
+    "decompose",
+    "PlanPreview",
+    "PlanNotApproved",
+    "build_plan_preview",
+    "approve_plan",
+    "is_approved",
+    "require_approved",
+]
