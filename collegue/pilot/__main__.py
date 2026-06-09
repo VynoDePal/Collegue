@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Désactive le dry_run : écritures réelles (branches/commits/PR + état).",
     )
     parser.add_argument("--max-iterations", type=int, default=None, help="Garde-fou anti-boucle (optionnel).")
+    parser.add_argument(
+        "--improve",
+        action="store_true",
+        help="Une fois le MVP construit, enchaîne le moteur d'amélioration (Phase 4) sous le budget restant.",
+    )
     return parser
 
 
@@ -51,6 +56,7 @@ async def _run(args: argparse.Namespace) -> int:
         base=args.base,
         dry_run=not args.execute,
         max_iterations=args.max_iterations,
+        improve=args.improve,
     )
     print(format_run_report(result, project_id=args.project_id))
     return 0 if result.stop_reason in _OK_STOPS else 1

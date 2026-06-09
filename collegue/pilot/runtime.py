@@ -94,12 +94,17 @@ async def run_project_from_settings(
     clients=None,
     budget=None,
     max_iterations: Optional[int] = None,
+    improve: bool = False,
+    run_improvement_fn=None,
 ) -> ProjectRunResult:
     """Assemble les dépendances (depuis la config) et lance ``run_project``.
 
     Toute dépendance non fournie est construite depuis ``settings`` (chemin réel,
     ``integration``) ; les tests injectent des doubles. ``dry_run`` par défaut.
     En réel, journalise un résumé du run (``record_decision``).
+
+    ``improve`` (H5) : enchaîne le moteur d'amélioration (Phase 4) sous le budget
+    restant une fois le MVP construit (off par défaut ; activable via ``--improve``).
     """
     settings_obj = settings_obj or _settings()
     manager = manager or _build_manager(settings_obj)
@@ -107,7 +112,14 @@ async def run_project_from_settings(
     agent = agent or _build_agent(sandbox, settings_obj)
     reviewer = reviewer or _build_reviewer(settings_obj)
     clients = clients or _build_clients(github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV))
-    budget = budget or BudgetTimeController(settings_obj=settings_obj)
+    if budget is None:
+        # Reprise (H5) : si un run a déjà démarré, on reconstruit le contrôleur depuis
+        # le ``started_at`` d'ORIGINE → la deadline reste ABSOLUE (ne glisse pas à
+        # chaque redémarrage). Premier run : ``started_at=None`` → maintenant.
+        from collegue.pilot.resume import load_run_start
+
+        started_at = load_run_start(manager, project_id)
+        budget = BudgetTimeController(settings_obj=settings_obj, started_at=started_at)
 
     result = await run_project(
         project_id,
@@ -124,6 +136,8 @@ async def run_project_from_settings(
         clients=clients,
         dry_run=dry_run,
         max_iterations=max_iterations,
+        improve=improve,
+        run_improvement_fn=run_improvement_fn,
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).

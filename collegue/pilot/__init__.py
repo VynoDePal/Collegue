@@ -25,6 +25,7 @@ from collegue.pilot.budget import (
     ContinueDecision,
 )
 from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
+from collegue.pilot.resume import load_run_start, persist_run_start
 from collegue.pilot.runtime import format_run_report, run_project_from_settings
 from collegue.pilot.scheduler import (
     SchedulerError,
@@ -62,4 +63,7 @@ __all__ = [
     "run_cost_summary",
     "export_run_audit",
     "default_process_cost_source",
+    # H5 (Phase 5) — reprise après crash (deadline absolue)
+    "persist_run_start",
+    "load_run_start",
 ]
