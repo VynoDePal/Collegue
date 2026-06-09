@@ -32,6 +32,7 @@ from collegue.pilot.budget import (
     BudgetTimeController,
     ContinueDecision,
 )
+from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
 from collegue.pilot.guard import (
     GuardOutcome,
     HealthResult,
@@ -39,7 +40,6 @@ from collegue.pilot.guard import (
     check_main_health,
     guard_post_merge,
 )
-from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
 from collegue.pilot.resume import load_run_start, persist_run_start
 from collegue.pilot.runtime import format_run_report, run_project_from_settings
 from collegue.pilot.scheduler import (
