@@ -69,6 +69,20 @@ async def test_failed_when_review_blocks():
     assert report.passed is False
 
 
+async def test_default_test_command_invokes_pytest_as_module():
+    """Régression #413 : le gate lance `python -m pytest` (PAS le script `pytest`).
+
+    Le script `pytest` n'ajoute pas le répertoire de travail à ``sys.path`` ; un projet
+    en layout ``src/``/``app/`` qui importe par package échouerait alors à la collecte.
+    ``python -m pytest`` ajoute le cwd (la racine du workspace) → imports résolus.
+    """
+    sandbox = _green()
+    await run_quality_gate("/ws", DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert sandbox.calls, "le gate doit exécuter les tests"
+    _ws, command = sandbox.calls[0]
+    assert command.startswith("python -m pytest"), f"commande de test inattendue: {command!r}"
+
+
 # --- fail-closed ----------------------------------------------------------------
 
 
