@@ -16,7 +16,7 @@ from .issues import IssueCommands, IssueInfo
 from .labels import LabelCommands, LabelInfo
 from .milestones import MilestoneCommands, MilestoneInfo
 from .projects import ProjectCommands, ProjectInfo
-from .prs import Comment, FileChange, PRCommands, PRInfo
+from .prs import Comment, FileChange, MergeResult, PRCommands, PRInfo
 from .repos import RepoCommands, RepoInfo
 from .search import SearchCommands, SearchResult
 from .workflows import WorkflowCommands, WorkflowRun
@@ -29,6 +29,7 @@ __all__ = [
     "PRInfo",
     "FileChange",
     "Comment",
+    "MergeResult",
     "IssueCommands",
     "IssueInfo",
     "BranchCommands",
