@@ -40,6 +40,18 @@ def test_issue_to_prompt_drops_blank_criteria():
     assert prompt.count("- ") == 1  # les critères vides sont ignorés
 
 
+def test_issue_to_prompt_includes_context():
+    # #412 : le contexte inter-tâches est rendu (et inline-isé : pas d'injection).
+    issue = IssueSpec(number=2, title="T", context="Dépend de « Schéma »\n## faux titre")
+    prompt = issue.to_prompt()
+    assert "Contexte : Dépend de « Schéma »" in prompt
+    assert "\n## faux titre" not in prompt  # multi-ligne aplati (anti-injection)
+
+
+def test_issue_to_prompt_no_context_by_default():
+    assert "Contexte" not in IssueSpec(number=1, title="Titre").to_prompt()
+
+
 # --- FakeCodeAgent --------------------------------------------------------------
 
 

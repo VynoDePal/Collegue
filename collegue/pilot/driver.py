@@ -83,16 +83,31 @@ class ProjectRunResult:
         return [t.pr_number for t in self.processed if t.pr_number is not None]
 
 
-def _issue_from_task(task) -> IssueSpec:
+def _issue_from_task(task, by_id=None) -> IssueSpec:
     """Construit l'``IssueSpec`` exécutable depuis une tâche persistée.
 
     Le numéro est celui de l'issue GitHub si la tâche est synchronisée
     (``issue_number``), sinon l'id de tâche (branche/``Closes`` cohérents).
+
+    ``by_id`` (id → tâche) permet d'injecter un **contexte inter-tâches** (#412) :
+    on liste les **dépendances déjà construites** pour que l'agent bâtisse sur
+    l'existant (le code des dépendances est dans le dépôt) au lieu de coder depuis
+    la seule consigne de l'issue → cohérence entre tâches.
     """
+    context = ""
+    deps = [by_id[d] for d in (task.depends_on or []) if by_id and d in by_id]
+    if deps:
+        titres = ", ".join(f"« {d.title} »" for d in deps)
+        context = (
+            f"Cette tâche dépend de tâches déjà construites : {titres}. "
+            "Inspecte le dépôt existant et réutilise leur code, modèles et conventions "
+            "(ne recrée pas ce qui existe)."
+        )
     return IssueSpec(
         number=task.issue_number or task.id,
         title=task.title,
         body=task.acceptance or "",
+        context=context,
     )
 
 
@@ -139,6 +154,7 @@ async def run_project(
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
     tasks = manager.get_tasks(project_id)  # objets détachés : overlay mutable en mémoire
+    tasks_by_id = {t.id: t for t in tasks}  # pour le contexte inter-tâches (#412)
 
     # Ancrage du début de run (réel) : persiste le ``started_at`` pour qu'une reprise
     # reconstruise une deadline ABSOLUE (sinon elle glisse à chaque redémarrage). La
@@ -198,7 +214,7 @@ async def run_project(
 
         audit.record(TASK_STARTED, iteration=iteration + 1, task_id=task.id, title=task.title)
         outcome = await execute_issue(
-            _issue_from_task(task),
+            _issue_from_task(task, tasks_by_id),
             repo_source,
             ctx,
             agent=agent,
