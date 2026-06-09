@@ -439,6 +439,13 @@ register_core(app)
 register_tools(app)
 register_resources(app)
 
+# Outil MCP du pilote (Phase 5, H6) — STRICT : non auto-découvert (hors collegue/tools/),
+# off par défaut, n'est posé que si PILOT_TOOL_ENABLED. Refuse de démarrer si activé sans
+# OAuth (l'exception se propage volontairement). Sinon (défaut), no-op.
+from collegue.pilot.mcp_tool import register_pilot_tool  # noqa: E402
+
+register_pilot_tool(app, settings)
+
 
 @app.resource(
     "system://health", name="health_check", description="Detailed health check endpoint", mime_type="application/json"

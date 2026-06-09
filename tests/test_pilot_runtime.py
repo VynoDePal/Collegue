@@ -220,11 +220,15 @@ def test_main_returns_1_on_blocked(monkeypatch):
 # --- isolation ------------------------------------------------------------------
 
 
-def test_app_does_not_wire_pilot():
-    # Le serveur ne câble pas le pilote : il s'invoque via `python -m collegue.pilot`.
+def test_app_wires_only_the_gated_pilot_tool_no_autostart():
+    # Depuis H6 (Phase 5), app.py expose le pilote en outil MCP — MAIS uniquement via
+    # ``register_pilot_tool`` (gaté, off par défaut). L'invariant de sûreté n'est plus
+    # « aucune référence au pilote » mais « aucun AUTO-RUN » : app.py ne doit jamais
+    # appeler ``run_project``/``run_project_from_settings`` directement au démarrage.
     app_src = (Path(__file__).resolve().parent.parent / "collegue" / "app.py").read_text(encoding="utf-8")
-    assert "collegue.pilot" not in app_src
-    assert "from collegue.pilot" not in app_src
+    assert "register_pilot_tool" in app_src  # l'outil gaté est bien câblé
+    assert "run_project_from_settings(" not in app_src  # mais aucun run lancé au boot
+    assert "run_project(" not in app_src
 
 
 def test_importing_pilot_does_not_pull_openhands_runtime():

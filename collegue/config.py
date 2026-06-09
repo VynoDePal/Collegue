@@ -139,6 +139,15 @@ class Settings(BaseSettings):
     AUTO_REVERT_ENABLED: bool = True
     AUTO_REVERT_HEALTH_COMMAND: str = "pytest -q"
 
+    # ── Outil MCP du pilote (Phase 5, H6) ────────────────────────────────────
+    # Expose le pilote autonome (run_project) comme outil MCP. **STRICT** : off par
+    # défaut ; l'outil n'est PAS auto-découvert (il vit hors de collegue/tools/) et
+    # ne s'enregistre que sur appel explicite gaté ; il **refuse de s'enregistrer si
+    # OAUTH_ENABLED=false** (actions dangereuses : Docker, PR, écritures GitHub) ; une
+    # allowlist de sujets OAuth autorisés est requise (vide = personne, fail-closed).
+    PILOT_TOOL_ENABLED: bool = False
+    PILOT_TOOL_ALLOWED_SUBJECTS: str = ""
+
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
 
     OAUTH_ENABLED: bool = False
