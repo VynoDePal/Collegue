@@ -115,6 +115,21 @@ class Settings(BaseSettings):
         action = str(v).strip().lower()
         return action if action in ("pause", "warn") else "pause"
 
+    # ── Auto-merge progressif (Phase 5, H2) ──────────────────────────────────
+    # §6 reste le DÉFAUT : approbation humaine avant chaque merge dans main.
+    # L'auto-merge ne s'active QUE si AUTO_MERGE_ENABLED est vrai ET le diff passe
+    # une allowlist STRICTE de faible risque (chemins + plafond LOC + toutes les
+    # vérifs CI vertes). Off par défaut (opt-in assumé) ; fail-closed (tout doute →
+    # pas d'auto-merge, la PR reste pour un humain). Un auto-revert (H3) borne le risque.
+    AUTO_MERGE_ENABLED: bool = False
+    AUTO_MERGE_MAX_LOC: int = 50
+    # Motifs de chemins à faible risque (séparés par des virgules ; '**' = sous-dossiers).
+    # Défaut = balisage/texte NON exécutable seulement. Tout code/exécutable/config
+    # (.py, .sh, .yml, migrations, .github, conftest.py…) reste bloqué par une garde
+    # dure même s'il est ajouté ici (cf. collegue.pilot.automerge.is_sensitive).
+    AUTO_MERGE_PATH_ALLOWLIST: str = "docs/**,**/*.md,**/*.rst"
+    AUTO_MERGE_METHOD: str = "squash"
+
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
 
     OAUTH_ENABLED: bool = False
