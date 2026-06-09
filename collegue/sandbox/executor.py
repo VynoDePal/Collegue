@@ -36,7 +36,7 @@ import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Mapping, Optional, Tuple, Union
 
 DEFAULT_SANDBOX_IMAGE = "collegue-sandbox:latest"
 
@@ -83,6 +83,9 @@ class DockerSandbox:
         workspace_root: Optional[str] = None,
         allow_root: bool = False,
         docker_bin: str = "docker",
+        env: Optional[Mapping[str, str]] = None,
+        env_passthrough: Tuple[str, ...] = (),
+        read_only: bool = True,
     ):
         self.image = image
         self.network = network
@@ -94,6 +97,16 @@ class DockerSandbox:
         self.workspace_root = workspace_root
         self.allow_root = allow_root
         self.docker_bin = docker_bin
+        # Injection d'environnement (ex. worker OpenHands) :
+        # - ``env`` : couples explicites (-e K=V) — pour les valeurs NON secrètes.
+        # - ``env_passthrough`` : noms passés par référence (-e NAME, sans valeur) —
+        #   docker hérite la valeur de l'environnement du process appelant, donc le
+        #   secret (ex. LLM_API_KEY) n'apparaît JAMAIS dans l'argv (ni dans `ps`).
+        # ``read_only`` : root FS en lecture seule (durci) ; désactivable pour les
+        #   workers qui écrivent hors workspace/tmp (au prix d'un durcissement moindre).
+        self.env = dict(env) if env else {}
+        self.env_passthrough = tuple(env_passthrough)
+        self.read_only = bool(read_only)
 
     # ── validation / construction (pur, testable sans Docker) ─────────────────────
 
@@ -137,12 +150,23 @@ class DockerSandbox:
             self.cpus,
             "--stop-timeout",
             "5",
-            "--read-only",  # root FS en lecture seule
+        ]
+        if self.read_only:
+            argv += ["--read-only"]  # root FS en lecture seule
+        argv += [
             "--tmpfs",
             "/tmp",  # scratch éphémère écrivable
             "-e",
             "HOME=/tmp",
         ]
+        # Injection d'environnement (ordre déterministe : passthrough triés, puis
+        # couples explicites triés) — pour le worker OpenHands (clé API par réf.,
+        # modèle/flags en clair). Vide par défaut → argv identique au comportement
+        # historique (tests inchangés).
+        for name in sorted(self.env_passthrough):
+            argv += ["-e", name]
+        for key in sorted(self.env):
+            argv += ["-e", f"{key}={self.env[key]}"]
         # Exécuter en tant qu'utilisateur hôte non-root : le workspace (dir hôte)
         # reste écrivable/persisté, et le conteneur ne tourne jamais en root
         # (run_command refuse uid 0 sauf allow_root explicite).
