@@ -130,6 +130,15 @@ class Settings(BaseSettings):
     AUTO_MERGE_PATH_ALLOWLIST: str = "docs/**,**/*.md,**/*.rst"
     AUTO_MERGE_METHOD: str = "squash"
 
+    # ── Auto-revert post-merge (Phase 5, H3) ─────────────────────────────────
+    # Filet de sécurité de l'auto-merge : après un auto-merge, si `main` devient
+    # rouge (tests en sandbox), on prépare un revert automatique. N'a d'effet que
+    # si AUTO_MERGE_ENABLED. Activé par défaut QUAND l'auto-merge l'est (le mettre
+    # à false = renoncer au filet de sécurité, risqué). Fail-closed : santé non
+    # concluante (sandbox indispo) = traité comme rouge → revert.
+    AUTO_REVERT_ENABLED: bool = True
+    AUTO_REVERT_HEALTH_COMMAND: str = "pytest -q"
+
     SUPPORTED_LANGUAGES: List[str] = ["python", "javascript", "typescript", "php"]
 
     OAUTH_ENABLED: bool = False
