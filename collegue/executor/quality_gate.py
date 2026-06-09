@@ -27,7 +27,12 @@ from collegue.executor.agent import IssueSpec
 from collegue.sandbox.executor import DockerSandbox
 from collegue.textnorm import inline
 
-DEFAULT_TEST_COMMAND = "pytest -q"
+# `python -m pytest` (et non le script `pytest`) ajoute le répertoire de travail
+# (la racine du workspace, montée sur `/workspace`) à `sys.path`. Sans ça, les tests
+# d'un projet en layout `src/`/`app/` qui importent par package (`from app.x import …`,
+# `from src.x import …`) lèvent `ModuleNotFoundError` à la collecte → le gate échoue
+# à tort (tests verts vus comme rouges). Voir issue #413.
+DEFAULT_TEST_COMMAND = "python -m pytest -q"
 # Triple-backtick de remplacement : neutralise les fences pour qu'un texte non
 # fiable ne puisse pas refermer le bloc de code et forger une fausse section.
 _FENCE = "```"
