@@ -81,6 +81,7 @@ class PrResult:
     number: Optional[int] = None
     html_url: Optional[str] = None
     skipped: bool = False  # PR déjà existante (idempotence)
+    skipped_binaries: Tuple[str, ...] = ()  # fichiers binaires non poussés (cf. #410)
 
 
 def build_pr_body(quality_report: QualityReport, issue: IssueSpec, *, closes_issue: bool = True) -> str:
@@ -153,17 +154,31 @@ def open_pr(
 
     clients.branches.ensure_branch(owner, repo, head, from_branch=base)
 
+    skipped_binaries: list[str] = []
     for path in files_changed:
         rel = _safe_rel_path(path)
         full = _resolve_in_workspace(workspace.path, rel)
         message = f"collegue: issue #{int(issue.number)} — {rel}"
         if os.path.isfile(full):
-            with open(full, "r", encoding="utf-8") as handle:
-                content = handle.read()
+            try:
+                with open(full, "r", encoding="utf-8") as handle:
+                    content = handle.read()
+            except UnicodeDecodeError:
+                # Fichier binaire (PNG/PDF/…) : la Contents API n'est câblée qu'en
+                # texte UTF-8 (limite §MVP). On le SAUTE plutôt que de faire échouer
+                # toute la tâche sur un asset — la PR porte le reste du diff. [#410]
+                skipped_binaries.append(rel)
+                continue
             clients.files.update_file(owner, repo, rel, message, content, branch=head)
         else:
             # Fichier supprimé par l'agent : on le retire aussi sur la branche.
             clients.files.delete_file(owner, repo, rel, message, branch=head)
+
+    if skipped_binaries:
+        # Trace visible pour le relecteur (la PR ne contient pas ces binaires).
+        body += "\n\n> ⚠️ Fichiers binaires non poussés (non supportés) : " + ", ".join(
+            f"`{p}`" for p in skipped_binaries
+        )
 
     pr = clients.prs.create_pr(owner, repo, title, head, base, body)
     number = getattr(pr, "number", None)
@@ -176,7 +191,16 @@ def open_pr(
             rationale=html_url,
         )
 
-    return PrResult(dry_run=False, title=title, head=head, base=base, body=body, number=number, html_url=html_url)
+    return PrResult(
+        dry_run=False,
+        title=title,
+        head=head,
+        base=base,
+        body=body,
+        number=number,
+        html_url=html_url,
+        skipped_binaries=tuple(skipped_binaries),
+    )
 
 
 def _default_clients(token: Optional[str] = None) -> PrClients:  # pragma: no cover - chemin réel (integration)
