@@ -17,6 +17,14 @@ from collegue.pilot.audit import (
     export_run_audit,
     run_cost_summary,
 )
+from collegue.pilot.automerge import (
+    AutoMergeDecision,
+    AutoMergeOutcome,
+    RiskPolicy,
+    evaluate_automerge,
+    is_sensitive,
+    maybe_auto_merge,
+)
 from collegue.pilot.budget import (
     ACTION_CONTINUE,
     ACTION_DEADLINE,
@@ -66,4 +74,11 @@ __all__ = [
     # H5 (Phase 5) — reprise après crash (deadline absolue)
     "persist_run_start",
     "load_run_start",
+    # H2 (Phase 5) — politique d'auto-merge (opt-in, off par défaut)
+    "RiskPolicy",
+    "AutoMergeDecision",
+    "AutoMergeOutcome",
+    "evaluate_automerge",
+    "maybe_auto_merge",
+    "is_sensitive",
 ]
