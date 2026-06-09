@@ -12,6 +12,7 @@ All data is read from disk-backed stores so the dashboard
 (separate process) sees updates from the MCP server in real-time.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ if str(_project_root) not in sys.path:
 
 from collegue.dashboard.data import (
     get_activity_data,
+    get_autonomous_runs_data,
     get_dashboard_data,
     get_delegation_data,
     get_memory_stats,
@@ -101,8 +103,8 @@ def _escape_html(text: str) -> str:
 st.title("Dashboard Monitoring")
 
 # Tabs
-tab_overview, tab_activity, tab_metrics, tab_delegation, tab_memory = st.tabs(
-    ["Vue d'ensemble", "Activite LLM", "Metriques", "Delegation", "Memoire"]
+tab_overview, tab_activity, tab_metrics, tab_delegation, tab_memory, tab_runs = st.tabs(
+    ["Vue d'ensemble", "Activite LLM", "Metriques", "Delegation", "Memoire", "Run autonome"]
 )
 
 # ==============================================================================
@@ -456,6 +458,80 @@ with tab_memory:
                     st.json(entry["data"])
     else:
         st.info("Aucune entree recente en memoire.")
+
+# ==============================================================================
+# TAB 6: Autonomous run (pilote) — audit timeline + cost ledger (#405)
+# ==============================================================================
+
+with tab_runs:
+    st.subheader("Runs autonomes (pilote)")
+    runs_data = get_autonomous_runs_data()
+
+    if not runs_data.get("configured"):
+        st.info(
+            "Etat durable non configure (STATE_DATABASE_URL absent) — aucun run autonome a afficher. "
+            "Le pilote (`python -m collegue.pilot`) ecrit son audit dans l'etat durable."
+        )
+    else:
+        runs = runs_data.get("runs", [])
+        if not runs:
+            st.info("Aucun run autonome enregistre pour l'instant.")
+        else:
+            by_id = {r["project_id"]: r for r in runs}
+            label_by_id = {
+                r["project_id"]: f"#{r['project_id']} {r['project_name']}"
+                + (" [!]" if r.get("needs_attention") else "")
+                for r in runs
+            }
+            # Clé par project_id (et non par index positionnel) : le tri peut changer à
+            # l'auto-refresh (un nouvel echec d'auto-revert remonte le projet en tete) ;
+            # garder l'id evite de pointer silencieusement sur un autre projet.
+            selected_id = st.selectbox(
+                "Projet", [r["project_id"] for r in runs], format_func=lambda i: label_by_id[i], key="run_select"
+            )
+            run = by_id[selected_id]
+
+            if run.get("needs_attention"):
+                st.error(
+                    "Intervention humaine requise : un auto-revert a echoue (`auto_revert_failed`) — "
+                    "`main` peut etre rouge sans avoir pu etre annule."
+                )
+
+            cost = run.get("cost", {})
+            counts = run.get("counts", {})
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Statut", run.get("status") or "--")
+            latest_iter = run.get("latest_iteration")
+            col2.metric("Iteration (checkpoint)", latest_iter if latest_iter is not None else "--")
+            col3.metric("Cout ($)", f"{cost.get('usd', 0):.4f}")
+            col4.metric("Tokens", cost.get("tokens", 0))
+
+            st.caption(
+                f"PR ouvertes: {counts.get('pr_opened', 0)} · "
+                f"auto-merge: {counts.get('automerge_decision', 0)} · "
+                f"auto-revert: {counts.get('auto_revert', 0)} · "
+                f"revert echoue: {counts.get('auto_revert_failed', 0)}"
+            )
+
+            st.divider()
+            st.subheader("Timeline d'audit")
+            events = run.get("events", [])
+            if events:
+                for event in reversed(events[-50:]):
+                    kind = event.get("kind", "?")
+                    if kind == "auto_revert_failed":
+                        icon = "🔴"
+                    elif kind in ("auto_revert", "budget_event", "run_stop"):
+                        icon = "🟠"
+                    else:
+                        icon = "•"
+                    detail = event.get("detail") or {}
+                    detail_str = json.dumps(detail, ensure_ascii=False) if detail else ""
+                    st.text(f"{icon} [{event.get('ts', '?')}] {kind} {detail_str}".rstrip())
+            else:
+                st.info(
+                    "Aucun evenement d'audit pour ce projet (le run n'a pas utilise de journal d'audit persistant)."
+                )
 
 
 # -- Auto-refresh at the end (after all data is loaded) ------------------------
