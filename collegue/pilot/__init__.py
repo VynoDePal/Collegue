@@ -33,6 +33,13 @@ from collegue.pilot.budget import (
     ContinueDecision,
 )
 from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
+from collegue.pilot.guard import (
+    GuardOutcome,
+    HealthResult,
+    RevertPolicy,
+    check_main_health,
+    guard_post_merge,
+)
 from collegue.pilot.resume import load_run_start, persist_run_start
 from collegue.pilot.runtime import format_run_report, run_project_from_settings
 from collegue.pilot.scheduler import (
@@ -81,4 +88,10 @@ __all__ = [
     "evaluate_automerge",
     "maybe_auto_merge",
     "is_sensitive",
+    # H3 (Phase 5) — garde post-merge (auto-revert)
+    "RevertPolicy",
+    "HealthResult",
+    "GuardOutcome",
+    "check_main_health",
+    "guard_post_merge",
 ]
