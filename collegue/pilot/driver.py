@@ -27,6 +27,17 @@ from typing import List, Optional
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.pipeline import execute_issue
+from collegue.pilot.audit import (
+    BUDGET_EVENT,
+    CHECKPOINT_SAVED,
+    GATE_DECISION,
+    PR_OPENED,
+    RUN_STOP,
+    TASK_STARTED,
+    CostSource,
+    NullAuditLog,
+    RunAuditLog,
+)
 from collegue.pilot.budget import ACTION_DEADLINE, ACTION_PAUSED_BUDGET, BudgetTimeController
 from collegue.pilot.scheduler import next_task, remaining_tasks
 
@@ -100,15 +111,30 @@ async def run_project(
     clients=None,
     dry_run: bool = True,
     max_iterations: Optional[int] = None,
+    audit: Optional[RunAuditLog] = None,
+    cost_source: Optional[CostSource] = None,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
     S'arrête quand : plus de tâche prête (``completed`` → bascule ``improving``),
     budget/deadline atteint, graphe bloqué, ou garde-fou ``max_iterations``.
     ``dry_run`` (défaut) ne persiste rien. Retourne un :class:`ProjectRunResult`.
+
+    ``audit`` (H4) : journal d'audit du run, **non intrusif** — défaut
+    :class:`NullAuditLog` (no-op) → comportement inchangé si non fourni.
+    ``cost_source`` (H4) : callable ``() -> (usd, tokens)`` cumulés ; si fourni, le
+    coût **par tâche** est échantillonné (delta) et alimente le ledger du run.
+    ``None`` (défaut) → pas d'échantillonnage (``collegue.pilot.audit`` fournit
+    ``default_process_cost_source`` à brancher par le runtime).
     """
     budget = budget or BudgetTimeController()
+    audit = audit or NullAuditLog()
     tasks = manager.get_tasks(project_id)  # objets détachés : overlay mutable en mémoire
+
+    # Coût par run : on échantillonne le cumul process avant/après chaque tâche et on
+    # enregistre le delta (le ledger ignore les deltas nuls/aberrants).
+    sample_cost = cost_source is not None
+    last_usd, last_tokens = cost_source() if sample_cost else (0.0, 0)
 
     # Reprise : une tâche laissée `in_progress` est un reliquat d'un run interrompu
     # (crash / pause budget en plein execute_issue). La boucle étant SÉQUENTIELLE,
@@ -141,6 +167,7 @@ async def run_project(
             stop_reason = STOP_PAUSED_BUDGET if decision.action == ACTION_PAUSED_BUDGET else STOP_DEADLINE
             if decision.action not in (ACTION_PAUSED_BUDGET, ACTION_DEADLINE):  # défensif
                 stop_reason = decision.action
+            audit.record(BUDGET_EVENT, iteration=iteration, action=decision.action, reason=decision.reason)
             break
 
         task = next_task(tasks)
@@ -152,6 +179,7 @@ async def run_project(
             stop_reason = STOP_COMPLETED if not remaining_tasks(tasks) else STOP_BLOCKED
             break
 
+        audit.record(TASK_STARTED, iteration=iteration + 1, task_id=task.id, title=task.title)
         outcome = await execute_issue(
             _issue_from_task(task),
             repo_source,
@@ -170,7 +198,14 @@ async def run_project(
             dry_run=dry_run,
         )
         iteration += 1
+        if sample_cost:
+            cur_usd, cur_tokens = cost_source()
+            audit.record_cost(usd=cur_usd - last_usd, tokens=int(cur_tokens - last_tokens), iteration=iteration)
+            last_usd, last_tokens = cur_usd, cur_tokens
         pr_number = outcome.pr.number if outcome.pr is not None else None
+        audit.record(GATE_DECISION, iteration=iteration, task_id=task.id, success=outcome.success, stage=outcome.stage)
+        if pr_number is not None:
+            audit.record(PR_OPENED, iteration=iteration, task_id=task.id, pr_number=pr_number, dry_run=dry_run)
         processed.append(
             TaskOutcome(
                 task_id=task.id,
@@ -196,6 +231,9 @@ async def run_project(
                 iteration,
                 state_json={"processed_task_ids": [t.task_id for t in processed]},
             )
+            audit.record(CHECKPOINT_SAVED, iteration=iteration)
+
+    audit.record(RUN_STOP, iteration=iteration, reason=stop_reason, iterations=len(processed))
 
     project_status: Optional[str] = None
     # Bascule MVP→amélioration uniquement si tout est construit sans échec, et

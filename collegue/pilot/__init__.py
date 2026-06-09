@@ -8,6 +8,15 @@ F1 pose l'ordonnanceur (sélection des tâches prêtes). Module **isolé** tant 
 le câblage runtime (F4) n'expose pas le pilote.
 """
 
+from collegue.pilot.audit import (
+    NullAuditLog,
+    RunAuditLog,
+    RunCostLedger,
+    RunEvent,
+    default_process_cost_source,
+    export_run_audit,
+    run_cost_summary,
+)
 from collegue.pilot.budget import (
     ACTION_CONTINUE,
     ACTION_DEADLINE,
@@ -45,4 +54,12 @@ __all__ = [
     # F4 — câblage runtime
     "run_project_from_settings",
     "format_run_report",
+    # H4 (Phase 5) — observabilité du run autonome
+    "RunAuditLog",
+    "NullAuditLog",
+    "RunEvent",
+    "RunCostLedger",
+    "run_cost_summary",
+    "export_run_audit",
+    "default_process_cost_source",
 ]
