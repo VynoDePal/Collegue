@@ -39,6 +39,10 @@ class IssueSpec:
     title: str
     body: str = ""
     acceptance_criteria: Tuple[str, ...] = ()
+    # Contexte inter-tâches (dépendances déjà construites, état du dépôt, conventions)
+    # injecté par le pilote pour que l'agent BÂTISSE sur l'existant au lieu de coder
+    # depuis une consigne d'une ligne → cohérence inter-tâches. Voir issue #412.
+    context: str = ""
 
     def to_prompt(self) -> str:
         """Construit la consigne (sanitizée) donnée à l'agent.
@@ -48,6 +52,9 @@ class IssueSpec:
         ne peut forger une nouvelle ligne/section dans la consigne rendue.
         """
         lines = [f"Issue #{self.number}: {inline(self.title)}"]
+        context = inline(self.context)
+        if context:
+            lines += ["", f"Contexte : {context}"]
         body = inline(self.body)
         if body:
             lines += ["", body]

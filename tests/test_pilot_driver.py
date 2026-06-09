@@ -123,6 +123,22 @@ async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, *
     )
 
 
+# --- contexte inter-tâches (#412) -----------------------------------------------
+
+
+def test_issue_from_task_injects_dependency_context():
+    from collegue.pilot.driver import _issue_from_task
+
+    schema = SimpleNamespace(id=1, issue_number=1, title="Schéma DB", acceptance="", depends_on=[])
+    api = SimpleNamespace(id=2, issue_number=12, title="API clients", acceptance="CRUD", depends_on=[1])
+    by_id = {1: schema, 2: api}
+    # une tâche dépendante reçoit le titre de ses dépendances déjà construites
+    ctx = _issue_from_task(api, by_id).context
+    assert "« Schéma DB »" in ctx and "réutilise" in ctx.lower()
+    # une tâche racine (sans dépendance) n'a pas de contexte
+    assert _issue_from_task(schema, by_id).context == ""
+
+
 # --- bout en bout ---------------------------------------------------------------
 
 
