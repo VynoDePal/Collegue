@@ -26,6 +26,13 @@ from collegue.executor.quality_gate import (
     outcome_from_review,
     run_quality_gate,
 )
+from collegue.executor.revert import (
+    RevertError,
+    RevertResult,
+    prepare_revert,
+    revert_commit,
+    revert_pr_preview,
+)
 from collegue.executor.runner import ExecutionResult, run_issue
 from collegue.executor.workspace import Workspace, WorkspaceError, branch_for_issue, prepare_workspace
 
@@ -63,4 +70,10 @@ __all__ = [
     # E5 — assemblage du pipeline
     "execute_issue",
     "ExecutionOutcome",
+    # H1 (Phase 5) — primitive de revert (capacité locale, sans push)
+    "RevertResult",
+    "RevertError",
+    "revert_commit",
+    "prepare_revert",
+    "revert_pr_preview",
 ]
