@@ -1,0 +1,182 @@
+"""Tests H1 (#392) : merge_pr (PRCommands) + delete_branch (BranchCommands).
+
+Client HTTP **mocké** (pas de réseau en CI) : on remplace les méthodes bas niveau
+(``_api_get``/``_api_put``/``_request_json``/``_branch_sha_or_none``) par des fakes
+qui enregistrent les appels, et on vérifie idempotence, garde anti-course, refus des
+branches protégées et fail-closed.
+"""
+
+import pytest
+
+from collegue.tools.base import ToolExecutionError
+from collegue.tools.github_commands import BranchCommands, MergeResult, PRCommands
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+
+def _pr_with(get_payload, *, put_payload=None):
+    pr = PRCommands(token=None)
+    rec = _Recorder()
+
+    def fake_get(endpoint, params=None):
+        rec.calls.append(("GET", endpoint))
+        return get_payload
+
+    def fake_put(endpoint, data):
+        rec.calls.append(("PUT", endpoint, data))
+        return put_payload or {}
+
+    pr._api_get = fake_get
+    pr._api_put = fake_put
+    return pr, rec
+
+
+# --- merge_pr -------------------------------------------------------------------
+
+
+def test_merge_pr_success():
+    pr, rec = _pr_with(
+        {"merged": False, "state": "open", "head": {"sha": "abc1234def567"}},
+        put_payload={"merged": True, "sha": "mergedsha123", "message": "merged"},
+    )
+    res = pr.merge_pr("o", "r", 7, method="squash", expected_head_sha="abc1234def567")
+    assert isinstance(res, MergeResult)
+    assert res.merged and res.sha == "mergedsha123" and not res.already_merged
+    assert any(c[0] == "PUT" for c in rec.calls)
+
+
+def test_merge_pr_idempotent_when_already_merged():
+    # PR déjà mergée : état réel renvoyé par GitHub = state closed + merged true.
+    pr, rec = _pr_with({"merged": True, "state": "closed", "merge_commit_sha": "x9"})
+    res = pr.merge_pr("o", "r", 7)
+    assert res.merged and res.already_merged and res.sha == "x9"
+    assert not any(c[0] == "PUT" for c in rec.calls)  # pas de second merge (405 évité)
+
+
+def test_merge_pr_sha_guard_refuses_moved_head():
+    pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "aaa1111"}})
+    with pytest.raises(ToolExecutionError):
+        pr.merge_pr("o", "r", 7, expected_head_sha="bbb2222")
+
+
+def test_merge_pr_refuses_closed_unmerged():
+    pr, _ = _pr_with({"merged": False, "state": "closed", "head": {"sha": "aaa1111"}})
+    with pytest.raises(ToolExecutionError):
+        pr.merge_pr("o", "r", 7)
+
+
+def test_merge_pr_invalid_method():
+    pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "z"}})
+    with pytest.raises(ToolExecutionError):
+        pr.merge_pr("o", "r", 7, method="rebandon")
+
+
+def test_merge_pr_invalid_owner():
+    pr, _ = _pr_with({})
+    with pytest.raises(ToolExecutionError):
+        pr.merge_pr("o/..", "r", 7)  # owner avec traversée → refus avant tout appel
+
+
+def test_merge_pr_fails_closed_on_unknown_state():
+    # GET vide/partiel (pas de ``state``) → état non confirmé → refus de merger.
+    pr, rec = _pr_with({})
+    with pytest.raises(ToolExecutionError):
+        pr.merge_pr("o", "r", 7)
+    assert not any(c[0] == "PUT" for c in rec.calls)  # jamais de merge sur un état non vu
+
+
+def test_merge_pr_empty_put_response_is_not_merged():
+    # PUT sans corps de confirmation → on ne suppose PAS le succès (merged défaut False).
+    pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "h1"}})  # put_payload None → {}
+    res = pr.merge_pr("o", "r", 7)
+    assert res.merged is False
+
+
+# --- delete_branch --------------------------------------------------------------
+
+
+def _branches(sha_seq, *, default_branch="main", repo_get_error=False):
+    """``sha_seq`` : valeurs successives renvoyées par ``_branch_sha_or_none``.
+
+    ``default_branch`` : branche par défaut renvoyée par le GET ``/repos/{o}/{r}``.
+    ``repo_get_error`` : si vrai, ce GET lève (simule une base non résolvable).
+    """
+    br = BranchCommands(token=None)
+    rec = _Recorder()
+    seq = list(sha_seq)
+
+    def fake_sha(owner, repo, branch):
+        return seq.pop(0) if seq else None
+
+    def fake_get(endpoint, params=None):
+        rec.calls.append(("GET", endpoint))
+        if repo_get_error:
+            raise ToolExecutionError("repo introuvable")
+        return {"default_branch": default_branch}
+
+    def fake_request(method, endpoint, **kw):
+        rec.calls.append((method, endpoint))
+        return None
+
+    br._branch_sha_or_none = fake_sha
+    br._api_get = fake_get
+    br._request_json = fake_request
+    return br, rec
+
+
+def test_delete_branch_deletes_existing():
+    br, rec = _branches(["sha-exists"])
+    assert br.delete_branch("o", "r", "feat/x") is True
+    assert any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_idempotent_when_absent():
+    br, rec = _branches([None])
+    assert br.delete_branch("o", "r", "feat/x") is True
+    assert not any(c[0] == "DELETE" for c in rec.calls)  # rien à supprimer
+
+
+def test_delete_branch_refuses_protected():
+    br, rec = _branches(["sha", "sha"])
+    for protected in ("main", "master"):
+        with pytest.raises(ToolExecutionError):
+            br.delete_branch("o", "r", protected)
+    assert rec.calls == []  # aucun appel réseau pour une branche protégée
+
+
+def test_delete_branch_refuses_traversal():
+    br, _ = _branches(["sha"])
+    with pytest.raises(ToolExecutionError):
+        br.delete_branch("o", "r", "../evil")
+
+
+def test_delete_branch_allows_slash_in_name():
+    # Un nom de branche légitime avec '/' ne doit PAS être rejeté.
+    br, rec = _branches(["sha"])
+    assert br.delete_branch("o", "r", "feat/h1-merge") is True
+
+
+def test_delete_branch_protects_real_default_branch():
+    # La VRAIE branche par défaut (ici ``develop``) est protégée, pas seulement main/master.
+    br, rec = _branches(["sha"], default_branch="develop")
+    with pytest.raises(ToolExecutionError):
+        br.delete_branch("o", "r", "develop")
+    assert not any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_default_param_skips_repo_get():
+    # Quand le caller fournit ``default_branch``, pas de round-trip GET /repos.
+    br, rec = _branches(["sha"], default_branch="main")
+    with pytest.raises(ToolExecutionError):
+        br.delete_branch("o", "r", "trunk", default_branch="trunk")
+    assert not any(c[0] == "GET" for c in rec.calls)
+
+
+def test_delete_branch_fail_closed_when_default_unresolvable():
+    # GET /repos échoue → on ne peut pas garantir qu'on ne supprime pas la base → refus.
+    br, _ = _branches(["sha"], repo_get_error=True)
+    with pytest.raises(ToolExecutionError):
+        br.delete_branch("o", "r", "feat/x")

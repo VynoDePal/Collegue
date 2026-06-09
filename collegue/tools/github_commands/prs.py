@@ -8,7 +8,11 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from ..base import ToolExecutionError
 from ..clients import GitHubClient
+from ._helpers import validate_ref
+
+_MERGE_METHODS = ("merge", "squash", "rebase")
 
 
 class PRInfo(BaseModel):
@@ -62,6 +66,13 @@ class Comment(BaseModel):
     created_at: str
     path: Optional[str] = None
     line: Optional[int] = None
+
+
+class MergeResult(BaseModel):
+    merged: bool
+    sha: Optional[str] = None
+    message: str = ""
+    already_merged: bool = False
 
 
 class PRCommands(GitHubClient):
@@ -192,3 +203,63 @@ class PRCommands(GitHubClient):
             updated_at=resp["updated_at"],
             draft=resp.get("draft", False),
         )
+
+    def merge_pr(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        method: str = "squash",
+        commit_title: Optional[str] = None,
+        commit_message: Optional[str] = None,
+        expected_head_sha: Optional[str] = None,
+    ) -> MergeResult:
+        """Merge une PR ouverte. **Idempotent** + **garde anti-course**.
+
+        - Idempotence : si la PR est déjà mergée, retourne ``already_merged`` sans
+          re-tenter (un second merge renverrait 405).
+        - Garde anti-course : si ``expected_head_sha`` est fourni et ne correspond pas
+          à la tête actuelle de la PR, **refuse** (on ne merge pas un état non vu). Le
+          SHA est aussi transmis à l'API GitHub (double vérification côté serveur).
+
+        ``method`` ∈ {merge, squash, rebase}. **Fail-closed** : toute erreur HTTP
+        inattendue propage (``ToolExecutionError``) — on ne « réussit » jamais
+        silencieusement. Aucun auto-déclenchement ici (H1, capacité seule) : c'est un
+        appel explicite, la décision de merger appartient à H2 (auto-merge).
+        """
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        if method not in _MERGE_METHODS:
+            raise ToolExecutionError(f"méthode de merge invalide: {method!r} (attendu: {_MERGE_METHODS})")
+
+        current = self._api_get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+        if not isinstance(current, dict) or "state" not in current:
+            # Réponse vide/partielle : on n'a pas confirmé l'état de la PR → on ne merge
+            # pas un état non vu (fail-closed).
+            raise ToolExecutionError(f"état de la PR #{pr_number} indisponible — refus de merger (fail-closed)")
+        if current.get("merged"):
+            return MergeResult(
+                merged=True, sha=current.get("merge_commit_sha"), message="PR déjà mergée", already_merged=True
+            )
+        if current.get("state") == "closed":
+            raise ToolExecutionError(f"PR #{pr_number} fermée sans merge — refus de merger")
+        head_sha = (current.get("head") or {}).get("sha")
+        if expected_head_sha and head_sha != expected_head_sha:
+            raise ToolExecutionError(
+                f"la tête de la PR #{pr_number} a bougé (attendu {expected_head_sha}, vu {head_sha}) — "
+                "refus (anti-course)"
+            )
+
+        body: dict = {"merge_method": method}
+        if commit_title:
+            body["commit_title"] = commit_title
+        if commit_message:
+            body["commit_message"] = commit_message
+        if expected_head_sha:
+            body["sha"] = expected_head_sha
+
+        resp = self._api_put(f"/repos/{owner}/{repo}/pulls/{pr_number}/merge", body) or {}
+        # Un merge réussi renvoie toujours ``{"merged": true, "sha": ...}`` ; l'absence
+        # de confirmation = échec (défaut False), jamais un succès supposé (fail-closed).
+        return MergeResult(merged=bool(resp.get("merged", False)), sha=resp.get("sha"), message=resp.get("message", ""))

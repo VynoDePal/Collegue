@@ -4,12 +4,16 @@ Branch Commands for GitHub Operations.
 Handles branch listing, creation, and commit operations.
 """
 
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from pydantic import BaseModel
 
 from ..base import ToolExecutionError
 from ..clients import GitHubClient
+from ._helpers import validate_ref
+
+# Branches refusées par défaut à la suppression (garde-fou contre la perte de la base).
+PROTECTED_BRANCHES = ("main", "master")
 
 
 class BranchInfo(BaseModel):
@@ -92,3 +96,64 @@ class BranchCommands(GitHubClient):
             if again is not None:
                 return BranchInfo(name=branch, commit_sha=again, protected=False)
             raise
+
+    def delete_branch(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        *,
+        protect: Iterable[str] = PROTECTED_BRANCHES,
+        default_branch: Optional[str] = None,
+    ) -> bool:
+        """Supprime une branche. **Idempotent** + **refuse les branches protégées**.
+
+        - Refuse ``main``/``master``, tout nom dans ``protect``, **et la vraie branche
+          par défaut du dépôt** (résolue via l'API) : un dépôt dont la base est
+          ``develop``/``trunk`` est protégé aussi, pas seulement ``main``/``master``.
+          La résolution est **fail-closed** : si on ne peut pas déterminer la base, on
+          refuse (op destructive). Le caller peut passer ``default_branch`` pour
+          éviter le round-trip.
+        - La comparaison est normalisée (casse + ``/``/``.`` final) en défense en
+          profondeur contre les variantes.
+        - Idempotent : si la branche n'existe pas (déjà supprimée), renvoie ``True``
+          sans erreur. Gère aussi la **course** (suppression concurrente pendant
+          l'appel) en re-vérifiant l'absence avant de propager.
+        """
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        # Les noms de branche GitHub peuvent contenir des '/' (``feat/x``), donc on
+        # ne réutilise pas ``validate_ref`` (alphanum strict) : on bloque seulement la
+        # traversée / les caractères dangereux avant interpolation dans l'URL.
+        if not branch or branch.startswith("/") or ".." in branch or any(c.isspace() for c in branch):
+            raise ToolExecutionError(f"nom de branche invalide: {branch!r}")
+
+        def _norm(name: str) -> str:
+            return name.strip().rstrip("/.").lower()
+
+        norm = _norm(branch)
+        # 1) Garde littérale (main/master) : refus SANS round-trip réseau.
+        if norm in {_norm(p) for p in protect if p}:
+            raise ToolExecutionError(f"refus de supprimer la branche protégée: {branch!r}")
+        # 2) Vraie branche par défaut (fail-closed si non résolvable).
+        if default_branch is None:
+            try:
+                repo_info = self._api_get(f"/repos/{owner}/{repo}") or {}
+            except ToolExecutionError as e:
+                raise ToolExecutionError(
+                    f"branche par défaut de {owner}/{repo} non résolue — refus de supprimer (fail-closed)"
+                ) from e
+            default_branch = repo_info.get("default_branch")
+        if default_branch and norm == _norm(default_branch):
+            raise ToolExecutionError(f"refus de supprimer la branche par défaut: {branch!r}")
+
+        if self._branch_sha_or_none(owner, repo, branch) is None:
+            return True  # déjà absente → succès idempotent
+        try:
+            self._request_json("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch}")
+        except ToolExecutionError:
+            # Course : supprimée entre-temps ? Si oui, succès idempotent ; sinon propage.
+            if self._branch_sha_or_none(owner, repo, branch) is None:
+                return True
+            raise
+        return True
