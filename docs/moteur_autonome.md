@@ -31,10 +31,10 @@ problématique + budget
 │ (DAG GitHub) │   │ budget-temps │   │ diff → PR    │   │ gaté/rollback│
 └──────────────┘   └──────┬───────┘   └──────┬───────┘   └──────────────┘
                           │                  │
-                   ┌──────▼──────────────────▼──────┐
-                   │ state (Postgres/SQLite) · sandbox Docker │
+                   ┌──────▼──────────────────▼──────────────────┐
+                   │ state (Postgres/SQLite) · sandbox Docker   │
                    │ budget dur · checkpoints · journal d'audit │
-                   └──────────────────────────────────────────┘
+                   └────────────────────────────────────────────┘
 ```
 
 | Étage | Module | Rôle |
