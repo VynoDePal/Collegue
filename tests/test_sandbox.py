@@ -49,6 +49,30 @@ def test_build_argv_mounts_only_workspace(tmp_path):
     assert _mounts(argv) == [f"{tmp_path}:/workspace"]
 
 
+def test_build_argv_env_injection_secret_by_reference(tmp_path):
+    # Worker (ex. OpenHands) : la clé API est passée par RÉFÉRENCE (`-e NAME`, sans
+    # valeur → docker l'hérite du process appelant) → le secret n'apparaît JAMAIS
+    # dans l'argv (ni dans `ps`). Les valeurs non secrètes vont en clair (`-e K=V`).
+    sb = DockerSandbox(image="img", env={"LLM_MODEL": "gemini/x"}, env_passthrough=("LLM_API_KEY",))
+    argv = sb._build_run_argv("echo hi", str(tmp_path))
+    joined = " ".join(argv)
+    assert "-e LLM_API_KEY" in joined  # par référence
+    assert "LLM_API_KEY=" not in joined  # jamais la valeur du secret
+    assert "-e LLM_MODEL=gemini/x" in joined  # valeur non secrète en clair
+
+
+def test_build_argv_no_env_by_default(tmp_path):
+    # Défaut : aucun `-e` hormis HOME=/tmp → argv identique au comportement historique.
+    sb = DockerSandbox(image="img")
+    argv = sb._build_run_argv("echo hi", str(tmp_path))
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "-e"] == ["HOME=/tmp"]
+
+
+def test_build_argv_read_only_toggle(tmp_path):
+    assert "--read-only" in DockerSandbox(image="img")._build_run_argv("x", str(tmp_path))
+    assert "--read-only" not in DockerSandbox(image="img", read_only=False)._build_run_argv("x", str(tmp_path))
+
+
 def test_build_argv_runs_non_root(tmp_path):
     sb = DockerSandbox(image="img")
     argv = sb._build_run_argv("echo hi", str(tmp_path))
