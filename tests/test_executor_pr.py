@@ -124,6 +124,24 @@ def test_real_creates_branch_files_and_pr(tmp_path):
     assert "Closes #5" in body and "## Gate qualité" in body and exec_marker(5) in body
 
 
+def test_binary_file_is_skipped_not_crashed(tmp_path):
+    """#410 : un fichier binaire (PNG/PDF/…) est SAUTÉ au lieu de faire planter
+    l'ouverture de PR (la Contents API n'est câblée qu'en texte UTF-8) ; le reste
+    du diff (texte) est bien poussé, et le binaire sauté est tracé."""
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    (ws_dir / "code.py").write_text("print('ok')\n", encoding="utf-8")
+    (ws_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\xcbbinaire")  # octets non-UTF-8
+    ws = Workspace(path=str(ws_dir), branch="collegue/issue-5", base_commit="basesha123")
+    clients = _clients()
+    result = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("code.py", "logo.png"), clients=clients, dry_run=False)
+    # le code texte est poussé, le binaire est sauté (aucune exception)
+    assert {p for p, _c, _b in clients.files.updated} == {"code.py"}
+    assert result.skipped_binaries == ("logo.png",)
+    # trace visible pour le relecteur dans le corps de PR
+    assert "logo.png" in clients.prs.created[0]["body"]
+
+
 def test_idempotent_when_pr_already_open(tmp_path):
     ws = _workspace(tmp_path)
     existing = SimpleNamespace(number=77, html_url="https://gh/pull/77", head_branch="collegue/issue-5")
