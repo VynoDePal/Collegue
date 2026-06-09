@@ -145,6 +145,35 @@ Each expert uses an LLM, iterates through an **agentic loop**, and can **delegat
 | `SENTRY_AUTH_TOKEN` | Sentry auth token | |
 | `SENTRY_ORG` | Sentry organization slug | |
 | `KUBECONFIG` | Path to kubeconfig | |
+| `STATE_DATABASE_URL` | Autonomous engine durable state (Postgres/SQLite) | |
+| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` | Hard budget (auto-pause) | |
+| `AUTO_MERGE_ENABLED` / `PILOT_TOOL_ENABLED` | Autonomous capabilities (opt-in, **off** by default) | |
+
+> Full autonomous-engine settings (budget, auto-merge/revert, pilot MCP tool):
+> [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env) (FR).
+
+---
+
+## 🧭 Autonomous Development Engine
+
+Beyond the **reactive** experts, Collègue can drive end-to-end development:
+**plan → code → test → open PRs**, under a budget, with GitHub as the substrate.
+Stages: `planner` → `pilote` → `executor` → `improve`, on a durable-state
+(Postgres/SQLite) + Docker-sandbox foundation.
+
+**Safe by default**: `dry_run` (no writes) until you pass `--execute`; **no merge to
+`main` without a human** (§6); hard auto-paused budget; auto-merge, auto-revert and the
+pilot MCP tool are **off by default** and fail-closed.
+
+```bash
+# Preview (dry_run), then real execution
+python -m collegue.pilot --project-id 1 --repo-source /path/clone --owner org --repo app
+python -m collegue.pilot ... --execute            # real writes (PRs + state)
+python -m collegue.pilot ... --execute --improve  # + improvement cycle
+```
+
+Architecture, guardrails, observability/audit, crash resume and settings:
+**[docs/moteur_autonome.md](docs/moteur_autonome.md)** (FR).
 
 ---
 
@@ -168,6 +197,7 @@ See [docs/watchdog_deployment.md](docs/watchdog_deployment.md) for deployment.
 | [Integration Guide](docs/guide_integration.md) | Claude Desktop, Cursor, Windsurf, CI/CD integration |
 | [Expert Reference](docs/reference_experts.md) | Parameters, outputs and use cases for each expert |
 | [Multi-Agent System](docs/multi_agent_expert_system.md) | Technical architecture, delegation, memory |
+| [Autonomous Development Engine](docs/moteur_autonome.md) | Autonomous pilot: architecture, guardrails, audit, resume, settings (FR) |
 | [LLM Evaluations](docs/llm_evals.md) | Output quality benchmarks |
 | [Rate Limiting](docs/rate_limiting_and_quotas.md) | Quotas and limits |
 
