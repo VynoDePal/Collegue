@@ -40,6 +40,16 @@ from collegue.pilot.guard import (
     check_main_health,
     guard_post_merge,
 )
+from collegue.pilot.mcp_tool import (
+    PilotGateDecision,
+    PilotToolError,
+    PilotToolRequest,
+    PilotToolResult,
+    caller_allowed,
+    evaluate_pilot_gate,
+    register_pilot_tool,
+    run_pilot_tool,
+)
 from collegue.pilot.resume import load_run_start, persist_run_start
 from collegue.pilot.runtime import format_run_report, run_project_from_settings
 from collegue.pilot.scheduler import (
@@ -94,4 +104,13 @@ __all__ = [
     "GuardOutcome",
     "check_main_health",
     "guard_post_merge",
+    # H6 (Phase 5) — outil MCP du pilote (auth strict)
+    "PilotToolRequest",
+    "PilotToolResult",
+    "PilotToolError",
+    "PilotGateDecision",
+    "evaluate_pilot_gate",
+    "caller_allowed",
+    "run_pilot_tool",
+    "register_pilot_tool",
 ]
