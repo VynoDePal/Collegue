@@ -269,3 +269,40 @@ def test_maybe_auto_merge_real_calls_merge_pr():
 
 def test_evaluate_returns_decision_type():
     assert isinstance(evaluate_automerge(["docs/x.md"], checks=["success"], policy=_policy()), AutoMergeDecision)
+
+
+def test_maybe_auto_merge_emits_audit_events():
+    # L'audit (H4) reçoit un événement `automerge_decision` à chaque décision → visible
+    # au dashboard (#405). Refus puis merge réel.
+    audit = SimpleNamespace(events=[])
+    audit.record = lambda kind, **d: audit.events.append((kind, d))
+    prs = _PRs()
+
+    maybe_auto_merge(  # refusé (politique off)
+        SimpleNamespace(number=7, head_sha="abc"),
+        ["docs/x.md"],
+        additions=1,
+        checks=["success"],
+        policy=RiskPolicy(),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        dry_run=False,
+        audit=audit,
+    )
+    assert audit.events[-1][0] == "automerge_decision" and audit.events[-1][1]["allowed"] is False
+
+    maybe_auto_merge(  # autorisé + merge réel
+        SimpleNamespace(number=42, head_sha="abc123"),
+        ["docs/x.md"],
+        additions=5,
+        checks=["success"],
+        policy=_policy(),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        dry_run=False,
+        audit=audit,
+    )
+    ev = audit.events[-1]
+    assert ev[0] == "automerge_decision" and ev[1]["allowed"] is True and ev[1]["merged"] is True

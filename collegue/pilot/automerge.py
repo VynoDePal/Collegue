@@ -17,6 +17,8 @@ import fnmatch
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+from collegue.pilot.audit import AUTOMERGE_DECISION
+
 # Faible risque = **données / balisage non exécutable** uniquement. On exclut
 # volontairement ``tests/**`` du défaut : du code de test est exécuté en CI (avec des
 # identifiants) — ``conftest.py`` est même importé automatiquement par pytest → RCE.
@@ -246,6 +248,7 @@ def maybe_auto_merge(
     repo: str,
     dry_run: bool = True,
     files_complete: bool = True,
+    audit: object = None,
 ) -> AutoMergeOutcome:
     """Évalue puis (si autorisé **et** pas ``dry_run``) merge via H1 ``merge_pr``.
 
@@ -253,7 +256,18 @@ def maybe_auto_merge(
     merge réel **exige** un SHA de tête connu (``pr.head_sha``/``pr.sha``) : la garde
     anti-course de H1 est précisément ce qui justifie d'automatiser le merge — sans
     elle, un commit poussé entre l'évaluation et le merge passerait inaperçu → refus.
+
+    ``audit`` (H4) : si fourni, chaque décision émet un événement ``automerge_decision``
+    (tracé/auditable, visible au dashboard) — best-effort, ne casse jamais le flux.
     """
+
+    def _emit(**detail):
+        if audit is not None:
+            try:
+                audit.record(AUTOMERGE_DECISION, **detail)
+            except Exception:
+                pass
+
     decision = evaluate_automerge(
         files_changed,
         additions=additions,
@@ -262,15 +276,19 @@ def maybe_auto_merge(
         policy=policy,
         files_complete=files_complete,
     )
+    pr_number = getattr(pr, "number", None)
     if not decision.allowed:
+        _emit(pr_number=pr_number, allowed=False, merged=False, reason=decision.reason)
         return AutoMergeOutcome(decision=decision, merged=False)
     if dry_run:
+        _emit(pr_number=pr_number, allowed=True, merged=False, dry_run=True, reason=decision.reason)
         return AutoMergeOutcome(decision=decision, merged=False, dry_run=True)
     expected = getattr(pr, "head_sha", None) or getattr(pr, "sha", None)
     if not expected:
-        return AutoMergeOutcome(
-            decision=AutoMergeDecision(False, "SHA de tête inconnu — garde anti-course requise pour l'auto-merge"),
-            merged=False,
-        )
+        refused = AutoMergeDecision(False, "SHA de tête inconnu — garde anti-course requise pour l'auto-merge")
+        _emit(pr_number=pr_number, allowed=False, merged=False, reason=refused.reason)
+        return AutoMergeOutcome(decision=refused, merged=False)
     result = clients.prs.merge_pr(owner, repo, pr.number, method=policy.method, expected_head_sha=expected)
-    return AutoMergeOutcome(decision=decision, merged=bool(getattr(result, "merged", False)), merge_result=result)
+    merged = bool(getattr(result, "merged", False))
+    _emit(pr_number=pr_number, allowed=True, merged=merged, reason=decision.reason)
+    return AutoMergeOutcome(decision=decision, merged=merged, merge_result=result)
