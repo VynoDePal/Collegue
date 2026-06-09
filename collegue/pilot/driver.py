@@ -39,6 +39,7 @@ from collegue.pilot.audit import (
     RunAuditLog,
 )
 from collegue.pilot.budget import ACTION_DEADLINE, ACTION_PAUSED_BUDGET, BudgetTimeController
+from collegue.pilot.resume import persist_run_start
 from collegue.pilot.scheduler import next_task, remaining_tasks
 
 # Statut projet une fois le MVP construit (le moteur d'amélioration = Phase 4).
@@ -75,6 +76,7 @@ class ProjectRunResult:
     iterations: int
     processed: List[TaskOutcome] = field(default_factory=list)
     project_status: Optional[str] = None  # statut projet final écrit (ex. improving), sinon None
+    improvement: Optional[object] = None  # ImprovementResult si le mode improving a été enchaîné (H5)
 
     @property
     def opened_prs(self) -> List[int]:
@@ -113,6 +115,8 @@ async def run_project(
     max_iterations: Optional[int] = None,
     audit: Optional[RunAuditLog] = None,
     cost_source: Optional[CostSource] = None,
+    improve: bool = False,
+    run_improvement_fn=None,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -126,10 +130,23 @@ async def run_project(
     coût **par tâche** est échantillonné (delta) et alimente le ledger du run.
     ``None`` (défaut) → pas d'échantillonnage (``collegue.pilot.audit`` fournit
     ``default_process_cost_source`` à brancher par le runtime).
+
+    ``improve`` (H5) : si vrai et le MVP est construit (réel), enchaîne le moteur
+    d'amélioration (Phase 4) **sous le budget restant** et attache l'``ImprovementResult``
+    à ``result.improvement``. Défaut faux → comportement inchangé.
+    ``run_improvement_fn`` : injection de test ; défaut = ``collegue.improve.run_improvement``.
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
     tasks = manager.get_tasks(project_id)  # objets détachés : overlay mutable en mémoire
+
+    # Ancrage du début de run (réel) : persiste le ``started_at`` pour qu'une reprise
+    # reconstruise une deadline ABSOLUE (sinon elle glisse à chaque redémarrage). La
+    # reconstruction du contrôleur depuis cette valeur est faite par le runtime (F4).
+    # ``getattr`` : tolère un budget factice (tests) sans ``started_at``.
+    started_at = getattr(budget, "started_at", None)
+    if not dry_run and started_at is not None:
+        persist_run_start(manager, project_id, started_at)
 
     # Coût par run : on échantillonne le cumul process avant/après chaque tâche et on
     # enregistre le delta (le ledger ignore les deltas nuls/aberrants).
@@ -236,18 +253,55 @@ async def run_project(
     audit.record(RUN_STOP, iteration=iteration, reason=stop_reason, iterations=len(processed))
 
     project_status: Optional[str] = None
-    # Bascule MVP→amélioration uniquement si tout est construit sans échec, et
-    # seulement en réel (dry_run n'écrit rien — le stop_reason "completed" suffit
-    # à signaler que le MVP serait atteint).
-    # `processed` non vide : un projet vide (0 tâche) ne doit PAS basculer (la
-    # vacuité de ``not any(...)`` le ferait passer à tort).
-    if stop_reason == STOP_COMPLETED and processed and not any(not t.success for t in processed) and not dry_run:
+    # MVP atteint : run terminé (``STOP_COMPLETED`` implique qu'aucune tâche n'a échoué
+    # — sinon ``STOP_BLOCKED``) et le projet a des tâches, toutes satisfaites. Vrai aussi
+    # à la REPRISE d'un MVP déjà construit (tâches déjà ``in_review`` en DB → ``processed``
+    # vide) : on se base donc sur ``len(tasks) > 0`` et non sur ``processed`` (sinon une
+    # reprise ne basculerait jamais en amélioration — le cas même que H5 doit couvrir).
+    # ``len(tasks) > 0`` exclut le projet vide (anti-vacuité). Réel uniquement.
+    mvp_built = stop_reason == STOP_COMPLETED and len(tasks) > 0 and not dry_run
+    if mvp_built:
         manager.update_project(project_id, status=PROJECT_STATUS_IMPROVING)
         project_status = PROJECT_STATUS_IMPROVING
+
+    # Mode `improving` (H5) : MVP construit → enchaîne le moteur d'amélioration
+    # (Phase 4) sous le MÊME budget (donc le budget restant). Opt-in (``improve``) et
+    # réel uniquement. Import paresseux → ``collegue.improve`` n'est pas tiré au simple
+    # import du pilote.
+    improvement = None
+    if mvp_built and improve:
+        run_imp = run_improvement_fn or _default_run_improvement
+        improvement = await run_imp(
+            project_id,
+            repo_source,
+            ctx,
+            agent=agent,
+            owner=owner,
+            repo=repo,
+            manager=manager,
+            budget=budget,
+            sandbox=sandbox,
+            reviewer=reviewer,
+            clients=clients,
+            runner=runner,
+            base=base,
+            dry_run=dry_run,
+        )
 
     return ProjectRunResult(
         stop_reason=stop_reason,
         iterations=len(processed),
         processed=processed,
         project_status=project_status,
+        improvement=improvement,
     )
+
+
+async def _default_run_improvement(*args, **kwargs):
+    """Adaptateur paresseux vers ``collegue.improve.run_improvement`` (Phase 4).
+
+    Import différé : garde ``collegue.improve`` hors de l'import du pilote (isolation).
+    """
+    from collegue.improve import run_improvement
+
+    return await run_improvement(*args, **kwargs)
