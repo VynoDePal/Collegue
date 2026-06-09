@@ -100,6 +100,11 @@ class BudgetTimeController:
         return _aware(self._clock())
 
     @property
+    def started_at(self) -> datetime:
+        """Début (aware UTC) du run — sert à persister/reprendre une deadline absolue."""
+        return self._started_at
+
+    @property
     def deadline(self) -> Optional[datetime]:
         return self._deadline
 
