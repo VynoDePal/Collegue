@@ -226,6 +226,30 @@ def get_memory_stats() -> Dict[str, Any]:
         }
 
 
+def get_autonomous_runs_data() -> Dict[str, Any]:
+    """Vue des runs autonomes (pilote) depuis l'état durable (``STATE_DATABASE_URL``).
+
+    Lecture seule via ``ProjectStateManager`` ; ``configured=False`` si l'état durable
+    n'est pas configuré (cas dev local sans Postgres/SQLite). Tolérant aux pannes.
+    """
+    try:
+        from collegue.config import settings
+
+        url = getattr(settings, "STATE_DATABASE_URL", None)
+        if not url:
+            return {"configured": False, "runs": []}
+
+        from collegue.dashboard.run_view import build_all_runs
+        from collegue.state import ProjectStateManager
+
+        manager = ProjectStateManager.from_url(url)
+        runs = [view.to_dict() for view in build_all_runs(manager)]
+        return {"configured": True, "runs": runs}
+    except Exception as exc:
+        logger.warning("Cannot load autonomous runs: %s", exc)
+        return {"configured": False, "runs": [], "error": str(exc)}
+
+
 def get_activity_data() -> Dict[str, Any]:
     """Get activity log data (LLM calls, expert results, delegations, memory writes)."""
     try:
