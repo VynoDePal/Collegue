@@ -145,6 +145,35 @@ Chaque expert utilise un LLM, itère via une **boucle agentique**, et peut **dé
 | `SENTRY_AUTH_TOKEN` | Token Sentry | |
 | `SENTRY_ORG` | Organisation Sentry | |
 | `KUBECONFIG` | Chemin kubeconfig | |
+| `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |
+| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` | Budget dur (auto-pause) | |
+| `AUTO_MERGE_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes (opt-in, **off** par défaut) | |
+
+> Réglages complets du moteur autonome (budget, auto-merge/revert, outil MCP du pilote) :
+> [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env).
+
+---
+
+## 🧭 Moteur de développement autonome
+
+Au-delà des experts **réactifs**, Collègue peut piloter un développement de bout en
+bout : **planifier → coder → tester → ouvrir des PR**, sous budget, avec GitHub comme
+substrat. Étages : `planner` → `pilote` → `executor` → `improve`, sur un socle d'état
+durable (Postgres/SQLite) et de sandbox Docker.
+
+**Sûr par défaut** : `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
+**aucun merge dans `main` sans humain** (§6) ; budget dur auto-pausé ; auto-merge,
+auto-revert et outil MCP du pilote **désactivés par défaut** et fail-closed.
+
+```bash
+# Aperçu (dry_run) puis exécution réelle
+python -m collegue.pilot --project-id 1 --repo-source /chemin/clone --owner org --repo app
+python -m collegue.pilot ... --execute            # écritures réelles (PR + état)
+python -m collegue.pilot ... --execute --improve  # + cycle d'amélioration
+```
+
+Architecture, garde-fous, observabilité/audit, reprise après crash et réglages :
+**[docs/moteur_autonome.md](docs/moteur_autonome.md)**.
 
 ---
 
@@ -168,6 +197,7 @@ Voir [docs/watchdog_deployment.md](docs/watchdog_deployment.md) pour le déploie
 | [Guide d'Intégration](docs/guide_integration.md) | Intégration Claude Desktop, Cursor, Windsurf, CI/CD |
 | [Référence des Experts](docs/reference_experts.md) | Paramètres, sorties et cas d'usage de chaque expert |
 | [Système Multi-Agents](docs/multi_agent_expert_system.md) | Architecture technique, délégation, mémoire |
+| [Moteur de développement autonome](docs/moteur_autonome.md) | Pilote autonome : architecture, garde-fous, audit, reprise, réglages |
 | [Évaluations LLM](docs/llm_evals.md) | Benchmarks qualité des sorties LLM |
 | [Rate Limiting](docs/rate_limiting_and_quotas.md) | Quotas et limites |
 
