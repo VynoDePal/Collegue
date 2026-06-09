@@ -20,6 +20,7 @@ qu'il ne puisse pas forger de fausse bannière/section (cf. P5).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Protocol, Tuple, runtime_checkable
 
@@ -234,6 +235,50 @@ def outcome_from_review(response, *, min_quality: float = DEFAULT_MIN_QUALITY) -
     )
 
 
+# Extensions → langage supporté par l'outil ``code_review`` (python/js/ts/php).
+_REVIEW_LANG_BY_EXT = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".php": "php",
+}
+
+
+def _detect_review_language(diff: str) -> Optional[str]:
+    """Langage dominant d'un diff parmi ceux que ``code_review`` sait reviewer.
+
+    Parse les chemins de fichiers du diff (lignes ``+++ b/…`` / ``diff --git a/… b/…``)
+    et compte les extensions reconnues. Retourne le langage le plus représenté, ou
+    ``None`` si le diff ne contient **aucun** fichier de code supporté (que du SQL,
+    Markdown, config…). Sans ça, l'``ExpertReviewer`` envoyait tout en ``python`` →
+    un diff SQL/JS était jugé « Python cassé » (score 0.00) et bloquait à tort. [#409]
+    """
+    counts: dict[str, int] = {}
+    seen: set[str] = set()
+    for line in diff.splitlines():
+        path = None
+        if line.startswith("+++ b/"):
+            path = line[len("+++ b/") :].strip()
+        elif line.startswith("diff --git "):
+            parts = line.split(" b/", 1)  # `diff --git a/x b/y` → chemin `b/`
+            if len(parts) == 2:
+                path = parts[1].strip()
+        if not path or path == "/dev/null" or path in seen:
+            continue
+        seen.add(path)
+        _root, ext = os.path.splitext(path)
+        lang = _REVIEW_LANG_BY_EXT.get(ext.lower())
+        if lang:
+            counts[lang] = counts.get(lang, 0) + 1
+    if not counts:
+        return None
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]  # dominant, déterministe
+
+
 class ExpertReviewer:
     """Adaptateur :class:`Reviewer` vers l'outil expert ``code_review`` (réel).
 
@@ -251,10 +296,23 @@ class ExpertReviewer:
     async def review(self, diff: str, ctx, *, issue: Optional[IssueSpec] = None) -> ReviewOutcome:
         from collegue.tools.code_review.models import CodeReviewRequest
 
+        language = _detect_review_language(diff)
+        if language is None:
+            # Aucun fichier de code supporté (python/js/ts/php) dans le diff → la revue
+            # experte, calibrée pour ces langages, n'a rien à juger. On NE la lance PAS
+            # (sinon du SQL/Markdown/config serait noté comme du Python cassé → 0.00 →
+            # blocage à tort). Outcome neutre, NON bloquant. [#409]
+            return ReviewOutcome(
+                summary="revue experte ignorée : aucun fichier de code supporté (python/js/ts/php) dans le diff",
+                quality_score=1.0,
+                findings=(),
+                blocking=False,
+            )
+
         tool = self._tool or self._build_tool()
         request = CodeReviewRequest(
             code=diff or "(diff vide)",
-            language="python",
+            language=language,
             context=issue.to_prompt() if issue is not None else None,
         )
         response = await tool.execute_async(request, ctx=ctx)

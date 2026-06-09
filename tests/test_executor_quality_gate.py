@@ -21,7 +21,7 @@ from collegue.tools.code_review.models import CodeReviewResponse, ReviewFinding
 from collegue.tools.quotas import BudgetExceeded
 
 ISSUE = IssueSpec(number=5, title="T")
-DIFF = "diff --git a/x b/x\n+print('x')\n"
+DIFF = "diff --git a/x.py b/x.py\n+print('x')\n"
 
 
 class _FakeSandbox:
@@ -201,6 +201,28 @@ async def test_expert_reviewer_maps_tool_response():
     request = tool.calls[0][0]
     assert request.code == DIFF
     assert request.context == ISSUE.to_prompt()
+    # Langage détecté depuis l'extension du diff (#409), pas codé en dur.
+    assert request.language == "python"
+
+
+async def test_review_skipped_for_unsupported_language_diff():
+    """#409 : un diff sans fichier de code supporté (SQL seul) → revue IGNORÉE et
+    NON bloquante ; l'outil n'est PAS appelé (plus de faux 0.00 sur du non-code)."""
+    sql_diff = "diff --git a/schema.sql b/schema.sql\n+CREATE TABLE t (id INT);\n"
+    tool = _FakeTool(_response(0.0))  # bloquerait s'il était appelé
+    reviewer = ExpertReviewer(tool=tool)
+    outcome = await reviewer.review(sql_diff, ctx=None, issue=ISSUE)
+    assert outcome.blocking is False
+    assert tool.calls == []  # outil non sollicité
+
+
+async def test_review_detects_language_from_diff():
+    """#409 : le langage envoyé à code_review est détecté depuis les extensions du diff."""
+    ts_diff = "diff --git a/app/x.ts b/app/x.ts\n+export const a = 1;\n"
+    tool = _FakeTool(_response(0.9))
+    reviewer = ExpertReviewer(tool=tool)
+    await reviewer.review(ts_diff, ctx=None, issue=ISSUE)
+    assert tool.calls[0][0].language == "typescript"
 
 
 # --- protocole ------------------------------------------------------------------
