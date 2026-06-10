@@ -41,7 +41,7 @@ DEFAULT_TEST_COMMAND = "python -m pytest -q"
 _INSTALL_FAILED_NOTE = "[gate] installation des dépendances en échec — tests lancés quand même (#414)"
 
 
-def deps_install_prelude(workspace: str) -> Optional[str]:
+def deps_install_prelude(workspace: str, *, strict: bool = False) -> Optional[str]:
     """Préambule shell installant les dépendances du projet avant les tests (#414).
 
     Le conteneur de tests est **éphémère** et distinct de celui où l'agent a
@@ -53,9 +53,12 @@ def deps_install_prelude(workspace: str) -> Optional[str]:
     - install et tests partagent le **même** conteneur : ``pip install --user``
       écrit sous ``HOME=/tmp`` (tmpfs compatible rootfs read-only) qui **meurt avec
       le conteneur** → on PRÉFIXE la commande de tests au lieu d'un run séparé ;
-    - échec d'install **toléré** (``|| echo``) : les tests tournent quand même
-      (comportement historique préservé, ex. sandbox sans réseau), mais la cause
-      reste visible dans la sortie du gate ;
+    - échec d'install **toléré** par défaut (``|| echo``) : les tests tournent
+      quand même (comportement historique, ex. sandbox sans réseau) et la cause
+      reste visible dans la sortie du gate — détectée et remontée dans
+      ``QualityReport.deps_install_failed`` (#439) ;
+    - ``strict=True`` (#439) : l'échec d'installation devient BLOQUANT (``&&``) —
+      l'installabilité des dépendances déclarées fait partie du contrat ;
     - ``None`` si le workspace ne déclare aucune dépendance installable.
     """
     parts: List[str] = []
@@ -65,7 +68,37 @@ def deps_install_prelude(workspace: str) -> Optional[str]:
         parts.append("python -m pip install --user --no-cache-dir -q -e .")
     if not parts:
         return None
+    if strict:
+        return " && ".join(f"({part})" for part in parts)
     return "; ".join(f"({part} || echo '{_INSTALL_FAILED_NOTE}')" for part in parts)
+
+
+# Bannière de la passe d'installabilité dans la sortie du gate (#439).
+_INSTALLABILITY_BANNER = "[gate] installabilité : venv nu + requirements + collecte (#439)"
+_GATE_VENV = "/tmp/.gate_venv"
+
+
+def installability_command(workspace: str) -> Optional[str]:
+    """Passe d'installabilité en environnement NU (#439). Fail-closed.
+
+    L'image sandbox pré-installe une stack web pour servir l'**agent** (#414) :
+    une dépendance manquante ou mal pinnée de ``requirements.txt`` y est
+    invisible — gate vert sur un projet **non installable** ailleurs (FacNor v2 :
+    ``email-validator``/``httpx``/``python-multipart`` absents, ``pytest`` EXIT 4
+    en environnement propre). Cette passe valide le **contrat d'installation** du
+    livrable : venv vierge → ``pip install -r requirements.txt`` → collecte
+    pytest (exécute les imports de conftest/tests, exactement le mode d'échec
+    constaté). ``None`` sans ``requirements.txt``. Nécessite le réseau (PyPI) —
+    opt-in via ``check_installability``.
+    """
+    if not os.path.isfile(os.path.join(workspace, "requirements.txt")):
+        return None
+    return (
+        f"python -m venv --clear {_GATE_VENV}"
+        f" && {_GATE_VENV}/bin/python -m pip install --no-cache-dir -q -r requirements.txt"
+        f" && {_GATE_VENV}/bin/python -m pip install --no-cache-dir -q pytest"
+        f" && {_GATE_VENV}/bin/python -m pytest --collect-only -q"
+    )
 
 
 # Bannière insérée entre la passe Python et la passe frontend dans la sortie du gate.
@@ -187,6 +220,10 @@ class QualityReport:
     review_blocking: bool
     passed: bool
     review_error: Optional[str] = None
+    # #439 : l'installation des dépendances déclarées a échoué pendant le gate
+    # (mode toléré) — le vert des tests peut venir des paquets de l'IMAGE, pas du
+    # requirements.txt du projet. Signal fort pour la PR et l'audit.
+    deps_install_failed: bool = False
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -195,6 +232,14 @@ class QualityReport:
             "## Gate qualité",
             "",
             f"**Tests** : {tests_badge} (code de sortie {self.test_exit_code})",
+        ]
+        if self.deps_install_failed:
+            lines.append(
+                "> ⚠️ **installation des dépendances déclarées EN ÉCHEC** pendant le gate (#439) — "
+                "le vert peut venir des paquets pré-installés de l'image sandbox, pas du "
+                "`requirements.txt` du projet (installabilité non prouvée)."
+            )
+        lines += [
             "",
             "<details><summary>Sortie des tests</summary>",
             "",
@@ -260,6 +305,8 @@ async def run_quality_gate(
     test_command: str = DEFAULT_TEST_COMMAND,
     install_deps: bool = True,
     frontend_gate: bool = True,
+    require_deps_install: bool = False,
+    check_installability: bool = False,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -271,28 +318,44 @@ async def run_quality_gate(
     enchaîne install + build/type-check + tests front dans le même conteneur,
     fail-closed (cf. :func:`frontend_gate_command`) — sans quoi « tests verts »
     signifie « tests *Python* verts », même sur un diff 100 % frontend.
+    ``require_deps_install`` (#439) : l'échec d'installation des dépendances
+    déclarées devient BLOQUANT (au lieu d'être toléré et seulement signalé via
+    ``QualityReport.deps_install_failed``).
+    ``check_installability`` (#439) : ajoute la passe d'installabilité en venv NU
+    (cf. :func:`installability_command`) — prouve que le livrable s'installe
+    depuis SES requirements, pas depuis les paquets de l'image sandbox.
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
 
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
+    deps_install_failed = False
     try:
         command = test_command
         if install_deps:
-            prelude = deps_install_prelude(workspace)
+            prelude = deps_install_prelude(workspace, strict=require_deps_install)
             if prelude is not None:
-                command = f"{prelude}; {test_command}"
+                # Strict (#439) : install bloquante. Toléré (#414) : les tests
+                # tournent quand même, l'échec laisse sa note dans la sortie.
+                command = f"({prelude}) && {test_command}" if require_deps_install else f"{prelude}; {test_command}"
         if frontend_gate:
             front = frontend_gate_command(workspace)
             if front is not None:
                 # `&&` : la passe frontend ne tourne que si pytest est vert (le
                 # verdict est déjà rouge sinon) et son échec rend le gate rouge.
                 command = f"({command}) && echo '{_FRONTEND_BANNER}' && ({front})"
+        if check_installability:
+            installability = installability_command(workspace)
+            if installability is not None:
+                command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
         test_res = sandbox.run_tests(workspace, command)
         tests_passed = test_res.ok
         test_exit_code = test_res.exit_code
         test_output = "\n".join(part for part in (test_res.stdout, test_res.stderr) if part).strip()
+        # #439 : la note du prelude toléré (#414) devient un SIGNAL structuré —
+        # un vert obtenu avec une install en échec n'a pas la même valeur.
+        deps_install_failed = _INSTALL_FAILED_NOTE in test_output
     except Exception as exc:  # noqa: BLE001 - fail-closed ; BaseException (budget) remonte
         tests_passed = False
         test_exit_code = -1
@@ -321,6 +384,7 @@ async def run_quality_gate(
         review_blocking=review_blocking,
         passed=passed,
         review_error=review_error,
+        deps_install_failed=deps_install_failed,
     )
 
 

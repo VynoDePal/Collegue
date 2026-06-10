@@ -103,11 +103,15 @@ def _build_clients(github_token):  # pragma: no cover - infra réelle (integrati
 
 
 def _gate_options(settings_obj) -> dict:
-    """Options du gate qualité depuis la config (#438) — transmises à ``execute_issue``.
+    """Options du gate qualité depuis la config (#438/#439) — vers ``execute_issue``.
 
     ``GATE_TEST_COMMAND`` vide/None → commande par défaut du gate (pytest).
     """
-    options: dict = {"frontend_gate": bool(getattr(settings_obj, "GATE_FRONTEND", True))}
+    options: dict = {
+        "frontend_gate": bool(getattr(settings_obj, "GATE_FRONTEND", True)),
+        "require_deps_install": bool(getattr(settings_obj, "GATE_REQUIRE_DEPS_INSTALL", False)),
+        "check_installability": bool(getattr(settings_obj, "GATE_CHECK_INSTALLABILITY", False)),
+    }
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)

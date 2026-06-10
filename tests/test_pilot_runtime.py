@@ -244,13 +244,27 @@ def test_main_returns_1_on_blocked(monkeypatch):
 
 
 def test_gate_options_built_from_settings():
-    # #438 : la config GATE_* devient les kwargs du gate (vide → défauts du gate).
+    # #438/#439 : la config GATE_* devient les kwargs du gate (vide → défauts du gate).
     from collegue.pilot.runtime import _gate_options
 
-    custom = SimpleNamespace(GATE_FRONTEND=False, GATE_TEST_COMMAND="npm run check")
-    assert _gate_options(custom) == {"frontend_gate": False, "test_command": "npm run check"}
+    custom = SimpleNamespace(
+        GATE_FRONTEND=False,
+        GATE_TEST_COMMAND="npm run check",
+        GATE_REQUIRE_DEPS_INSTALL=True,
+        GATE_CHECK_INSTALLABILITY=True,
+    )
+    assert _gate_options(custom) == {
+        "frontend_gate": False,
+        "test_command": "npm run check",
+        "require_deps_install": True,
+        "check_installability": True,
+    }
     defaults = SimpleNamespace(GATE_TEST_COMMAND="")
-    assert _gate_options(defaults) == {"frontend_gate": True}
+    assert _gate_options(defaults) == {
+        "frontend_gate": True,
+        "require_deps_install": False,
+        "check_installability": False,
+    }
 
 
 # --- isolation ------------------------------------------------------------------
