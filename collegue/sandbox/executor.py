@@ -155,7 +155,15 @@ class DockerSandbox:
             argv += ["--read-only"]  # root FS en lecture seule
         argv += [
             "--tmpfs",
-            "/tmp",  # scratch éphémère écrivable
+            # Scratch éphémère écrivable. ``exec`` EXPLICITE (#454) : les défauts
+            # docker (`noexec,nosuid,nodev`) rendent inimportable tout module natif
+            # (.so) installé sous /tmp — or ``HOME=/tmp`` y envoie `pip --user`
+            # (#414) et la passe d'installabilité y crée son venv (#439) :
+            # `failed to map segment from shared object`, gate rouge structurel.
+            # ``noexec`` n'est PAS une frontière de sécurité ici : ce conteneur
+            # exécute déjà délibérément le code du projet (pytest, npm). On garde
+            # ``nosuid``/``nodev``.
+            "/tmp:exec,nosuid,nodev",
             "-e",
             "HOME=/tmp",
         ]

@@ -36,7 +36,11 @@ def test_build_argv_isolation_flags(tmp_path):
     assert "--cap-drop ALL" in joined
     assert "--security-opt no-new-privileges" in joined
     assert "--read-only" in argv
-    assert "--tmpfs" in argv and "/tmp" in argv
+    # #454 : ``exec`` EXPLICITE — les défauts docker (noexec) rendent inimportable
+    # tout .so sous /tmp (venv du gate #439, pip --user #414 avec HOME=/tmp) ;
+    # on garde nosuid/nodev (noexec n'est pas une frontière ici : le conteneur
+    # exécute déjà le code du projet).
+    assert "--tmpfs" in argv and "/tmp:exec,nosuid,nodev" in argv
     assert "--pids-limit" in argv
     assert "--memory" in argv and "--cpus" in argv
     assert "-w" in argv and "/workspace" in argv
