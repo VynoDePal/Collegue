@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     GATE_FRONTEND: bool = True
     # Commande de tests du gate (vide → défaut `python -m pytest -q`).
     GATE_TEST_COMMAND: str = ""
+    # Installabilité (#439). REQUIRE_DEPS_INSTALL : l'échec d'installation des
+    # deps déclarées rend le gate ROUGE (au lieu d'un signal toléré). CHECK_
+    # INSTALLABILITY : passe venv NU (install -r requirements + collecte pytest)
+    # — prouve que le livrable s'installe depuis SES requirements, pas depuis les
+    # paquets pré-installés de l'image sandbox (réseau PyPI requis).
+    GATE_REQUIRE_DEPS_INSTALL: bool = False
+    GATE_CHECK_INSTALLABILITY: bool = False
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

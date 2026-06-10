@@ -221,6 +221,79 @@ async def test_gate_frontend_opt_out(tmp_path):
     assert "npm" not in command
 
 
+# --- installabilité du livrable (#439) ---------------------------------------------
+
+
+async def test_deps_install_failure_is_surfaced_as_signal(tmp_path):
+    """#439 : l'échec d'installation des deps déclarées (toléré, #414) devient un
+    SIGNAL structuré — un vert obtenu grâce aux paquets de l'IMAGE n'a pas la
+    même valeur qu'un vert installable partout."""
+    from collegue.sandbox import SandboxResult
+
+    (tmp_path / "requirements.txt").write_text("paquet-inexistant\n", encoding="utf-8")
+    out = "[gate] installation des dépendances en échec — tests lancés quand même (#414)\n2 passed"
+    sandbox = _FakeSandbox(SandboxResult(exit_code=0, stdout=out, stderr=""))
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.passed is True  # toléré par défaut (sandbox sans réseau, #414)
+    assert report.deps_install_failed is True  # …mais le signal SURVIT
+    markdown = report.to_markdown()
+    assert "installation des dépendances déclarées EN ÉCHEC" in markdown
+    assert "installabilité non prouvée" in markdown
+
+
+async def test_deps_install_ok_has_no_signal(tmp_path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer())
+    assert report.deps_install_failed is False
+    assert "EN ÉCHEC" not in report.to_markdown()
+
+
+async def test_require_deps_install_makes_install_blocking(tmp_path):
+    # Mode strict (#439) : plus de `|| echo` — l'install conditionne les tests
+    # (`&&`), son échec rend le gate rouge au lieu d'un vert trompeur.
+    (tmp_path / "requirements.txt").write_text("x\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), require_deps_install=True
+    )
+    _ws, command = sandbox.calls[0]
+    assert "|| echo" not in command
+    assert ") && python -m pytest" in command
+
+
+def test_installability_command_requires_requirements(tmp_path):
+    from collegue.executor import installability_command
+
+    assert installability_command(str(tmp_path)) is None
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    command = installability_command(str(tmp_path))
+    # venv NU → install depuis les requirements du projet → collecte (imports).
+    assert "python -m venv --clear /tmp/.gate_venv" in command
+    assert "-r requirements.txt" in command
+    assert "pytest --collect-only" in command
+    assert " && " in command  # fail-closed à chaque étape
+
+
+async def test_check_installability_appends_nude_venv_pass(tmp_path):
+    """#439 : la passe d'installabilité tourne dans un venv VIERGE — une dep
+    manquante du requirements.txt (masquée par l'image sandbox, ex.
+    email-validator sur FacNor v2) fait enfin échouer le gate."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), check_installability=True
+    )
+    _ws, command = sandbox.calls[0]
+    assert "installabilité" in command  # bannière
+    assert "/tmp/.gate_venv" in command
+    assert command.index("pytest -q") < command.index("--collect-only")  # après la passe normale
+
+    # …et opt-out par défaut (réseau PyPI requis).
+    sandbox2 = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox2, reviewer=FakeReviewer())
+    assert ".gate_venv" not in sandbox2.calls[0][1]
+
+
 # --- fail-closed ----------------------------------------------------------------
 
 
