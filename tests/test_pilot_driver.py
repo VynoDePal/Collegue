@@ -331,6 +331,69 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     assert result.iterations == 2
 
 
+# --- barrière d'exception par tâche (#435) ------------------------------------------
+
+
+class _ExplodingThenOkAgent:
+    """Lève une exception CRUE N fois (panne d'infrastructure) puis réussit."""
+
+    def __init__(self, boom_times=1):
+        self.calls = 0
+        self.contexts = []
+        self._boom_times = boom_times
+        self._ok = FakeCodeAgent()
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        self.contexts.append(issue.context)
+        if self.calls <= self._boom_times:
+            raise RuntimeError("connexion réinitialisée (simulé)")
+        return self._ok.implement_issue(workspace, issue)
+
+
+async def test_engine_exception_enters_retry_path_not_run_crash(repo, manager):
+    """#435 : une exception d'infrastructure d'UNE tâche ne tue plus le run — elle
+    devient un échec retentable (engine_error) qui entre dans le canal #420/#424
+    (attempt_count, backoff, feedback ré-injecté) et le run aboutit."""
+    from collegue.pilot.audit import RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _ExplodingThenOkAgent(boom_times=1)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager, repo, pid, dry_run=False, agent=agent, audit=audit, max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "completed"
+    retries = [e for e in audit.events if e.kind == "task_retry"]
+    assert retries and retries[0].detail["reason"] == "engine_error"
+    assert "connexion réinitialisée" in retries[0].detail["error"]
+    assert "connexion réinitialisée" in agent.contexts[1]  # feedback #424 ré-injecté
+
+
+async def test_engine_exception_is_isolated_to_its_task(repo, manager):
+    # Panne DURABLE sur S0 (exception à chaque tentative) → failed terminal ; le
+    # run survit et construit S1 (avant : l'exception tuait run_project entier).
+    class _SelectiveBoom:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            if issue.title == "S0":
+                raise OSError("disque plein simulé")
+            return self._ok.implement_issue(workspace, issue)
+
+    pid = _sibling_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_SelectiveBoom())
+    statuses = {t.title: t.status for t in manager.get_tasks(pid)}
+    assert statuses == {"S0": "failed", "S1": "in_review"}
+    assert result.stop_reason == "blocked"  # S0 échouée : le graphe reste incomplet
+    s0 = next(t for t in manager.get_tasks(pid) if t.title == "S0")
+    assert "engine_error" in s0.last_error and "disque plein" in s0.last_error
+
+
 def test_requeue_task_for_redo_resets_for_feedback(manager):
     """#434 : contrat du close+redo — la tâche repart `todo` avec un feedback (#424)
     et un attempt_count MINIMAL (un conflit d'infrastructure ne consomme pas le

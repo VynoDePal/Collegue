@@ -436,6 +436,8 @@ async def run_project(
             task.status = TASK_STATUS_IN_REVIEW
         else:
             detail = {"task_id": task.id, "stage": outcome.stage, "reason": outcome.reason}
+            if getattr(outcome, "error", None):  # exception d'infrastructure (#435)
+                detail["error"] = log_tail(outcome.error, 600)
             agent_tail = log_tail(outcome.execution.agent_result.logs)
             if agent_tail:
                 detail["agent_log_tail"] = agent_tail
