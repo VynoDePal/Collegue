@@ -294,6 +294,153 @@ async def test_check_installability_appends_nude_venv_pass(tmp_path):
     assert ".gate_venv" not in sandbox2.calls[0][1]
 
 
+# --- adéquation diff↔issue (#437) --------------------------------------------------
+
+
+def test_issue_expects_code_heuristic():
+    from collegue.executor import issue_expects_code
+
+    # Fail-closed : une feature attend du code…
+    assert issue_expects_code(IssueSpec(number=1, title="Implémentation du service d'export PDF")) is True
+    # …un livrable explicitement non-code, non.
+    assert issue_expects_code(IssueSpec(number=2, title="Documentation de l'API")) is False
+    assert issue_expects_code(IssueSpec(number=3, title="Mise à jour de la configuration CI")) is False
+
+
+async def test_review_blocks_phantom_delivery_diff():
+    """#437 : la livraison fantôme exacte du run v2 — issue feature (« export PDF »)
+    fermée par +1 ligne de requirements.txt. Le skip neutre #409 devenait la faille :
+    diff sans code → revue ignorée → gate vert. Désormais BLOQUANT."""
+    req_diff = "diff --git a/requirements.txt b/requirements.txt\n+reportlab\n"
+    feature = IssueSpec(number=55, title="Implémentation du service d'export PDF")
+    reviewer = ExpertReviewer(tool=None)  # l'outil ne doit JAMAIS être sollicité
+    outcome = await reviewer.review(req_diff, ctx=None, issue=feature)
+    assert outcome.blocking is True
+    assert "fantôme" in outcome.summary
+    assert outcome.findings and outcome.findings[0].severity == "critical"
+
+
+async def test_review_still_neutral_for_expected_non_code_diff():
+    # Livrable non-code ATTENDU (docs) : comportement #409 conservé (neutre).
+    md_diff = "diff --git a/README.md b/README.md\n+# titre\n"
+    docs_issue = IssueSpec(number=9, title="Documentation utilisateur")
+    outcome = await ExpertReviewer(tool=None).review(md_diff, ctx=None, issue=docs_issue)
+    assert outcome.blocking is False
+
+    # …et sans issue fournie : neutre aussi (comportement historique).
+    outcome2 = await ExpertReviewer(tool=None).review(md_diff, ctx=None)
+    assert outcome2.blocking is False
+
+
+async def test_adequacy_checker_blocks_gate_when_not_implemented(tmp_path):
+    """#437 : tests verts + revue OK mais le diff n'implémente PAS l'issue →
+    gate NON passé, justification visible dans le rapport (et donc la PR)."""
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(implemented=False, justification="aucune route PDF, reportlab jamais importé")
+    report = await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE, adequacy_checker=checker
+    )
+    assert checker.calls == [ISSUE.number]
+    assert report.tests_passed is True
+    assert report.adequacy_implemented is False
+    assert report.passed is False  # fail-closed
+    markdown = report.to_markdown()
+    assert "Adéquation à l'issue" in markdown and "NON conforme" in markdown
+    assert "aucune route PDF" in markdown
+
+
+async def test_adequacy_checker_pass_keeps_gate_green(tmp_path):
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(implemented=True, justification="service livré et testé")
+    report = await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE, adequacy_checker=checker
+    )
+    assert report.passed is True
+    assert report.adequacy_implemented is True
+
+
+async def test_adequacy_checker_not_called_when_gate_already_red(tmp_path):
+    # Économie LLM : un gate déjà rouge n'appelle pas le contrôle d'adéquation.
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(implemented=True)
+    report = await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=_red(), reviewer=FakeReviewer(), issue=ISSUE, adequacy_checker=checker
+    )
+    assert checker.calls == []
+    assert report.adequacy_implemented is None
+    assert report.passed is False
+
+
+async def test_adequacy_checker_exception_is_fail_closed(tmp_path):
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(raises=RuntimeError("LLM indisponible"))
+    report = await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE, adequacy_checker=checker
+    )
+    assert report.adequacy_error is not None
+    assert report.passed is False
+    assert "indisponible" in report.to_markdown()
+
+
+def test_parse_adequacy_is_fail_closed():
+    from collegue.executor.quality_gate import _parse_adequacy
+
+    ok = _parse_adequacy('{"implemented": true, "justification": "service livré"}')
+    assert ok.implemented is True and "livré" in ok.justification
+    fenced = _parse_adequacy('```json\n{"implemented": false, "justification": "feature absente"}\n```')
+    assert fenced.implemented is False
+    assert _parse_adequacy("je ne sais pas").implemented is False  # illisible ⇒ non conforme
+    assert _parse_adequacy("").implemented is False
+
+
+async def test_llm_adequacy_checker_round_trip():
+    from collegue.executor import LLMAdequacyChecker
+
+    prompts = []
+
+    async def fake_sample(prompt, system_prompt):
+        prompts.append((prompt, system_prompt))
+        return '{"implemented": false, "justification": "le diff ne contient que requirements.txt"}'
+
+    checker = LLMAdequacyChecker(fake_sample)
+    outcome = await checker.check("diff --git a/requirements.txt b/requirements.txt\n+x\n", ISSUE, ctx=None)
+    assert outcome.implemented is False
+    prompt, system = prompts[0]
+    assert "Diff livré" in prompt and ISSUE.title in prompt
+    assert "JSON" in system
+
+
+# --- signal « aucun test touché » (#437) --------------------------------------------
+
+
+def test_tests_touched_detection():
+    from collegue.executor import tests_touched
+
+    assert tests_touched("diff --git a/tests/test_api.py b/tests/test_api.py\n+x\n") is True
+    assert tests_touched("diff --git a/src/InvoiceForm.test.tsx b/src/InvoiceForm.test.tsx\n+x\n") is True
+    assert tests_touched("diff --git a/src/form.spec.ts b/src/form.spec.ts\n+x\n") is True
+    assert tests_touched("diff --git a/app/main.py b/app/main.py\n+x\n") is False
+    assert tests_touched("") is False
+
+
+async def test_require_test_changes_blocks_codeless_coverage(tmp_path):
+    report = await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), require_test_changes=True
+    )
+    assert report.tests_touched is False
+    assert report.passed is False
+    assert "aucun fichier de test touché" in report.to_markdown()
+
+    # Par défaut : simple signal, pas bloquant.
+    report2 = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer())
+    assert report2.passed is True
+    assert "aucun fichier de test touché" in report2.to_markdown()
+
+
 # --- fail-closed ----------------------------------------------------------------
 
 
@@ -418,11 +565,13 @@ async def test_expert_reviewer_maps_tool_response():
 
 async def test_review_skipped_for_unsupported_language_diff():
     """#409 : un diff sans fichier de code supporté (SQL seul) → revue IGNORÉE et
-    NON bloquante ; l'outil n'est PAS appelé (plus de faux 0.00 sur du non-code)."""
+    NON bloquante ; l'outil n'est PAS appelé (plus de faux 0.00 sur du non-code).
+    (Depuis #437 : ne vaut que si l'issue n'attend PAS de code — ici données/seed.)"""
     sql_diff = "diff --git a/schema.sql b/schema.sql\n+CREATE TABLE t (id INT);\n"
     tool = _FakeTool(_response(0.0))  # bloquerait s'il était appelé
     reviewer = ExpertReviewer(tool=tool)
-    outcome = await reviewer.review(sql_diff, ctx=None, issue=ISSUE)
+    data_issue = IssueSpec(number=5, title="Seed des données de démonstration")
+    outcome = await reviewer.review(sql_diff, ctx=None, issue=data_issue)
     assert outcome.blocking is False
     assert tool.calls == []  # outil non sollicité
 

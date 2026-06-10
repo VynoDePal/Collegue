@@ -76,9 +76,17 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     Exception d'infrastructure (#435, ``outcome.error``) : c'est ELLE le motif —
     les logs agent (potentiellement ceux d'une exécution réussie, si la panne est
     survenue à l'ouverture de PR) seraient un feedback trompeur.
+
+    Adéquation refusée (#437) : les tests sont VERTS — le motif utile est la
+    justification du contrôle (« la feature n'est pas implémentée »), pas la
+    sortie des tests.
     """
     if outcome.error:
         return log_tail(outcome.error, 400)
+    report = outcome.quality_report
+    if report is not None and getattr(report, "adequacy_implemented", None) is False:
+        justification = getattr(report, "adequacy_justification", "") or "le diff n'implémente pas l'issue"
+        return ("ADÉQUATION REFUSÉE — le diff ne réalise pas l'issue : " + justification)[:700]
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
         fails = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED", "ERROR"))]

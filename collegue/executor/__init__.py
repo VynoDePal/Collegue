@@ -17,16 +17,22 @@ from collegue.executor.openhands_agent import OpenHandsAgent
 from collegue.executor.pipeline import ExecutionOutcome, execute_issue
 from collegue.executor.pr import PrClients, PrResult, build_pr_body, exec_marker, open_pr
 from collegue.executor.quality_gate import (
+    AdequacyChecker,
+    AdequacyOutcome,
     ExpertReviewer,
+    FakeAdequacyChecker,
     FakeReviewer,
+    LLMAdequacyChecker,
     QualityReport,
     Reviewer,
     ReviewFindingLite,
     ReviewOutcome,
     frontend_gate_command,
     installability_command,
+    issue_expects_code,
     outcome_from_review,
     run_quality_gate,
+    tests_touched,
 )
 from collegue.executor.revert import (
     RevertError,
@@ -65,6 +71,12 @@ __all__ = [
     "frontend_gate_command",
     "installability_command",
     "outcome_from_review",
+    "AdequacyChecker",
+    "AdequacyOutcome",
+    "FakeAdequacyChecker",
+    "LLMAdequacyChecker",
+    "issue_expects_code",
+    "tests_touched",
     # E4 — ouverture de PR
     "PrClients",
     "PrResult",

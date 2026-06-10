@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
-from typing import List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from collegue.executor.agent import IssueSpec
 from collegue.sandbox.executor import DockerSandbox
@@ -208,6 +209,21 @@ class Reviewer(Protocol):
     async def review(self, diff: str, ctx, *, issue: Optional[IssueSpec] = None) -> ReviewOutcome: ...
 
 
+@dataclass(frozen=True)
+class AdequacyOutcome:
+    """Verdict d'adéquation diff↔issue (#437)."""
+
+    implemented: bool
+    justification: str = ""
+
+
+@runtime_checkable
+class AdequacyChecker(Protocol):
+    """Contrôle « ce diff implémente-t-il l'issue ? » (#437). Async (LLM possible)."""
+
+    async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome: ...
+
+
 @dataclass
 class QualityReport:
     """Verdict combiné tests + revue d'un diff."""
@@ -224,6 +240,15 @@ class QualityReport:
     # (mode toléré) — le vert des tests peut venir des paquets de l'IMAGE, pas du
     # requirements.txt du projet. Signal fort pour la PR et l'audit.
     deps_install_failed: bool = False
+    # #437 : contrôle d'adéquation diff↔issue (None = non évalué). Fail-closed :
+    # implemented=False ou erreur du checker ⇒ passed=False.
+    adequacy_implemented: Optional[bool] = None
+    adequacy_justification: str = ""
+    adequacy_error: Optional[str] = None
+    # #437 : le diff touche-t-il au moins un fichier de test ? (signal — défaut
+    # True pour ne pas générer d'avertissement sur les rapports construits sans
+    # cette information).
+    tests_touched: bool = True
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -261,8 +286,149 @@ class QualityReport:
                 f"[{_fence_safe_line(finding.severity)}] "
                 f"{_fence_safe_line(finding.category)} : {_fence_safe_line(finding.title)}"
             )
-        lines += ["```", "", f"**Verdict** : {'✅ PASSÉ' if self.passed else '❌ NON PASSÉ'}"]
+        lines += ["```"]
+        if self.adequacy_implemented is not None or self.adequacy_error:
+            if self.adequacy_error:
+                badge = "⚠️ indisponible (fail-closed)"
+                detail = self.adequacy_error
+            else:
+                badge = "✅ conforme" if self.adequacy_implemented else "⛔ NON conforme"
+                detail = self.adequacy_justification
+            lines += ["", f"**Adéquation à l'issue (#437)** : {badge}"]
+            if detail:
+                lines.append(f"> {_fence_safe_line(detail)}")
+        if not self.tests_touched:
+            lines += [
+                "",
+                "> ⚠️ **aucun fichier de test touché** par ce diff (#437) — la feature livrée "
+                "n'est couverte par aucun test nouveau ou modifié.",
+            ]
+        lines += ["", f"**Verdict** : {'✅ PASSÉ' if self.passed else '❌ NON PASSÉ'}"]
         return "\n".join(lines)
+
+
+# Indices d'un livrable NON-code dans le titre d'une issue (#437). Fail-closed :
+# sans indice explicite, une issue est réputée attendre du CODE.
+_NON_CODE_HINTS = (
+    "doc",
+    "readme",
+    "config",
+    "données",
+    "data",
+    "seed",
+    "dépendance",
+    "dependance",
+    "changelog",
+    "licence",
+    "license",
+)
+
+
+def issue_expects_code(issue: IssueSpec) -> bool:
+    """Heuristique fail-closed : cette issue attend-elle une implémentation CODE ? (#437)
+
+    ``True`` par défaut ; ``False`` seulement quand le titre annonce explicitement
+    un livrable non-code (documentation, configuration, données…). C'est ce qui
+    distingue un « diff data-only attendu » d'une **livraison fantôme** (feature
+    fermée par +1 ligne de requirements — cas réel FacNor #69/export PDF).
+    """
+    title = (issue.title or "").lower()
+    return not any(hint in title for hint in _NON_CODE_HINTS)
+
+
+# Fichiers de test : tests/, __tests__/, test_x.py, x_test.go, x.test.ts, x.spec.ts…
+_TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__)(/|$)|(^|/)test_[^/]+$|[^/]+[._]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$")
+
+
+def tests_touched(diff: str) -> bool:
+    """Le diff touche-t-il au moins un fichier de test ? (#437, signal de couverture)."""
+    return any(_TEST_PATH_RE.search(path.lower()) for path in _diff_paths(diff))
+
+
+_ADEQUACY_SYSTEM = (
+    "Tu es un relecteur d'ADÉQUATION (rôle REVIEWER). On te donne une issue (titre, "
+    "critères d'acceptation) et le diff livré pour la fermer. Tu ne juges PAS le style : "
+    "uniquement si le diff RÉALISE concrètement ce que l'issue demande. "
+    'Réponds STRICTEMENT en JSON : {"implemented": true|false, "justification": "..."}. '
+    "implemented=false si la feature est absente ou hors-spec (ex. : une seule ligne de "
+    "dépendance pour un service entier, un schéma sans la logique demandée)."
+)
+
+
+def _parse_adequacy(text: str) -> AdequacyOutcome:
+    """Parsing tolérant de la réponse du LLM — **fail-closed** (illisible ⇒ non conforme)."""
+    raw = (text or "").strip()
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            return AdequacyOutcome(
+                implemented=bool(data.get("implemented")),
+                justification=str(data.get("justification") or "")[:500],
+            )
+        except ValueError:
+            pass
+    if not raw:
+        return AdequacyOutcome(False, "réponse vide du contrôle d'adéquation")
+    return AdequacyOutcome(False, f"réponse illisible du contrôle d'adéquation : {raw[:300]}")
+
+
+class LLMAdequacyChecker:
+    """:class:`AdequacyChecker` par LLM (#437) — fail-closed.
+
+    ``sample_fn`` : ``async (prompt, system_prompt) -> str``, injectable (mocké en
+    CI) ; défaut = ``generate_text`` des providers LLM avec la config du serveur.
+    Le diff est borné (``max_diff_chars``) pour rester dans la fenêtre du modèle.
+    """
+
+    def __init__(self, sample_fn=None, *, max_diff_chars: int = 20000):
+        self._sample_fn = sample_fn or _default_adequacy_sample_fn()
+        self._max_diff_chars = max_diff_chars
+
+    async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome:
+        prompt = (
+            f"## Issue à fermer\n{issue.to_prompt()}\n\n"
+            f"## Diff livré\n```diff\n{(diff or '(diff vide)')[: self._max_diff_chars]}\n```\n\n"
+            "Ce diff implémente-t-il concrètement l'issue ?"
+        )
+        text = await self._sample_fn(prompt, _ADEQUACY_SYSTEM)
+        return _parse_adequacy(text)
+
+
+def _default_adequacy_sample_fn():  # pragma: no cover - chemin réel (integration)
+    from collegue.config import settings
+    from collegue.resources.llm.providers import LLMConfig, generate_text
+
+    config = LLMConfig(
+        model_name=settings.llm_model,
+        api_key=settings.llm_api_key,
+        max_tokens=settings.MAX_TOKENS,
+        temperature=0.2,  # verdict, pas créativité
+    )
+
+    async def sample(prompt: str, system_prompt: str) -> str:
+        response = await generate_text(config, prompt, system_prompt)
+        return response.text
+
+    return sample
+
+
+class FakeAdequacyChecker:
+    """:class:`AdequacyChecker` déterministe pour la CI (aucun LLM)."""
+
+    def __init__(
+        self, *, implemented: bool = True, justification: str = "conforme", raises: Optional[Exception] = None
+    ):
+        self._implemented = implemented
+        self._justification = justification
+        self._raises = raises
+        self.calls: List[int] = []
+
+    async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome:
+        self.calls.append(issue.number)
+        if self._raises is not None:
+            raise self._raises
+        return AdequacyOutcome(implemented=self._implemented, justification=self._justification)
 
 
 class FakeReviewer:
@@ -307,6 +473,8 @@ async def run_quality_gate(
     frontend_gate: bool = True,
     require_deps_install: bool = False,
     check_installability: bool = False,
+    adequacy_checker: Optional[AdequacyChecker] = None,
+    require_test_changes: bool = False,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -324,6 +492,12 @@ async def run_quality_gate(
     ``check_installability`` (#439) : ajoute la passe d'installabilité en venv NU
     (cf. :func:`installability_command`) — prouve que le livrable s'installe
     depuis SES requirements, pas depuis les paquets de l'image sandbox.
+    ``adequacy_checker`` (#437) : contrôle « ce diff implémente-t-il l'issue ? »
+    (LLM rôle REVIEWER, fail-closed), lancé seulement quand le reste du gate est
+    vert ET qu'une ``issue`` est fournie — un diff trivial sans rapport avec les
+    critères (« livraison fantôme ») ne passe plus.
+    ``require_test_changes`` (#437) : exige qu'au moins un fichier de test soit
+    touché par le diff (sinon, simple signal ``tests_touched`` dans le rapport).
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
@@ -374,7 +548,25 @@ async def run_quality_gate(
         review_findings = ()
         review_blocking = True
 
-    passed = bool(tests_passed and not review_blocking and review_error is None)
+    # 3. Adéquation diff↔issue (#437) — lancée seulement si le reste est vert
+    #    (économie d'appels LLM : un gate déjà rouge n'a pas besoin du verdict).
+    #    Fail-closed : non conforme OU erreur du checker ⇒ non passé.
+    would_pass = bool(tests_passed and not review_blocking and review_error is None)
+    adequacy_implemented: Optional[bool] = None
+    adequacy_justification = ""
+    adequacy_error: Optional[str] = None
+    if adequacy_checker is not None and issue is not None and would_pass:
+        try:
+            adequacy = await adequacy_checker.check(diff, issue, ctx)
+            adequacy_implemented = bool(adequacy.implemented)
+            adequacy_justification = adequacy.justification
+        except Exception as exc:  # noqa: BLE001 - fail-closed ; BaseException (budget) remonte
+            adequacy_error = str(exc) or repr(exc)
+
+    touched = tests_touched(diff)
+    passed = would_pass and adequacy_implemented is not False and adequacy_error is None
+    if require_test_changes and not touched:
+        passed = False
     return QualityReport(
         tests_passed=tests_passed,
         test_exit_code=test_exit_code,
@@ -385,6 +577,10 @@ async def run_quality_gate(
         passed=passed,
         review_error=review_error,
         deps_install_failed=deps_install_failed,
+        adequacy_implemented=adequacy_implemented,
+        adequacy_justification=adequacy_justification,
+        adequacy_error=adequacy_error,
+        tests_touched=touched,
     )
 
 
@@ -424,18 +620,10 @@ _REVIEW_LANG_BY_EXT = {
 }
 
 
-def _detect_review_language(diff: str) -> Optional[str]:
-    """Langage dominant d'un diff parmi ceux que ``code_review`` sait reviewer.
-
-    Parse les chemins de fichiers du diff (lignes ``+++ b/…`` / ``diff --git a/… b/…``)
-    et compte les extensions reconnues. Retourne le langage le plus représenté, ou
-    ``None`` si le diff ne contient **aucun** fichier de code supporté (que du SQL,
-    Markdown, config…). Sans ça, l'``ExpertReviewer`` envoyait tout en ``python`` →
-    un diff SQL/JS était jugé « Python cassé » (score 0.00) et bloquait à tort. [#409]
-    """
-    counts: dict[str, int] = {}
+def _diff_paths(diff: str) -> Iterator[str]:
+    """Chemins (uniques) des fichiers touchés par un diff unifié git."""
     seen: set[str] = set()
-    for line in diff.splitlines():
+    for line in (diff or "").splitlines():
         path = None
         if line.startswith("+++ b/"):
             path = line[len("+++ b/") :].strip()
@@ -446,6 +634,20 @@ def _detect_review_language(diff: str) -> Optional[str]:
         if not path or path == "/dev/null" or path in seen:
             continue
         seen.add(path)
+        yield path
+
+
+def _detect_review_language(diff: str) -> Optional[str]:
+    """Langage dominant d'un diff parmi ceux que ``code_review`` sait reviewer.
+
+    Parse les chemins de fichiers du diff (lignes ``+++ b/…`` / ``diff --git a/… b/…``)
+    et compte les extensions reconnues. Retourne le langage le plus représenté, ou
+    ``None`` si le diff ne contient **aucun** fichier de code supporté (que du SQL,
+    Markdown, config…). Sans ça, l'``ExpertReviewer`` envoyait tout en ``python`` →
+    un diff SQL/JS était jugé « Python cassé » (score 0.00) et bloquait à tort. [#409]
+    """
+    counts: dict[str, int] = {}
+    for path in _diff_paths(diff):
         _root, ext = os.path.splitext(path)
         lang = _REVIEW_LANG_BY_EXT.get(ext.lower())
         if lang:
@@ -474,9 +676,30 @@ class ExpertReviewer:
 
         language = _detect_review_language(diff)
         if language is None:
-            # Aucun fichier de code supporté (python/js/ts/php) dans le diff → la revue
-            # experte, calibrée pour ces langages, n'a rien à juger. On NE la lance PAS
-            # (sinon du SQL/Markdown/config serait noté comme du Python cassé → 0.00 →
+            # Aucun fichier de code supporté (python/js/ts/php) dans le diff.
+            # #437 : si l'issue attend une IMPLÉMENTATION, un diff sans code est
+            # une livraison fantôme probable (cas réel : « export PDF » fermé par
+            # +1 ligne de requirements) → BLOQUANT, plus un skip neutre.
+            if issue is not None and issue_expects_code(issue):
+                return ReviewOutcome(
+                    summary=(
+                        "revue bloquante : le diff ne contient AUCUN fichier de code supporté "
+                        "(python/js/ts/php) alors que l'issue attend une implémentation — "
+                        "livraison fantôme probable (#437)"
+                    ),
+                    quality_score=0.0,
+                    findings=(
+                        ReviewFindingLite(
+                            category="adequacy",
+                            severity="critical",
+                            title="diff sans code pour une issue d'implémentation",
+                        ),
+                    ),
+                    blocking=True,
+                )
+            # Livrable non-code ATTENDU (docs, config, données) ou pas d'issue : la
+            # revue experte, calibrée pour le code, n'a rien à juger. On NE la lance
+            # PAS (sinon du SQL/Markdown serait noté comme du Python cassé → 0.00 →
             # blocage à tort). Outcome neutre, NON bloquant. [#409]
             return ReviewOutcome(
                 summary="revue experte ignorée : aucun fichier de code supporté (python/js/ts/php) dans le diff",
