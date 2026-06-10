@@ -32,6 +32,7 @@ from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.pipeline import execute_issue, failure_feedback, log_tail
+from collegue.executor.workspace import branch_for_issue
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
@@ -39,6 +40,7 @@ from collegue.pilot.audit import (
     PR_OPENED,
     RUN_STOP,
     TASK_FAILED,
+    TASK_RECONCILED,
     TASK_RETRY,
     TASK_STARTED,
     CostSource,
@@ -61,6 +63,7 @@ TASK_STATUS_TODO = "todo"
 TASK_STATUS_IN_PROGRESS = "in_progress"
 TASK_STATUS_IN_REVIEW = "in_review"
 TASK_STATUS_FAILED = "failed"
+TASK_STATUS_MERGED = "merged"
 
 # Raisons d'arrêt du pilote.
 STOP_COMPLETED = "completed"  # plus rien à construire → MVP atteint
@@ -224,6 +227,58 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     )
 
 
+def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str, audit=None) -> int:
+    """Réaligne les tâches ``in_review`` sur l'état RÉEL de leur PR GitHub (#442).
+
+    Entre deux runs, des PRs sont mergées ou fermées **hors moteur** (opérateur,
+    autre outil) : l'état persisté diverge alors silencieusement de la vérité
+    GitHub — un redémarrage repartirait d'un état faux (MVP jamais « complet »,
+    dépendants stricts bloqués ``awaiting_merge`` à tort). Pour chaque tâche
+    ``in_review`` (PR retrouvée par sa branche déterministe) :
+
+    - PR **mergée** → statut ``merged`` (terminal) ;
+    - PR **fermée sans merge** → redo (``todo`` + feedback #424, même canal que
+      le conflit #434) ;
+    - PR encore ouverte / introuvable / GitHub injoignable → état conservé
+      (**best-effort** : la réconciliation n'invente rien et ne tue pas le run).
+
+    Mute les objets ``tasks`` (overlay) ET persiste via ``manager``. Retourne le
+    nombre de tâches réalignées.
+    """
+    audit = audit or NullAuditLog()
+    reconciled = 0
+    for task in tasks:
+        if task.status != TASK_STATUS_IN_REVIEW:
+            continue
+        branch = branch_for_issue(task.issue_number or task.id)
+        try:
+            pr = clients.prs.find_pr_by_head(owner, repo, branch, state="all")
+        except Exception as exc:  # noqa: BLE001 - best-effort : GitHub down ≠ run mort
+            logger.warning("réconciliation #442 : PR introuvable pour la tâche %s (%s) — état conservé", task.id, exc)
+            continue
+        if pr is None:
+            continue
+        if getattr(pr, "merged", False):
+            task.status = TASK_STATUS_MERGED
+            manager.update_task_status(task.id, TASK_STATUS_MERGED)
+            audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="merged")
+            logger.info("tâche %s : PR #%s mergée hors-run → statut merged (#442)", task.id, pr.number)
+            reconciled += 1
+        elif getattr(pr, "state", "") == "closed":
+            message = (
+                f"[reconcile] ta PR #{pr.number} a été FERMÉE sans merge en dehors du run — "
+                "son contenu n'est PAS dans le dépôt : repars du dépôt à jour et relivre la tâche."
+            )
+            requeue_task_for_redo(manager, task.id, message=message)
+            task.status = TASK_STATUS_TODO
+            task.attempt_count = max(1, int(getattr(task, "attempt_count", 0) or 0))
+            task.last_error = message
+            audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="closed_requeued")
+            logger.info("tâche %s : PR #%s fermée sans merge → redo (#442)", task.id, pr.number)
+            reconciled += 1
+    return reconciled
+
+
 def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count: int = 1) -> None:
     """Re-file une tâche pour un REDO complet après un événement externe (#434).
 
@@ -273,6 +328,7 @@ async def run_project(
     require_merged_deps: bool = False,
     max_inflight_reviews: int = DEFAULT_MAX_INFLIGHT_REVIEWS,
     gate_options=None,
+    reconcile_reviews: bool = True,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -310,6 +366,11 @@ async def run_project(
     ``gate_options`` (#438) : kwargs transmis tels quels au gate qualité via
     ``execute_issue`` (``test_command``, ``frontend_gate``…) — configuration du
     gate par projet sans coupler le pilote à la config.
+
+    ``reconcile_reviews`` (#442, défaut vrai) : au démarrage d'un run RÉEL (avec
+    ``clients``), réaligne chaque tâche ``in_review`` sur l'état GitHub de sa PR
+    (mergée → ``merged`` ; fermée sans merge → redo) — le redémarrage après des
+    merges manuels (post-deadline notamment) redevient idempotent.
 
     ``max_inflight_reviews`` (#434, mode strict uniquement) : plafond de tâches
     ``in_review`` (PR ouverte non mergée) avant de s'arrêter ``awaiting_merge``.
@@ -363,6 +424,12 @@ async def run_project(
             task.status = TASK_STATUS_TODO
             if not dry_run:
                 manager.update_task_status(task.id, TASK_STATUS_TODO)
+
+    # #442 : réconciliation GitHub→état (réel uniquement, clients requis). Des PRs
+    # ont pu être mergées/fermées HORS moteur depuis le dernier run : sans
+    # réalignement, le redémarrage n'est pas idempotent.
+    if reconcile_reviews and not dry_run and clients is not None:
+        reconcile_in_review_tasks(tasks, manager, clients, owner=owner, repo=repo, audit=audit)
 
     # Avec retries, chaque tâche peut consommer jusqu'à max_task_attempts itérations.
     cap = max_iterations if max_iterations is not None else len(tasks) * max(2, max_task_attempts) + 5

@@ -159,6 +159,42 @@ def test_merge_pr_other_http_errors_propagate_untyped():
     assert not isinstance(ei.value, PRNotMergeableError)
 
 
+# --- mapping merged (réconciliation #442) -----------------------------------------
+
+
+def _pr_payload(**overrides):
+    payload = {
+        "number": 72,
+        "title": "t",
+        "state": "closed",
+        "html_url": "https://gh/pull/72",
+        "user": {"login": "x"},
+        "base": {"ref": "main"},
+        "head": {"ref": "collegue/issue-11"},
+        "created_at": "2026-06-10T00:00:00Z",
+        "updated_at": "2026-06-10T01:00:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_find_pr_by_head_maps_merged_from_merged_at():
+    # L'endpoint de LISTE n'expose pas `merged` (bool) mais `merged_at` : une PR
+    # closed+merged doit être distinguable d'une closed-abandonnée (#442).
+    pr, _ = _pr_with([_pr_payload(merged_at="2026-06-10T02:00:00Z")])
+    info = pr.find_pr_by_head("o", "r", "collegue/issue-11", state="all")
+    assert info.merged is True and info.state == "closed"
+
+    pr2, _ = _pr_with([_pr_payload(merged_at=None)])
+    info2 = pr2.find_pr_by_head("o", "r", "collegue/issue-11", state="all")
+    assert info2.merged is False
+
+
+def test_get_pr_maps_merged_bool():
+    pr, _ = _pr_with(_pr_payload(merged=True))
+    assert pr.get_pr("o", "r", 72).merged is True
+
+
 # --- delete_branch --------------------------------------------------------------
 
 

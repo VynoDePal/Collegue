@@ -114,7 +114,7 @@ def _sibling_project(manager, n=2):
     return pid
 
 
-async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, agent=None, **kw):
+async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, agent=None, clients=None, **kw):
     return await run_project(
         pid,
         repo,
@@ -126,7 +126,7 @@ async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, a
         budget=budget or _always(),
         sandbox=sandbox or _Sandbox(ok=True),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=clients or _clients(),
         dry_run=dry_run,
         **kw,
     )
@@ -330,6 +330,110 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     result = await _run(manager, repo, pid, dry_run=False)
     assert result.stop_reason == "completed"
     assert result.iterations == 2
+
+
+# --- réconciliation GitHub→état au démarrage (#442) ----------------------------------
+
+
+class _ReconcilePRs(_PRs):
+    """``find_pr_by_head`` scripté par branche (et journal des requêtes)."""
+
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self.queries = []
+
+    def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+        self.queries.append((head, state))
+        value = self._mapping.get(head)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def _reconcile_clients(mapping):
+    return PrClients(branches=_Branches(), files=_Files(), prs=_ReconcilePRs(mapping))
+
+
+async def test_reconcile_merged_pr_updates_state_and_unblocks_strict(repo, manager):
+    """#442 : une tâche in_review dont la PR a été MERGÉE hors-run (merge manuel
+    post-deadline) repart `merged` au démarrage — la reprise est idempotente et le
+    mode strict ne bloque plus `awaiting_merge` sur du travail déjà dans main."""
+    pid = _sibling_project(manager, 2)
+    s0 = manager.get_tasks(pid)[0]
+    manager.update_task_status(s0.id, "in_review")
+    branch = f"collegue/issue-{s0.id}"
+    clients = _reconcile_clients({branch: SimpleNamespace(number=72, state="closed", merged=True)})
+    result = await _run(manager, repo, pid, dry_run=False, clients=clients, require_merged_deps=True)
+    statuses = {t.title: t.status for t in manager.get_tasks(pid)}
+    assert statuses["S0"] == "merged"  # vérité GitHub réalignée
+    assert statuses["S1"] == "in_review"  # la sœur a pu se construire
+    assert result.iterations == 1
+    assert clients.prs.queries[0] == (branch, "all")
+
+
+async def test_reconcile_closed_pr_requeues_with_feedback(repo, manager):
+    # PR fermée SANS merge hors-run → redo : la tâche repart `todo` avec le
+    # feedback (#424) et est relivrée dans CE run.
+    pid = _linear_project(manager, 1)
+    t0 = manager.get_tasks(pid)[0]
+    manager.update_task_status(t0.id, "in_review")
+    branch = f"collegue/issue-{t0.id}"
+    clients = _reconcile_clients({branch: SimpleNamespace(number=64, state="closed", merged=False)})
+    agent = _RecordingAgent()
+    result = await _run(manager, repo, pid, dry_run=False, clients=clients, agent=agent)
+    assert result.iterations == 1  # relivrée dans ce run
+    assert "FERMÉE sans merge" in agent.contexts[0]  # feedback ré-injecté
+    assert manager.get_tasks(pid)[0].status == "in_review"
+
+
+async def test_reconcile_is_best_effort_and_conservative(repo, manager):
+    """PR encore ouverte → in_review conservé ; PR introuvable → état intact ;
+    GitHub injoignable → le run continue (best-effort, pas de mort du run)."""
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _sibling_project(manager, 3)
+    s0, s1, s2 = manager.get_tasks(pid)
+    for t in (s0, s1, s2):
+        manager.update_task_status(t.id, "in_review")
+    mapping = {
+        f"collegue/issue-{s0.id}": SimpleNamespace(number=70, state="open", merged=False),
+        f"collegue/issue-{s1.id}": None,
+        f"collegue/issue-{s2.id}": RuntimeError("GitHub 503"),
+    }
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, clients=_reconcile_clients(mapping), audit=audit)
+    assert result.stop_reason == "completed"  # rien à construire, rien n'a explosé
+    assert all(t.status == "in_review" for t in manager.get_tasks(pid))
+    assert [e for e in audit.events if e.kind == "task_reconciled"] == []
+
+
+async def test_reconcile_skipped_in_dry_run(repo, manager):
+    # dry_run n'écrit rien : pas de réconciliation (aperçu sans effet de bord).
+    pid = _linear_project(manager, 1)
+    t0 = manager.get_tasks(pid)[0]
+    manager.update_task_status(t0.id, "in_review")
+    branch = f"collegue/issue-{t0.id}"
+    clients = _reconcile_clients({branch: SimpleNamespace(number=72, state="closed", merged=True)})
+    await _run(manager, repo, pid, dry_run=True, clients=clients)
+    assert clients.prs.queries == []
+    assert manager.get_tasks(pid)[0].status == "in_review"
+
+
+async def test_reconcile_audits_outcomes(repo, manager):
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _sibling_project(manager, 2)
+    s0, s1 = manager.get_tasks(pid)
+    manager.update_task_status(s0.id, "in_review")
+    manager.update_task_status(s1.id, "in_review")
+    mapping = {
+        f"collegue/issue-{s0.id}": SimpleNamespace(number=72, state="closed", merged=True),
+        f"collegue/issue-{s1.id}": SimpleNamespace(number=64, state="closed", merged=False),
+    }
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, clients=_reconcile_clients(mapping), audit=audit)
+    outcomes = {e.detail["pr_number"]: e.detail["outcome"] for e in audit.events if e.kind == "task_reconciled"}
+    assert outcomes == {72: "merged", 64: "closed_requeued"}
 
 
 # --- drain des reviews au stop (#440) ------------------------------------------------
