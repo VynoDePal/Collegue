@@ -43,6 +43,21 @@ STAGE_RUN = "run"  # exécution de l'agent (diff)
 STAGE_GATE = "gate"  # gate qualité (tests + revue)
 STAGE_PR = "pr"  # ouverture de PR
 
+# Raisons d'échec portées par l'outcome (#421). Un ``success=False`` indifférencié
+# rendait le no-op de l'agent (souvent transitoire, ex. fenêtre 503 du provider)
+# indiscernable d'un vrai échec : ni retry intelligent, ni post-mortem possibles.
+REASON_NO_OP = "no_op"  # l'agent a tourné sans erreur mais n'a produit AUCUN diff
+REASON_AGENT_ERROR = "agent_error"  # le process agent a échoué (exit ≠ 0 / timeout)
+REASON_GATE_FAILED = "gate_failed"  # tests rouges ou revue bloquante
+
+
+def log_tail(text: str, limit: int = 2000) -> str:
+    """Dernier segment (borné) d'un log — journalisable sans inonder l'audit (#421)."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "…" + text[-limit:]
+
 
 @dataclass
 class ExecutionOutcome:
@@ -55,6 +70,7 @@ class ExecutionOutcome:
     quality_report: Optional[QualityReport] = None
     pr: Optional[PrResult] = None
     final_status: Optional[str] = None  # statut de tâche effectivement écrit (None si dry_run / pas de manager)
+    reason: Optional[str] = None  # raison d'échec (no_op | agent_error | gate_failed), None si succès
 
 
 def _set_status(manager, task_id, status: str, *, enabled: bool) -> Optional[str]:
@@ -99,12 +115,16 @@ async def execute_issue(
     # E2 : exécution de l'agent + capture du diff (l'état est piloté ici, pas par run_issue).
     execution = run_issue(agent, workspace, issue, runner=runner)
     if not execution.changed:
+        # #421 : distinguer le no-op (agent OK, zéro diff — souvent transitoire)
+        # de l'erreur du process agent (exit ≠ 0) — la couche retry en dépend.
+        reason = REASON_NO_OP if execution.agent_result.success else REASON_AGENT_ERROR
         return ExecutionOutcome(
             success=False,
             stage=STAGE_RUN,
             workspace=workspace,
             execution=execution,
             final_status=final_status,
+            reason=reason,
         )
 
     # E3 : gate qualité (fail-closed).
@@ -119,6 +139,7 @@ async def execute_issue(
             execution=execution,
             quality_report=report,
             final_status=final_status,
+            reason=REASON_GATE_FAILED,
         )
 
     # E4 : ouverture de PR (dry_run respecté).

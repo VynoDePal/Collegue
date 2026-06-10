@@ -155,6 +155,7 @@ async def test_tests_red_stops_at_gate_no_pr(repo, tmp_path):
     )
     assert outcome.success is False
     assert outcome.stage == "gate"
+    assert outcome.reason == "gate_failed"  # raison différenciée (#421)
     assert outcome.pr is None
     assert clients.prs.created == []  # aucune PR
     # l'état ne dépasse pas in_progress
@@ -180,9 +181,38 @@ async def test_agent_noop_stops_at_run(repo):
     )
     assert outcome.success is False
     assert outcome.stage == "run"
+    assert outcome.reason == "no_op"  # agent OK mais zéro diff (#421)
     assert outcome.quality_report is None  # gate jamais atteint
     assert outcome.pr is None
     assert clients.prs.created == []
+
+
+async def test_agent_process_error_has_distinct_reason(repo):
+    """#421 : un agent dont le PROCESS échoue (exit ≠ 0) n'est pas un no-op —
+    même stage `run`, mais reason `agent_error` (la couche retry en dépend)."""
+    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=False, **_kwargs(agent=FakeCodeAgent(succeed=False)))
+    assert outcome.success is False
+    assert outcome.stage == "run"
+    assert outcome.reason == "agent_error"
+    # Le diagnostic (logs agent) survit dans l'outcome.
+    assert "échec simulé" in outcome.execution.agent_result.logs
+
+
+async def test_success_outcome_has_no_reason(repo):
+    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=True, **_kwargs())
+    assert outcome.success is True
+    assert outcome.reason is None
+
+
+def test_log_tail_bounds_long_text():
+    from collegue.executor.pipeline import log_tail
+
+    assert log_tail("") == ""
+    assert log_tail("court") == "court"
+    long = "x" * 5000
+    tail = log_tail(long, 2000)
+    assert len(tail) == 2001  # « … » + 2000 derniers caractères
+    assert tail.startswith("…") and tail.endswith("x")
 
 
 async def test_reviewer_error_is_contained_not_propagated(repo):

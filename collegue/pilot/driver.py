@@ -22,17 +22,19 @@ Module **isolé** : non importé par ``app.py`` (F4 câblera).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.pipeline import execute_issue
+from collegue.executor.pipeline import execute_issue, log_tail
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
     GATE_DECISION,
     PR_OPENED,
     RUN_STOP,
+    TASK_FAILED,
     TASK_STARTED,
     CostSource,
     NullAuditLog,
@@ -55,6 +57,8 @@ STOP_PAUSED_BUDGET = "paused_budget"
 STOP_DEADLINE = "deadline_reached"
 STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -236,7 +240,32 @@ async def run_project(
             audit.record_cost(usd=cur_usd - last_usd, tokens=int(cur_tokens - last_tokens), iteration=iteration)
             last_usd, last_tokens = cur_usd, cur_tokens
         pr_number = outcome.pr.number if outcome.pr is not None else None
-        audit.record(GATE_DECISION, iteration=iteration, task_id=task.id, success=outcome.success, stage=outcome.stage)
+        audit.record(
+            GATE_DECISION,
+            iteration=iteration,
+            task_id=task.id,
+            success=outcome.success,
+            stage=outcome.stage,
+            reason=outcome.reason,
+        )
+        if not outcome.success:
+            # #421 : la cause doit SURVIVRE à l'échec — raison différenciée
+            # (no_op/agent_error/gate_failed) + extraits bornés des logs agent et de
+            # la sortie des tests, journalisés ET audités (persistés via decisions).
+            detail = {"task_id": task.id, "stage": outcome.stage, "reason": outcome.reason}
+            agent_tail = log_tail(outcome.execution.agent_result.logs)
+            if agent_tail:
+                detail["agent_log_tail"] = agent_tail
+            if outcome.quality_report is not None and outcome.quality_report.test_output:
+                detail["test_output_tail"] = log_tail(outcome.quality_report.test_output, 1000)
+            audit.record(TASK_FAILED, iteration=iteration, **detail)
+            logger.warning(
+                "tâche %s « %s » en échec (stage=%s, reason=%s)",
+                task.id,
+                task.title,
+                outcome.stage,
+                outcome.reason,
+            )
         if pr_number is not None:
             audit.record(PR_OPENED, iteration=iteration, task_id=task.id, pr_number=pr_number, dry_run=dry_run)
         processed.append(

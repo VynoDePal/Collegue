@@ -105,12 +105,12 @@ def _linear_project(manager, n=3):
     return pid
 
 
-async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, **kw):
+async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, agent=None, **kw):
     return await run_project(
         pid,
         repo,
         ctx=None,
-        agent=FakeCodeAgent(),
+        agent=agent or FakeCodeAgent(),
         owner="o",
         repo="r",
         manager=manager,
@@ -217,6 +217,35 @@ async def test_failed_task_blocks_dependents(repo, manager):
     statuses = {t.title: t.status for t in manager.get_tasks(pid)}
     assert statuses["T0"] == "failed"
     assert statuses["T1"] == "todo"  # jamais lancée
+
+
+async def test_failure_is_audited_with_reason_and_log_tails(repo, manager):
+    """#421 : la cause d'un échec SURVIT — l'audit porte la raison différenciée
+    (gate_failed / no_op / agent_error) + extraits bornés des logs agent et de la
+    sortie des tests (avant : seul success/stage, post-mortem impossible)."""
+    from collegue.pilot.audit import RunAuditLog
+
+    # Échec au gate (tests rouges) : raison + tails agent/tests.
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, sandbox=_Sandbox(ok=False), audit=audit)
+    failed = [e for e in audit.events if e.kind == "task_failed"]
+    assert len(failed) == 1
+    detail = failed[0].detail
+    assert detail["stage"] == "gate" and detail["reason"] == "gate_failed"
+    assert "fake agent" in detail["agent_log_tail"]  # logs agent enfin journalisés
+    assert detail["test_output_tail"] == "out"  # sortie des tests rouge capturée
+    # gate_decision porte aussi la raison (None si succès).
+    gates = [e for e in audit.events if e.kind == "gate_decision"]
+    assert gates and gates[0].detail["reason"] == "gate_failed"
+
+    # No-op de l'agent (zéro diff) : raison distincte, pas de sortie de tests.
+    pid2 = _linear_project(manager, 1)
+    audit2 = RunAuditLog(pid2)
+    await _run(manager, repo, pid2, dry_run=False, agent=FakeCodeAgent(files={}), audit=audit2)
+    failed2 = [e for e in audit2.events if e.kind == "task_failed"]
+    assert failed2 and failed2[0].detail["reason"] == "no_op"
+    assert "test_output_tail" not in failed2[0].detail  # gate jamais atteint
 
 
 async def test_resume_skips_already_done(repo, manager):
