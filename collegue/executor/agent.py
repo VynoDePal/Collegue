@@ -72,6 +72,11 @@ class AgentResult:
     ``diff``/``files_changed`` sont auto-déclarés (best-effort) ; la capture
     autoritative du diff revient à l'exécuteur (E2). ``success=False`` signale que
     l'agent n'a pas pu produire de changement exploitable.
+
+    Usage LLM (#441) : auto-déclaré par l'agent (0 = inconnu/non rapporté) — le
+    pilote l'ajoute au ledger de coût du run. Sans ce canal, la dépense du coder
+    (majoritaire) reste invisible de toute gouvernance (ledger à 0 $ / 0 token
+    sur ~7 h de LLM au run FacNor v2).
     """
 
     success: bool
@@ -79,6 +84,13 @@ class AgentResult:
     files_changed: Tuple[str, ...] = ()
     logs: str = ""
     summary: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        return int(self.prompt_tokens or 0) + int(self.completion_tokens or 0)
 
 
 @runtime_checkable

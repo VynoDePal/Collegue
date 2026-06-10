@@ -23,6 +23,7 @@ Pré-requis d'une exécution réelle (différés, integration) :
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from typing import List, Optional, Tuple
@@ -32,6 +33,41 @@ from collegue.executor.agent import AgentResult, IssueSpec
 
 # Point d'entrée headless d'OpenHands (module exécuté dans le conteneur sandbox).
 OPENHANDS_ENTRYPOINT = "openhands.core.main"
+
+# Contrat d'usage LLM du canal coder (#441) : le runner (entrypoint OpenHands ou
+# tout wrapper SDK) imprime, par appel LLM ou en fin de run, une ligne
+#   [collegue-usage] {"prompt_tokens": 1200, "completion_tokens": 480, "cost_usd": 0.0021}
+# Toutes les occurrences sont SOMMÉES par :func:`parse_usage_from_logs` et
+# alimentent le ledger de coût du run via ``AgentResult``.
+USAGE_MARKER = "[collegue-usage]"
+
+
+def parse_usage_from_logs(logs: str) -> Tuple[int, int, float]:
+    """``(prompt_tokens, completion_tokens, cost_usd)`` sommés depuis les logs (#441).
+
+    Best-effort : une ligne marquée mais illisible est ignorée (l'usage est une
+    télémétrie, jamais une cause d'échec). ``(0, 0, 0.0)`` si rien n'est rapporté
+    — le ledger distingue « zéro rapporté » de « gouvernance morte » par la
+    présence des événements ``cost_observed``.
+    """
+    prompt = completion = 0
+    cost = 0.0
+    for line in (logs or "").splitlines():
+        index = line.find(USAGE_MARKER)
+        if index < 0:
+            continue
+        payload = line[index + len(USAGE_MARKER) :].strip()
+        try:
+            data = json.loads(payload)
+            prompt += max(0, int(data.get("prompt_tokens") or 0))
+            completion += max(0, int(data.get("completion_tokens") or 0))
+            usd = float(data.get("cost_usd") or 0.0)
+            if math.isfinite(usd) and usd > 0:
+                cost += usd
+        except (ValueError, TypeError, AttributeError):
+            continue
+    return prompt, completion, cost
+
 
 # Politique retries/backoff par défaut du canal coder (#422) — alignée sur les
 # settings ``CODER_LLM_*`` de ``collegue.config``.
@@ -166,8 +202,12 @@ class OpenHandsAgent:
         self._last_launch = self._clock()
         result = self._sandbox.run_command(self.build_command(issue), workspace)
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        prompt_tokens, completion_tokens, cost_usd = parse_usage_from_logs(logs)
         return AgentResult(
             success=result.ok,
             logs=logs,
             summary=f"OpenHands sur l'issue #{issue.number}",
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost_usd,
         )

@@ -332,6 +332,34 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     assert result.iterations == 2
 
 
+# --- gouvernance de coût : canal coder → ledger (#441) -------------------------------
+
+
+async def test_coder_usage_feeds_run_cost_ledger(repo, manager):
+    """#441 : l'usage auto-déclaré par l'agent (tokens/coût du canal coder,
+    majoritaire en dépense et invisible du MetricsCollector serveur) alimente le
+    ledger du run — la gouvernance de coût n'est plus structurellement morte."""
+    import dataclasses
+
+    from collegue.pilot.audit import RunAuditLog
+
+    class _UsageAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(result, prompt_tokens=1200, completion_tokens=300, cost_usd=0.002)
+
+    pid = _linear_project(manager, 2)
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_UsageAgent(), audit=audit)
+    assert result.stop_reason == "completed"
+    assert audit.cost.tokens == 2 * 1500
+    assert audit.cost.usd == pytest.approx(2 * 0.002)
+    assert len([e for e in audit.events if e.kind == "cost_observed"]) == 2
+
+
 # --- hygiène des workspaces /tmp (#443) ----------------------------------------------
 
 
