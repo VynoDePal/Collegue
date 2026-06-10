@@ -46,7 +46,13 @@ from collegue.pilot.audit import (
 )
 from collegue.pilot.budget import ACTION_DEADLINE, ACTION_PAUSED_BUDGET, BudgetTimeController
 from collegue.pilot.resume import persist_run_start
-from collegue.pilot.scheduler import next_task, remaining_tasks
+from collegue.pilot.scheduler import (
+    SATISFIED_STATUSES,
+    SATISFIED_STATUSES_STRICT,
+    next_task,
+    ready_tasks,
+    remaining_tasks,
+)
 
 # Statut projet une fois le MVP construit (le moteur d'amélioration = Phase 4).
 PROJECT_STATUS_IMPROVING = "improving"
@@ -60,6 +66,7 @@ STOP_COMPLETED = "completed"  # plus rien à construire → MVP atteint
 STOP_PAUSED_BUDGET = "paused_budget"
 STOP_DEADLINE = "deadline_reached"
 STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
+STOP_AWAITING_MERGE = "awaiting_merge"  # mode strict (#411) : tout est prêt SAUF des merges humains
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
 
 # Retry au niveau tâche (#420). Le défaut du MODULE reste 1 (= pas de retry,
@@ -118,12 +125,24 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     """
     parts = []
     deps = [by_id[d] for d in (task.depends_on or []) if by_id and d in by_id]
-    if deps:
-        titres = ", ".join(f"« {d.title} »" for d in deps)
+    # #411 : ne pas mentir à l'agent. Une dépendance `in_review` (PR ouverte, non
+    # mergée) n'est PAS dans le clone (`main`) — la présenter comme « déjà
+    # construite » pousserait l'agent à chercher du code absent.
+    pending = [d for d in deps if getattr(d, "status", None) == "in_review"]
+    built = [d for d in deps if d not in pending]
+    if built:
+        titres = ", ".join(f"« {d.title} »" for d in built)
         parts.append(
             f"Cette tâche dépend de tâches déjà construites : {titres}. "
             "Inspecte le dépôt existant et réutilise leur code, modèles et conventions "
             "(ne recrée pas ce qui existe)."
+        )
+    if pending:
+        titres = ", ".join(f"« {d.title} »" for d in pending)
+        parts.append(
+            f"Attention : cette tâche dépend aussi de {titres}, dont la PR n'est PAS encore "
+            "mergée — leur code peut être ABSENT du dépôt cloné. Reste cohérent avec leur "
+            "périmètre (mêmes conventions et interfaces) sans dupliquer leur travail."
         )
     last_error = getattr(task, "last_error", None)
     if int(getattr(task, "attempt_count", 0) or 0) > 0 and last_error:
@@ -164,6 +183,7 @@ async def run_project(
     max_task_attempts: int = DEFAULT_MAX_TASK_ATTEMPTS,
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     sleep_fn=None,
+    require_merged_deps: bool = False,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -190,6 +210,13 @@ async def run_project(
     atteint — un aléa transitoire (503, no-op) ne fige plus tout le DAG. Le compteur
     est persisté (``tasks.attempt_count``) → le plafond survit aux redémarrages.
     ``sleep_fn`` : injection de test (défaut ``asyncio.sleep``).
+
+    ``require_merged_deps`` (#411) : si vrai, une dépendance ``in_review`` (PR non
+    mergée) ne débloque PAS ses dépendants — leur clone (``main``) ne contiendrait
+    pas son code. Quand seuls des merges humains manquent, le run s'arrête
+    ``awaiting_merge`` (relancer après merge reprend naturellement). À faux
+    (défaut historique), le démarrage d'un dépendant sur dépendance non mergée est
+    SIGNALÉ (audit ``unmerged_deps`` + warning) au lieu d'être silencieux.
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
@@ -255,16 +282,44 @@ async def run_project(
             audit.record(BUDGET_EVENT, iteration=iteration, action=decision.action, reason=decision.reason)
             break
 
-        task = next_task(tasks)
+        dep_satisfied = SATISFIED_STATUSES_STRICT if require_merged_deps else SATISFIED_STATUSES
+        task = next_task(tasks, satisfied=dep_satisfied)
         if task is None:
             # Plus aucune tâche prête. En séquentiel, plus aucun reliquat
             # `in_progress` (remis à `todo` au démarrage) : s'il reste des tâches
-            # non terminées, c'est un graphe coincé (dépendance échouée) → bloqué ;
-            # sinon, tout est construit → MVP atteint.
-            stop_reason = STOP_COMPLETED if not remaining_tasks(tasks) else STOP_BLOCKED
+            # non terminées, c'est soit (mode strict, #411) un graphe seulement en
+            # attente de merges humains (des tâches seraient prêtes au sens
+            # historique : rien d'autre ne manque) → `awaiting_merge` (un nouveau
+            # run après merge reprend naturellement) ; soit un graphe coincé
+            # (dépendance échouée) → bloqué ; sinon, tout est construit → MVP.
+            if not remaining_tasks(tasks):
+                stop_reason = STOP_COMPLETED
+            elif require_merged_deps and ready_tasks(tasks):
+                stop_reason = STOP_AWAITING_MERGE
+            else:
+                stop_reason = STOP_BLOCKED
             break
 
-        audit.record(TASK_STARTED, iteration=iteration + 1, task_id=task.id, title=task.title)
+        # #411 (mode historique) : démarrer un dépendant alors qu'une dépendance est
+        # `in_review` signifie que son clone (`main`) ne contient PAS le code de la
+        # dépendance — on le SIGNALE (audit + warning) au lieu de le taire.
+        unmerged_deps = [
+            d
+            for d in (task.depends_on or [])
+            if d in tasks_by_id and getattr(tasks_by_id[d], "status", None) == "in_review"
+        ]
+        started_detail = {"task_id": task.id, "title": task.title}
+        if unmerged_deps:
+            started_detail["unmerged_deps"] = unmerged_deps
+            logger.warning(
+                "tâche %s « %s » démarrée alors que ses dépendances %s sont in_review (PR non "
+                "mergée) : leur code n'est pas dans le clone — incohérence possible (#411). "
+                "DEPS_REQUIRE_MERGED=true pour exiger le merge.",
+                task.id,
+                task.title,
+                unmerged_deps,
+            )
+        audit.record(TASK_STARTED, iteration=iteration + 1, **started_detail)
         outcome = await execute_issue(
             _issue_from_task(task, tasks_by_id),
             repo_source,

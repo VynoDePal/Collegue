@@ -8,7 +8,11 @@ consomme la sélection.
 Statuts (alignés Phase 2 ``todo``→``in_progress``→``in_review``) :
 - **satisfaisants** (débloquent un dépendant) : ``in_review``, ``done``, ``merged``.
   Une PR ouverte (``in_review``) suffit à débloquer la suite — on n'attend pas le
-  merge humain pour enchaîner la construction du MVP.
+  merge humain pour enchaîner la construction du MVP. **Caveat (#411)** : le
+  workspace d'un dépendant clone ``main``, qui ne contient PAS le code d'une
+  dépendance ``in_review`` (PR non mergée) — le pilote SIGNALE ce démarrage et
+  un mode strict (``satisfied=SATISFIED_STATUSES_STRICT``) permet d'exiger le
+  merge avant de débloquer.
 - **en cours** : ``in_progress`` (ni prête ni terminée).
 - **prête** : ``todo`` avec toutes ses dépendances satisfaites.
 - tout autre statut non satisfaisant et non actif (ex. ``failed``) bloque ses
@@ -19,10 +23,13 @@ Module **isolé** : non câblé au runtime (F4 câblera le pilote).
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, FrozenSet, List, Optional, Sequence
 
 # Statuts qui SATISFONT une dépendance (débloquent un dépendant).
 SATISFIED_STATUSES = frozenset({"in_review", "done", "merged"})
+# Variante STRICTE (#411) : une PR ouverte ne suffit pas — le code d'une dépendance
+# n'atterrit dans `main` (donc dans le clone du dépendant) qu'au MERGE.
+SATISFIED_STATUSES_STRICT = frozenset({"done", "merged"})
 # Statuts « en cours » : du travail progresse, pas un blocage.
 ACTIVE_STATUSES = frozenset({"in_progress"})
 # Statut d'une tâche pas encore démarrée.
@@ -74,27 +81,29 @@ def _validate_graph(tasks: Sequence) -> None:
                 stack.pop()
 
 
-def ready_tasks(tasks: Sequence) -> List:
+def ready_tasks(tasks: Sequence, *, satisfied: FrozenSet[str] = SATISFIED_STATUSES) -> List:
     """Tâches prêtes (``todo`` + dépendances satisfaites), en ordre déterministe (par id).
 
     Les tâches prêtes sont à la « frontière » du graphe (dépendances déjà
     terminées) donc mutuellement indépendantes : trier par id est déterministe et
     cohérent avec un ordre topologique. Lève :class:`SchedulerError` si le graphe
-    est invalide (cycle / dépendance absente).
+    est invalide (cycle / dépendance absente). ``satisfied`` (#411) : ensemble des
+    statuts qui débloquent (défaut historique ; ``SATISFIED_STATUSES_STRICT`` pour
+    exiger le merge).
     """
     _validate_graph(tasks)
     by_id = _by_id(tasks)
     ready = [
         task
         for task in tasks
-        if task.status == PENDING_STATUS and all(by_id[dep].status in SATISFIED_STATUSES for dep in _deps(task))
+        if task.status == PENDING_STATUS and all(by_id[dep].status in satisfied for dep in _deps(task))
     ]
     return sorted(ready, key=lambda task: task.id)
 
 
-def next_task(tasks: Sequence) -> Optional[object]:
+def next_task(tasks: Sequence, *, satisfied: FrozenSet[str] = SATISFIED_STATUSES) -> Optional[object]:
     """Prochaine tâche prête (la plus prioritaire), ou ``None`` s'il n'y en a pas."""
-    ready = ready_tasks(tasks)
+    ready = ready_tasks(tasks, satisfied=satisfied)
     return ready[0] if ready else None
 
 
@@ -103,7 +112,7 @@ def remaining_tasks(tasks: Sequence) -> List:
     return [task for task in tasks if task.status not in SATISFIED_STATUSES]
 
 
-def is_blocked(tasks: Sequence) -> bool:
+def is_blocked(tasks: Sequence, *, satisfied: FrozenSet[str] = SATISFIED_STATUSES) -> bool:
     """True si des tâches restent, mais aucune n'est prête **et** aucune n'est en cours.
 
     Signale un graphe « coincé » (p.ex. un dépendant d'une tâche ``failed``), pour
@@ -113,6 +122,6 @@ def is_blocked(tasks: Sequence) -> bool:
     remaining = remaining_tasks(tasks)
     if not remaining:
         return False
-    if ready_tasks(tasks):
+    if ready_tasks(tasks, satisfied=satisfied):
         return False
     return not any(task.status in ACTIVE_STATUSES for task in remaining)
