@@ -83,6 +83,55 @@ async def test_default_test_command_invokes_pytest_as_module():
     assert command.startswith("python -m pytest"), f"commande de test inattendue: {command!r}"
 
 
+# --- installation des deps du projet (#414) --------------------------------------
+
+
+async def test_gate_installs_project_deps_before_tests(tmp_path):
+    """#414 : le conteneur de tests est éphémère → les deps déclarées du projet
+    sont installées AVANT pytest, dans la MÊME commande (même conteneur — un run
+    séparé perdrait l'install, `pip --user` écrivant sous /tmp tmpfs)."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "pip install --user --no-cache-dir -q -r requirements.txt" in command
+    assert command.index("pip install") < command.index("python -m pytest")
+
+
+async def test_gate_installs_editable_project_when_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "pip install --user --no-cache-dir -q -e ." in command
+
+
+async def test_gate_no_install_when_no_deps_declared(tmp_path):
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert command == "python -m pytest -q"
+
+
+async def test_gate_install_failure_is_tolerated_in_command(tmp_path):
+    # L'échec d'install ne court-circuite pas les tests : chaque étape est
+    # encapsulée en `(... || echo ...)` — les tests tournent quand même et la
+    # cause reste visible dans la sortie du gate.
+    (tmp_path / "requirements.txt").write_text("x\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "|| echo" in command
+
+
+async def test_gate_install_deps_opt_out(tmp_path):
+    (tmp_path / "requirements.txt").write_text("x\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), install_deps=False)
+    _ws, command = sandbox.calls[0]
+    assert "pip install" not in command
+
+
 # --- fail-closed ----------------------------------------------------------------
 
 
