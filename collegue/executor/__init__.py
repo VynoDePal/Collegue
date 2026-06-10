@@ -23,6 +23,7 @@ from collegue.executor.quality_gate import (
     Reviewer,
     ReviewFindingLite,
     ReviewOutcome,
+    frontend_gate_command,
     outcome_from_review,
     run_quality_gate,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "ExpertReviewer",
     "QualityReport",
     "run_quality_gate",
+    "frontend_gate_command",
     "outcome_from_review",
     # E4 — ouverture de PR
     "PrClients",

@@ -289,6 +289,34 @@ async def test_budget_exception_propagates_through_pipeline(repo):
         await execute_issue(ISSUE, repo, ctx=None, dry_run=False, **_kwargs(reviewer=reviewer))
 
 
+# --- options du gate par projet (#438) ---------------------------------------------
+
+
+async def test_gate_options_are_threaded_to_quality_gate(repo):
+    # #438 : la configuration du gate (commande de tests, passe frontend…)
+    # traverse execute_issue sans coupler l'exécuteur à la config.
+    class _RecordingSandbox(_Sandbox):
+        def __init__(self):
+            super().__init__(ok=True)
+            self.commands = []
+
+        def run_tests(self, workspace, command="pytest -q"):
+            self.commands.append(command)
+            return super().run_tests(workspace, command)
+
+    sandbox = _RecordingSandbox()
+    outcome = await execute_issue(
+        ISSUE,
+        repo,
+        ctx=None,
+        dry_run=True,
+        gate_options={"test_command": "make check"},
+        **_kwargs(sandbox=sandbox),
+    )
+    assert outcome.success is True
+    assert sandbox.commands == ["make check"]
+
+
 # --- réensemencement du workspace au retry (#436) ----------------------------------
 
 

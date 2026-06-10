@@ -22,6 +22,7 @@ qu'il ne puisse pas forger de fausse bannière/section (cf. P5).
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import List, Optional, Protocol, Tuple, runtime_checkable
@@ -65,6 +66,65 @@ def deps_install_prelude(workspace: str) -> Optional[str]:
     if not parts:
         return None
     return "; ".join(f"({part} || echo '{_INSTALL_FAILED_NOTE}')" for part in parts)
+
+
+# Bannière insérée entre la passe Python et la passe frontend dans la sortie du gate.
+_FRONTEND_BANNER = "[gate] frontend : install + build + tests (#438)"
+
+
+def _real_test_script(scripts: dict) -> bool:
+    """Vrai si ``package.json`` déclare un script ``test`` RÉEL (pas le stub npm).
+
+    Le stub par défaut de ``npm init`` (« Error: no test specified… && exit 1 »)
+    ferait échouer le gate de TOUT projet front sans tests — on ne lance que les
+    vrais scripts.
+    """
+    script = str(scripts.get("test") or "")
+    return bool(script.strip()) and "no test specified" not in script
+
+
+def frontend_gate_command(workspace: str) -> Optional[str]:
+    """Commande de gate frontend quand le workspace a un ``package.json`` (#438).
+
+    Le gate historique ne lançait QUE pytest : compilation TypeScript, build Vite
+    et tests front n'étaient JAMAIS validés — des PRs front cassées au type-check
+    sont mergées en série avec un verdict « ✅ PASSÉ » (main FacNor : ``npm run
+    build`` rouge, 11 erreurs TS, toutes PRs gate vert).
+
+    **Fail-closed, comme pytest** : npm absent de l'image, install, build ou tests
+    front en échec ⇒ gate rouge. Enchaîné dans le **même** conteneur :
+
+    - install : ``npm ci`` (reproductible), repli ``npm install`` (pas de lockfile) ;
+    - build : script ``build`` s'il existe, sinon ``tsc --noEmit`` quand TypeScript
+      est déclaré (tsconfig.json + dépendance ``typescript`` — installée juste
+      avant, d'où ``--no-install``) ;
+    - tests front : script ``test`` réel uniquement (stub npm ignoré).
+
+    ``CI=true`` neutralise les modes watch (react-scripts, vitest) ; le cache npm
+    vit sous ``/tmp`` (rootfs read-only, #414). ``None`` si pas de ``package.json``.
+    """
+    pkg_path = os.path.join(workspace, "package.json")
+    if not os.path.isfile(pkg_path):
+        return None
+    scripts: dict = {}
+    declared: set = set()
+    try:
+        with open(pkg_path, encoding="utf-8") as handle:
+            data = json.load(handle) or {}
+        scripts = dict(data.get("scripts") or {})
+        declared = set(data.get("dependencies") or {}) | set(data.get("devDependencies") or {})
+    except (OSError, ValueError):
+        # package.json illisible : on garde au moins l'install (fail-closed — npm
+        # signalera lui-même le JSON invalide au lieu d'un gate silencieusement vert).
+        pass
+    steps = ["(npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --silent)"]
+    if "build" in scripts:
+        steps.append("npm run build --silent")
+    elif "typescript" in declared and os.path.isfile(os.path.join(workspace, "tsconfig.json")):
+        steps.append("npx --no-install tsc --noEmit")
+    if _real_test_script(scripts):
+        steps.append("npm test --silent")
+    return "export CI=true NPM_CONFIG_CACHE=/tmp/.npm; " + " && ".join(steps)
 
 
 # Triple-backtick de remplacement : neutralise les fences pour qu'un texte non
@@ -199,6 +259,7 @@ async def run_quality_gate(
     issue: Optional[IssueSpec] = None,
     test_command: str = DEFAULT_TEST_COMMAND,
     install_deps: bool = True,
+    frontend_gate: bool = True,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -206,6 +267,10 @@ async def run_quality_gate(
     indisponibilité ⇒ ``passed=False``. Les ``BaseException`` remontent.
     ``install_deps`` (défaut vrai) : préfixe la commande de tests par l'installation
     des dépendances déclarées du projet (cf. :func:`deps_install_prelude`, #414).
+    ``frontend_gate`` (défaut vrai, #438) : si le workspace a un ``package.json``,
+    enchaîne install + build/type-check + tests front dans le même conteneur,
+    fail-closed (cf. :func:`frontend_gate_command`) — sans quoi « tests verts »
+    signifie « tests *Python* verts », même sur un diff 100 % frontend.
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
@@ -218,6 +283,12 @@ async def run_quality_gate(
             prelude = deps_install_prelude(workspace)
             if prelude is not None:
                 command = f"{prelude}; {test_command}"
+        if frontend_gate:
+            front = frontend_gate_command(workspace)
+            if front is not None:
+                # `&&` : la passe frontend ne tourne que si pytest est vert (le
+                # verdict est déjà rouge sinon) et son échec rend le gate rouge.
+                command = f"({command}) && echo '{_FRONTEND_BANNER}' && ({front})"
         test_res = sandbox.run_tests(workspace, command)
         tests_passed = test_res.ok
         test_exit_code = test_res.exit_code

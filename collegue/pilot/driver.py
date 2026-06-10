@@ -265,6 +265,7 @@ async def run_project(
     sleep_fn=None,
     require_merged_deps: bool = False,
     max_inflight_reviews: int = DEFAULT_MAX_INFLIGHT_REVIEWS,
+    gate_options=None,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -298,6 +299,10 @@ async def run_project(
     ``awaiting_merge`` (relancer après merge reprend naturellement). À faux
     (défaut historique), le démarrage d'un dépendant sur dépendance non mergée est
     SIGNALÉ (audit ``unmerged_deps`` + warning) au lieu d'être silencieux.
+
+    ``gate_options`` (#438) : kwargs transmis tels quels au gate qualité via
+    ``execute_issue`` (``test_command``, ``frontend_gate``…) — configuration du
+    gate par projet sans coupler le pilote à la config.
 
     ``max_inflight_reviews`` (#434, mode strict uniquement) : plafond de tâches
     ``in_review`` (PR ouverte non mergée) avant de s'arrêter ``awaiting_merge``.
@@ -454,6 +459,7 @@ async def run_project(
             project_id=project_id,
             dry_run=dry_run,
             seed_diff=seed,
+            gate_options=gate_options,
         )
         iteration += 1
         if sample_cost:
