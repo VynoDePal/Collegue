@@ -176,6 +176,8 @@ async def run_project_from_settings(
         retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
         # Cohérence inter-tâches (#411) : opt-in pour exiger le merge des deps.
         require_merged_deps=bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False)),
+        # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
+        max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).

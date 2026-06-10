@@ -32,7 +32,7 @@ from collegue.pilot.budget import (
     BudgetTimeController,
     ContinueDecision,
 )
-from collegue.pilot.driver import ProjectRunResult, TaskOutcome, run_project
+from collegue.pilot.driver import ProjectRunResult, TaskOutcome, requeue_task_for_redo, run_project
 from collegue.pilot.guard import (
     GuardOutcome,
     HealthResult,
@@ -77,6 +77,7 @@ __all__ = [
     "run_project",
     "ProjectRunResult",
     "TaskOutcome",
+    "requeue_task_for_redo",
     # F4 — câblage runtime
     "run_project_from_settings",
     "format_run_report",

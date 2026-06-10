@@ -9,7 +9,7 @@ branches protégées et fail-closed.
 import pytest
 
 from collegue.tools.base import ToolExecutionError
-from collegue.tools.github_commands import BranchCommands, MergeResult, PRCommands
+from collegue.tools.github_commands import BranchCommands, MergeResult, PRCommands, PRNotMergeableError
 
 
 class _Recorder:
@@ -93,6 +93,70 @@ def test_merge_pr_empty_put_response_is_not_merged():
     pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "h1"}})  # put_payload None → {}
     res = pr.merge_pr("o", "r", 7)
     assert res.merged is False
+
+
+# --- détection de conflit avant merge (#434) --------------------------------------
+
+
+def test_merge_pr_conflict_detected_before_put():
+    # Conflit signalé par GitHub (mergeable False / state dirty) → erreur TYPÉE
+    # avant tout PUT, pour que l'appelant branche close+redo/update-branch au lieu
+    # de parser un 405 générique.
+    pr, rec = _pr_with(
+        {"merged": False, "state": "open", "head": {"sha": "h"}, "mergeable": False, "mergeable_state": "dirty"}
+    )
+    with pytest.raises(PRNotMergeableError) as ei:
+        pr.merge_pr("o", "r", 64)
+    assert ei.value.pr_number == 64
+    assert ei.value.mergeable_state == "dirty"
+    assert not any(c[0] == "PUT" for c in rec.calls)
+
+
+def test_merge_pr_mergeable_unknown_proceeds():
+    # ``mergeable`` None (calcul GitHub en cours) n'est PAS un conflit confirmé :
+    # on laisse le PUT trancher (sinon fausses alertes sur les PRs fraîches).
+    pr, _ = _pr_with(
+        {"merged": False, "state": "open", "head": {"sha": "h"}, "mergeable": None, "mergeable_state": "unknown"},
+        put_payload={"merged": True, "sha": "s", "message": "ok"},
+    )
+    assert pr.merge_pr("o", "r", 7).merged is True
+
+
+def test_merge_pr_behind_is_not_a_conflict():
+    # ``behind`` (base avancée sans conflit) merge très bien : seul ``dirty``/
+    # ``mergeable=False`` déclenche l'erreur typée.
+    pr, _ = _pr_with(
+        {"merged": False, "state": "open", "head": {"sha": "h"}, "mergeable": True, "mergeable_state": "behind"},
+        put_payload={"merged": True, "sha": "s", "message": "ok"},
+    )
+    assert pr.merge_pr("o", "r", 7).merged is True
+
+
+def test_merge_pr_put_405_retyped_as_not_mergeable():
+    # GET avec ``mergeable`` périmé/absent → GitHub répond 405 au PUT : re-typé
+    # pour offrir le même canal de réparation que la détection amont.
+    pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "h"}})
+
+    def fail_put(endpoint, data):
+        raise ToolExecutionError("Erreur API GitHub: 405 Client Error: Method Not Allowed for url: .../merge")
+
+    pr._api_put = fail_put
+    with pytest.raises(PRNotMergeableError) as ei:
+        pr.merge_pr("o", "r", 71)
+    assert ei.value.pr_number == 71
+
+
+def test_merge_pr_other_http_errors_propagate_untyped():
+    # Une 500 quelconque reste une ToolExecutionError générique (pas un conflit).
+    pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "h"}})
+
+    def fail_put(endpoint, data):
+        raise ToolExecutionError("Erreur API GitHub: 500 Server Error")
+
+    pr._api_put = fail_put
+    with pytest.raises(ToolExecutionError) as ei:
+        pr.merge_pr("o", "r", 7)
+    assert not isinstance(ei.value, PRNotMergeableError)
 
 
 # --- delete_branch --------------------------------------------------------------

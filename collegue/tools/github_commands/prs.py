@@ -15,6 +15,21 @@ from ._helpers import validate_ref
 _MERGE_METHODS = ("merge", "squash", "rebase")
 
 
+class PRNotMergeableError(ToolExecutionError):
+    """La PR est en CONFLIT avec sa base : le merge est impossible en l'état (#434).
+
+    Erreur **typée** (sous-classe de :class:`ToolExecutionError`) pour que les
+    appelants (auto-merge H2, orchestrations) puissent brancher une stratégie de
+    réparation — close + redo de la tâche (cf. ``requeue_task_for_redo`` du pilote),
+    update-branch… — au lieu de parser un 405 générique.
+    """
+
+    def __init__(self, pr_number: int, mergeable_state: str, message: str):
+        super().__init__(message)
+        self.pr_number = pr_number
+        self.mergeable_state = mergeable_state
+
+
 class PRInfo(BaseModel):
     number: int
     title: str
@@ -251,6 +266,21 @@ class PRCommands(GitHubClient):
                 "refus (anti-course)"
             )
 
+        # #434 : détecter le CONFLIT avant le PUT. GitHub expose ``mergeable``
+        # (False = conflit confirmé ; None = calcul en cours → on tente, le PUT
+        # tranchera) et ``mergeable_state`` (``dirty`` = conflit). Les autres états
+        # (behind/blocked/unstable) ne sont PAS des conflits : on laisse l'API
+        # décider (un ``behind`` merge très bien).
+        mergeable_state = str(current.get("mergeable_state") or "").lower()
+        if current.get("mergeable") is False or mergeable_state == "dirty":
+            raise PRNotMergeableError(
+                pr_number,
+                mergeable_state or "dirty",
+                f"PR #{pr_number} en conflit avec sa base (mergeable_state="
+                f"{mergeable_state or 'dirty'}) — merge impossible en l'état : "
+                "rebase/update-branch ou close+redo de la tâche requis",
+            )
+
         body: dict = {"merge_method": method}
         if commit_title:
             body["commit_title"] = commit_title
@@ -259,7 +289,23 @@ class PRCommands(GitHubClient):
         if expected_head_sha:
             body["sha"] = expected_head_sha
 
-        resp = self._api_put(f"/repos/{owner}/{repo}/pulls/{pr_number}/merge", body) or {}
+        try:
+            resp = self._api_put(f"/repos/{owner}/{repo}/pulls/{pr_number}/merge", body) or {}
+        except PRNotMergeableError:
+            raise
+        except ToolExecutionError as exc:
+            # ``mergeable`` peut être None/périmé au GET : GitHub répond alors
+            # 405 « Pull Request is not mergeable » au PUT. On re-type l'erreur
+            # pour offrir le même canal de réparation que la détection amont.
+            text = str(exc)
+            if "405" in text or "not mergeable" in text.lower():
+                raise PRNotMergeableError(
+                    pr_number,
+                    "dirty",
+                    f"PR #{pr_number} refusée au merge par GitHub (405 non mergeable) — "
+                    "conflit probable avec la base : rebase/update-branch ou close+redo requis",
+                ) from exc
+            raise
         # Un merge réussi renvoie toujours ``{"merged": true, "sha": ...}`` ; l'absence
         # de confirmation = échec (défaut False), jamais un succès supposé (fail-closed).
         return MergeResult(merged=bool(resp.get("merged", False)), sha=resp.get("sha"), message=resp.get("message", ""))
