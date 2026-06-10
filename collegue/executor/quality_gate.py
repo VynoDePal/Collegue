@@ -3,7 +3,9 @@
 Deux vérifications, **fail-closed** :
 
 1. **Tests** dans le :class:`~collegue.sandbox.executor.DockerSandbox` (C8) sur
-   l'arbre patché — du code non fiable ne tourne donc jamais sur l'hôte.
+   l'arbre patché — du code non fiable ne tourne donc jamais sur l'hôte. Les
+   dépendances déclarées du projet (``requirements.txt`` / ``pyproject.toml``)
+   sont installées dans le **même** conteneur avant ``pytest`` (#414).
 2. **Revue experte** via l'outil ``code_review`` existant (rôle LLM ``REVIEWER``),
    derrière un :class:`Reviewer` injectable (mocké en CI, réel en ``integration``).
 
@@ -34,6 +36,37 @@ from collegue.textnorm import inline
 # `from src.x import …`) lèvent `ModuleNotFoundError` à la collecte → le gate échoue
 # à tort (tests verts vus comme rouges). Voir issue #413.
 DEFAULT_TEST_COMMAND = "python -m pytest -q"
+# Note visible dans la sortie du gate quand l'installation des deps échoue (#414).
+_INSTALL_FAILED_NOTE = "[gate] installation des dépendances en échec — tests lancés quand même (#414)"
+
+
+def deps_install_prelude(workspace: str) -> Optional[str]:
+    """Préambule shell installant les dépendances du projet avant les tests (#414).
+
+    Le conteneur de tests est **éphémère** et distinct de celui où l'agent a
+    travaillé : sans installation, tout projet à dépendance tierce échoue en
+    ``ModuleNotFoundError`` (environnement incomplet, pas code faux) et le gate
+    refuse la PR à tort (cas réel FacNor : ``No module named 'jose'``).
+
+    Contraintes de conception :
+    - install et tests partagent le **même** conteneur : ``pip install --user``
+      écrit sous ``HOME=/tmp`` (tmpfs compatible rootfs read-only) qui **meurt avec
+      le conteneur** → on PRÉFIXE la commande de tests au lieu d'un run séparé ;
+    - échec d'install **toléré** (``|| echo``) : les tests tournent quand même
+      (comportement historique préservé, ex. sandbox sans réseau), mais la cause
+      reste visible dans la sortie du gate ;
+    - ``None`` si le workspace ne déclare aucune dépendance installable.
+    """
+    parts: List[str] = []
+    if os.path.isfile(os.path.join(workspace, "requirements.txt")):
+        parts.append("python -m pip install --user --no-cache-dir -q -r requirements.txt")
+    if os.path.isfile(os.path.join(workspace, "pyproject.toml")) or os.path.isfile(os.path.join(workspace, "setup.py")):
+        parts.append("python -m pip install --user --no-cache-dir -q -e .")
+    if not parts:
+        return None
+    return "; ".join(f"({part} || echo '{_INSTALL_FAILED_NOTE}')" for part in parts)
+
+
 # Triple-backtick de remplacement : neutralise les fences pour qu'un texte non
 # fiable ne puisse pas refermer le bloc de code et forger une fausse section.
 _FENCE = "```"
@@ -165,11 +198,14 @@ async def run_quality_gate(
     reviewer: Optional[Reviewer] = None,
     issue: Optional[IssueSpec] = None,
     test_command: str = DEFAULT_TEST_COMMAND,
+    install_deps: bool = True,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
     ``sandbox``/``reviewer`` sont injectables (mockés en CI). Tout échec ou
     indisponibilité ⇒ ``passed=False``. Les ``BaseException`` remontent.
+    ``install_deps`` (défaut vrai) : préfixe la commande de tests par l'installation
+    des dépendances déclarées du projet (cf. :func:`deps_install_prelude`, #414).
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
@@ -177,7 +213,12 @@ async def run_quality_gate(
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
     try:
-        test_res = sandbox.run_tests(workspace, test_command)
+        command = test_command
+        if install_deps:
+            prelude = deps_install_prelude(workspace)
+            if prelude is not None:
+                command = f"{prelude}; {test_command}"
+        test_res = sandbox.run_tests(workspace, command)
         tests_passed = test_res.ok
         test_exit_code = test_res.exit_code
         test_output = "\n".join(part for part in (test_res.stdout, test_res.stderr) if part).strip()
