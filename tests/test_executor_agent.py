@@ -145,6 +145,64 @@ def test_openhands_build_command_carries_task_and_model_not_secret():
     assert not any("API_KEY" in part for part in argv)
 
 
+def test_openhands_build_command_propagates_coder_retry_policy():
+    """#422 : le moteur ne peut pas intercepter les appels LiteLLM du sandbox —
+    il PROPAGE donc la politique retries/backoff au worker via l'env OpenHands."""
+    agent = OpenHandsAgent(
+        sandbox=object(),
+        settings_obj=_settings(CODER_LLM_NUM_RETRIES=5, CODER_LLM_RETRY_MIN_WAIT=10, CODER_LLM_RETRY_MAX_WAIT=60),
+    )
+    argv = agent.build_command(IssueSpec(number=9, title="T"))
+    assert "LLM_NUM_RETRIES=5" in argv
+    assert "LLM_RETRY_MIN_WAIT=10" in argv
+    assert "LLM_RETRY_MAX_WAIT=60" in argv
+    # L'env précède l'entrypoint python (consommé par `env`).
+    assert argv.index("LLM_NUM_RETRIES=5") < argv.index("-m")
+
+
+def test_openhands_retry_policy_defaults_and_robustness():
+    # Sans settings dédiés → défauts ; valeurs invalides/négatives → défauts.
+    assert OpenHandsAgent(sandbox=object(), settings_obj=_settings()).retry_policy() == (8, 8, 90)
+    agent = OpenHandsAgent(
+        sandbox=object(),
+        settings_obj=_settings(CODER_LLM_NUM_RETRIES="n/a", CODER_LLM_RETRY_MIN_WAIT=-3),
+    )
+    assert agent.retry_policy() == (8, 8, 90)
+
+
+def test_openhands_min_interval_paces_consecutive_launches():
+    """#422 : back-pressure start-to-start — deux lancements coder rapprochés sont
+    espacés de CODER_MIN_INTERVAL_SECONDS (lisse le débit sur le quota partagé)."""
+    sandbox = _FakeSandbox(SandboxResult(exit_code=0, stdout="ok", stderr=""))
+    waits = []
+    fake_now = [100.0]
+    agent = OpenHandsAgent(
+        sandbox=sandbox,
+        settings_obj=_settings(CODER_MIN_INTERVAL_SECONDS=30.0),
+        clock=lambda: fake_now[0],
+        sleep=waits.append,
+    )
+    issue = IssueSpec(number=1, title="T")
+    agent.implement_issue("/work", issue)
+    assert waits == []  # premier lancement : aucun délai
+    fake_now[0] = 112.0  # 12s plus tard → il manque 18s
+    agent.implement_issue("/work", issue)
+    assert waits == [18.0]
+    fake_now[0] = 200.0  # bien après l'intervalle → pas d'attente
+    agent.implement_issue("/work", issue)
+    assert waits == [18.0]
+
+
+def test_openhands_min_interval_disabled_by_default():
+    sandbox = _FakeSandbox(SandboxResult(exit_code=0, stdout="ok", stderr=""))
+    waits = []
+    agent = OpenHandsAgent(sandbox=sandbox, settings_obj=_settings(), clock=lambda: 0.0, sleep=waits.append)
+    issue = IssueSpec(number=1, title="T")
+    agent.implement_issue("/work", issue)
+    agent.implement_issue("/work", issue)
+    assert waits == []  # 0 (défaut) = pas d'espacement
+
+
 class _FakeSandbox:
     """Sandbox factice : enregistre l'argv et renvoie un SandboxResult canné."""
 
