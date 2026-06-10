@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.pipeline import execute_issue, failure_feedback, log_tail
-from collegue.executor.workspace import branch_for_issue
+from collegue.executor.workspace import branch_for_issue, cleanup_workspace
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
@@ -329,6 +329,7 @@ async def run_project(
     max_inflight_reviews: int = DEFAULT_MAX_INFLIGHT_REVIEWS,
     gate_options=None,
     reconcile_reviews: bool = True,
+    cleanup_workspaces: bool = True,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -371,6 +372,13 @@ async def run_project(
     ``clients``), réaligne chaque tâche ``in_review`` sur l'état GitHub de sa PR
     (mergée → ``merged`` ; fermée sans merge → redo) — le redémarrage après des
     merges manuels (post-deadline notamment) redevient idempotent.
+
+    ``cleanup_workspaces`` (#443, défaut vrai) : le pilote détruit les clones
+    ``/tmp/collegue-exec-*`` en fin de tâche — succès : suppression immédiate ;
+    échec : on ne conserve que le DERNIER workspace de la tâche (debug), les
+    précédents sont purgés (et celui d'une tâche finalement réussie aussi).
+    Sans ça, un clone par tentative s'accumule jusqu'à l'erreur disque (233 Mo
+    sur 7 h au run v2 — fuite linéaire). ``False`` : tout conserver (debug).
 
     ``max_inflight_reviews`` (#434, mode strict uniquement) : plafond de tâches
     ``in_review`` (PR ouverte non mergée) avant de s'arrêter ``awaiting_merge``.
@@ -441,6 +449,9 @@ async def run_project(
 
     processed: List[TaskOutcome] = []
     stop_reason = STOP_COMPLETED
+    # #443 : dernier workspace CONSERVÉ par tâche (échec → debug). Toute nouvelle
+    # tentative purge le précédent — au plus UN clone par tâche échouée survit.
+    kept_workspaces: dict = {}
 
     while True:
         if len(processed) >= cap:
@@ -560,6 +571,22 @@ async def run_project(
                 pr_number=pr_number,
             )
         )
+
+        # #443 : hygiène des clones /tmp. Succès → le workspace ne sert plus (la
+        # PR est ouverte) : suppression, y compris celui d'un échec précédent de
+        # la même tâche. Échec → on garde CE workspace pour le debug et on purge
+        # le précédent de la tâche (au plus un clone conservé par tâche échouée).
+        if cleanup_workspaces:
+            if outcome.success:
+                cleanup_workspace(outcome.workspace)
+                previous = kept_workspaces.pop(task.id, None)
+                if previous:
+                    cleanup_workspace(previous)
+            elif outcome.workspace is not None:
+                previous = kept_workspaces.get(task.id)
+                if previous:
+                    cleanup_workspace(previous)
+                kept_workspaces[task.id] = outcome.workspace.path
 
         # Overlay en mémoire (+ persistance en réel). Succès → in_review (déjà
         # persisté par execute_issue). Échec : tant qu'il reste des tentatives

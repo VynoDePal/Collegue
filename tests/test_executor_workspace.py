@@ -4,6 +4,7 @@ Utilise git en local sur un dépôt-fixture (pas de Docker) ; la variante sandbo
 réelle est couverte en ``integration``.
 """
 
+import os
 import subprocess
 
 import pytest
@@ -176,3 +177,38 @@ def test_local_runner_caps_output(tmp_path):
     res = runner.run_command(["sh", "-c", "printf 'a%.0s' $(seq 1 50)"], str(tmp_path))
     assert "tronquée" in res.stdout
     assert len(res.stdout.encode("utf-8")) < 60  # bien borné
+
+
+# --- nettoyage des workspaces (#443) ----------------------------------------------
+
+
+def test_cleanup_workspace_removes_temp_root(repo):
+    from collegue.executor import IssueSpec, cleanup_workspace, prepare_workspace
+
+    ws = prepare_workspace(repo, IssueSpec(number=7, title="T"))
+    parent = os.path.dirname(ws.path)
+    assert os.path.basename(parent).startswith("collegue-exec-")
+    cleanup_workspace(ws)
+    assert not os.path.exists(parent)  # le répertoire racine /tmp disparaît aussi
+
+
+def test_cleanup_workspace_confined_when_dest_root_is_custom(repo, tmp_path):
+    # ``dest_root`` fourni par l'appelant : on ne supprime QUE le clone, jamais le
+    # répertoire parent qui ne nous appartient pas.
+    from collegue.executor import IssueSpec, cleanup_workspace, prepare_workspace
+
+    root = tmp_path / "mine"
+    root.mkdir()
+    (root / "garde.txt").write_text("à conserver", encoding="utf-8")
+    ws = prepare_workspace(repo, IssueSpec(number=8, title="T"), dest_root=str(root))
+    cleanup_workspace(ws)
+    assert not os.path.exists(ws.path)
+    assert (root / "garde.txt").exists()  # le parent n'a pas été touché
+
+
+def test_cleanup_workspace_tolerates_missing_and_none():
+    from collegue.executor import cleanup_workspace
+
+    cleanup_workspace("/tmp/collegue-exec-inexistant/workspace")  # ne lève pas
+    cleanup_workspace(None)
+    cleanup_workspace("")
