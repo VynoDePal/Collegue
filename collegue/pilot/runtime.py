@@ -103,7 +103,7 @@ def _build_clients(github_token):  # pragma: no cover - infra réelle (integrati
 
 
 def _gate_options(settings_obj) -> dict:
-    """Options du gate qualité depuis la config (#438/#439) — vers ``execute_issue``.
+    """Options du gate qualité depuis la config (#437/#438/#439) — vers ``execute_issue``.
 
     ``GATE_TEST_COMMAND`` vide/None → commande par défaut du gate (pytest).
     """
@@ -111,11 +111,20 @@ def _gate_options(settings_obj) -> dict:
         "frontend_gate": bool(getattr(settings_obj, "GATE_FRONTEND", True)),
         "require_deps_install": bool(getattr(settings_obj, "GATE_REQUIRE_DEPS_INSTALL", False)),
         "check_installability": bool(getattr(settings_obj, "GATE_CHECK_INSTALLABILITY", False)),
+        "require_test_changes": bool(getattr(settings_obj, "GATE_REQUIRE_TEST_CHANGES", False)),
     }
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)
+    if bool(getattr(settings_obj, "GATE_ADEQUACY", False)):
+        options["adequacy_checker"] = _build_adequacy_checker(settings_obj)
     return options
+
+
+def _build_adequacy_checker(settings_obj):  # pragma: no cover - infra réelle (integration)
+    from collegue.executor.quality_gate import LLMAdequacyChecker
+
+    return LLMAdequacyChecker()
 
 
 # ── point d'entrée assemblé ────────────────────────────────────────────────────

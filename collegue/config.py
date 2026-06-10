@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     # paquets pré-installés de l'image sandbox (réseau PyPI requis).
     GATE_REQUIRE_DEPS_INSTALL: bool = False
     GATE_CHECK_INSTALLABILITY: bool = False
+    # Adéquation diff↔issue (#437) : contrôle LLM fail-closed « ce diff
+    # implémente-t-il l'issue ? » lancé quand le reste du gate est vert — une
+    # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne
+    # passe plus. Opt-in : un appel LLM par PR candidate.
+    GATE_ADEQUACY: bool = False
+    # Exiger qu'un diff touche au moins un fichier de test (sinon : simple
+    # signal ⚠️ dans le rapport de gate / corps de PR).
+    GATE_REQUIRE_TEST_CHANGES: bool = False
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

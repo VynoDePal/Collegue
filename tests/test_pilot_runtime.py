@@ -244,7 +244,7 @@ def test_main_returns_1_on_blocked(monkeypatch):
 
 
 def test_gate_options_built_from_settings():
-    # #438/#439 : la config GATE_* devient les kwargs du gate (vide → défauts du gate).
+    # #437/#438/#439 : la config GATE_* devient les kwargs du gate (vide → défauts).
     from collegue.pilot.runtime import _gate_options
 
     custom = SimpleNamespace(
@@ -252,19 +252,26 @@ def test_gate_options_built_from_settings():
         GATE_TEST_COMMAND="npm run check",
         GATE_REQUIRE_DEPS_INSTALL=True,
         GATE_CHECK_INSTALLABILITY=True,
+        GATE_REQUIRE_TEST_CHANGES=True,
     )
     assert _gate_options(custom) == {
         "frontend_gate": False,
         "test_command": "npm run check",
         "require_deps_install": True,
         "check_installability": True,
+        "require_test_changes": True,
     }
     defaults = SimpleNamespace(GATE_TEST_COMMAND="")
     assert _gate_options(defaults) == {
         "frontend_gate": True,
         "require_deps_install": False,
         "check_installability": False,
+        "require_test_changes": False,
     }
+    # GATE_ADEQUACY (opt-in) câble un checker LLM dans les options.
+    with_adequacy = SimpleNamespace(GATE_ADEQUACY=True)
+    options = _gate_options(with_adequacy)
+    assert options["adequacy_checker"] is not None
 
 
 # --- isolation ------------------------------------------------------------------
