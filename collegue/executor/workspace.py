@@ -13,6 +13,7 @@ tests) viendra plus tard et passera, elle, par le :class:`DockerSandbox`.
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from collegue.executor.agent import IssueSpec
 from collegue.executor.command import LocalCommandRunner
 
 BRANCH_PREFIX = "collegue/issue-"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -87,3 +90,31 @@ def prepare_workspace(
         raise WorkspaceError(f"git checkout -b {branch} a échoué: {checkout.stderr.strip()}")
 
     return Workspace(path=dest, branch=branch, base_commit=base_commit)
+
+
+def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") -> bool:
+    """Ré-applique le diff d'une tentative précédente sur un clone neuf (#436).
+
+    **Best-effort** : un diff qui ne s'applique plus (base déplacée entre deux
+    tentatives, diff corrompu) renvoie ``False`` — l'appelant continue sur le
+    clone vierge (mode historique) au lieu d'échouer. Le diff est appliqué SANS
+    commit : il apparaît comme modifications locales, donc dans le diff
+    autoritatif de la tentative (la PR portera l'état complet, seed + réparation).
+    """
+    if not (diff or "").strip():
+        return False
+    runner = LocalCommandRunner()
+    fd, patch_path = tempfile.mkstemp(prefix="collegue-seed-", suffix=".diff")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(diff if diff.endswith("\n") else diff + "\n")
+        result = runner.run_command([git_bin, "apply", "--whitespace=nowarn", patch_path], workspace.path)
+        if not result.ok:
+            logger.warning(
+                "seed_diff inapplicable sur %s (base déplacée ?) — la tentative repart du clone vierge : %s",
+                workspace.path,
+                (result.stderr or result.stdout or "").strip()[:300],
+            )
+        return bool(result.ok)
+    finally:
+        os.unlink(patch_path)
