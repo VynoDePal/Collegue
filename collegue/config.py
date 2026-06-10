@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     # côté driver). Un échec transitoire (503, no-op) ne fige plus tout le DAG.
     TASK_MAX_ATTEMPTS: int = 3
     TASK_RETRY_BACKOFF_SECONDS: float = 15.0
+    # Cohérence inter-tâches (#411) : si vrai, une dépendance `in_review` (PR non
+    # mergée) ne débloque PAS ses dépendants (leur clone ne contiendrait pas son
+    # code) ; le run s'arrête `awaiting_merge` quand seuls des merges manquent.
+    # Faux (défaut historique) : le pilote démarre quand même mais SIGNALE le cas.
+    DEPS_REQUIRE_MERGED: bool = False
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

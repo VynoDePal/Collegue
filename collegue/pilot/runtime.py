@@ -174,6 +174,8 @@ async def run_project_from_settings(
         # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
         max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),
         retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
+        # Cohérence inter-tâches (#411) : opt-in pour exiger le merge des deps.
+        require_merged_deps=bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False)),
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).

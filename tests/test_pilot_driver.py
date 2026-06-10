@@ -219,6 +219,60 @@ async def test_failed_task_blocks_dependents(repo, manager):
     assert statuses["T1"] == "todo"  # jamais lancée
 
 
+# --- cohérence inter-tâches sur PR non mergée (#411) -------------------------------
+
+
+async def test_unmerged_dep_start_is_signaled(repo, manager):
+    """#411 (mode historique) : démarrer un dépendant alors que sa dépendance est
+    `in_review` (PR non mergée → code absent du clone) est SIGNALÉ dans l'audit
+    (`task_started.unmerged_deps`) au lieu d'être silencieux."""
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _linear_project(manager, 2)
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, audit=audit)
+    assert result.stop_reason == "completed"
+    started = [e for e in audit.events if e.kind == "task_started"]
+    t0 = manager.get_tasks(pid)[0]
+    assert "unmerged_deps" not in started[0].detail  # T0 (racine) : rien à signaler
+    assert started[1].detail["unmerged_deps"] == [t0.id]  # T1 démarrée sur T0 non mergée
+
+
+async def test_agent_context_flags_unmerged_dependency(repo, manager):
+    # Le contexte donné à l'agent ne MENT plus : une dépendance in_review n'est pas
+    # présentée comme « déjà construite » (son code peut être absent du clone).
+    pid = _linear_project(manager, 2)
+    agent = _RecordingAgent()
+    await _run(manager, repo, pid, dry_run=False, agent=agent)
+    ctx = agent.contexts[1]  # T1, dépend de T0 in_review
+    assert "PAS encore" in ctx and "ABSENT" in ctx
+    assert "déjà construites" not in ctx
+
+
+async def test_require_merged_deps_stops_awaiting_merge_then_resumes(repo, manager):
+    """#411 (mode strict) : la PR de T0 n'étant pas mergée, T1 ne démarre pas et le
+    run s'arrête `awaiting_merge` (≠ `blocked` : seul un merge humain manque).
+    Après le merge, un nouveau run reprend naturellement et termine."""
+    pid = _linear_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True)
+    assert result.iterations == 1  # T0 seulement
+    assert result.stop_reason == "awaiting_merge"
+    t0, t1 = manager.get_tasks(pid)
+    assert t0.status == "in_review" and t1.status == "todo"
+
+    manager.update_task_status(t0.id, "merged")  # merge humain
+    result2 = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True)
+    assert result2.stop_reason == "completed"
+    assert manager.get_tasks(pid)[1].status == "in_review"
+
+
+async def test_strict_mode_hard_failure_still_blocked(repo, manager):
+    # Un échec dur n'est PAS un merge manquant : `blocked`, pas `awaiting_merge`.
+    pid = _linear_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True, sandbox=_Sandbox(ok=False))
+    assert result.stop_reason == "blocked"
+
+
 # --- ré-injection du feedback d'échec au retry (#424) ------------------------------
 
 

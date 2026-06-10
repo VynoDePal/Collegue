@@ -156,3 +156,27 @@ def test_not_blocked_when_all_done(manager):
     a = manager.add_task(pid, title="A")
     manager.update_task_status(a, "done")
     assert is_blocked(manager.get_tasks(pid)) is False
+
+
+# --- mode strict : exiger le merge des dépendances (#411) -------------------------
+
+
+def test_strict_satisfied_requires_merge(manager):
+    """#411 : en mode strict, une dépendance `in_review` (PR non mergée) ne rend
+    PAS son dépendant prêt — le clone d'un dépendant part de `main`, qui ne
+    contient le code de la dépendance qu'au merge. Seuls done/merged débloquent."""
+    from collegue.pilot.scheduler import SATISFIED_STATUSES_STRICT
+
+    pid = manager.create_project(name="demo")
+    a = manager.add_task(pid, title="A")
+    b = manager.add_task(pid, title="B", depends_on=[a])
+
+    manager.update_task_status(a, "in_review")
+    tasks = manager.get_tasks(pid)
+    assert _ids(ready_tasks(tasks)) == [b]  # défaut historique : inchangé
+    assert ready_tasks(tasks, satisfied=SATISFIED_STATUSES_STRICT) == []  # strict : bloqué
+    assert next_task(tasks, satisfied=SATISFIED_STATUSES_STRICT) is None
+
+    manager.update_task_status(a, "merged")
+    tasks = manager.get_tasks(pid)
+    assert _ids(ready_tasks(tasks, satisfied=SATISFIED_STATUSES_STRICT)) == [b]

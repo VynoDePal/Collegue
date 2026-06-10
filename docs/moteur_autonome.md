@@ -159,6 +159,9 @@ lit :
 | `MAX_TOKENS_BUDGET` | Plafond dur de tokens cumulés (`0` = désactivé). | `0` |
 | `BUDGET_EXHAUSTED_ACTION` | `pause` (refuse les appels LLM) ou `warn` (journalise seulement). | `pause` |
 | `COLLEGUE_RUN_DEADLINE_SECONDS` | Durée mur max d'un run (`0` = pas de deadline). | `0` |
+| `TASK_MAX_ATTEMPTS` | Tentatives max par tâche — retry avec backoff sur échec transitoire (`1` = pas de retry). | `3` |
+| `TASK_RETRY_BACKOFF_SECONDS` | Base du backoff linéaire entre tentatives (plafonné à 90 s). | `15` |
+| `DEPS_REQUIRE_MERGED` | Exige le **merge** d'une dépendance avant de débloquer ses dépendants (sinon le démarrage sur PR non mergée est signalé) ; arrêt `awaiting_merge` quand seuls des merges manquent. | `false` |
 | `LLM_CALL_TIMEOUT` | Timeout par appel LLM, secondes (`0` = off). | `0` |
 | `AUTO_MERGE_ENABLED` | Active l'auto-merge progressif (opt-in). | `false` |
 | `AUTO_MERGE_MAX_LOC` | Plafond de lignes nettes pour l'auto-merge. | `50` |
