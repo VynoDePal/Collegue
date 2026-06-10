@@ -102,8 +102,13 @@ Un run de plusieurs jours peut **reprendre après un crash sans perte d'état** 
   mur reste **fixe** au lieu de glisser à chaque redémarrage.
 
 > Pour que le plafond `$`/tokens survive aussi aux redémarrages, `COLLEGUE_HOME` doit
-> pointer vers un chemin **absolu et stable** (le cumul est persisté dans
-> `$COLLEGUE_HOME/monitoring/`).
+> pointer vers un chemin **absolu et stable**, identique d'un redémarrage à l'autre
+> (le cumul est persisté dans `$COLLEGUE_HOME/monitoring/`). Le chemin est résolu en
+> absolu dès l'import (#406) — un `chdir` du process en cours de run ne déplace donc
+> plus la persistance — mais si la variable est laissée relative (défaut `.collegue`),
+> deux redémarrages depuis des répertoires différents liront deux cumuls distincts :
+> le pilote **avertit** au lancement quand un budget dur est configuré avec un
+> `COLLEGUE_HOME` non absolu.
 
 ---
 

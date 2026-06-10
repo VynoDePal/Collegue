@@ -10,6 +10,7 @@ import pytest
 from collegue.executor import FakeCodeAgent, FakeReviewer, PrClients
 from collegue.pilot import ProjectRunResult, TaskOutcome, format_run_report, run_project_from_settings
 from collegue.pilot.__main__ import build_parser
+from collegue.pilot.runtime import collegue_home_durability_warning
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
 
@@ -145,6 +146,31 @@ def test_format_run_report_no_prs_and_no_budget():
     assert "PRs ouvertes : (aucune)" in report
     assert "Statut projet : (inchangé)" in report
     assert "Budget-temps restant : n/a" in report
+
+
+# --- durabilité du plafond budget (#406) ------------------------------------------
+
+
+def test_home_durability_warns_on_relative_home_with_hard_budget(monkeypatch):
+    monkeypatch.delenv("COLLEGUE_HOME", raising=False)
+    s = SimpleNamespace(MAX_COST_USD=5.0, MAX_TOKENS_BUDGET=0)
+    msg = collegue_home_durability_warning(s)
+    assert msg is not None and "COLLEGUE_HOME" in msg
+    monkeypatch.setenv("COLLEGUE_HOME", "rel/.collegue")  # relatif explicite → idem
+    assert collegue_home_durability_warning(s) is not None
+
+
+def test_home_durability_silent_when_absolute_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("COLLEGUE_HOME", str(tmp_path))
+    s = SimpleNamespace(MAX_COST_USD=0.0, MAX_TOKENS_BUDGET=100_000)
+    assert collegue_home_durability_warning(s) is None
+
+
+def test_home_durability_silent_without_hard_budget(monkeypatch):
+    # Pas de plafond dur configuré → rien à perdre, pas de bruit.
+    monkeypatch.delenv("COLLEGUE_HOME", raising=False)
+    s = SimpleNamespace(MAX_COST_USD=0.0, MAX_TOKENS_BUDGET=0)
+    assert collegue_home_durability_warning(s) is None
 
 
 # --- CLI parser -----------------------------------------------------------------

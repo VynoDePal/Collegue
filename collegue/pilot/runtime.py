@@ -20,6 +20,7 @@ l'activerait au démarrage, et le serveur tourne ``OAUTH_ENABLED=false`` par dé
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import List, Optional
 
@@ -28,11 +29,39 @@ from collegue.pilot.driver import ProjectRunResult, run_project
 
 GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 
+logger = logging.getLogger(__name__)
+
 
 def _settings():
     from collegue.config import settings
 
     return settings
+
+
+def collegue_home_durability_warning(settings_obj=None) -> Optional[str]:
+    """Avertissement si le plafond ``$``/tokens n'est pas durable (#406), sinon ``None``.
+
+    Le cumul coût/tokens du ``MetricsCollector`` survit aux redémarrages via
+    ``$COLLEGUE_HOME/monitoring/metrics.json``. Si ``COLLEGUE_HOME`` n'est pas
+    défini en chemin **absolu** (défaut : ``.collegue`` relatif au cwd), un
+    redémarrage depuis un autre répertoire relit un cumul **vide** : le plafond
+    dur (``MAX_COST_USD``/``MAX_TOKENS_BUDGET``) se réinitialise silencieusement.
+    On n'avertit que si un plafond dur est configuré (sinon rien à perdre).
+    """
+    settings_obj = settings_obj or _settings()
+    max_cost = float(getattr(settings_obj, "MAX_COST_USD", 0) or 0)
+    max_tokens = int(getattr(settings_obj, "MAX_TOKENS_BUDGET", 0) or 0)
+    if max_cost <= 0 and max_tokens <= 0:
+        return None
+    raw = os.environ.get("COLLEGUE_HOME", "")
+    if raw and os.path.isabs(os.path.expanduser(raw)):
+        return None
+    return (
+        "Budget dur configuré (MAX_COST_USD/MAX_TOKENS_BUDGET) mais COLLEGUE_HOME "
+        f"{'non défini' if not raw else f'relatif ({raw!r})'} : le cumul coût/tokens est ancré sur le cwd "
+        "du process — un redémarrage depuis un autre répertoire réinitialiserait le plafond. "
+        "Définir COLLEGUE_HOME en chemin ABSOLU et stable pour un run long (cf. #406)."
+    )
 
 
 # ── construction des dépendances réelles (integration) ─────────────────────────
@@ -107,6 +136,9 @@ async def run_project_from_settings(
     restant une fois le MVP construit (off par défaut ; activable via ``--improve``).
     """
     settings_obj = settings_obj or _settings()
+    durability = collegue_home_durability_warning(settings_obj)
+    if durability:
+        logger.warning(durability)
     manager = manager or _build_manager(settings_obj)
     sandbox = sandbox or _build_sandbox(settings_obj)
     agent = agent or _build_agent(sandbox, settings_obj)
