@@ -102,6 +102,18 @@ def _build_clients(github_token):  # pragma: no cover - infra réelle (integrati
     return _default_clients(token=github_token)
 
 
+def _gate_options(settings_obj) -> dict:
+    """Options du gate qualité depuis la config (#438) — transmises à ``execute_issue``.
+
+    ``GATE_TEST_COMMAND`` vide/None → commande par défaut du gate (pytest).
+    """
+    options: dict = {"frontend_gate": bool(getattr(settings_obj, "GATE_FRONTEND", True))}
+    test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
+    if test_command:
+        options["test_command"] = str(test_command)
+    return options
+
+
 # ── point d'entrée assemblé ────────────────────────────────────────────────────
 
 
@@ -178,6 +190,8 @@ async def run_project_from_settings(
         require_merged_deps=bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False)),
         # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
         max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
+        # Gate configurable par projet (#438) : commande de tests + passe frontend.
+        gate_options=_gate_options(settings_obj),
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).

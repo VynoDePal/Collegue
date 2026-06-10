@@ -132,6 +132,95 @@ async def test_gate_install_deps_opt_out(tmp_path):
     assert "pip install" not in command
 
 
+# --- gate frontend (#438) ---------------------------------------------------------
+
+
+def _write_pkg(tmp_path, scripts=None, dev_deps=None):
+    import json as _json
+
+    payload = {"name": "front", "scripts": scripts or {}}
+    if dev_deps:
+        payload["devDependencies"] = dev_deps
+    (tmp_path / "package.json").write_text(_json.dumps(payload), encoding="utf-8")
+
+
+def test_frontend_gate_command_none_without_package_json(tmp_path):
+    from collegue.executor import frontend_gate_command
+
+    assert frontend_gate_command(str(tmp_path)) is None
+
+
+def test_frontend_gate_command_install_build_and_real_tests(tmp_path):
+    from collegue.executor import frontend_gate_command
+
+    _write_pkg(tmp_path, scripts={"build": "tsc && vite build", "test": "vitest run"})
+    command = frontend_gate_command(str(tmp_path))
+    assert "npm ci" in command and "npm install" in command  # install + repli
+    assert "npm run build" in command
+    assert "npm test" in command
+    assert "CI=true" in command  # neutralise les modes watch
+    assert "NPM_CONFIG_CACHE=/tmp/.npm" in command  # rootfs read-only (#414)
+    # fail-closed : chaque étape conditionne la suivante
+    assert command.index("npm ci") < command.index("npm run build") < command.index("npm test")
+    assert "&&" in command
+
+
+def test_frontend_gate_command_skips_npm_default_test_stub(tmp_path):
+    # Le stub `npm init` (« no test specified… exit 1 ») ferait échouer TOUT
+    # projet front sans tests : il n'est jamais lancé.
+    from collegue.executor import frontend_gate_command
+
+    _write_pkg(tmp_path, scripts={"build": "vite build", "test": 'echo "Error: no test specified" && exit 1'})
+    command = frontend_gate_command(str(tmp_path))
+    assert "npm test" not in command
+
+
+def test_frontend_gate_command_typecheck_fallback_without_build_script(tmp_path):
+    # Pas de script build mais TypeScript déclaré + tsconfig → `tsc --noEmit`
+    # (le bug InvoiceForm.tsx aurait été bloqué dès la première PR fautive).
+    from collegue.executor import frontend_gate_command
+
+    _write_pkg(tmp_path, scripts={}, dev_deps={"typescript": "^5"})
+    (tmp_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+    command = frontend_gate_command(str(tmp_path))
+    assert "tsc --noEmit" in command
+
+    # …mais pas de type-check si TypeScript n'est pas déclaré (rien à vérifier).
+    (tmp_path / "tsconfig.json").unlink()
+    assert "tsc" not in frontend_gate_command(str(tmp_path))
+
+
+def test_frontend_gate_command_tolerates_invalid_package_json(tmp_path):
+    # JSON invalide : on garde l'install (npm signalera lui-même l'erreur) —
+    # fail-closed plutôt qu'un gate silencieusement vert.
+    from collegue.executor import frontend_gate_command
+
+    (tmp_path / "package.json").write_text("{pas du json", encoding="utf-8")
+    command = frontend_gate_command(str(tmp_path))
+    assert command is not None and "npm ci" in command
+
+
+async def test_gate_chains_frontend_after_pytest(tmp_path):
+    """#438 : avec un package.json, la passe frontend est enchaînée fail-closed
+    (`&&`) après pytest, dans la MÊME commande (même conteneur) — sans elle,
+    « tests verts » signifiait « tests *Python* verts » même sur un diff front."""
+    _write_pkg(tmp_path, scripts={"build": "vite build"})
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "python -m pytest" in command and "npm run build" in command
+    assert command.index("pytest") < command.index("npm run build")
+    assert ") && " in command  # la passe front rend le gate ROUGE si elle échoue
+
+
+async def test_gate_frontend_opt_out(tmp_path):
+    _write_pkg(tmp_path, scripts={"build": "vite build"})
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), frontend_gate=False)
+    _ws, command = sandbox.calls[0]
+    assert "npm" not in command
+
+
 # --- fail-closed ----------------------------------------------------------------
 
 

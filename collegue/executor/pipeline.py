@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Mapping, Optional
 
 from collegue.executor.agent import AgentResult, CodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner
@@ -129,6 +129,7 @@ async def execute_issue(
     project_id: Optional[int] = None,
     dry_run: bool = True,
     seed_diff: Optional[str] = None,
+    gate_options: Optional[Mapping[str, object]] = None,
 ) -> ExecutionOutcome:
     """Exécute une issue de bout en bout (workspace → agent → tests+revue → PR).
 
@@ -150,6 +151,11 @@ async def execute_issue(
     clone neuf avant l'agent (mémoire de retry — réparation incrémentale au lieu
     de régénération complète). Best-effort : un seed inapplicable est ignoré
     (clone vierge, comportement historique).
+
+    ``gate_options`` (#438) : kwargs additionnels transmis tels quels à
+    :func:`run_quality_gate` (``test_command``, ``frontend_gate``…) — c'est le
+    canal de configuration du gate par projet/runtime, sans coupler l'exécuteur
+    à la config.
     """
     persist = not dry_run  # les transitions d'état n'ont lieu qu'en exécution réelle
     final_status: Optional[str] = None
@@ -182,7 +188,13 @@ async def execute_issue(
         # E3 : gate qualité (fail-closed).
         stage = STAGE_GATE
         report = await run_quality_gate(
-            workspace.path, execution.diff, ctx, sandbox=sandbox, reviewer=reviewer, issue=issue
+            workspace.path,
+            execution.diff,
+            ctx,
+            sandbox=sandbox,
+            reviewer=reviewer,
+            issue=issue,
+            **dict(gate_options or {}),
         )
         if not report.passed:
             return ExecutionOutcome(

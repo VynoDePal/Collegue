@@ -332,6 +332,27 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     assert result.iterations == 2
 
 
+# --- options du gate par projet (#438) ----------------------------------------------
+
+
+async def test_gate_options_threaded_from_run_project(repo, manager):
+    # #438 : la config du gate traverse run_project → execute_issue → run_quality_gate.
+    class _RecordingSandbox(_Sandbox):
+        def __init__(self):
+            super().__init__(ok=True)
+            self.commands = []
+
+        def run_tests(self, workspace, command="pytest -q"):
+            self.commands.append(command)
+            return super().run_tests(workspace, command)
+
+    pid = _linear_project(manager, 1)
+    sandbox = _RecordingSandbox()
+    result = await _run(manager, repo, pid, dry_run=True, sandbox=sandbox, gate_options={"test_command": "make check"})
+    assert result.stop_reason == "completed"
+    assert sandbox.commands == ["make check"]
+
+
 # --- mémoire de la meilleure tentative entre retries (#436) -------------------------
 
 

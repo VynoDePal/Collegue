@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # sœurs ne sont plus construites depuis la même base → plus de PRs sœurs en
     # conflit (merge 405 irrécupérable). Ignoré si DEPS_REQUIRE_MERGED est faux.
     STRICT_MAX_INFLIGHT_PRS: int = 1
+    # Gate qualité multi-écosystème (#438) : si le workspace a un package.json,
+    # enchaîner npm install + build/type-check + tests front dans le même
+    # conteneur, fail-closed comme pytest (l'image sandbox doit fournir npm).
+    GATE_FRONTEND: bool = True
+    # Commande de tests du gate (vide → défaut `python -m pytest -q`).
+    GATE_TEST_COMMAND: str = ""
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0
