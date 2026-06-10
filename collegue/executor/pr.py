@@ -43,16 +43,16 @@ def _safe_rel_path(path: str) -> str:
 
 
 def _resolve_in_workspace(workspace_path: str, rel: str) -> str:
-    """Résout ``rel`` dans le workspace en **refusant toute évasion** (symlink inclus).
+    """Résout ``rel`` dans le workspace en **refusant toute évasion**.
 
-    L'agent est **non fiable** : sans cette garde, un symlink ``x.py`` pointant vers
-    un secret de l'hôte (``~/.ssh/id_rsa``, ``.env``…) serait lu sur l'hôte et poussé
-    dans la PR. On refuse donc tout symlink et on vérifie le confinement via
-    ``realpath`` (déjoue aussi un répertoire intermédiaire symlinké).
+    L'agent est **non fiable** : sans cette garde, un chemin passant par un
+    répertoire intermédiaire symlinké vers l'hôte (``dir → ~/.ssh``) serait lu sur
+    l'hôte et poussé dans la PR. Le confinement est vérifié via ``realpath``.
+    Les **fichiers** symlinks, eux, sont sautés en amont par :func:`open_pr` sans
+    jamais être lus (même politique que les binaires, cf. #423) — ils ne passent
+    donc pas par cette résolution.
     """
     full = os.path.join(workspace_path, rel)
-    if os.path.islink(full):
-        raise ValueError(f"symlink refusé dans le workspace: {rel!r}")
     root = os.path.realpath(workspace_path)
     real = os.path.realpath(full)
     if real != root and os.path.commonpath([real, root]) != root:
@@ -82,6 +82,7 @@ class PrResult:
     html_url: Optional[str] = None
     skipped: bool = False  # PR déjà existante (idempotence)
     skipped_binaries: Tuple[str, ...] = ()  # fichiers binaires non poussés (cf. #410)
+    skipped_symlinks: Tuple[str, ...] = ()  # liens symboliques non poussés (cf. #423)
 
 
 def build_pr_body(quality_report: QualityReport, issue: IssueSpec, *, closes_issue: bool = True) -> str:
@@ -155,8 +156,16 @@ def open_pr(
     clients.branches.ensure_branch(owner, repo, head, from_branch=base)
 
     skipped_binaries: list[str] = []
+    skipped_symlinks: list[str] = []
     for path in files_changed:
         rel = _safe_rel_path(path)
+        if os.path.islink(os.path.join(workspace.path, rel)):
+            # Lien symbolique (ex. `node_modules/.bin/*` après un `npm install`) :
+            # la Contents API ne représente pas les symlinks, et un lien peut viser
+            # un secret hôte — on ne le LIT jamais. Même politique que les binaires :
+            # SAUTER + tracer, plutôt que faire échouer toute la tâche. [#423]
+            skipped_symlinks.append(rel)
+            continue
         full = _resolve_in_workspace(workspace.path, rel)
         message = f"collegue: issue #{int(issue.number)} — {rel}"
         if os.path.isfile(full):
@@ -179,6 +188,10 @@ def open_pr(
         body += "\n\n> ⚠️ Fichiers binaires non poussés (non supportés) : " + ", ".join(
             f"`{p}`" for p in skipped_binaries
         )
+    if skipped_symlinks:
+        body += "\n\n> ⚠️ Liens symboliques non poussés (jamais lus, non supportés) : " + ", ".join(
+            f"`{p}`" for p in skipped_symlinks
+        )
 
     pr = clients.prs.create_pr(owner, repo, title, head, base, body)
     number = getattr(pr, "number", None)
@@ -200,6 +213,7 @@ def open_pr(
         number=number,
         html_url=html_url,
         skipped_binaries=tuple(skipped_binaries),
+        skipped_symlinks=tuple(skipped_symlinks),
     )
 
 

@@ -196,18 +196,58 @@ def test_dot_and_empty_segments_rejected(tmp_path):
             open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=(bad,), clients=_clients(), dry_run=False)
 
 
-def test_symlink_escape_is_rejected_not_exfiltrated(tmp_path):
+def test_symlink_is_skipped_not_crashed(tmp_path):
+    """#423 : un symlink légitime du diff (ex. `node_modules/.bin/*` après un
+    `npm install`) est SAUTÉ au lieu de faire planter toute la tâche ; le reste
+    du diff est poussé et le lien sauté est tracé (résultat + corps de PR)."""
+    ws = _workspace(tmp_path, {"code.py": "x = 1\n", "node_modules/acorn/bin/acorn": "#!/usr/bin/env node\n"})
+    bin_dir = Path(ws.path) / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    os.symlink(Path(ws.path) / "node_modules" / "acorn" / "bin" / "acorn", bin_dir / "acorn")
+    clients = _clients()
+    result = open_pr(
+        ws,
+        REPORT,
+        ISSUE,
+        "o",
+        "r",
+        files_changed=("code.py", "node_modules/.bin/acorn"),
+        clients=clients,
+        dry_run=False,
+    )
+    assert {p for p, _c, _b in clients.files.updated} == {"code.py"}
+    assert result.skipped_symlinks == ("node_modules/.bin/acorn",)
+    assert "node_modules/.bin/acorn" in clients.prs.created[0]["body"]
+
+
+def test_symlink_escape_is_skipped_never_read(tmp_path):
     # Un agent non fiable crée un symlink pointant un secret hôte hors workspace.
-    # open_pr doit REFUSER (ValueError) et ne jamais lire/pousser le secret.
+    # open_pr ne doit JAMAIS lire/pousser le secret : le lien est sauté (et la
+    # tâche n'échoue plus pour autant, cf. #423 — même politique que les binaires).
     secret = tmp_path / "host_secret.txt"
     secret.write_text("HOST PRIVATE KEY", encoding="utf-8")
     ws = _workspace(tmp_path, {"real.py": "x = 1\n"})
     os.symlink(secret, Path(ws.path) / "evil.py")
     clients = _clients()
-    with pytest.raises(ValueError):
-        open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("evil.py",), clients=clients, dry_run=False)
-    # le contenu du secret n'a JAMAIS été poussé
+    result = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("real.py", "evil.py"), clients=clients, dry_run=False)
+    # le contenu du secret n'a JAMAIS été poussé ; le vrai code l'est.
     assert all("HOST PRIVATE KEY" not in content for _p, content, _b in clients.files.updated)
+    assert {p for p, _c, _b in clients.files.updated} == {"real.py"}
+    assert result.skipped_symlinks == ("evil.py",)
+
+
+def test_symlinked_dir_escape_still_rejected(tmp_path):
+    # Garde de confinement conservée : un répertoire INTERMÉDIAIRE symlinké vers
+    # l'hôte (le fichier terminal n'est pas un lien) reste une évasion → refus.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("HOST PRIVATE KEY", encoding="utf-8")
+    ws = _workspace(tmp_path, {"real.py": "x = 1\n"})
+    os.symlink(outside, Path(ws.path) / "leak")
+    clients = _clients()
+    with pytest.raises(ValueError):
+        open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("leak/secret.txt",), clients=clients, dry_run=False)
+    assert clients.files.updated == []
 
 
 def test_title_is_inlined(tmp_path):
