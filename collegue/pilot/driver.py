@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.pipeline import execute_issue, log_tail
+from collegue.executor.pipeline import execute_issue, failure_feedback, log_tail
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
@@ -109,21 +109,34 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     on liste les **dépendances déjà construites** pour que l'agent bâtisse sur
     l'existant (le code des dépendances est dans le dépôt) au lieu de coder depuis
     la seule consigne de l'issue → cohérence entre tâches.
+
+    Retry (#424) : si la tâche a déjà échoué (``attempt_count`` > 0), le motif du
+    dernier échec (``last_error``, synthèse crisp de :func:`failure_feedback`) est
+    ré-injecté dans le contexte — sans lui, un retry rejoue la même consigne à
+    l'identique et reproduit le même bug (retry « aveugle », gaspillage pur).
+    Le contexte passe par ``IssueSpec.to_prompt`` → inline-isé (anti-injection).
     """
-    context = ""
+    parts = []
     deps = [by_id[d] for d in (task.depends_on or []) if by_id and d in by_id]
     if deps:
         titres = ", ".join(f"« {d.title} »" for d in deps)
-        context = (
+        parts.append(
             f"Cette tâche dépend de tâches déjà construites : {titres}. "
             "Inspecte le dépôt existant et réutilise leur code, modèles et conventions "
             "(ne recrée pas ce qui existe)."
+        )
+    last_error = getattr(task, "last_error", None)
+    if int(getattr(task, "attempt_count", 0) or 0) > 0 and last_error:
+        parts.append(
+            "ATTENTION : ta tentative précédente sur CETTE tâche a ÉCHOUÉ. "
+            f"Détail de l'échec : {last_error}. "
+            "Analyse et corrige d'abord cette cause précise au lieu de régénérer le même code."
         )
     return IssueSpec(
         number=task.issue_number or task.id,
         title=task.title,
         body=task.acceptance or "",
-        context=context,
+        context=" ".join(parts),
     )
 
 
@@ -314,10 +327,12 @@ async def run_project(
 
             attempts = int(getattr(task, "attempt_count", 0) or 0) + 1
             task.attempt_count = attempts
+            # Synthèse CRISP (#424) : lignes FAILED/ERROR de pytest en priorité —
+            # c'est ce qui sera ré-injecté dans le prompt de la tentative suivante.
             last_error = f"[{outcome.stage}/{outcome.reason}] tentative {attempts}/{max_task_attempts}"
-            diagnostic = detail.get("test_output_tail") or detail.get("agent_log_tail") or ""
+            diagnostic = failure_feedback(outcome)
             if diagnostic:
-                last_error += " — " + diagnostic[-700:]
+                last_error += " — " + diagnostic
             task.last_error = last_error
 
             if attempts < max_task_attempts:
