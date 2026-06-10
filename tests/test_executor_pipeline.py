@@ -352,6 +352,32 @@ async def test_invalid_seed_diff_falls_back_to_clean_clone(repo):
     assert "existing.txt" not in outcome.execution.files_changed
 
 
+async def test_binary_diff_is_reseedable(repo):
+    """#455 : le diff autoritatif est capturé avec ``--binary`` — un fichier
+    binaire (png…) produit par une tentative est RÉ-APPLICABLE au retry (#436).
+    Sans le payload, ``git apply`` échouait (« sans la ligne complète d'index »)
+    et la mémoire de retry était neutralisée sur les tâches frontend."""
+    import os
+
+    from collegue.executor import AgentResult
+    from collegue.executor.workspace import apply_seed_diff, prepare_workspace
+
+    class _BinaryAgent:
+        def implement_issue(self, workspace, issue):
+            os.makedirs(os.path.join(workspace, "assets"), exist_ok=True)
+            with open(os.path.join(workspace, "assets", "hero.png"), "wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n" + bytes(range(64)))
+            return AgentResult(success=True, logs="ok", files_changed=("assets/hero.png",))
+
+    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=True, **_kwargs(agent=_BinaryAgent()))
+    assert outcome.success is True
+    assert "GIT binary patch" in outcome.execution.diff  # payload embarqué
+
+    fresh = prepare_workspace(repo, ISSUE)
+    assert apply_seed_diff(fresh, outcome.execution.diff) is True
+    assert os.path.exists(os.path.join(fresh.path, "assets", "hero.png"))
+
+
 # --- barrière d'exception par tâche (#435) ----------------------------------------
 
 
