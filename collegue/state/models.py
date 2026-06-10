@@ -111,6 +111,14 @@ class Task(Base):
     # Dernier motif d'échec connu (stage/raison + extrait) — diagnostic post-mortem
     # et ré-injection de feedback à la tentative suivante (#420/#424).
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Mémoire de la MEILLEURE tentative (#436) : diff + score de tests + échecs
+    # restants. Le retry réensemence son workspace avec ce diff (réparation
+    # incrémentale ciblée) au lieu de tout régénérer — sans elle, une tentative
+    # quasi-verte (26/27) peut être JETÉE puis remplacée par pire (oscillation).
+    best_diff: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    best_passed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    best_failed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    best_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
     )

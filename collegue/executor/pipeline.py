@@ -33,7 +33,7 @@ from collegue.executor.command import CommandRunner
 from collegue.executor.pr import PrClients, PrResult, open_pr
 from collegue.executor.quality_gate import QualityReport, Reviewer, run_quality_gate
 from collegue.executor.runner import ExecutionResult, run_issue
-from collegue.executor.workspace import Workspace, prepare_workspace
+from collegue.executor.workspace import Workspace, apply_seed_diff, prepare_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,7 @@ async def execute_issue(
     task_id: Optional[int] = None,
     project_id: Optional[int] = None,
     dry_run: bool = True,
+    seed_diff: Optional[str] = None,
 ) -> ExecutionOutcome:
     """Exécute une issue de bout en bout (workspace → agent → tests+revue → PR).
 
@@ -144,6 +145,11 @@ async def execute_issue(
     (#420/#424). Une panne ponctuelle d'UNE tâche ne tue plus le run entier alors
     que le reste du DAG est exécutable. Les ``BaseException`` (annulation asyncio,
     arrêt process) propagent, elles, normalement.
+
+    ``seed_diff`` (#436) : diff d'une tentative précédente à RÉ-APPLIQUER sur le
+    clone neuf avant l'agent (mémoire de retry — réparation incrémentale au lieu
+    de régénération complète). Best-effort : un seed inapplicable est ignoré
+    (clone vierge, comportement historique).
     """
     persist = not dry_run  # les transitions d'état n'ont lieu qu'en exécution réelle
     final_status: Optional[str] = None
@@ -154,6 +160,8 @@ async def execute_issue(
 
     try:
         workspace = prepare_workspace(repo_source, issue)
+        if seed_diff and apply_seed_diff(workspace, seed_diff):
+            logger.info("issue #%s : workspace réensemencé avec la meilleure tentative (#436)", issue.number)
         final_status = _set_status(manager, task_id, TASK_STATUS_IN_PROGRESS, enabled=persist) or final_status
 
         # E2 : exécution de l'agent + capture du diff (l'état est piloté ici, pas par run_issue).

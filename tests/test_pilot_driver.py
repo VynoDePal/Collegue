@@ -4,6 +4,7 @@ Pipeline réel par tâche (prepare_workspace + run_issue sur git fixture) avec
 sandbox/reviewer/clients factices. Budget injecté (déterministe).
 """
 
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -331,6 +332,146 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     assert result.iterations == 2
 
 
+# --- mémoire de la meilleure tentative entre retries (#436) -------------------------
+
+
+class _SeqSandbox:
+    """Sorties de tests scriptées, une par appel (la dernière se répète)."""
+
+    def __init__(self, outputs):
+        self._outputs = list(outputs)
+        self.calls = 0
+
+    def run_tests(self, workspace, command="pytest -q"):
+        out = self._outputs[min(self.calls, len(self._outputs) - 1)]
+        self.calls += 1
+        exit_code = 1 if ("failed" in out or "Error" in out) else 0
+        return SandboxResult(exit_code=exit_code, stdout=out, stderr="")
+
+
+class _SeedProbeAgent:
+    """Écrit feature.py et mémorise l'état du workspace AVANT son passage (#436)."""
+
+    def __init__(self):
+        self.calls = 0
+        self.contexts = []
+        self.seeded = []  # le travail précédent était-il déjà dans le clone ?
+        self.seen_content = []  # contenu trouvé (None si absent)
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        self.contexts.append(issue.context)
+        marker = os.path.join(workspace, "feature.py")
+        if os.path.exists(marker):
+            self.seeded.append(True)
+            with open(marker, encoding="utf-8") as fh:
+                self.seen_content.append(fh.read())
+        else:
+            self.seeded.append(False)
+            self.seen_content.append(None)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(f"VERSION = {self.calls}\n")
+        return AgentResult(success=True, logs="ok", files_changed=("feature.py",))
+
+
+async def test_retry_reseeds_workspace_with_best_attempt(repo, manager):
+    """#436 : la tentative suivante repart de l'ÉTAT de la meilleure tentative
+    (workspace réensemencé, consigne de réparation ciblée) au lieu d'une
+    régénération-loterie qui jette un travail quasi-vert."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _SeedProbeAgent()
+    sandbox = _SeqSandbox(["FAILED tests/test_x.py::t - boom\n1 failed, 26 passed", "27 passed"])
+    result = await _run(
+        manager, repo, pid, dry_run=False, agent=agent, sandbox=sandbox, max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "completed"
+    assert agent.seeded == [False, True]  # tentative 2 : le travail précédent est LÀ
+    ctx = agent.contexts[1]
+    assert "RÉPARATION CIBLÉE" in ctx
+    assert "FAILED tests/test_x.py::t" in ctx  # les échecs de la MEILLEURE tentative
+    t = manager.get_tasks(pid)[0]
+    assert t.best_passed == 26 and t.best_failed == 1  # mémoire persistée (DB)
+
+
+async def test_worse_attempt_never_replaces_best(repo, manager):
+    """#436 anti-oscillation : une tentative PIRE ne remplace pas la meilleure —
+    l'essai suivant repart de la MEILLEURE tentative, pas de la dernière
+    (la dégradation monotone de la task 7 FacNor devient impossible)."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _SeedProbeAgent()
+    sandbox = _SeqSandbox(
+        [
+            "FAILED tests/test_x.py::t - a\n1 failed, 26 passed",
+            "FAILED tests/test_x.py::t - a\nFAILED tests/test_y.py::u - b\n3 failed, 24 passed",
+            "27 passed",
+        ]
+    )
+    result = await _run(
+        manager, repo, pid, dry_run=False, agent=agent, sandbox=sandbox, max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "completed"
+    # Tentative 2 voit l'état de la tentative 1 ; tentative 3 voit ENCORE l'état 1
+    # (le 24/27 de la tentative 2 n'a pas remplacé le 26/27 de la 1).
+    assert agent.seen_content == [None, "VERSION = 1\n", "VERSION = 1\n"]
+    t = manager.get_tasks(pid)[0]
+    assert t.best_passed == 26 and t.best_failed == 1
+
+
+async def test_collection_error_attempt_is_not_memorized(repo, manager):
+    # L'anti-exemple de la task 7 FacNor : un état qui ne COLLECTE même pas
+    # (ImportError de conftest, 0 test) ne devient JAMAIS « meilleure tentative ».
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _SeedProbeAgent()
+    sandbox = _SeqSandbox(
+        [
+            "FAILED tests/test_x.py::t - a\n1 failed, 26 passed",
+            "ImportError while loading conftest: app/crud.py:114 AttributeError",
+            "27 passed",
+        ]
+    )
+    result = await _run(
+        manager, repo, pid, dry_run=False, agent=agent, sandbox=sandbox, max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "completed"
+    t = manager.get_tasks(pid)[0]
+    assert t.best_passed == 26  # l'ImportError n'a pas remplacé le 26/27
+
+
+def test_issue_from_task_repair_mode_for_green_state():
+    # État mémorisé VERT (la tentative a échoué APRÈS le gate, ex. panne à la PR) :
+    # la consigne dit de relivrer l'état tel quel en corrigeant la cause externe.
+    from collegue.pilot.driver import _issue_from_task
+
+    t = SimpleNamespace(
+        id=1,
+        issue_number=5,
+        title="T",
+        acceptance="",
+        depends_on=[],
+        attempt_count=1,
+        last_error="[pr/engine_error] tentative 1/3 — ConnectionError: GitHub 502",
+        best_diff="diff --git a/x b/x",
+        best_passed=27,
+        best_failed=0,
+        best_feedback=None,
+    )
+    ctx = _issue_from_task(t, {1: t}).context
+    assert "RÉPARATION CIBLÉE" in ctx
+    assert "passait les tests" in ctx
+    assert "GitHub 502" in ctx
+
+
 # --- barrière d'exception par tâche (#435) ------------------------------------------
 
 
@@ -449,9 +590,10 @@ class _FlakySandbox:
 
 
 async def test_retry_reinjects_crisp_failure_feedback(repo, manager):
-    """#424 : la tentative suivante reçoit le MOTIF de l'échec précédent (lignes
-    FAILED de pytest, pas la sortie brute) dans son contexte — sans ça, le retry
-    rejoue la même consigne à l'identique et reproduit le même bug."""
+    """#424/#436 : la tentative suivante reçoit le MOTIF de l'échec précédent (lignes
+    FAILED de pytest, pas la sortie brute) ET bascule en mode réparation ciblée
+    (l'état de la meilleure tentative est réensemencé) — sans ça, le retry rejoue
+    la même consigne à l'identique et reproduit le même bug."""
 
     async def _sleep(d):
         pass
@@ -470,9 +612,9 @@ async def test_retry_reinjects_crisp_failure_feedback(repo, manager):
     )
     assert result.stop_reason == "completed"
     assert len(agent.contexts) == 2
-    assert "ÉCHOUÉ" not in agent.contexts[0]  # 1re tentative : pas de feedback
+    assert "RÉPARATION" not in agent.contexts[0]  # 1re tentative : pas de feedback
     ctx = agent.contexts[1]
-    assert "ÉCHOUÉ" in ctx  # la consigne signale l'échec précédent
+    assert "RÉPARATION CIBLÉE" in ctx  # mode réparation (#436), pas régénération
     assert "FAILED tests/test_auth.py::test_login" in ctx  # crisp et actionnable
     assert "collected 4 items" not in ctx  # le bruit n'est PAS ré-injecté
 

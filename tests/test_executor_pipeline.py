@@ -289,6 +289,41 @@ async def test_budget_exception_propagates_through_pipeline(repo):
         await execute_issue(ISSUE, repo, ctx=None, dry_run=False, **_kwargs(reviewer=reviewer))
 
 
+# --- réensemencement du workspace au retry (#436) ----------------------------------
+
+
+async def test_seed_diff_is_applied_before_agent(repo):
+    """#436 : le diff d'une tentative précédente est ré-appliqué sur le clone neuf
+    AVANT l'agent et fait partie du diff autoritatif final — la PR porte l'état
+    complet (seed + réparation), pas seulement ce que l'agent vient d'écrire."""
+    import os
+    import subprocess as sp
+
+    from collegue.executor.workspace import prepare_workspace
+
+    scratch = prepare_workspace(repo, ISSUE)
+    with open(os.path.join(scratch.path, "existing.txt"), "w", encoding="utf-8") as fh:
+        fh.write("état de la meilleure tentative\n")
+    _git(scratch.path, "add", "-A")
+    seed = sp.run(["git", "diff", "--staged"], cwd=scratch.path, capture_output=True, text=True).stdout
+    assert "existing.txt" in seed
+
+    outcome = await execute_issue(
+        ISSUE, repo, ctx=None, dry_run=True, seed_diff=seed, **_kwargs(agent=FakeCodeAgent(files={"new.txt": "x\n"}))
+    )
+    assert outcome.success is True
+    assert "existing.txt" in outcome.execution.files_changed  # le seed est DANS le diff
+    assert "new.txt" in outcome.execution.files_changed
+
+
+async def test_invalid_seed_diff_falls_back_to_clean_clone(repo):
+    # Best-effort : un seed inapplicable (corrompu / base déplacée) est ignoré —
+    # la tentative continue sur le clone vierge au lieu d'échouer.
+    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=True, seed_diff="pas un diff git valide", **_kwargs())
+    assert outcome.success is True
+    assert "existing.txt" not in outcome.execution.files_changed
+
+
 # --- barrière d'exception par tâche (#435) ----------------------------------------
 
 

@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.pipeline import execute_issue, failure_feedback, log_tail
@@ -82,6 +83,34 @@ RETRY_BACKOFF_CAP_SECONDS = 90.0
 # sœur se construit sur la précédente MERGÉE — des PRs sœurs ouvertes depuis la
 # même base ne peuvent plus entrer en conflit entre elles (merge 405 irrécupérable).
 DEFAULT_MAX_INFLIGHT_REVIEWS = 1
+
+# Mémoire de la meilleure tentative (#436). Un diff tronqué ne s'appliquerait
+# plus (git apply échouerait) : au-delà de ce plafond, on ne mémorise pas.
+MAX_BEST_DIFF_CHARS = 200_000
+_PASSED_RE = re.compile(r"(\d+) passed")
+_FAILED_RE = re.compile(r"(\d+) failed")
+
+
+def _attempt_score(outcome) -> Optional[Tuple[int, int]]:
+    """Score de tests d'une tentative : ``(verts, -rouges)`` — comparable, ou None.
+
+    ``None`` quand la sortie de tests est absente ou illisible (erreur de
+    collection : 0 collecté) : un état qui ne collecte même pas n'est PAS un
+    candidat « meilleure tentative » (c'est l'anti-exemple de la task 7 FacNor —
+    l'ImportError n'aurait jamais dû remplacer le 26/27).
+    """
+    report = getattr(outcome, "quality_report", None)
+    output = getattr(report, "test_output", "") if report is not None else ""
+    if not output:
+        return None
+    passed_m = _PASSED_RE.search(output)
+    failed_m = _FAILED_RE.search(output)
+    passed = int(passed_m.group(1)) if passed_m else 0
+    failed = int(failed_m.group(1)) if failed_m else 0
+    if passed == 0 and failed == 0:
+        return None
+    return (passed, -failed)
+
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +180,30 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
             "périmètre (mêmes conventions et interfaces) sans dupliquer leur travail."
         )
     last_error = getattr(task, "last_error", None)
-    if int(getattr(task, "attempt_count", 0) or 0) > 0 and last_error:
+    attempts = int(getattr(task, "attempt_count", 0) or 0)
+    best_diff = getattr(task, "best_diff", None)
+    if attempts > 0 and best_diff:
+        # #436 : le workspace du retry est RÉENSEMENCÉ avec la meilleure tentative
+        # → consigne en mode réparation CIBLÉE (pas de régénération complète, qui
+        # sous variance LLM détruit du travail quasi-abouti — oscillation).
+        best_passed = int(getattr(task, "best_passed", 0) or 0)
+        best_failed = int(getattr(task, "best_failed", 0) or 0)
+        best_feedback = getattr(task, "best_feedback", None)
+        msg = (
+            "IMPORTANT : le dépôt cloné contient DÉJÀ (en modifications locales non commitées) "
+            f"le travail de ta meilleure tentative précédente : {best_passed} test(s) verts, "
+            f"{best_failed} en échec. Mode RÉPARATION CIBLÉE : "
+        )
+        if best_failed > 0 and best_feedback:
+            msg += f"corrige UNIQUEMENT ces échecs : {best_feedback}. "
+        elif last_error:
+            msg += (
+                f"cet état passait les tests ; la tentative a échoué pour une autre raison ({last_error}) — "
+                "relivre-le en corrigeant cette cause. "
+            )
+        msg += "Ne réécris PAS ce qui passe déjà, ne repars pas de zéro."
+        parts.append(msg)
+    elif attempts > 0 and last_error:
         parts.append(
             "ATTENTION : ta tentative précédente sur CETTE tâche a ÉCHOUÉ. "
             f"Détail de l'échec : {last_error}. "
@@ -382,6 +434,9 @@ async def run_project(
                 unmerged_deps,
             )
         audit.record(TASK_STARTED, iteration=iteration + 1, **started_detail)
+        # #436 : au retry, réensemencer le workspace avec la meilleure tentative
+        # (le diff survit en DB → la mémoire traverse aussi les redémarrages).
+        seed = getattr(task, "best_diff", None) if int(getattr(task, "attempt_count", 0) or 0) > 0 else None
         outcome = await execute_issue(
             _issue_from_task(task, tasks_by_id),
             repo_source,
@@ -398,6 +453,7 @@ async def run_project(
             task_id=task.id,
             project_id=project_id,
             dry_run=dry_run,
+            seed_diff=seed,
         )
         iteration += 1
         if sample_cost:
@@ -454,10 +510,35 @@ async def run_project(
                 last_error += " — " + diagnostic
             task.last_error = last_error
 
+            # #436 : mémoriser la MEILLEURE tentative (diff + score + échecs). Le
+            # prochain essai réensemence son workspace avec cet état (réparation
+            # ciblée) — et une tentative PIRE ne remplace jamais une meilleure
+            # (anti-oscillation : un 26/27 vert ne doit plus être jeté).
+            best_fields = {}
+            score = _attempt_score(outcome)
+            diff = getattr(outcome.execution, "diff", "") or ""
+            if score is not None and outcome.execution.changed and 0 < len(diff) <= MAX_BEST_DIFF_CHARS:
+                current = (
+                    (int(task.best_passed or 0), -int(task.best_failed or 0))
+                    if getattr(task, "best_passed", None) is not None
+                    else None
+                )
+                if current is None or score > current:
+                    best_fields = {
+                        "best_diff": diff,
+                        "best_passed": score[0],
+                        "best_failed": -score[1],
+                        "best_feedback": diagnostic or None,
+                    }
+                    for key, value in best_fields.items():
+                        setattr(task, key, value)  # overlay mémoire (dry_run inclus)
+
             if attempts < max_task_attempts:
                 task.status = TASK_STATUS_TODO
                 if not dry_run:
-                    manager.update_task(task.id, status=TASK_STATUS_TODO, attempt_count=attempts, last_error=last_error)
+                    manager.update_task(
+                        task.id, status=TASK_STATUS_TODO, attempt_count=attempts, last_error=last_error, **best_fields
+                    )
                 delay = min(backoff * attempts, RETRY_BACKOFF_CAP_SECONDS) if backoff > 0 else 0.0
                 audit.record(
                     TASK_RETRY,
@@ -483,7 +564,7 @@ async def run_project(
                 task.status = TASK_STATUS_FAILED
                 if not dry_run:
                     manager.update_task(
-                        task.id, status=TASK_STATUS_FAILED, attempt_count=attempts, last_error=last_error
+                        task.id, status=TASK_STATUS_FAILED, attempt_count=attempts, last_error=last_error, **best_fields
                     )
                 audit.record(
                     TASK_FAILED, iteration=iteration, attempt=attempts, max_attempts=max_task_attempts, **detail
