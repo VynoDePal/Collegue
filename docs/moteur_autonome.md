@@ -177,3 +177,31 @@ lit :
 python -m pytest -m "not integration" -q   # CI (par défaut)
 python -m pytest -m integration -q          # chemins réels (credentials requis)
 ```
+
+### CI nightly « integration » (#404)
+
+Le workflow [`integration-nightly.yml`](../.github/workflows/integration-nightly.yml)
+exécute chaque nuit (03:17 UTC, ou à la demande via *Run workflow*) la suite
+`pytest -m integration` que la CI PR exclut :
+
+| Chemin réel exercé | Pré-requis | Fourni par |
+|--------------------|------------|------------|
+| État durable **PostgreSQL** (checkpoints, reprise) | `STATE_DATABASE_URL` | service container `postgres:16` (aucun secret) |
+| **DockerSandbox** réel (isolation FS, persistance, kill au timeout) | Docker + image | runner GitHub + `python:3.12-slim` |
+| Appels **LLM réels** (chaînes de délégation…) | clé API | secret `INTEGRATION_LLM_API_KEY` |
+| Sentry / GitHub réels | tokens | secrets `INTEGRATION_SENTRY_AUTH_TOKEN`, `INTEGRATION_SENTRY_ORG`, `INTEGRATION_GITHUB_TOKEN` |
+
+**Secrets** (Settings → Secrets and variables → Actions) — tous **optionnels** : un
+test dont le pré-requis manque se **skippe** avec sa raison (`-rs`). Garde-fou
+anti-vacuité : si *tous* les tests ont été skippés, le job **échoue** (un nightly
+vert qui n'a rien exercé serait une fausse assurance). Les coûts LLM sont bornés
+par le budget dur (`MAX_COST_USD=2`, `MAX_TOKENS_BUDGET=2M`, deadline 30 min) —
+coût attendu par run : ~0 à 2 $ selon les secrets fournis.
+
+En cas d'échec, le workflow ouvre (ou commente) une issue **« CI nightly
+integration en échec »** avec le lien du run — la CI PR normale n'est jamais
+bloquée par le nightly.
+
+> Étape suivante (suivi #404) : un smoke **end-to-end** réel (plan → `--execute`
+> sur un dépôt fixture → PR ouverte puis nettoyée). Il exige une image sandbox
+> embarquant OpenHands, que le dépôt ne fournit pas encore.
