@@ -24,6 +24,7 @@ import logging
 import os
 from typing import List, Optional
 
+from collegue.pilot.audit import RunAuditLog, default_process_cost_source
 from collegue.pilot.budget import BudgetTimeController
 from collegue.pilot.driver import ProjectRunResult, run_project
 
@@ -150,6 +151,8 @@ async def run_project_from_settings(
     max_iterations: Optional[int] = None,
     improve: bool = False,
     run_improvement_fn=None,
+    audit=None,
+    cost_source=None,
 ) -> ProjectRunResult:
     """Assemble les dépendances (depuis la config) et lance ``run_project``.
 
@@ -159,6 +162,12 @@ async def run_project_from_settings(
 
     ``improve`` (H5) : enchaîne le moteur d'amélioration (Phase 4) sous le budget
     restant une fois le MVP construit (off par défaut ; activable via ``--improve``).
+
+    ``audit``/``cost_source`` (#441) : en RÉEL, branchés **par défaut** —
+    ``RunAuditLog`` persistant (ledger ``run_cost_usd``/``run_tokens`` en
+    métriques) + ``default_process_cost_source``. Sans ce câblage, la plomberie
+    H4 existait mais restait morte : 0 $ / 0 token journalisés sur ~7 h de LLM
+    au run FacNor v2, plafond budget structurellement inerte.
     """
     settings_obj = settings_obj or _settings()
     durability = collegue_home_durability_warning(settings_obj)
@@ -169,6 +178,13 @@ async def run_project_from_settings(
     agent = agent or _build_agent(sandbox, settings_obj)
     reviewer = reviewer or _build_reviewer(settings_obj)
     clients = clients or _build_clients(github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV))
+    # #441 : gouvernance de coût branchée PAR DÉFAUT en réel — audit persistant
+    # (ledger en métriques, lisible par run_cost_summary) + source de coût process.
+    # dry_run : aucun appel LLM réel → pas d'audit implicite (aucune écriture).
+    if audit is None and not dry_run:
+        audit = RunAuditLog(project_id, manager=manager, persist=True)
+    if cost_source is None and not dry_run:
+        cost_source = default_process_cost_source
     if budget is None:
         # Reprise (H5) : si un run a déjà démarré, on reconstruit le contrôleur depuis
         # le ``started_at`` d'ORIGINE → la deadline reste ABSOLUE (ne glisse pas à
@@ -205,6 +221,9 @@ async def run_project_from_settings(
         max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
         # Gate configurable par projet (#438) : commande de tests + passe frontend.
         gate_options=_gate_options(settings_obj),
+        # Gouvernance de coût (#441) : ledger + source process branchés en réel.
+        audit=audit,
+        cost_source=cost_source,
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
@@ -216,9 +235,14 @@ async def run_project_from_settings(
         drain = ""
         if result.pending_reviews:
             drain = f" ; {len(result.pending_reviews)} tâche(s) in_review À DRAINER (merge requis)"
+        # #441 : bilan de coût du run dans le journal (ledger enfin vivant).
+        cost_note = ""
+        if audit is not None:
+            ledger = audit.cost_summary()
+            cost_note = f" ; coût≈{ledger.get('usd', 0.0)}$ / {ledger.get('tokens', 0)} tokens"
         manager.record_decision(
             project_id,
-            f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}",
+            f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}{cost_note}",
             rationale=f"statut projet={result.project_status or 'inchangé'}",
         )
 

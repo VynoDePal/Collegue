@@ -123,6 +123,43 @@ async def test_real_run_records_summary_decision(git_repo, manager):
     assert manager.get_tasks(pid)[0].status == "in_review"
 
 
+async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
+    """#441 : en réel, audit persistant + source de coût branchés PAR DÉFAUT — le
+    ledger vit (métriques run_cost_usd/run_tokens lues par run_cost_summary) et le
+    journal de décisions porte le bilan, au lieu de 0 $ / 0 token sur 7 h de LLM."""
+    import dataclasses
+
+    from collegue.pilot.audit import run_cost_summary
+
+    class _UsageAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(result, prompt_tokens=1000, completion_tokens=200, cost_usd=0.003)
+
+    pid = _linear(manager, 1)
+    result = await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=_UsageAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+    )
+    assert result.stop_reason == "completed"
+    summary = run_cost_summary(manager, pid)
+    assert summary["tokens"] == 1200  # canal coder enfin compté
+    assert summary["usd"] == pytest.approx(0.003)
+    assert any("coût≈" in d.summary for d in manager.get_decisions(pid))
+
+
 # --- reporting ------------------------------------------------------------------
 
 

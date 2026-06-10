@@ -551,6 +551,17 @@ async def run_project(
             cur_usd, cur_tokens = cost_source()
             audit.record_cost(usd=cur_usd - last_usd, tokens=int(cur_tokens - last_tokens), iteration=iteration)
             last_usd, last_tokens = cur_usd, cur_tokens
+        # #441 : canal CODER — majoritaire en dépense et invisible du
+        # MetricsCollector serveur (process distinct dans le sandbox). L'usage
+        # auto-déclaré par l'agent alimente le même ledger (les deux canaux
+        # s'additionnent : ils ne comptent jamais les mêmes appels).
+        agent_result = outcome.execution.agent_result
+        coder_tokens = int(getattr(agent_result, "prompt_tokens", 0) or 0) + int(
+            getattr(agent_result, "completion_tokens", 0) or 0
+        )
+        coder_usd = float(getattr(agent_result, "cost_usd", 0.0) or 0.0)
+        if coder_tokens or coder_usd:
+            audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
         pr_number = outcome.pr.number if outcome.pr is not None else None
         audit.record(
             GATE_DECISION,

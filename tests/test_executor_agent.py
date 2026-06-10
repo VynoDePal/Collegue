@@ -241,6 +241,41 @@ def test_openhands_implement_issue_timeout_is_not_success():
     assert agent.implement_issue("/work", IssueSpec(number=1, title="T")).success is False
 
 
+# --- usage LLM du canal coder (#441) ------------------------------------------------
+
+
+def test_parse_usage_from_logs_sums_marked_lines():
+    from collegue.executor.openhands_agent import parse_usage_from_logs
+
+    logs = (
+        "INFO démarrage\n"
+        '[collegue-usage] {"prompt_tokens": 1200, "completion_tokens": 480, "cost_usd": 0.0021}\n'
+        "bruit intermédiaire\n"
+        'préfixe [collegue-usage] {"prompt_tokens": 800, "completion_tokens": 20}\n'
+        "[collegue-usage] pas du json (ignoré, best-effort)\n"
+        '[collegue-usage] {"prompt_tokens": -5, "cost_usd": "NaN"}\n'
+    )
+    prompt, completion, cost = parse_usage_from_logs(logs)
+    assert prompt == 2000
+    assert completion == 500
+    assert cost == pytest.approx(0.0021)
+    assert parse_usage_from_logs("") == (0, 0, 0.0)
+
+
+def test_openhands_implement_issue_reports_usage():
+    """#441 : l'usage imprimé par le runner (contrat ``[collegue-usage]``) remonte
+    dans l'AgentResult — sans lui, la dépense du coder (canal majoritaire) reste
+    invisible du ledger (0 $ / 0 token sur 7 h au run v2)."""
+    out = 'travail…\n[collegue-usage] {"prompt_tokens": 1500, "completion_tokens": 300, "cost_usd": 0.004}\nfin'
+    sandbox = _FakeSandbox(SandboxResult(exit_code=0, stdout=out, stderr=""))
+    agent = OpenHandsAgent(sandbox=sandbox, settings_obj=_settings())
+    result = agent.implement_issue("/work", IssueSpec(number=3, title="T"))
+    assert result.prompt_tokens == 1500
+    assert result.completion_tokens == 300
+    assert result.total_tokens == 1800
+    assert result.cost_usd == pytest.approx(0.004)
+
+
 # --- Isolation ------------------------------------------------------------------
 
 
