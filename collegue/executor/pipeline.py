@@ -59,6 +59,25 @@ def log_tail(text: str, limit: int = 2000) -> str:
     return "…" + text[-limit:]
 
 
+def failure_feedback(outcome: "ExecutionOutcome") -> str:
+    """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
+
+    Priorité aux lignes ``FAILED``/``ERROR`` de pytest : c'est exactement ce dont
+    l'agent a besoin pour corriger la cause. Un feedback verbeux (sortie brute)
+    NOIE l'agent au lieu de l'aider — constaté en run réel (FacNor, task 4 :
+    feedback bruité → time-out de 40 min ; lignes FAILED seules → convergence).
+    À défaut de lignes de tests, queue bornée de la sortie de tests puis des logs
+    agent (échec au stage ``run``).
+    """
+    if outcome.quality_report is not None and outcome.quality_report.test_output:
+        output = outcome.quality_report.test_output
+        fails = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED", "ERROR"))]
+        if fails:
+            return " ; ".join(fails[:6])[:700]
+        return log_tail(output, 400)
+    return log_tail(outcome.execution.agent_result.logs, 400)
+
+
 @dataclass
 class ExecutionOutcome:
     """Résultat de bout en bout de l'exécution d'une issue."""

@@ -219,19 +219,104 @@ async def test_failed_task_blocks_dependents(repo, manager):
     assert statuses["T1"] == "todo"  # jamais lancée
 
 
+# --- ré-injection du feedback d'échec au retry (#424) ------------------------------
+
+
+class _RecordingAgent:
+    """Enregistre le contexte de chaque issue reçue (délègue au FakeCodeAgent)."""
+
+    def __init__(self):
+        self.contexts = []
+        self._ok = FakeCodeAgent()
+
+    def implement_issue(self, workspace, issue):
+        self.contexts.append(issue.context)
+        return self._ok.implement_issue(workspace, issue)
+
+
+class _FlakySandbox:
+    """Tests rouges N fois (sortie pytest réaliste) puis verts."""
+
+    def __init__(self, fail_times=1):
+        self.calls = 0
+        self._fail_times = fail_times
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            return SandboxResult(
+                exit_code=1,
+                stdout=(
+                    "collected 4 items\n"
+                    "bruit de collection\n"
+                    "FAILED tests/test_auth.py::test_login - sqlalchemy.exc.OperationalError: no such table\n"
+                    "1 failed, 3 passed"
+                ),
+                stderr="",
+            )
+        return SandboxResult(exit_code=0, stdout="4 passed", stderr="")
+
+
+async def test_retry_reinjects_crisp_failure_feedback(repo, manager):
+    """#424 : la tentative suivante reçoit le MOTIF de l'échec précédent (lignes
+    FAILED de pytest, pas la sortie brute) dans son contexte — sans ça, le retry
+    rejoue la même consigne à l'identique et reproduit le même bug."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _RecordingAgent()
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=agent,
+        sandbox=_FlakySandbox(fail_times=1),
+        max_task_attempts=3,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "completed"
+    assert len(agent.contexts) == 2
+    assert "ÉCHOUÉ" not in agent.contexts[0]  # 1re tentative : pas de feedback
+    ctx = agent.contexts[1]
+    assert "ÉCHOUÉ" in ctx  # la consigne signale l'échec précédent
+    assert "FAILED tests/test_auth.py::test_login" in ctx  # crisp et actionnable
+    assert "collected 4 items" not in ctx  # le bruit n'est PAS ré-injecté
+
+
+async def test_run_stage_retry_feeds_agent_logs(repo, manager):
+    # Échec au stage `run` (process agent) : le feedback vient des logs agent.
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _FlakyAgent(fail_times=1)
+    result = await _run(manager, repo, pid, dry_run=False, agent=agent, max_task_attempts=3, sleep_fn=_sleep)
+    assert result.stop_reason == "completed"
+    assert "503 transitoire simulé" in agent.contexts[1]
+
+
 # --- retry au niveau tâche (#420) -------------------------------------------------
 
 
 class _FlakyAgent:
-    """Agent qui échoue N fois (process en erreur) puis réussit — simule un 503."""
+    """Agent qui échoue N fois (process en erreur) puis réussit — simule un 503.
+
+    Enregistre le ``context`` de chaque ``IssueSpec`` reçu (vérification de la
+    ré-injection de feedback, #424).
+    """
 
     def __init__(self, fail_times=1):
         self.calls = 0
+        self.contexts = []
         self._fail_times = fail_times
         self._ok = FakeCodeAgent()
 
     def implement_issue(self, workspace, issue):
         self.calls += 1
+        self.contexts.append(issue.context)
         if self.calls <= self._fail_times:
             return AgentResult(success=False, logs="503 transitoire simulé")
         return self._ok.implement_issue(workspace, issue)

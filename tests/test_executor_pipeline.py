@@ -215,6 +215,60 @@ def test_log_tail_bounds_long_text():
     assert tail.startswith("…") and tail.endswith("x")
 
 
+def test_failure_feedback_is_crisp_and_actionable():
+    """#424 : la synthèse d'échec privilégie les lignes FAILED/ERROR de pytest
+    (courtes, actionnables) — la sortie brute noierait l'agent au retry."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    ws = Workspace(path="/w", branch="b", base_commit="c")
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="journal de l'agent"),
+        changed=True,
+        diff="",
+        files_changed=("a.py",),
+        success=True,
+    )
+
+    def _report(output):
+        return QualityReport(
+            tests_passed=False,
+            test_exit_code=1,
+            test_output=output,
+            review_summary="",
+            review_findings=(),
+            review_blocking=False,
+            passed=False,
+        )
+
+    # Lignes FAILED/ERROR présentes → seules elles sont retenues (jointes, bornées).
+    gate = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=ws,
+        execution=execution,
+        quality_report=_report("bruit\nFAILED tests/a.py::t1 - boom\nencore du bruit\nERROR tests/b.py - setup\n"),
+        reason="gate_failed",
+    )
+    assert failure_feedback(gate) == "FAILED tests/a.py::t1 - boom ; ERROR tests/b.py - setup"
+
+    # Pas de ligne FAILED → queue bornée de la sortie de tests.
+    fuzzy = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=ws,
+        execution=execution,
+        quality_report=_report("z" * 1000),
+        reason="gate_failed",
+    )
+    assert len(failure_feedback(fuzzy)) <= 401 and failure_feedback(fuzzy).endswith("z")
+
+    # Échec au stage run (aucun rapport) → logs agent.
+    run = ExecutionOutcome(success=False, stage="run", workspace=ws, execution=execution, reason="agent_error")
+    assert failure_feedback(run) == "journal de l'agent"
+
+
 async def test_reviewer_error_is_contained_not_propagated(repo):
     # Une exception « ordinaire » du reviewer est CONTENUE par le gate (fail-closed) :
     # le pipeline s'arrête proprement, sans laisser l'exception remonter.
