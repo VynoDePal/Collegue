@@ -289,6 +289,67 @@ async def test_budget_exception_propagates_through_pipeline(repo):
         await execute_issue(ISSUE, repo, ctx=None, dry_run=False, **_kwargs(reviewer=reviewer))
 
 
+# --- barrière d'exception par tâche (#435) ----------------------------------------
+
+
+class _BoomAgent:
+    def implement_issue(self, workspace, issue):
+        raise RuntimeError("panne réseau simulée")
+
+
+async def test_infra_exception_becomes_engine_error_outcome(repo):
+    """#435 : une exception d'infrastructure ne remonte PLUS crue — outcome failed
+    (reason=engine_error, stage atteint), exception dans ``error`` ET en feedback :
+    elle entre dans le chemin retry du pilote au lieu de tuer le run entier."""
+    from collegue.executor.pipeline import failure_feedback
+
+    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=True, **_kwargs(agent=_BoomAgent()))
+    assert outcome.success is False
+    assert outcome.reason == "engine_error"
+    assert outcome.stage == "run"
+    assert "panne réseau simulée" in outcome.error
+    assert "panne réseau simulée" in failure_feedback(outcome)
+
+
+async def test_workspace_error_caught_with_synthetic_execution(tmp_path):
+    # Panne AVANT l'agent (clone impossible) : l'outcome reste exploitable
+    # (workspace None, exécution synthétique) au lieu d'une WorkspaceError crue.
+    outcome = await execute_issue(ISSUE, str(tmp_path / "absent"), ctx=None, dry_run=True, **_kwargs())
+    assert outcome.success is False and outcome.reason == "engine_error"
+    assert outcome.stage == "run"
+    assert outcome.workspace is None
+    assert "[engine] exception avant l'agent" in outcome.execution.agent_result.logs
+
+
+async def test_pr_stage_exception_keeps_stage_and_real_feedback(repo):
+    # Panne réseau à l'OUVERTURE de PR : stage=pr, et le feedback est l'exception —
+    # PAS les logs (verts) de l'agent, qui seraient un motif de retry trompeur.
+    from collegue.executor.pipeline import failure_feedback
+
+    class _DownPRs(_PRs):
+        def create_pr(self, owner, repo, title, head, base, body):
+            raise ConnectionError("GitHub 502 simulé")
+
+    clients = PrClients(branches=_Branches(), files=_Files(), prs=_DownPRs())
+    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=False, **_kwargs(clients=clients))
+    assert outcome.success is False and outcome.reason == "engine_error"
+    assert outcome.stage == "pr"
+    assert "GitHub 502" in failure_feedback(outcome)
+
+
+async def test_base_exception_still_propagates_from_agent(repo):
+    # Les BaseException (annulation asyncio, arrêt process) traversent la barrière —
+    # même contrat que BudgetExceeded ci-dessus.
+    import asyncio
+
+    class _Cancel:
+        def implement_issue(self, workspace, issue):
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_issue(ISSUE, repo, ctx=None, dry_run=True, **_kwargs(agent=_Cancel()))
+
+
 # --- garanties d'état -----------------------------------------------------------
 
 

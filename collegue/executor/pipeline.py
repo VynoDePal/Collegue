@@ -24,15 +24,18 @@ items du board) — délibérément hors périmètre ici.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from collegue.executor.agent import CodeAgent, IssueSpec
+from collegue.executor.agent import AgentResult, CodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner
 from collegue.executor.pr import PrClients, PrResult, open_pr
 from collegue.executor.quality_gate import QualityReport, Reviewer, run_quality_gate
 from collegue.executor.runner import ExecutionResult, run_issue
 from collegue.executor.workspace import Workspace, prepare_workspace
+
+logger = logging.getLogger(__name__)
 
 TASK_STATUS_TODO = "todo"
 TASK_STATUS_IN_PROGRESS = "in_progress"
@@ -49,6 +52,7 @@ STAGE_PR = "pr"  # ouverture de PR
 REASON_NO_OP = "no_op"  # l'agent a tourné sans erreur mais n'a produit AUCUN diff
 REASON_AGENT_ERROR = "agent_error"  # le process agent a échoué (exit ≠ 0 / timeout)
 REASON_GATE_FAILED = "gate_failed"  # tests rouges ou revue bloquante
+REASON_ENGINE_ERROR = "engine_error"  # exception d'infrastructure interceptée (#435)
 
 
 def log_tail(text: str, limit: int = 2000) -> str:
@@ -68,7 +72,13 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     feedback bruité → time-out de 40 min ; lignes FAILED seules → convergence).
     À défaut de lignes de tests, queue bornée de la sortie de tests puis des logs
     agent (échec au stage ``run``).
+
+    Exception d'infrastructure (#435, ``outcome.error``) : c'est ELLE le motif —
+    les logs agent (potentiellement ceux d'une exécution réussie, si la panne est
+    survenue à l'ouverture de PR) seraient un feedback trompeur.
     """
+    if outcome.error:
+        return log_tail(outcome.error, 400)
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
         fails = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED", "ERROR"))]
@@ -84,12 +94,13 @@ class ExecutionOutcome:
 
     success: bool  # le pipeline est allé jusqu'à la PR (gate passé)
     stage: str  # dernière étape atteinte : run | gate | pr
-    workspace: Workspace
+    workspace: Optional[Workspace]  # None si l'exception a frappé avant la préparation (#435)
     execution: ExecutionResult
     quality_report: Optional[QualityReport] = None
     pr: Optional[PrResult] = None
     final_status: Optional[str] = None  # statut de tâche effectivement écrit (None si dry_run / pas de manager)
-    reason: Optional[str] = None  # raison d'échec (no_op | agent_error | gate_failed), None si succès
+    reason: Optional[str] = None  # raison d'échec (no_op | agent_error | gate_failed | engine_error), None si succès
+    error: Optional[str] = None  # exception d'infrastructure interceptée (#435), None sinon
 
 
 def _set_status(manager, task_id, status: str, *, enabled: bool) -> Optional[str]:
@@ -124,58 +135,101 @@ async def execute_issue(
     ou gate non passé), ``success=False`` et aucune PR n'est ouverte ; l'état ne
     dépasse pas ``in_progress``. ``dry_run`` (défaut) n'écrit rien et n'effectue
     aucune transition d'état.
+
+    **Barrière d'exception (#435)** : une exception d'infrastructure pendant le
+    traitement (``WorkspaceError`` au clone, erreur réseau GitHub à l'ouverture de
+    PR, bug ponctuel d'un adaptateur) ne remonte PLUS crue — elle est convertie en
+    outcome ``failed`` (``reason="engine_error"``, ``stage`` = étape atteinte,
+    ``error`` = exception) qui entre dans le chemin retry existant du pilote
+    (#420/#424). Une panne ponctuelle d'UNE tâche ne tue plus le run entier alors
+    que le reste du DAG est exécutable. Les ``BaseException`` (annulation asyncio,
+    arrêt process) propagent, elles, normalement.
     """
     persist = not dry_run  # les transitions d'état n'ont lieu qu'en exécution réelle
     final_status: Optional[str] = None
+    stage = STAGE_RUN
+    workspace: Optional[Workspace] = None
+    execution: Optional[ExecutionResult] = None
+    report: Optional[QualityReport] = None
 
-    workspace = prepare_workspace(repo_source, issue)
-    final_status = _set_status(manager, task_id, TASK_STATUS_IN_PROGRESS, enabled=persist) or final_status
+    try:
+        workspace = prepare_workspace(repo_source, issue)
+        final_status = _set_status(manager, task_id, TASK_STATUS_IN_PROGRESS, enabled=persist) or final_status
 
-    # E2 : exécution de l'agent + capture du diff (l'état est piloté ici, pas par run_issue).
-    execution = run_issue(agent, workspace, issue, runner=runner)
-    if not execution.changed:
-        # #421 : distinguer le no-op (agent OK, zéro diff — souvent transitoire)
-        # de l'erreur du process agent (exit ≠ 0) — la couche retry en dépend.
-        reason = REASON_NO_OP if execution.agent_result.success else REASON_AGENT_ERROR
-        return ExecutionOutcome(
-            success=False,
-            stage=STAGE_RUN,
-            workspace=workspace,
-            execution=execution,
-            final_status=final_status,
-            reason=reason,
+        # E2 : exécution de l'agent + capture du diff (l'état est piloté ici, pas par run_issue).
+        execution = run_issue(agent, workspace, issue, runner=runner)
+        if not execution.changed:
+            # #421 : distinguer le no-op (agent OK, zéro diff — souvent transitoire)
+            # de l'erreur du process agent (exit ≠ 0) — la couche retry en dépend.
+            reason = REASON_NO_OP if execution.agent_result.success else REASON_AGENT_ERROR
+            return ExecutionOutcome(
+                success=False,
+                stage=STAGE_RUN,
+                workspace=workspace,
+                execution=execution,
+                final_status=final_status,
+                reason=reason,
+            )
+
+        # E3 : gate qualité (fail-closed).
+        stage = STAGE_GATE
+        report = await run_quality_gate(
+            workspace.path, execution.diff, ctx, sandbox=sandbox, reviewer=reviewer, issue=issue
         )
+        if not report.passed:
+            return ExecutionOutcome(
+                success=False,
+                stage=STAGE_GATE,
+                workspace=workspace,
+                execution=execution,
+                quality_report=report,
+                final_status=final_status,
+                reason=REASON_GATE_FAILED,
+            )
 
-    # E3 : gate qualité (fail-closed).
-    report = await run_quality_gate(
-        workspace.path, execution.diff, ctx, sandbox=sandbox, reviewer=reviewer, issue=issue
-    )
-    if not report.passed:
+        # E4 : ouverture de PR (dry_run respecté).
+        stage = STAGE_PR
+        pr = open_pr(
+            workspace,
+            report,
+            issue,
+            owner,
+            repo,
+            files_changed=execution.files_changed,
+            base=base,
+            clients=clients,
+            dry_run=dry_run,
+            manager=manager,
+            project_id=project_id,
+        )
+        final_status = _set_status(manager, task_id, TASK_STATUS_IN_REVIEW, enabled=persist) or final_status
+    except Exception as exc:  # barrière volontairement large (#435) — fail-closed, retentable
+        error = f"{type(exc).__name__}: {exc}"
+        logger.exception(
+            "exception d'infrastructure pendant l'issue #%s (stage=%s) — convertie en échec retentable (#435)",
+            issue.number,
+            stage,
+        )
+        if execution is None:
+            # L'agent n'a jamais tourné (panne au clone / à la transition d'état) :
+            # résultat synthétique pour que l'outcome reste exploitable partout.
+            execution = ExecutionResult(
+                agent_result=AgentResult(success=False, logs=f"[engine] exception avant l'agent — {error}"),
+                changed=False,
+                diff="",
+                files_changed=(),
+                success=False,
+            )
         return ExecutionOutcome(
             success=False,
-            stage=STAGE_GATE,
+            stage=stage,
             workspace=workspace,
             execution=execution,
             quality_report=report,
             final_status=final_status,
-            reason=REASON_GATE_FAILED,
+            reason=REASON_ENGINE_ERROR,
+            error=error,
         )
-
-    # E4 : ouverture de PR (dry_run respecté).
-    pr = open_pr(
-        workspace,
-        report,
-        issue,
-        owner,
-        repo,
-        files_changed=execution.files_changed,
-        base=base,
-        clients=clients,
-        dry_run=dry_run,
-        manager=manager,
-        project_id=project_id,
-    )
-    final_status = _set_status(manager, task_id, TASK_STATUS_IN_REVIEW, enabled=persist) or final_status
 
     return ExecutionOutcome(
         success=True,
