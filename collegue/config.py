@@ -90,6 +90,19 @@ class Settings(BaseSettings):
     LLM_RATE_LIMIT_PER_MINUTE: int = 15
     LLM_RATE_LIMIT_PER_DAY: int = 500
 
+    # --- Canal LLM du coder OpenHands (#422) ---
+    # Le coder appelle le modèle DIRECTEMENT (LiteLLM dans le sandbox), hors de
+    # portée du rate-limiter et des retries des clients du moteur. À défaut d'un
+    # proxy partagé, le moteur (1) PROPAGE une politique retries/backoff au worker
+    # (env LLM_NUM_RETRIES / LLM_RETRY_MIN_WAIT / LLM_RETRY_MAX_WAIT, lus par la
+    # config OpenHands) pour absorber les fenêtres 503 « high demand », et
+    # (2) peut ESPACER les lancements coder (back-pressure start-to-start) pour
+    # lisser le débit sur le quota fournisseur partagé. 0 = pas d'espacement.
+    CODER_LLM_NUM_RETRIES: int = 8
+    CODER_LLM_RETRY_MIN_WAIT: int = 8
+    CODER_LLM_RETRY_MAX_WAIT: int = 90
+    CODER_MIN_INTERVAL_SECONDS: float = 0.0
+
     # --- Budget DUR global (coût $ / tokens) + auto-pause (garde-fou brief §6) ---
     # Plafond DUR sur la dépense cumulée, distinct du rate limiter (fréquence) et
     # des quotas per-session (collegue.tools.quotas). Quand le coût cumulé atteint

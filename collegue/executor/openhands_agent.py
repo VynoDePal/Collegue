@@ -23,6 +23,8 @@ Pré-requis d'une exécution réelle (différés, integration) :
 
 from __future__ import annotations
 
+import math
+import time
 from typing import List, Optional, Tuple
 
 from collegue.core.llm.roles import LLMRole, resolve_role
@@ -30,6 +32,21 @@ from collegue.executor.agent import AgentResult, IssueSpec
 
 # Point d'entrée headless d'OpenHands (module exécuté dans le conteneur sandbox).
 OPENHANDS_ENTRYPOINT = "openhands.core.main"
+
+# Politique retries/backoff par défaut du canal coder (#422) — alignée sur les
+# settings ``CODER_LLM_*`` de ``collegue.config``.
+DEFAULT_CODER_NUM_RETRIES = 8
+DEFAULT_CODER_RETRY_MIN_WAIT = 8
+DEFAULT_CODER_RETRY_MAX_WAIT = 90
+
+
+def _int_setting(settings_obj, name: str, default: int) -> int:
+    """Lit un entier de settings, robuste (None/str/invalide/négatif → défaut)."""
+    try:
+        value = int(getattr(settings_obj, name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
 
 
 class OpenHandsAgent:
@@ -48,12 +65,62 @@ class OpenHandsAgent:
         settings_obj: Optional[object] = None,
         entrypoint: str = OPENHANDS_ENTRYPOINT,
         python_bin: str = "python",
+        clock=time.monotonic,
+        sleep=time.sleep,
     ):
         self._sandbox = sandbox
         self._role = role
         self._settings = settings_obj
         self._entrypoint = entrypoint
         self._python_bin = python_bin
+        # Back-pressure du canal coder (#422) : horloge/sleep injectables (tests).
+        self._clock = clock
+        self._sleep = sleep
+        self._last_launch: Optional[float] = None
+
+    def _resolved_settings(self):
+        if self._settings is not None:
+            return self._settings
+        from collegue.config import settings
+
+        return settings
+
+    def retry_policy(self) -> Tuple[int, int, int]:
+        """``(num_retries, retry_min_wait, retry_max_wait)`` du canal coder (#422).
+
+        Le moteur n'intercepte pas les appels LiteLLM faits DANS le sandbox : la
+        seule régulation possible est de propager une politique de retries/backoff
+        au worker OpenHands (qui la lit via l'environnement ``LLM_*``).
+        """
+        s = self._resolved_settings()
+        return (
+            _int_setting(s, "CODER_LLM_NUM_RETRIES", DEFAULT_CODER_NUM_RETRIES),
+            _int_setting(s, "CODER_LLM_RETRY_MIN_WAIT", DEFAULT_CODER_RETRY_MIN_WAIT),
+            _int_setting(s, "CODER_LLM_RETRY_MAX_WAIT", DEFAULT_CODER_RETRY_MAX_WAIT),
+        )
+
+    def min_interval_seconds(self) -> float:
+        """Espacement minimal (s) entre deux lancements coder (0 = désactivé)."""
+        try:
+            value = float(getattr(self._resolved_settings(), "CODER_MIN_INTERVAL_SECONDS", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) and value > 0 else 0.0
+
+    def _respect_min_interval(self) -> float:
+        """Back-pressure start-to-start (#422) : attend s'il le faut, renvoie l'attente.
+
+        Protège le quota fournisseur partagé contre des lancements coder en rafale
+        (ex. retries de tâche pendant une fenêtre 503) sans toucher au sandbox.
+        """
+        interval = self.min_interval_seconds()
+        if interval <= 0 or self._last_launch is None:
+            return 0.0
+        remaining = interval - (self._clock() - self._last_launch)
+        if remaining > 0:
+            self._sleep(remaining)
+            return remaining
+        return 0.0
 
     def resolved_model(self) -> Tuple[str, str]:
         """Retourne ``(provider, model)`` pour le rôle de cet agent (défaut CODER).
@@ -70,12 +137,17 @@ class OpenHandsAgent:
         clé API reste hors argv (injectée par le sandbox à l'exécution réelle). La
         consigne est ``issue.to_prompt()`` (déjà sanitizée contre l'injection).
         On passe un **argv** (pas de ``sh -c``) : aucun risque d'injection shell via
-        le texte de l'issue.
+        le texte de l'issue. La politique retries/backoff du canal coder (#422,
+        non secrète) est propagée via l'environnement ``LLM_*`` d'OpenHands.
         """
         _provider, model = self.resolved_model()
+        num_retries, retry_min, retry_max = self.retry_policy()
         return [
             "env",
             f"LLM_MODEL={model}",
+            f"LLM_NUM_RETRIES={num_retries}",
+            f"LLM_RETRY_MIN_WAIT={retry_min}",
+            f"LLM_RETRY_MAX_WAIT={retry_max}",
             self._python_bin,
             "-m",
             self._entrypoint,
@@ -87,8 +159,11 @@ class OpenHandsAgent:
         """Lance OpenHands dans le sandbox sur ``workspace`` pour ``issue``.
 
         Le diff autoritatif est capturé par l'exécuteur (E2) ; ici on ne renvoie que
-        le statut (code de sortie du sandbox) et les logs.
+        le statut (code de sortie du sandbox) et les logs. Les lancements sont
+        espacés de ``CODER_MIN_INTERVAL_SECONDS`` (back-pressure, #422).
         """
+        self._respect_min_interval()
+        self._last_launch = self._clock()
         result = self._sandbox.run_command(self.build_command(issue), workspace)
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
         return AgentResult(
