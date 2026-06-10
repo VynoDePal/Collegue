@@ -77,6 +77,12 @@ DEFAULT_MAX_TASK_ATTEMPTS = 1
 DEFAULT_RETRY_BACKOFF_SECONDS = 15.0
 RETRY_BACKOFF_CAP_SECONDS = 90.0
 
+# Intégration sérielle en mode strict (#434) : nombre max de PRs « en vol »
+# (tâches ``in_review``) avant de s'arrêter ``awaiting_merge``. À 1, chaque tâche
+# sœur se construit sur la précédente MERGÉE — des PRs sœurs ouvertes depuis la
+# même base ne peuvent plus entrer en conflit entre elles (merge 405 irrécupérable).
+DEFAULT_MAX_INFLIGHT_REVIEWS = 1
+
 logger = logging.getLogger(__name__)
 
 
@@ -159,6 +165,28 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     )
 
 
+def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count: int = 1) -> None:
+    """Re-file une tâche pour un REDO complet après un événement externe (#434).
+
+    Cas nominal : la PR d'une tâche ``in_review`` est devenue non mergeable
+    (conflit avec ``main`` — :class:`~collegue.tools.github_commands.PRNotMergeableError`).
+    L'orchestrateur ferme la PR puis appelle ce helper : la tâche repart ``todo``
+    avec ``attempt_count``/``last_error`` posés pour que le canal feedback (#424)
+    ré-injecte ``message`` dans le prompt de la nouvelle tentative (« ta PR était
+    en conflit, repars du dépôt à jour »).
+
+    ``attempt_count=1`` (défaut) : un conflit d'infrastructure ne consomme pas le
+    budget de retries fonctionnels — on garde juste le minimum (> 0) pour que le
+    feedback soit injecté.
+    """
+    manager.update_task(
+        task_id,
+        status=TASK_STATUS_TODO,
+        attempt_count=max(1, int(attempt_count)),
+        last_error=str(message),
+    )
+
+
 async def run_project(
     project_id: int,
     repo_source: str,
@@ -184,6 +212,7 @@ async def run_project(
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     sleep_fn=None,
     require_merged_deps: bool = False,
+    max_inflight_reviews: int = DEFAULT_MAX_INFLIGHT_REVIEWS,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -217,6 +246,15 @@ async def run_project(
     ``awaiting_merge`` (relancer après merge reprend naturellement). À faux
     (défaut historique), le démarrage d'un dépendant sur dépendance non mergée est
     SIGNALÉ (audit ``unmerged_deps`` + warning) au lieu d'être silencieux.
+
+    ``max_inflight_reviews`` (#434, mode strict uniquement) : plafond de tâches
+    ``in_review`` (PR ouverte non mergée) avant de s'arrêter ``awaiting_merge``.
+    À 1 (défaut), l'intégration est SÉRIELLE : des tâches sœurs (indépendantes
+    entre elles) ne sont plus construites depuis la même base — la base de
+    chacune inclut le merge de la précédente, donc plus de PRs sœurs en conflit
+    (merge 405 irrécupérable sans opérateur). Augmenter rétablit N PRs en vol
+    (au risque documenté de #434). Ignoré hors mode strict (comportement
+    historique inchangé : ``in_review`` débloque déjà les dépendants).
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
@@ -230,6 +268,10 @@ async def run_project(
         backoff = DEFAULT_RETRY_BACKOFF_SECONDS
     if not (backoff > 0 and backoff < float("inf")):  # nan/inf/négatif → pas d'attente
         backoff = 0.0
+    try:
+        max_inflight_reviews = max(1, int(max_inflight_reviews))
+    except (TypeError, ValueError):
+        max_inflight_reviews = DEFAULT_MAX_INFLIGHT_REVIEWS
     sleep = sleep_fn or asyncio.sleep
     tasks = manager.get_tasks(project_id)  # objets détachés : overlay mutable en mémoire
     tasks_by_id = {t.id: t for t in tasks}  # pour le contexte inter-tâches (#412)
@@ -299,6 +341,26 @@ async def run_project(
             else:
                 stop_reason = STOP_BLOCKED
             break
+
+        # #434 (mode strict) : borner les PRs « en vol ». Une tâche est prête, mais
+        # si ``max_inflight_reviews`` tâches sont déjà ``in_review``, la démarrer la
+        # construirait sur une base qui n'inclut PAS ces PRs → dès que l'une merge,
+        # les PRs sœurs touchant les mêmes fichiers deviennent non mergeables (405),
+        # sans aucune issue moteur. On s'arrête ``awaiting_merge`` : après le(s)
+        # merge(s) humains, un nouveau run repart d'une base à jour.
+        if require_merged_deps:
+            inflight = sum(1 for t in tasks if t.status == TASK_STATUS_IN_REVIEW)
+            if inflight >= max_inflight_reviews:
+                logger.info(
+                    "mode strict : %d PR(s) en vol (plafond %d) — arrêt awaiting_merge "
+                    "avant la tâche %s « %s » (#434, intégration sérielle)",
+                    inflight,
+                    max_inflight_reviews,
+                    task.id,
+                    task.title,
+                )
+                stop_reason = STOP_AWAITING_MERGE
+                break
 
         # #411 (mode historique) : démarrer un dépendant alors qu'une dépendance est
         # `in_review` signifie que son clone (`main`) ne contient PAS le code de la

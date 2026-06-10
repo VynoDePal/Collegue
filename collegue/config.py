@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # code) ; le run s'arrête `awaiting_merge` quand seuls des merges manquent.
     # Faux (défaut historique) : le pilote démarre quand même mais SIGNALE le cas.
     DEPS_REQUIRE_MERGED: bool = False
+    # Intégration sérielle en mode strict (#434) : plafond de PRs « en vol »
+    # (tâches in_review) avant arrêt `awaiting_merge`. À 1 (défaut), des tâches
+    # sœurs ne sont plus construites depuis la même base → plus de PRs sœurs en
+    # conflit (merge 405 irrécupérable). Ignoré si DEPS_REQUIRE_MERGED est faux.
+    STRICT_MAX_INFLIGHT_PRS: int = 1
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

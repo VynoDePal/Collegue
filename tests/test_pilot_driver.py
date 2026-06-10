@@ -105,6 +105,14 @@ def _linear_project(manager, n=3):
     return pid
 
 
+def _sibling_project(manager, n=2):
+    """Tâches SŒURS : indépendantes entre elles (toutes prêtes dès la 1re passe)."""
+    pid = manager.create_project(name="demo-siblings")
+    for i in range(n):
+        manager.add_task(pid, title=f"S{i}")
+    return pid
+
+
 async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, agent=None, **kw):
     return await run_project(
         pid,
@@ -271,6 +279,72 @@ async def test_strict_mode_hard_failure_still_blocked(repo, manager):
     pid = _linear_project(manager, 2)
     result = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True, sandbox=_Sandbox(ok=False))
     assert result.stop_reason == "blocked"
+
+
+# --- intégration sérielle en mode strict (#434) -------------------------------------
+
+
+async def test_strict_mode_serializes_sibling_prs(repo, manager):
+    """#434 : deux tâches SŒURS (indépendantes) ne sont plus construites depuis la
+    même base — dès la 1re PR en vol, le run s'arrête `awaiting_merge` ; la sœur
+    n'est construite qu'après le merge (sa base inclut alors la PR précédente →
+    plus de PRs sœurs en conflit, merge 405 irrécupérable)."""
+    pid = _sibling_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True)
+    assert result.stop_reason == "awaiting_merge"
+    assert result.iterations == 1  # S0 seulement : S1 attend le merge
+    s0, s1 = manager.get_tasks(pid)
+    assert s0.status == "in_review" and s1.status == "todo"
+
+    manager.update_task_status(s0.id, "merged")  # merge humain
+    result2 = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True)
+    assert result2.iterations == 1
+    assert result2.stop_reason == "completed"
+    assert manager.get_tasks(pid)[1].status == "in_review"
+
+
+async def test_strict_mode_inflight_cap_is_configurable(repo, manager):
+    # max_inflight_reviews=2 : les deux sœurs partent dans la même passe (N PRs en
+    # vol, comportement pré-#434) — l'opérateur choisit explicitement son risque.
+    pid = _sibling_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True, max_inflight_reviews=2)
+    assert result.stop_reason == "completed"
+    assert result.iterations == 2
+
+
+async def test_strict_mode_resume_with_inflight_pr_starts_nothing(repo, manager):
+    # Reprise : une PR d'un run précédent est déjà en vol → on ne démarre RIEN
+    # (la base clonée ne l'inclut pas) ; `awaiting_merge` immédiat.
+    pid = _sibling_project(manager, 2)
+    manager.update_task_status(manager.get_tasks(pid)[0].id, "in_review")
+    result = await _run(manager, repo, pid, dry_run=False, require_merged_deps=True)
+    assert result.stop_reason == "awaiting_merge"
+    assert result.iterations == 0
+
+
+async def test_historical_mode_keeps_chaining_siblings(repo, manager):
+    # Hors mode strict : comportement inchangé, les sœurs s'enchaînent dans la passe
+    # (`in_review` débloque déjà — le plafond #434 ne s'applique qu'au mode strict).
+    pid = _sibling_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False)
+    assert result.stop_reason == "completed"
+    assert result.iterations == 2
+
+
+def test_requeue_task_for_redo_resets_for_feedback(manager):
+    """#434 : contrat du close+redo — la tâche repart `todo` avec un feedback (#424)
+    et un attempt_count MINIMAL (un conflit d'infrastructure ne consomme pas le
+    budget de retries fonctionnels)."""
+    from collegue.pilot import requeue_task_for_redo
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="in_review", attempt_count=2)
+    requeue_task_for_redo(manager, tid, message="[merge/conflit] ta PR était en conflit avec main — repars à jour")
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "todo"
+    assert t.attempt_count == 1
+    assert "conflit" in t.last_error
 
 
 # --- ré-injection du feedback d'échec au retry (#424) ------------------------------
