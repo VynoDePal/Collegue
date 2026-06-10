@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 
@@ -90,6 +91,26 @@ def prepare_workspace(
         raise WorkspaceError(f"git checkout -b {branch} a échoué: {checkout.stderr.strip()}")
 
     return Workspace(path=dest, branch=branch, base_commit=base_commit)
+
+
+def cleanup_workspace(workspace_or_path) -> None:
+    """Supprime un workspace et son répertoire racine temporaire (#443). Best-effort.
+
+    Chaque tâche clone le projet sous ``/tmp/collegue-exec-*/workspace`` et
+    personne ne le détruisait : 22 clones / 233 Mo après le run FacNor v2, fuite
+    LINÉAIRE (un clone par tentative) jusqu'à l'erreur disque sur un moteur qui
+    tourne des jours. Supprime le parent ``collegue-exec-*`` quand c'est bien lui
+    (sinon, par prudence, seulement le répertoire du workspace — cas
+    ``dest_root`` fourni par l'appelant). ``ignore_errors`` : un nettoyage ne
+    fait jamais échouer un run (même pattern que ``guard.py``).
+    """
+    path = getattr(workspace_or_path, "path", workspace_or_path)
+    if not path:
+        return
+    path = os.path.abspath(str(path))
+    parent = os.path.dirname(path)
+    target = parent if os.path.basename(parent).startswith("collegue-exec-") else path
+    shutil.rmtree(target, ignore_errors=True)
 
 
 def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") -> bool:

@@ -42,7 +42,13 @@ from collegue.executor.revert import (
     revert_pr_preview,
 )
 from collegue.executor.runner import ExecutionResult, run_issue
-from collegue.executor.workspace import Workspace, WorkspaceError, branch_for_issue, prepare_workspace
+from collegue.executor.workspace import (
+    Workspace,
+    WorkspaceError,
+    branch_for_issue,
+    cleanup_workspace,
+    prepare_workspace,
+)
 
 __all__ = [
     # E1 — contrat agent
@@ -58,6 +64,7 @@ __all__ = [
     "WorkspaceError",
     "branch_for_issue",
     "prepare_workspace",
+    "cleanup_workspace",
     "ExecutionResult",
     "run_issue",
     # E3 — gate qualité

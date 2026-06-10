@@ -332,6 +332,90 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     assert result.iterations == 2
 
 
+# --- hygiène des workspaces /tmp (#443) ----------------------------------------------
+
+
+class _WorkspaceTrackingAgent:
+    """FakeCodeAgent qui journalise le chemin de chaque workspace reçu."""
+
+    def __init__(self):
+        self.paths = []
+        self._inner = FakeCodeAgent()
+
+    def implement_issue(self, workspace, issue):
+        self.paths.append(workspace)
+        return self._inner.implement_issue(workspace, issue)
+
+
+async def test_successful_task_workspace_is_cleaned(repo, manager):
+    """#443 : plus de fuite /tmp — le clone d'une tâche réussie est détruit dès la
+    PR ouverte (22 clones / 233 Mo laissés par le run v2, fuite linéaire)."""
+    pid = _linear_project(manager, 2)
+    agent = _WorkspaceTrackingAgent()
+    result = await _run(manager, repo, pid, dry_run=False, agent=agent)
+    assert result.stop_reason == "completed"
+    assert len(agent.paths) == 2
+    assert all(not os.path.exists(p) for p in agent.paths)
+
+
+async def test_failed_task_keeps_only_last_workspace(repo, manager):
+    # Échec terminal après retries : seul le DERNIER clone survit (post-mortem).
+    from collegue.executor import cleanup_workspace
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _WorkspaceTrackingAgent()
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=agent,
+        sandbox=_Sandbox(ok=False),
+        max_task_attempts=2,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "blocked"
+    first, last = agent.paths
+    assert not os.path.exists(first)  # tentative 1 purgée
+    assert os.path.exists(last)  # dernier état conservé pour le debug
+    cleanup_workspace(last)  # hygiène du test
+
+
+async def test_retry_then_success_purges_kept_failure_workspace(repo, manager):
+    # Une tâche qui finit par réussir ne laisse RIEN derrière elle.
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _WorkspaceTrackingAgent()
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=agent,
+        sandbox=_FlakySandbox(fail_times=1),
+        max_task_attempts=3,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "completed"
+    assert all(not os.path.exists(p) for p in agent.paths)
+
+
+async def test_cleanup_workspaces_opt_out_keeps_everything(repo, manager):
+    from collegue.executor import cleanup_workspace
+
+    pid = _linear_project(manager, 1)
+    agent = _WorkspaceTrackingAgent()
+    await _run(manager, repo, pid, dry_run=False, agent=agent, cleanup_workspaces=False)
+    assert all(os.path.exists(p) for p in agent.paths)  # debug : tout conservé
+    for p in agent.paths:
+        cleanup_workspace(p)  # hygiène du test
+
+
 # --- réconciliation GitHub→état au démarrage (#442) ----------------------------------
 
 
