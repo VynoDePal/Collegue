@@ -170,6 +170,10 @@ async def run_project_from_settings(
         max_iterations=max_iterations,
         improve=improve,
         run_improvement_fn=run_improvement_fn,
+        # Retry au niveau tâche (#420) : le chemin assemblé est résilient par défaut
+        # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
+        max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),
+        retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).

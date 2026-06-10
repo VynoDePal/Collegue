@@ -75,6 +75,12 @@ class Settings(BaseSettings):
             return 0.0
         return f if math.isfinite(f) and f > 0 else 0.0
 
+    # Retry au niveau tâche du pilote (#420) : nombre max de tentatives par tâche
+    # (1 = pas de retry) et base du backoff linéaire entre tentatives (s, plafonné
+    # côté driver). Un échec transitoire (503, no-op) ne fige plus tout le DAG.
+    TASK_MAX_ATTEMPTS: int = 3
+    TASK_RETRY_BACKOFF_SECONDS: float = 15.0
+
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0
     MAX_HISTORY_LENGTH: int = 20

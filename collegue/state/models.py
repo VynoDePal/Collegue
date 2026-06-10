@@ -105,6 +105,12 @@ class Task(Base):
     # Numéro d'issue GitHub une fois la tâche synchronisée (P4) ; NULL sinon.
     # Sert de mapping task↔issue et de garde d'idempotence (ne pas recréer).
     issue_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Tentatives d'exécution déjà consommées (retry au niveau tâche, #420) :
+    # persistées pour que le plafond max_attempts survive aux redémarrages.
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Dernier motif d'échec connu (stage/raison + extrait) — diagnostic post-mortem
+    # et ré-injection de feedback à la tentative suivante (#420/#424).
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
     )
