@@ -135,6 +135,13 @@ class ProjectRunResult:
     processed: List[TaskOutcome] = field(default_factory=list)
     project_status: Optional[str] = None  # statut projet final écrit (ex. improving), sinon None
     improvement: Optional[object] = None  # ImprovementResult si le mode improving a été enchaîné (H5)
+    # #440 : tâches encore ``in_review`` AU MOMENT du stop (ids) — du travail
+    # TERMINÉ et validé (gate vert, PR ouverte) qui n'atteint `main` qu'après un
+    # merge. Au ``STOP_DEADLINE`` en particulier, l'appelant DOIT drainer ces
+    # reviews (passe de merge/réconciliation) au lieu de les découvrir en
+    # post-mortem : deadline = « ne plus DÉMARRER de travail », pas « abandonner
+    # le travail déjà validé ».
+    pending_reviews: List[int] = field(default_factory=list)
 
     @property
     def opened_prs(self) -> List[int]:
@@ -638,6 +645,10 @@ async def run_project(
         processed=processed,
         project_status=project_status,
         improvement=improvement,
+        # #440 : exposer le travail validé encore en attente de merge — la boucle
+        # s'arrête toujours ENTRE deux tâches (jamais en plein milieu), donc cette
+        # photo est exacte quel que soit le motif d'arrêt (deadline incluse).
+        pending_reviews=[t.id for t in tasks if t.status == TASK_STATUS_IN_REVIEW],
     )
 
 

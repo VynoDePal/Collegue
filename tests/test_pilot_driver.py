@@ -332,6 +332,47 @@ async def test_historical_mode_keeps_chaining_siblings(repo, manager):
     assert result.iterations == 2
 
 
+# --- drain des reviews au stop (#440) ------------------------------------------------
+
+
+async def test_deadline_stop_exposes_pending_reviews(repo, manager):
+    """#440 : au STOP_DEADLINE, les tâches `in_review` (gate vert, PR ouverte) sont
+    EXPOSÉES dans le résultat — l'appelant sait qu'un drain (merge) est requis au
+    lieu de découvrir la PR abandonnée en post-mortem (PR FacNor #72)."""
+    pid = _sibling_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, budget=_Budget([CONT, DEADLINE]))
+    assert result.stop_reason == "deadline_reached"
+    s0 = manager.get_tasks(pid)[0]
+    assert result.pending_reviews == [s0.id]  # S0 validée, en attente de merge
+
+
+async def test_pending_reviews_reflect_all_unmerged_work(repo, manager):
+    # Vrai pour TOUT motif d'arrêt : un run `completed` en mode historique laisse
+    # toutes ses PRs en attente de merge — le drain les voit aussi.
+    pid = _sibling_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False)
+    assert result.stop_reason == "completed"
+    assert result.pending_reviews == [t.id for t in manager.get_tasks(pid)]
+
+    # …et vide quand tout est mergé (reprise d'un projet terminé).
+    for t in manager.get_tasks(pid):
+        manager.update_task_status(t.id, "merged")
+    result2 = await _run(manager, repo, pid, dry_run=False)
+    assert result2.pending_reviews == []
+
+
+def test_run_report_flags_pending_reviews():
+    # Le rapport lisible signale le drain requis (#440).
+    from collegue.pilot import format_run_report
+    from collegue.pilot.driver import ProjectRunResult
+
+    result = ProjectRunResult(stop_reason="deadline_reached", iterations=1, processed=[], pending_reviews=[11])
+    report = format_run_report(result, project_id=1)
+    assert "drain requis" in report and "[11]" in report
+    silent = ProjectRunResult(stop_reason="completed", iterations=0, processed=[])
+    assert "drain requis" not in format_run_report(silent, project_id=1)
+
+
 # --- options du gate par projet (#438) ----------------------------------------------
 
 
