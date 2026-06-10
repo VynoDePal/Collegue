@@ -210,9 +210,15 @@ async def run_project_from_settings(
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
     if not dry_run:
         prs = ", ".join(str(n) for n in result.opened_prs) or "aucune"
+        # #440 : un arrêt deadline laisse du travail VALIDÉ en attente de merge —
+        # le signaler dans le journal pour que le drain ne dépende pas d'un
+        # post-mortem (la PR FacNor #72 est restée ouverte, mergée à la main).
+        drain = ""
+        if result.pending_reviews:
+            drain = f" ; {len(result.pending_reviews)} tâche(s) in_review À DRAINER (merge requis)"
         manager.record_decision(
             project_id,
-            f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}",
+            f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}",
             rationale=f"statut projet={result.project_status or 'inchangé'}",
         )
 
@@ -242,6 +248,10 @@ def format_run_report(result: ProjectRunResult, *, project_id: Optional[int] = N
         pr = f" → PR #{task.pr_number}" if task.pr_number is not None else ""
         lines.append(f"  [{badge}] #{task.task_id} {task.title} ({task.stage}){pr}")
     lines.append(f"PRs ouvertes : {result.opened_prs or '(aucune)'}")
+    pending = getattr(result, "pending_reviews", None) or []
+    if pending:
+        # #440 : travail validé en attente de merge — à drainer, surtout après deadline.
+        lines.append(f"⚠ Reviews en attente de merge (drain requis) : tâches {pending}")
     lines.append(f"Statut projet : {result.project_status or '(inchangé)'}")
     lines.append(f"Budget-temps restant : {_remaining_label(budget)}")
     return "\n".join(lines)
