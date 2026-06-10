@@ -42,6 +42,9 @@ class PRInfo(BaseModel):
     updated_at: str
     labels: List[str] = []
     draft: bool = False
+    # #442 : une PR ``closed`` peut l'être par MERGE ou par simple fermeture —
+    # la réconciliation GitHub→état a besoin de distinguer les deux.
+    merged: bool = False
 
 
 class IssueInfo(BaseModel):
@@ -142,6 +145,8 @@ class PRCommands(GitHubClient):
             updated_at=pr["updated_at"],
             labels=[label["name"] for label in pr.get("labels", [])],
             draft=pr.get("draft", False),
+            # L'endpoint de liste n'a pas ``merged`` (bool) mais ``merged_at``.
+            merged=bool(pr.get("merged") or pr.get("merged_at")),
         )
 
     def get_pr(self, owner: str, repo: str, pr_number: int) -> PRInfo:
@@ -158,6 +163,7 @@ class PRCommands(GitHubClient):
             updated_at=data["updated_at"],
             labels=[l["name"] for l in data.get("labels", [])],
             draft=data.get("draft", False),
+            merged=bool(data.get("merged") or data.get("merged_at")),
         )
 
     def get_pr_files(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[FileChange]:
