@@ -6,8 +6,10 @@ tâches prêtes, exécuter la prochaine, checkpointer, et basculer en mode
 amélioration quand le MVP est atteint.
 
 Boucle **séquentielle et bornée** : chaque itération traite une tâche ``todo`` et
-la marque ``in_review`` (succès) ou ``failed`` (fail-closed). Le todo-set décroît
-strictement → terminaison garantie (backstop ``max_iterations`` par sécurité).
+la marque ``in_review`` (succès), la **re-file** ``todo`` avec backoff si l'échec
+est encore retentable (``max_task_attempts``, #420), ou la marque ``failed``
+(terminal). La terminaison reste garantie : chaque tâche consomme au plus
+``max_task_attempts`` itérations (backstop ``max_iterations`` par sécurité).
 
 ``dry_run`` (défaut) : pipeline complet jusqu'aux **aperçus** de PR, **sans aucune
 écriture** (ni GitHub ni état) ; la progression est simulée via un *overlay* en
@@ -22,6 +24,7 @@ Module **isolé** : non importé par ``app.py`` (F4 câblera).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -35,6 +38,7 @@ from collegue.pilot.audit import (
     PR_OPENED,
     RUN_STOP,
     TASK_FAILED,
+    TASK_RETRY,
     TASK_STARTED,
     CostSource,
     NullAuditLog,
@@ -57,6 +61,14 @@ STOP_PAUSED_BUDGET = "paused_budget"
 STOP_DEADLINE = "deadline_reached"
 STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
+
+# Retry au niveau tâche (#420). Le défaut du MODULE reste 1 (= pas de retry,
+# comportement historique — module isolé, aucun changement sans opt-in) ; le
+# runtime assemblé (F4) passe ``TASK_MAX_ATTEMPTS`` (défaut config : 3) pour que
+# le chemin autonome réel soit, lui, résilient aux échecs transitoires.
+DEFAULT_MAX_TASK_ATTEMPTS = 1
+DEFAULT_RETRY_BACKOFF_SECONDS = 15.0
+RETRY_BACKOFF_CAP_SECONDS = 90.0
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +148,9 @@ async def run_project(
     cost_source: Optional[CostSource] = None,
     improve: bool = False,
     run_improvement_fn=None,
+    max_task_attempts: int = DEFAULT_MAX_TASK_ATTEMPTS,
+    retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
+    sleep_fn=None,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -154,9 +169,28 @@ async def run_project(
     d'amélioration (Phase 4) **sous le budget restant** et attache l'``ImprovementResult``
     à ``result.improvement``. Défaut faux → comportement inchangé.
     ``run_improvement_fn`` : injection de test ; défaut = ``collegue.improve.run_improvement``.
+
+    ``max_task_attempts`` (#420) : tentatives max par tâche. À 1 (défaut du module),
+    tout échec est terminal (comportement historique). Au-delà, un échec re-file la
+    tâche ``todo`` avec un backoff linéaire ``retry_backoff_seconds × tentative``
+    (plafonné à ``RETRY_BACKOFF_CAP_SECONDS``) tant que le plafond n'est pas
+    atteint — un aléa transitoire (503, no-op) ne fige plus tout le DAG. Le compteur
+    est persisté (``tasks.attempt_count``) → le plafond survit aux redémarrages.
+    ``sleep_fn`` : injection de test (défaut ``asyncio.sleep``).
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
+    try:
+        max_task_attempts = max(1, int(max_task_attempts))
+    except (TypeError, ValueError):
+        max_task_attempts = DEFAULT_MAX_TASK_ATTEMPTS
+    try:
+        backoff = float(retry_backoff_seconds)
+    except (TypeError, ValueError):
+        backoff = DEFAULT_RETRY_BACKOFF_SECONDS
+    if not (backoff > 0 and backoff < float("inf")):  # nan/inf/négatif → pas d'attente
+        backoff = 0.0
+    sleep = sleep_fn or asyncio.sleep
     tasks = manager.get_tasks(project_id)  # objets détachés : overlay mutable en mémoire
     tasks_by_id = {t.id: t for t in tasks}  # pour le contexte inter-tâches (#412)
 
@@ -184,7 +218,8 @@ async def run_project(
             if not dry_run:
                 manager.update_task_status(task.id, TASK_STATUS_TODO)
 
-    cap = max_iterations if max_iterations is not None else len(tasks) * 2 + 5
+    # Avec retries, chaque tâche peut consommer jusqu'à max_task_attempts itérations.
+    cap = max_iterations if max_iterations is not None else len(tasks) * max(2, max_task_attempts) + 5
 
     # Reprise : repartir du numéro d'itération du dernier checkpoint (l'état des
     # tâches en DB fournit la vraie reprise — les tâches terminées sont ignorées).
@@ -248,24 +283,6 @@ async def run_project(
             stage=outcome.stage,
             reason=outcome.reason,
         )
-        if not outcome.success:
-            # #421 : la cause doit SURVIVRE à l'échec — raison différenciée
-            # (no_op/agent_error/gate_failed) + extraits bornés des logs agent et de
-            # la sortie des tests, journalisés ET audités (persistés via decisions).
-            detail = {"task_id": task.id, "stage": outcome.stage, "reason": outcome.reason}
-            agent_tail = log_tail(outcome.execution.agent_result.logs)
-            if agent_tail:
-                detail["agent_log_tail"] = agent_tail
-            if outcome.quality_report is not None and outcome.quality_report.test_output:
-                detail["test_output_tail"] = log_tail(outcome.quality_report.test_output, 1000)
-            audit.record(TASK_FAILED, iteration=iteration, **detail)
-            logger.warning(
-                "tâche %s « %s » en échec (stage=%s, reason=%s)",
-                task.id,
-                task.title,
-                outcome.stage,
-                outcome.reason,
-            )
         if pr_number is not None:
             audit.record(PR_OPENED, iteration=iteration, task_id=task.id, pr_number=pr_number, dry_run=dry_run)
         processed.append(
@@ -278,14 +295,75 @@ async def run_project(
             )
         )
 
-        # Overlay en mémoire : avance le statut de la tâche pour l'ordonnancement.
-        # En réel, le succès est déjà persisté par execute_issue (→ in_review) ; on
-        # ne persiste donc que l'échec (fail-closed) pour ne pas re-sélectionner la
-        # tâche et débloquer la détection de blocage.
-        task.status = TASK_STATUS_IN_REVIEW if outcome.success else TASK_STATUS_FAILED
+        # Overlay en mémoire (+ persistance en réel). Succès → in_review (déjà
+        # persisté par execute_issue). Échec : tant qu'il reste des tentatives
+        # (#420), la tâche est RE-FILÉE `todo` avec backoff — un aléa transitoire
+        # (503, no-op) ne fige plus le DAG ; sinon `failed` (terminal, fail-closed).
+        # Dans les deux cas la cause SURVIT (#421) : raison différenciée + extraits
+        # bornés des logs agent / sortie des tests, audités (persistés via decisions)
+        # et stockés dans tasks.last_error.
+        if outcome.success:
+            task.status = TASK_STATUS_IN_REVIEW
+        else:
+            detail = {"task_id": task.id, "stage": outcome.stage, "reason": outcome.reason}
+            agent_tail = log_tail(outcome.execution.agent_result.logs)
+            if agent_tail:
+                detail["agent_log_tail"] = agent_tail
+            if outcome.quality_report is not None and outcome.quality_report.test_output:
+                detail["test_output_tail"] = log_tail(outcome.quality_report.test_output, 1000)
+
+            attempts = int(getattr(task, "attempt_count", 0) or 0) + 1
+            task.attempt_count = attempts
+            last_error = f"[{outcome.stage}/{outcome.reason}] tentative {attempts}/{max_task_attempts}"
+            diagnostic = detail.get("test_output_tail") or detail.get("agent_log_tail") or ""
+            if diagnostic:
+                last_error += " — " + diagnostic[-700:]
+            task.last_error = last_error
+
+            if attempts < max_task_attempts:
+                task.status = TASK_STATUS_TODO
+                if not dry_run:
+                    manager.update_task(task.id, status=TASK_STATUS_TODO, attempt_count=attempts, last_error=last_error)
+                delay = min(backoff * attempts, RETRY_BACKOFF_CAP_SECONDS) if backoff > 0 else 0.0
+                audit.record(
+                    TASK_RETRY,
+                    iteration=iteration,
+                    attempt=attempts,
+                    max_attempts=max_task_attempts,
+                    backoff_seconds=delay,
+                    **detail,
+                )
+                logger.warning(
+                    "tâche %s « %s » re-tentée (%d/%d, stage=%s, reason=%s, backoff=%.0fs)",
+                    task.id,
+                    task.title,
+                    attempts,
+                    max_task_attempts,
+                    outcome.stage,
+                    outcome.reason,
+                    delay,
+                )
+                if delay > 0 and not dry_run:  # l'aperçu (dry_run) n'attend pas
+                    await sleep(delay)
+            else:
+                task.status = TASK_STATUS_FAILED
+                if not dry_run:
+                    manager.update_task(
+                        task.id, status=TASK_STATUS_FAILED, attempt_count=attempts, last_error=last_error
+                    )
+                audit.record(
+                    TASK_FAILED, iteration=iteration, attempt=attempts, max_attempts=max_task_attempts, **detail
+                )
+                logger.warning(
+                    "tâche %s « %s » en échec TERMINAL (%d/%d, stage=%s, reason=%s)",
+                    task.id,
+                    task.title,
+                    attempts,
+                    max_task_attempts,
+                    outcome.stage,
+                    outcome.reason,
+                )
         if not dry_run:
-            if not outcome.success:
-                manager.update_task_status(task.id, TASK_STATUS_FAILED)
             # Checkpoint C7 : le numéro d'itération sert à la reprise ; ``state_json``
             # est un instantané d'audit (la reprise effective lit les statuts en DB).
             manager.save_checkpoint(

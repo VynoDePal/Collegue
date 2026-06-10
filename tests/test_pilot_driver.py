@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from collegue.executor import FakeCodeAgent, FakeReviewer, PrClients
+from collegue.executor import AgentResult, FakeCodeAgent, FakeReviewer, PrClients
 from collegue.pilot import (
     ACTION_CONTINUE,
     ACTION_DEADLINE,
@@ -217,6 +217,111 @@ async def test_failed_task_blocks_dependents(repo, manager):
     statuses = {t.title: t.status for t in manager.get_tasks(pid)}
     assert statuses["T0"] == "failed"
     assert statuses["T1"] == "todo"  # jamais lancée
+
+
+# --- retry au niveau tâche (#420) -------------------------------------------------
+
+
+class _FlakyAgent:
+    """Agent qui échoue N fois (process en erreur) puis réussit — simule un 503."""
+
+    def __init__(self, fail_times=1):
+        self.calls = 0
+        self._fail_times = fail_times
+        self._ok = FakeCodeAgent()
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            return AgentResult(success=False, logs="503 transitoire simulé")
+        return self._ok.implement_issue(workspace, issue)
+
+
+async def test_transient_failure_retried_then_recovers(repo, manager):
+    """#420 : un échec transitoire ne fige plus le DAG — la tâche est re-filée
+    `todo` avec backoff, réussit à la tentative suivante, et les dépendants
+    s'enchaînent jusqu'au MVP (avant : `failed` terminal → run `blocked` à 0%)."""
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _linear_project(manager, 2)
+    agent = _FlakyAgent(fail_times=1)
+    sleeps = []
+
+    async def _sleep(d):
+        sleeps.append(d)
+
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager, repo, pid, dry_run=False, agent=agent, audit=audit, max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "completed"
+    statuses = {t.title: t.status for t in manager.get_tasks(pid)}
+    assert statuses == {"T0": "in_review", "T1": "in_review"}
+    assert sleeps == [15.0]  # backoff linéaire : 15 × tentative 1
+    retries = [e for e in audit.events if e.kind == "task_retry"]
+    assert len(retries) == 1
+    assert retries[0].detail["reason"] == "agent_error"
+    assert retries[0].detail["attempt"] == 1
+    # Compteur + motif persistés (le plafond survit aux redémarrages).
+    t0 = manager.get_tasks(pid)[0]
+    assert t0.attempt_count == 1
+    assert "agent_error" in t0.last_error and "503 transitoire" in t0.last_error
+
+
+async def test_attempts_exhausted_marks_failed_and_blocks(repo, manager):
+    pid = _linear_project(manager, 2)
+    sleeps = []
+
+    async def _sleep(d):
+        sleeps.append(d)
+
+    result = await _run(
+        manager, repo, pid, dry_run=False, agent=FakeCodeAgent(files={}), max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "blocked"
+    t0, t1 = manager.get_tasks(pid)
+    assert t0.status == "failed"  # terminal après épuisement
+    assert t0.attempt_count == 3
+    assert "no_op" in t0.last_error
+    assert sleeps == [15.0, 30.0]  # 15×1 puis 15×2 (plafonné à 90)
+    assert t1.status == "todo"  # dépendant jamais lancé
+
+
+async def test_default_module_behavior_is_no_retry(repo, manager):
+    # Défaut du MODULE isolé (max_task_attempts=1) : comportement historique —
+    # tout échec est terminal, aucun retry (le runtime, lui, passe la config).
+    pid = _linear_project(manager, 1)
+    result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(files={}))
+    assert result.iterations == 1
+    assert manager.get_tasks(pid)[0].status == "failed"
+
+
+async def test_dry_run_retry_simulates_without_persisting_or_sleeping(repo, manager):
+    pid = _linear_project(manager, 1)
+    sleeps = []
+
+    async def _sleep(d):
+        sleeps.append(d)
+
+    result = await _run(
+        manager, repo, pid, dry_run=True, agent=_FlakyAgent(fail_times=1), max_task_attempts=3, sleep_fn=_sleep
+    )
+    assert result.stop_reason == "completed"  # la simulation retente et aboutit
+    assert sleeps == []  # l'aperçu n'attend jamais
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "todo" and t.attempt_count == 0 and t.last_error is None  # rien persisté
+
+
+async def test_attempt_budget_survives_restart(repo, manager):
+    # attempt_count est lu depuis la DB : 2 tentatives déjà consommées avant un
+    # redémarrage → la 3e (dernière) échoue TERMINAL sans re-queue infinie.
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, attempt_count=2)
+    result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(files={}), max_task_attempts=3)
+    t = manager.get_tasks(pid)[0]
+    assert result.iterations == 1
+    assert t.status == "failed" and t.attempt_count == 3
 
 
 async def test_failure_is_audited_with_reason_and_log_tails(repo, manager):

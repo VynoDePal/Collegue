@@ -25,7 +25,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 CostSource = Callable[[], Tuple[float, int]]
 
 TASK_STARTED = "task_started"
-TASK_FAILED = "task_failed"  # échec d'une tâche, avec raison + extrait de logs (#421)
+TASK_RETRY = "task_retry"  # tâche re-filée `todo` après un échec retentable (#420)
+TASK_FAILED = "task_failed"  # échec TERMINAL d'une tâche, raison + extrait de logs (#421)
 DIFF_PRODUCED = "diff_produced"
 GATE_DECISION = "gate_decision"
 PR_OPENED = "pr_opened"
