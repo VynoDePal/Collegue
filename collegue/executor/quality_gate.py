@@ -38,7 +38,13 @@ from collegue.textnorm import inline
 # d'un projet en layout `src/`/`app/` qui importent par package (`from app.x import …`,
 # `from src.x import …`) lèvent `ModuleNotFoundError` à la collecte → le gate échoue
 # à tort (tests verts vus comme rouges). Voir issue #413.
-DEFAULT_TEST_COMMAND = "python -m pytest -q"
+# #478 : en non-tty (conteneur), pytest borne son short summary à COLUMNS
+# (défaut 80) et tronque le diagnostic avec « ... » — le nom du paquet manquant
+# (httpx, python-multipart…) disparaissait du feedback de retry, brûlant des
+# cycles à deviner. Largeur large forcée sur TOUTES les invocations pytest du
+# gate (préfixe d'env sh — inerte pour pip/uvicorn).
+_PYTEST_WIDE_COLUMNS = "COLUMNS=220"
+DEFAULT_TEST_COMMAND = f"{_PYTEST_WIDE_COLUMNS} python -m pytest -q"
 # Note visible dans la sortie du gate quand l'installation des deps échoue (#414).
 _INSTALL_FAILED_NOTE = "[gate] installation des dépendances en échec — tests lancés quand même (#414)"
 
@@ -242,7 +248,7 @@ def installability_command(workspace: str) -> Optional[str]:
         f"python -m venv --clear {_GATE_VENV}"
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} -r requirements.txt"
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} pytest"
-        f" && {_GATE_VENV}/bin/python -m pytest --collect-only -q"
+        f" && {_PYTEST_WIDE_COLUMNS} {_GATE_VENV}/bin/python -m pytest --collect-only -q"
     )
 
 

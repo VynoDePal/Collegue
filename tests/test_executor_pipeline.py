@@ -508,6 +508,58 @@ def test_is_infra_noise_never_flags_functional_diagnostics():
     assert is_infra_noise("Collecting fastapi\n[sandbox] délai dépassé après 120s")
 
 
+# --- dé-troncature du short summary pytest (#478) ------------------------------------
+
+
+def test_failure_feedback_detruncates_pytest_short_summary():
+    """#478 : pytest borne « FAILED nodeid - message » à COLUMNS (80 en non-tty)
+    et tronque avec « ... » au moment exact où il nommait le paquet manquant —
+    le message entier est repris des lignes ``E   …`` du traceback."""
+    from collegue.executor.pipeline import failure_feedback
+
+    output = (
+        "==== ERRORS ====\n"
+        "_ ERROR collecting tests/test_auth.py _\n"
+        'E   RuntimeError: Form data requires "python-multipart" to be installed. '
+        "You can install it with pip install python-multipart\n"
+        "==== short test summary info ====\n"
+        'ERROR tests/test_auth.py - RuntimeError: Form data requires "python-multipart...\n'
+    )
+    feedback = failure_feedback(_gate_outcome(output))
+    assert "pip install python-multipart" in feedback
+    assert not feedback.endswith("...")
+
+    # Cas réel httpx (run v4, 09:21) : « The starlette.testclient module requ… ».
+    output_httpx = (
+        "E   RuntimeError: The starlette.testclient module requires the httpx package to be installed.\n"
+        "==== short test summary info ====\n"
+        "FAILED tests/test_app.py::test_root - RuntimeError: The starlette.testclient module requ...\n"
+    )
+    assert "httpx" in failure_feedback(_gate_outcome(output_httpx))
+
+
+def test_detruncate_is_best_effort_and_bounded():
+    """Sans ligne E correspondante, la ligne tronquée est relayée telle quelle ;
+    une ligne E géante est bornée pour ne pas masquer les FAILED suivants."""
+    from collegue.executor.pipeline import _detruncate_summary_line
+
+    # Pas de traceback correspondant → inchangée.
+    line = "FAILED tests/test_x.py::t - RuntimeError: mystere..."
+    assert _detruncate_summary_line(line, "du bruit sans rapport") == line
+    # Ligne sans « - » (nodeid nu) → inchangée.
+    bare = "ERROR tests/test_auth.py..."
+    assert _detruncate_summary_line(bare, "E   peu importe") == bare
+    # Ligne non tronquée → inchangée (le filet ne réécrit jamais un diagnostic sain).
+    clean = "FAILED tests/test_x.py::t - assert 1 == 2"
+    assert _detruncate_summary_line(clean, "E   assert 1 == 2 long contexte") == clean
+    # Ligne E géante → reprise bornée à 300 caractères de message.
+    long_msg = "RuntimeError: contexte " + "x" * 500
+    out = f"E   {long_msg}\n"
+    detrunc = _detruncate_summary_line("FAILED tests/test_y.py::t - RuntimeError: contexte...", out)
+    assert detrunc.startswith("FAILED tests/test_y.py::t - RuntimeError: contexte")
+    assert len(detrunc) <= len("FAILED tests/test_y.py::t - ") + 300
+
+
 # --- classification infra d'un échec de gate (#477) ----------------------------------
 
 
