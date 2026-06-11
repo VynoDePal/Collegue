@@ -1727,3 +1727,80 @@ def test_repair_prompt_carries_requirements_append_only_rule():
         best_feedback=None,
     )
     assert REQUIREMENTS_APPEND_ONLY_RULE in _issue_from_task(repair).context
+
+
+# --- coût inconnu / prix de secours du canal coder (#484) ----------------------------
+
+
+class _UnmappedModelAgent:
+    """Agent dont le runner déclare des tokens mais cost_usd=0 (litellm sans
+    mapping du modèle — cas gemma-4-31b-it du run v4)."""
+
+    def __init__(self):
+        self._ok = FakeCodeAgent()
+
+    def implement_issue(self, workspace, issue):
+        import dataclasses
+
+        result = self._ok.implement_issue(workspace, issue)
+        return dataclasses.replace(result, prompt_tokens=1_000_000, completion_tokens=100_000, cost_usd=0.0)
+
+
+async def test_coder_cost_estimated_when_litellm_unmapped(repo, manager, monkeypatch):
+    """#484 : prix de secours configurés → le ledger porte le coût ESTIMÉ
+    (tokens × prix), aucun signal cost_unknown."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 9.0, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_UnmappedModelAgent(), audit=audit)
+    assert result.stop_reason == "completed"
+    assert audit.cost.tokens == 1_100_000
+    assert audit.cost.usd == pytest.approx(1.5 + 0.9)
+    assert not [e for e in audit.events if e.kind == "cost_unknown"]
+
+
+async def test_cost_unknown_event_when_tokens_without_price(repo, manager, monkeypatch):
+    """#484 : tokens comptés, coût inconnu, aucun prix configuré → UN événement
+    cost_unknown par run (anti-bruit), tokens toujours comptés au ledger."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    # Herméticité : un .env développeur définissant des prix fausserait le test.
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 2)
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_UnmappedModelAgent(), audit=audit)
+    assert result.stop_reason == "completed"
+    assert audit.cost.usd == 0.0
+    assert audit.cost.tokens == 2 * 1_100_000
+    unknown = [e for e in audit.events if e.kind == "cost_unknown"]
+    assert len(unknown) == 1  # une seule fois par run, malgré 2 tâches
+    assert unknown[0].detail["tokens"] == 1_100_000
+    assert "MAX_COST_USD" in unknown[0].detail["reason"]
+    assert len([e for e in audit.events if e.kind == "cost_observed"]) == 2
+
+
+async def test_no_cost_unknown_when_cost_reported(repo, manager):
+    """#441 préservé : un coût déclaré par le runner ne déclenche aucun signal."""
+    import dataclasses
+
+    from collegue.pilot.audit import RunAuditLog
+
+    class _PaidAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(result, prompt_tokens=1200, completion_tokens=300, cost_usd=0.002)
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, agent=_PaidAgent(), audit=audit)
+    assert not [e for e in audit.events if e.kind == "cost_unknown"]
+    assert audit.cost.usd == pytest.approx(0.002)

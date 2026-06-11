@@ -155,7 +155,9 @@ lit :
 |----------|-------------|--------|
 | `STATE_DATABASE_URL` | État durable (Postgres ou SQLite). Requis pour un run réel. | — |
 | `LLM_MODEL_CODER` / `_QA` / `_PLANNER` / `_REVIEWER` | Modèle par **rôle** (codeur fort, QA économique, planificateur, revue). Retombe sur `LLM_MODEL` si absent. | `LLM_MODEL` |
-| `MAX_COST_USD` | Plafond dur de dépense cumulée (`0` = désactivé). | `0` |
+| `MAX_COST_USD` | Plafond dur de dépense cumulée (`0` = désactivé). NB : son enforcement lit le MetricsCollector serveur et ne voit PAS le canal coder (gap structurel) ; les prix `LLM_PRICE_*` ne corrigent que le ledger/reporting du run — sans eux, un modèle non mappé litellm laisse `run_cost_usd=0` (événement d'audit `cost_unknown`, #484). | `0` |
+| `LLM_PRICE_PROMPT_PER_1M` | Prix de secours du canal coder, $/1M tokens prompt — utilisé quand le runner émet `cost_usd=0` malgré des tokens (#484). | `0` |
+| `LLM_PRICE_COMPLETION_PER_1M` | Idem, $/1M tokens completion. `0` = désactivé. | `0` |
 | `MAX_TOKENS_BUDGET` | Plafond dur de tokens cumulés (`0` = désactivé). | `0` |
 | `BUDGET_EXHAUSTED_ACTION` | `pause` (refuse les appels LLM) ou `warn` (journalise seulement). | `pause` |
 | `COLLEGUE_RUN_DEADLINE_SECONDS` | Durée mur max d'un run (`0` = pas de deadline). | `0` |

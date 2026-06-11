@@ -41,6 +41,11 @@ COST_OBSERVED = "cost_observed"
 # ligne d'usage — la dépense de la tentative est invisible du ledger ; on
 # journalise la perte au lieu de laisser un trou silencieux.
 USAGE_LOST = "usage_lost"
+# #484 : des tokens coder sont comptés mais leur coût ne l'est pas (modèle non
+# mappé litellm → cost_usd=0, aucun prix LLM_PRICE_*_PER_1M configuré) — le
+# plafond MAX_COST_USD est aveugle en dollars sur ce canal ; on le signale au
+# lieu de laisser un 0 ressembler à un run gratuit.
+COST_UNKNOWN = "cost_unknown"
 
 # Noms des métriques persistées pour le ledger de coût par run.
 METRIC_RUN_COST_USD = "run_cost_usd"
