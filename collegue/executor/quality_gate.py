@@ -580,6 +580,9 @@ class QualityReport:
     # #481 : paquets ajoutés à requirements.txt par la remédiation déterministe
     # du gate (modules manquants) — visibles dans la PR et l'audit.
     requirements_added: Tuple[str, ...] = ()
+    # #482 : lignes de requirements.txt de la base supprimées sans que l'issue
+    # le demande — requirements.txt est append-only ; non vide ⇒ gate rouge.
+    requirements_removed: Tuple[str, ...] = ()
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -599,6 +602,12 @@ class QualityReport:
             lines.append(
                 "> 🔧 **dépendances manquantes ajoutées automatiquement** à `requirements.txt` (#481) : "
                 + ", ".join(f"`{p}`" for p in self.requirements_added)
+            )
+        if self.requirements_removed:
+            lines.append(
+                "> ⛔ **lignes de `requirements.txt` supprimées sans que l'issue le demande (#482)** — "
+                "`requirements.txt` est append-only. Lignes supprimées : "
+                + ", ".join(f"`{_fence_safe_line(line)}`" for line in self.requirements_removed)
             )
         lines += [
             "",
@@ -673,6 +682,111 @@ def issue_expects_code(issue: IssueSpec) -> bool:
 
 
 # Fichiers de test : tests/, __tests__/, test_x.py, x_test.go, x.test.ts, x.spec.ts…
+# --- garde append-only requirements.txt (#482) ---------------------------------
+# Nom de paquet en tête d'une ligne de requirements ; les lignes d'option
+# (-r/-e/--index-url), commentaires et vides n'ont pas de nom.
+_REQ_LINE_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]+\])?")
+
+
+def _requirement_name(line: str) -> Optional[str]:
+    """Nom normalisé (PEP 503) d'une ligne de requirements, ``None`` si non-paquet."""
+    text = line.strip()
+    if not text or text.startswith(("#", "-")):
+        return None
+    match = _REQ_LINE_NAME_RE.match(text)
+    return _canonical(match.group(1)) if match else None
+
+
+def _requirement_key(line: str) -> Optional[str]:
+    """Clé d'identité d'une ligne de requirements pour la garde #482.
+
+    - paquet : nom PEP 503 **+ extras normalisés** — ``passlib[bcrypt]`` ≠
+      ``passlib`` : perdre un extra prive le venv nu de la dépendance réelle,
+      invisible à la collecte #439 (les backends lazy ne sont importés qu'à
+      l'exécution) ;
+    - ligne d'option (``-r base.txt``, ``--extra-index-url …``) : la ligne
+      normalisée — perdre un ``-r`` jette tout un fichier de dépendances ;
+    - commentaire/vide : ``None`` (pas une dépendance).
+    """
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("-"):
+        return " ".join(text.split())
+    match = _REQ_LINE_NAME_RE.match(text)
+    if not match:
+        return None
+    name = _canonical(match.group(1))
+    extras = match.group(2)
+    if extras:
+        items = sorted(item.strip().lower() for item in extras[1:-1].split(","))
+        return f"{name}[{','.join(items)}]"
+    return name
+
+
+def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
+    """Lignes de ``requirements.txt`` de la BASE supprimées par le diff (#482).
+
+    Comparaison par NOM : un changement de pin ou un réordonnancement n'est pas
+    une suppression — seule une dépendance qui DISPARAÎT est retenue (cas réel
+    FacNor v4, tâche 5 : ``python-jose[cryptography]``/``passlib[bcrypt]``
+    perdus à la régénération → « No module named 'jose' » en venv nu, alors que
+    12 tests étaient verts).
+    """
+    removed: dict = {}  # nom → ligne d'origine
+    added: set = set()
+    in_requirements = False
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            path = parts[1].strip() if len(parts) == 2 else ""
+            in_requirements = os.path.basename(path) == "requirements.txt"
+            continue
+        if line.startswith(("--- ", "+++ ")) or not in_requirements:
+            continue
+        if line.startswith("-"):
+            key = _requirement_key(line[1:])
+            if key is not None:
+                removed.setdefault(key, line[1:].strip())
+        elif line.startswith("+"):
+            key = _requirement_key(line[1:])
+            if key is not None:
+                added.add(key)
+    return tuple(text for key, text in removed.items() if key not in added)
+
+
+def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = None) -> Tuple[str, ...]:
+    """Suppressions de requirements NON demandées par l'issue (#482).
+
+    Fail-closed : une suppression est « demandée » si le nom du paquet (ou le
+    fichier d'une ligne d'option) apparaît — en MOT ENTIER — dans le texte
+    OPÉRATEUR de l'issue (titre, corps, critères). ``issue.context`` est EXCLU :
+    machine-généré, il porte le feedback de la tentative précédente, qui NOMME
+    précisément les lignes perdues — l'y chercher désarmerait la garde dès la
+    tentative 2 (boomerang du feedback). Sans issue, toute suppression bloque.
+
+    Trou connu (documenté) : un RENOMMAGE du fichier (``requirements.txt`` →
+    autre nom) évade la garde — mais il évade aussi l'install sandbox et la
+    passe #439, donc le gate échoue ailleurs.
+    """
+    removed = removed_requirement_lines(diff)
+    if not removed or issue is None:
+        return removed
+    text = " ".join((issue.title or "", issue.body or "", *issue.acceptance_criteria))
+    normalized = re.sub(r"[-_.]+", "-", text.lower())
+    kept = []
+    for line in removed:
+        token = _requirement_name(line)
+        if token is None:
+            # Ligne d'option : le fichier/URL référencé (dernier mot) fait foi.
+            parts = line.split()
+            token = re.sub(r"[-_.]+", "-", parts[-1].lower()) if len(parts) > 1 else None
+        if token and re.search(rf"(?<![a-z0-9-]){re.escape(token)}(?![a-z0-9-])", normalized):
+            continue  # suppression demandée par l'issue
+        kept.append(line)
+    return tuple(kept)
+
+
 _TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__)(/|$)|(^|/)test_[^/]+$|[^/]+[._]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$")
 
 
@@ -816,6 +930,7 @@ async def run_quality_gate(
     smoke_paths: Tuple[str, ...] = ("/",),
     smoke_timeout: float = 30.0,
     fix_missing_requirements: bool = True,
+    requirements_guard: bool = True,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -851,6 +966,13 @@ async def run_quality_gate(
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
+
+    # #482 : garde append-only sur requirements.txt — analyse PURE du diff,
+    # AVANT les passes d'infra. Les tests tournent quand même : la mémoire de
+    # retry (#436) garde son score, et le feedback nominatif part avec.
+    requirements_removed: Tuple[str, ...] = ()
+    if requirements_guard:
+        requirements_removed = unjustified_requirement_removals(diff, issue)
 
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
@@ -941,7 +1063,7 @@ async def run_quality_gate(
     # 3. Adéquation diff↔issue (#437) — lancée seulement si le reste est vert
     #    (économie d'appels LLM : un gate déjà rouge n'a pas besoin du verdict).
     #    Fail-closed : non conforme OU erreur du checker ⇒ non passé.
-    would_pass = bool(tests_passed and not review_blocking and review_error is None)
+    would_pass = bool(tests_passed and not review_blocking and review_error is None and not requirements_removed)
     adequacy_implemented: Optional[bool] = None
     adequacy_justification = ""
     adequacy_error: Optional[str] = None
@@ -972,6 +1094,7 @@ async def run_quality_gate(
         adequacy_error=adequacy_error,
         tests_touched=touched,
         requirements_added=tuple(requirements_added),
+        requirements_removed=requirements_removed,
     )
 
 

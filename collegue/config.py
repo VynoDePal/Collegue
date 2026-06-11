@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     # #481 : remédiation déterministe des dépendances manquantes pendant le gate
     # (table module→paquet + relance bornée, sans LLM). Défaut ON — opt-out.
     GATE_FIX_REQUIREMENTS: bool = True
+    # Garde append-only sur requirements.txt (#482) : des lignes présentes sur la
+    # base SUPPRIMÉES par le diff sans que l'issue nomme le paquet rendent le gate
+    # ROUGE (feedback nominatif). Analyse pure du diff, aucun coût d'infra ;
+    # off → suppression silencieuse tolérée (comportement historique).
+    GATE_REQUIREMENTS_APPEND_ONLY: bool = True
     # Adéquation diff↔issue (#437) : contrôle LLM fail-closed « ce diff
     # implémente-t-il l'issue ? » lancé quand le reste du gate est vert — une
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne

@@ -198,6 +198,16 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     if report is not None and getattr(report, "adequacy_implemented", None) is False:
         justification = getattr(report, "adequacy_justification", "") or "le diff n'implémente pas l'issue"
         return ("ADÉQUATION REFUSÉE — le diff ne réalise pas l'issue : " + justification)[:700]
+    removed = tuple(getattr(report, "requirements_removed", ()) or ()) if report is not None else ()
+    if removed:
+        # #482 : le motif utile est la liste NOMINATIVE des lignes perdues —
+        # c'est elle que la tentative suivante doit ré-ajouter telles quelles
+        # (la sortie des tests, souvent VERTE ici, serait un feedback trompeur).
+        return (
+            "REQUIREMENTS APPEND-ONLY (#482) — lignes de requirements.txt présentes sur la base et "
+            "SUPPRIMÉES par ton diff : " + " ; ".join(removed[:10]) + ". Ré-ajoute-les telles quelles "
+            "(n'en supprime aucune) et conserve le reste de ton travail."
+        )[:700]
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
         # « FAILED  » / « ERROR  » avec espace : les formes du short summary

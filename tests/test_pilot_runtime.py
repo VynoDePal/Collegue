@@ -355,3 +355,14 @@ def test_gate_fix_requirements_opt_out_emitted_only_on_deviation():
     assert "fix_missing_requirements" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
     options = _gate_options(SimpleNamespace(GATE_FIX_REQUIREMENTS=False))
     assert options["fix_missing_requirements"] is False
+
+
+def test_gate_requirements_append_only_opt_out_emitted_only_on_deviation():
+    """#482 : garde append-only ON par défaut côté gate — clé émise seulement
+    en opt-out (défauts inchangés)."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _gate_options
+
+    assert "requirements_guard" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
+    assert _gate_options(SimpleNamespace(GATE_REQUIREMENTS_APPEND_ONLY=False))["requirements_guard"] is False
