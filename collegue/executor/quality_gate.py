@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
@@ -117,8 +118,34 @@ def _real_test_script(scripts: dict) -> bool:
     return bool(script.strip()) and "no test specified" not in script
 
 
-def frontend_gate_command(workspace: str) -> Optional[str]:
-    """Commande de gate frontend quand le workspace a un ``package.json`` (#438).
+def _frontend_dirs(workspace: str) -> List[str]:
+    """Répertoires (relatifs) candidats à la passe frontend (#457).
+
+    La racine d'abord (comportement historique #438), puis les sous-répertoires
+    de **premier niveau** contenant un ``package.json``. Le layout CIBLE du moteur
+    pour les projets web (backend Python à la racine + ``frontend/``) place le
+    ``package.json`` dans un sous-répertoire : ne sonder que la racine rendait la
+    passe silencieusement absente — main mergé avec 42 erreurs TypeScript, tout
+    gate vert (run FacNor v3). ``node_modules`` et les répertoires cachés sont
+    ignorés ; tri déterministe.
+    """
+    dirs: List[str] = []
+    if os.path.isfile(os.path.join(workspace, "package.json")):
+        dirs.append(".")
+    try:
+        entries = sorted(os.listdir(workspace))
+    except OSError:
+        return dirs
+    for entry in entries:
+        if entry.startswith(".") or entry == "node_modules":
+            continue
+        if os.path.isfile(os.path.join(workspace, entry, "package.json")):
+            dirs.append(entry)
+    return dirs
+
+
+def frontend_gate_command(workspace: str, subdir: str = ".") -> Optional[str]:
+    """Commande de gate frontend pour le ``package.json`` de ``workspace/subdir`` (#438).
 
     Le gate historique ne lançait QUE pytest : compilation TypeScript, build Vite
     et tests front n'étaient JAMAIS validés — des PRs front cassées au type-check
@@ -134,10 +161,13 @@ def frontend_gate_command(workspace: str) -> Optional[str]:
       avant, d'où ``--no-install``) ;
     - tests front : script ``test`` réel uniquement (stub npm ignoré).
 
-    ``CI=true`` neutralise les modes watch (react-scripts, vitest) ; le cache npm
-    vit sous ``/tmp`` (rootfs read-only, #414). ``None`` si pas de ``package.json``.
+    ``subdir`` (#457) : répertoire relatif du front dans le workspace (monorepo
+    backend + ``frontend/``) — la commande s'exécute dedans (``cd``). ``CI=true``
+    neutralise les modes watch (react-scripts, vitest) ; le cache npm vit sous
+    ``/tmp`` (rootfs read-only, #414). ``None`` si pas de ``package.json``.
     """
-    pkg_path = os.path.join(workspace, "package.json")
+    base = workspace if subdir == "." else os.path.join(workspace, subdir)
+    pkg_path = os.path.join(base, "package.json")
     if not os.path.isfile(pkg_path):
         return None
     scripts: dict = {}
@@ -154,11 +184,17 @@ def frontend_gate_command(workspace: str) -> Optional[str]:
     steps = ["(npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --silent)"]
     if "build" in scripts:
         steps.append("npm run build --silent")
-    elif "typescript" in declared and os.path.isfile(os.path.join(workspace, "tsconfig.json")):
+    elif "typescript" in declared and os.path.isfile(os.path.join(base, "tsconfig.json")):
         steps.append("npx --no-install tsc --noEmit")
     if _real_test_script(scripts):
         steps.append("npm test --silent")
-    return "export CI=true NPM_CONFIG_CACHE=/tmp/.npm; " + " && ".join(steps)
+    prefix = "export CI=true NPM_CONFIG_CACHE=/tmp/.npm; "
+    if subdir != ".":
+        # `--` : un nom de répertoire commençant par `-` (contenu non fiable,
+        # écrit par l'agent) serait sinon consommé comme OPTION de `cd` — la
+        # passe npm tournerait silencieusement dans $HOME au lieu du front.
+        prefix += f"cd -- {shlex.quote(subdir)} && "
+    return prefix + " && ".join(steps)
 
 
 # Triple-backtick de remplacement : neutralise les fences pour qu'un texte non
@@ -482,10 +518,12 @@ async def run_quality_gate(
     indisponibilité ⇒ ``passed=False``. Les ``BaseException`` remontent.
     ``install_deps`` (défaut vrai) : préfixe la commande de tests par l'installation
     des dépendances déclarées du projet (cf. :func:`deps_install_prelude`, #414).
-    ``frontend_gate`` (défaut vrai, #438) : si le workspace a un ``package.json``,
-    enchaîne install + build/type-check + tests front dans le même conteneur,
-    fail-closed (cf. :func:`frontend_gate_command`) — sans quoi « tests verts »
-    signifie « tests *Python* verts », même sur un diff 100 % frontend.
+    ``frontend_gate`` (défaut vrai, #438) : pour chaque ``package.json`` détecté —
+    à la racine OU dans un sous-répertoire de 1er niveau (#457, layout monorepo
+    backend+``frontend/``) — enchaîne install + build/type-check + tests front
+    dans le même conteneur, fail-closed (cf. :func:`frontend_gate_command`) —
+    sans quoi « tests verts » signifie « tests *Python* verts », même sur un diff
+    100 % frontend.
     ``require_deps_install`` (#439) : l'échec d'installation des dépendances
     déclarées devient BLOQUANT (au lieu d'être toléré et seulement signalé via
     ``QualityReport.deps_install_failed``).
@@ -514,11 +552,16 @@ async def run_quality_gate(
                 # tournent quand même, l'échec laisse sa note dans la sortie.
                 command = f"({prelude}) && {test_command}" if require_deps_install else f"{prelude}; {test_command}"
         if frontend_gate:
-            front = frontend_gate_command(workspace)
-            if front is not None:
-                # `&&` : la passe frontend ne tourne que si pytest est vert (le
-                # verdict est déjà rouge sinon) et son échec rend le gate rouge.
-                command = f"({command}) && echo '{_FRONTEND_BANNER}' && ({front})"
+            for front_dir in _frontend_dirs(workspace):
+                front = frontend_gate_command(workspace, subdir=front_dir)
+                if front is None:
+                    continue
+                # `&&` : chaque passe frontend ne tourne que si la précédente est
+                # verte (le verdict est déjà rouge sinon) et son échec rend le
+                # gate rouge. Une passe PAR répertoire détecté (#457 : la racine
+                # ET les sous-répertoires de 1er niveau — layout monorepo).
+                banner = _FRONTEND_BANNER if front_dir == "." else f"{_FRONTEND_BANNER} [{front_dir}]"
+                command = f"({command}) && echo {shlex.quote(banner)} && ({front})"
         if check_installability:
             installability = installability_command(workspace)
             if installability is not None:
