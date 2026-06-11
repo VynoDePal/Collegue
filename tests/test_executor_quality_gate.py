@@ -80,7 +80,7 @@ async def test_default_test_command_invokes_pytest_as_module():
     await run_quality_gate("/ws", DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
     assert sandbox.calls, "le gate doit exécuter les tests"
     _ws, command = sandbox.calls[0]
-    assert command.startswith("python -m pytest"), f"commande de test inattendue: {command!r}"
+    assert command.startswith("COLUMNS=220 python -m pytest"), f"commande de test inattendue: {command!r}"
 
 
 # --- installation des deps du projet (#414) --------------------------------------
@@ -110,7 +110,7 @@ async def test_gate_no_install_when_no_deps_declared(tmp_path):
     sandbox = _green()
     await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
     _ws, command = sandbox.calls[0]
-    assert command == "python -m pytest -q"
+    assert command == "COLUMNS=220 python -m pytest -q"
 
 
 async def test_gate_install_failure_is_tolerated_in_command(tmp_path):
@@ -534,7 +534,7 @@ async def test_require_deps_install_makes_install_blocking(tmp_path):
     )
     _ws, command = sandbox.calls[0]
     assert "|| echo" not in command
-    assert ") && python -m pytest" in command
+    assert ") && COLUMNS=220 python -m pytest" in command
 
 
 def test_installability_command_has_network_retries(tmp_path):
@@ -547,6 +547,22 @@ def test_installability_command_has_network_retries(tmp_path):
     command = installability_command(str(tmp_path))
     assert command.count("--retries 5") == 2  # requirements + pytest
     assert command.count("--timeout 30") == 2
+
+
+async def test_gate_pytest_commands_force_wide_columns(tmp_path):
+    """#478 : en non-tty, pytest borne son short summary à COLUMNS (80 par
+    défaut) et tronquait le nom du paquet manquant du feedback — toutes les
+    invocations pytest du gate forcent une largeur large."""
+    from collegue.executor import installability_command
+
+    sandbox = _green()
+    await run_quality_gate("/ws", DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "COLUMNS=220 python -m pytest -q" in command
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    install = installability_command(str(tmp_path))
+    assert "COLUMNS=220 /tmp/.gate_venv/bin/python -m pytest --collect-only -q" in install
 
 
 def test_installability_command_requires_requirements(tmp_path):

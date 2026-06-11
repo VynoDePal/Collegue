@@ -143,6 +143,37 @@ def is_infra_gate_failure(outcome: "ExecutionOutcome") -> bool:
     return False
 
 
+# #478 : marqueur de troncature du short summary pytest (ASCII « ... » — distinct
+# du « … » de log_tail, qui est un autre chemin).
+_PYTEST_TRUNCATION = "..."
+
+
+def _detruncate_summary_line(line: str, output: str) -> str:
+    """Restitue le diagnostic complet d'une ligne de short summary tronquée (#478).
+
+    En non-tty, pytest borne « FAILED nodeid - message » à COLUMNS (80 par
+    défaut) et tronque avec « ... » — le nom du paquet manquant disparaissait du
+    feedback (cas réel FacNor v4 : « requires the httpx pack... », 3 cycles
+    brûlés à deviner + requeues opérateur). Le message ENTIER vit dans les
+    lignes ``E   …`` du traceback de la même sortie : on l'y reprend (préfixe
+    tronqué → première ligne E qui le contient). Best-effort : sans
+    correspondance, la ligne tronquée est relayée telle quelle.
+    """
+    if not line.endswith(_PYTEST_TRUNCATION):
+        return line
+    head, sep, message = line.partition(" - ")
+    prefix = message[: -len(_PYTEST_TRUNCATION)].strip()
+    if not sep or not prefix:
+        return line
+    for raw in output.splitlines():
+        candidate = raw.strip()
+        if candidate.startswith("E ") and prefix in candidate:
+            # Borné : une ligne E géante ne doit pas manger le budget [:700]
+            # du feedback et masquer les autres lignes FAILED.
+            return f"{head} - {candidate[1:].strip()[:300]}"
+    return line
+
+
 def failure_feedback(outcome: "ExecutionOutcome") -> str:
     """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
 
@@ -176,7 +207,9 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
         # était jeté : la grâce #461 ne voyait jamais la signature infra.
         fails = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED ", "ERROR "))]
         if fails:
-            return " ; ".join(fails[:6])[:700]
+            # #478 : filet — le diagnostic complet est repris du traceback quand
+            # le short summary a été tronqué à la largeur du terminal.
+            return " ; ".join(_detruncate_summary_line(line, output) for line in fails[:6])[:700]
         return log_tail(output, 400)
     return log_tail(outcome.execution.agent_result.logs, 400)
 

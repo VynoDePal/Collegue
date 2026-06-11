@@ -94,7 +94,8 @@ class Settings(BaseSettings):
     # enchaîner npm install + build/type-check + tests front dans le même
     # conteneur, fail-closed comme pytest (l'image sandbox doit fournir npm).
     GATE_FRONTEND: bool = True
-    # Commande de tests du gate (vide → défaut `python -m pytest -q`).
+    # Commande de tests du gate (vide → défaut `COLUMNS=220 python -m pytest -q`).
+    # Une commande custom doit forcer elle-même sa largeur de summary (#478).
     GATE_TEST_COMMAND: str = ""
     # Installabilité (#439). REQUIRE_DEPS_INSTALL : l'échec d'installation des
     # deps déclarées rend le gate ROUGE (au lieu d'un signal toléré). CHECK_
