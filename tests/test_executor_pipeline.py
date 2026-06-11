@@ -751,3 +751,71 @@ async def test_remediation_failure_keeps_gate_red_and_diff_updated(repo):
     assert outcome.reason == "gate_failed"
     assert outcome.quality_report.requirements_added == ("httpx",)
     assert "+httpx" in outcome.execution.diff
+
+
+# --- garde append-only requirements : feedback nominatif (#482) ----------------------
+
+
+def test_failure_feedback_names_removed_requirements():
+    """#482 : tests VERTS mais lignes de requirements perdues — le feedback est
+    la liste NOMINATIVE des lignes (la sortie verte serait un feedback trompeur)."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    outcome = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(success=True, logs="journal"),
+            changed=True,
+            diff="",
+            files_changed=("requirements.txt",),
+            success=True,
+        ),
+        quality_report=QualityReport(
+            tests_passed=True,
+            test_exit_code=0,
+            test_output="12 passed in 1.02s",
+            review_summary="",
+            review_findings=(),
+            review_blocking=False,
+            passed=False,
+            requirements_removed=("python-jose[cryptography]", "passlib[bcrypt]"),
+        ),
+        reason="gate_failed",
+    )
+    feedback = failure_feedback(outcome)
+    assert "APPEND-ONLY" in feedback
+    assert "python-jose[cryptography]" in feedback and "passlib[bcrypt]" in feedback
+    assert "12 passed" not in feedback
+    assert len(feedback) <= 700
+
+
+async def test_requirements_regeneration_stops_at_gate(repo):
+    """#482 bout en bout : l'agent régénère requirements.txt en perdant une ligne
+    de la base → gate rouge, aucune PR."""
+    import pathlib
+
+    src = pathlib.Path(repo)
+    (src / "requirements.txt").write_text("fastapi\npython-jose[cryptography]\n")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "deps de base")
+
+    clients = _clients()
+    outcome = await execute_issue(
+        ISSUE,
+        repo,
+        ctx=None,
+        dry_run=False,
+        **_kwargs(
+            agent=FakeCodeAgent(files={"requirements.txt": "fastapi\nhttpx\n"}),
+            clients=clients,
+        ),
+    )
+    assert outcome.success is False
+    assert outcome.stage == "gate"
+    assert outcome.reason == "gate_failed"
+    assert outcome.quality_report.requirements_removed == ("python-jose[cryptography]",)
+    assert clients.prs.created == []

@@ -1687,3 +1687,43 @@ async def test_dry_run_never_rereads_db_before_verdict(repo, manager):
     result = await _run(counting, repo, pid, dry_run=True)
     assert result.stop_reason == "completed"
     assert counting.get_tasks_calls == 1  # le seul chargement initial
+
+
+# --- consigne append-only requirements dans les prompts de retry (#482) -------------
+
+
+def test_repair_prompt_carries_requirements_append_only_rule():
+    """#482 : la règle append-only n'apparaît que dans les prompts de
+    réparation/retry — le prompt initial reste inchangé."""
+    from collegue.pilot.driver import REQUIREMENTS_APPEND_ONLY_RULE, _issue_from_task
+
+    fresh = SimpleNamespace(
+        id=1, title="T", acceptance="", issue_number=None, depends_on=[], attempt_count=0, last_error=None
+    )
+    assert "APPEND-ONLY" not in _issue_from_task(fresh).context
+
+    retry = SimpleNamespace(
+        id=1,
+        title="T",
+        acceptance="",
+        issue_number=None,
+        depends_on=[],
+        attempt_count=1,
+        last_error="[gate/gate_failed] tentative 1/3 — FAILED tests/test_x.py",
+    )
+    assert REQUIREMENTS_APPEND_ONLY_RULE in _issue_from_task(retry).context
+
+    repair = SimpleNamespace(
+        id=1,
+        title="T",
+        acceptance="",
+        issue_number=None,
+        depends_on=[],
+        attempt_count=0,
+        last_error=None,
+        best_diff="diff --git a/x b/x\n+x",
+        best_passed=12,
+        best_failed=0,
+        best_feedback=None,
+    )
+    assert REQUIREMENTS_APPEND_ONLY_RULE in _issue_from_task(repair).context

@@ -99,6 +99,15 @@ DEFAULT_MAX_INFLIGHT_REVIEWS = 1
 # Mémoire de la meilleure tentative (#436). Un diff tronqué ne s'appliquerait
 # plus (git apply échouerait) : au-delà de ce plafond, on ne mémorise pas.
 MAX_BEST_DIFF_CHARS = 200_000
+
+# #482 : consigne append-only sur requirements.txt, injectée dans tout prompt de
+# nouvelle tentative — en réparation, l'agent a déjà RÉGÉNÉRÉ le fichier au moins
+# une fois (cas réel v4 : lignes de main perdues → « No module named 'jose' » en
+# venv nu, 12 tests verts par ailleurs).
+REQUIREMENTS_APPEND_ONLY_RULE = (
+    "Règle stricte : requirements.txt est APPEND-ONLY — ne le régénère jamais, ne supprime "
+    "ni ne remplace AUCUNE ligne existante ; ajoute uniquement les dépendances manquantes."
+)
 _PASSED_RE = re.compile(r"(\d+) passed")
 _FAILED_RE = re.compile(r"(\d+) failed")
 
@@ -233,6 +242,9 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
             f"Détail de l'échec : {last_error}. "
             "Analyse et corrige d'abord cette cause précise au lieu de régénérer le même code."
         )
+    if best_diff or attempts > 0:
+        # #482 : prompts de réparation/retry seulement — le prompt initial reste inchangé.
+        parts.append(REQUIREMENTS_APPEND_ONLY_RULE)
     return IssueSpec(
         number=task.issue_number or task.id,
         title=task.title,

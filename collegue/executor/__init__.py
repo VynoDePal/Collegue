@@ -31,9 +31,11 @@ from collegue.executor.quality_gate import (
     installability_command,
     issue_expects_code,
     outcome_from_review,
+    removed_requirement_lines,
     run_quality_gate,
     smoke_run_command,
     tests_touched,
+    unjustified_requirement_removals,
 )
 from collegue.executor.revert import (
     RevertError,
@@ -78,6 +80,8 @@ __all__ = [
     "run_quality_gate",
     "frontend_gate_command",
     "installability_command",
+    "removed_requirement_lines",
+    "unjustified_requirement_removals",
     "smoke_run_command",
     "outcome_from_review",
     "AdequacyChecker",

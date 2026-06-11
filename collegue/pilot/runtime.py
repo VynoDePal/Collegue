@@ -118,6 +118,9 @@ def _gate_options(settings_obj) -> dict:
     # seulement en opt-out, pour ne pas grossir les options par défaut.
     if not bool(getattr(settings_obj, "GATE_FIX_REQUIREMENTS", True)):
         options["fix_missing_requirements"] = False
+    # #482 : garde append-only requirements — même convention (défaut ON).
+    if not bool(getattr(settings_obj, "GATE_REQUIREMENTS_APPEND_ONLY", True)):
+        options["requirements_guard"] = False
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)
