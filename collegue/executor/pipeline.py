@@ -34,6 +34,7 @@ from collegue.executor.pr import PrClients, PrResult, open_pr
 from collegue.executor.quality_gate import QualityReport, Reviewer, run_quality_gate
 from collegue.executor.runner import ExecutionResult, run_issue
 from collegue.executor.workspace import Workspace, apply_seed_diff, prepare_workspace
+from collegue.sandbox.executor import TIMEOUT_NOTE
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ _INFRA_NOISE_SIGNATURES = (
     # Kill du conteneur sandbox au timeout (#461) : quand pip pend sur PyPI, le
     # conteneur peut être tué avant d'imprimer un traceback réseau — la note du
     # sandbox est alors le seul indice, et ce n'est pas un diagnostic actionnable.
-    "[sandbox] délai dépassé après",
+    TIMEOUT_NOTE,
 )
 
 

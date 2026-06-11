@@ -43,6 +43,10 @@ DEFAULT_SANDBOX_IMAGE = "collegue-sandbox:latest"
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
 
+# Préfixe de la note ajoutée à stderr quand le conteneur est tué au timeout —
+# consommé par le moteur (#461 : classification infra ; #464 : usage perdu).
+TIMEOUT_NOTE = "[sandbox] délai dépassé après"
+
 
 class SandboxUnavailable(RuntimeError):
     """Docker indisponible, ou refus de s'exécuter (ex. en root)."""
@@ -247,7 +251,7 @@ class DockerSandbox:
             stdout = self._read_capped(out_path)
             stderr = self._read_capped(err_path)
             if timed_out:
-                stderr += f"\n[sandbox] délai dépassé après {self.timeout:g}s"
+                stderr += f"\n{TIMEOUT_NOTE} {self.timeout:g}s"
             return SandboxResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out)
         finally:
             for path in (out_path, err_path):

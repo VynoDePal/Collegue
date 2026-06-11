@@ -43,6 +43,7 @@ from collegue.pilot.audit import (
     TASK_RECONCILED,
     TASK_RETRY,
     TASK_STARTED,
+    USAGE_LOST,
     CostSource,
     NullAuditLog,
     RunAuditLog,
@@ -56,6 +57,7 @@ from collegue.pilot.scheduler import (
     ready_tasks,
     remaining_tasks,
 )
+from collegue.sandbox.executor import TIMEOUT_NOTE
 
 # Statut projet une fois le MVP construit (le moteur d'amélioration = Phase 4).
 PROJECT_STATUS_IMPROVING = "improving"
@@ -608,6 +610,12 @@ async def run_project(
         coder_usd = float(getattr(agent_result, "cost_usd", 0.0) or 0.0)
         if coder_tokens or coder_usd:
             audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
+        elif TIMEOUT_NOTE in (getattr(agent_result, "logs", "") or ""):
+            # #464 : tentative tuée de l'extérieur (timeout sandbox) AVANT toute
+            # ligne [collegue-usage] — la dépense (la tentative la plus longue,
+            # donc la plus coûteuse) est invisible du ledger : perte journalisée
+            # au lieu d'un trou silencieux (budget sous-estimé en silence).
+            audit.record(USAGE_LOST, iteration=iteration, task_id=task.id, reason="sandbox_timeout")
         pr_number = outcome.pr.number if outcome.pr is not None else None
         audit.record(
             GATE_DECISION,
