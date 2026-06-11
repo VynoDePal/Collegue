@@ -897,6 +897,103 @@ async def test_retry_reinjects_crisp_failure_feedback(repo, manager):
     assert "collected 4 items" not in ctx  # le bruit n'est PAS ré-injecté
 
 
+class _InfraThenGreenSandbox:
+    """Échec FONCTIONNEL (ligne FAILED), puis aléa INFRA (traceback réseau sans
+    ligne FAILED), puis vert — la séquence exacte du run FacNor v3 (#459)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.calls += 1
+        if self.calls == 1:
+            # Le FAILED mentionne une exception réseau : il doit RESTER classé
+            # actionnable une fois stocké dans last_error (préfixe compris).
+            return SandboxResult(
+                exit_code=1,
+                stdout="FAILED tests/test_x.py::test_a - requests.exceptions.ConnectionError: email_validator absent",
+                stderr="",
+            )
+        if self.calls == 2:
+            return SandboxResult(
+                exit_code=1,
+                stdout=(
+                    "Collecting fastapi\n"
+                    "urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org')\n"
+                    "pip install a échoué"
+                ),
+                stderr="",
+            )
+        return SandboxResult(exit_code=0, stdout="4 passed", stderr="")
+
+
+async def test_infra_noise_does_not_clobber_actionable_feedback(repo, manager):
+    """#459 : un timeout PyPI à la tentative 2 n'écrase pas le diagnostic
+    actionnable de la tentative 1 — l'agent (tentative 3) et l'opérateur voient
+    toujours « email_validator », plus le marqueur d'aléa, borné."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _RecordingAgent()
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=agent,
+        sandbox=_InfraThenGreenSandbox(),
+        max_task_attempts=3,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "completed"
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "in_review"
+    # Pendant la 3e tentative, last_error portait toujours le diagnostic utile.
+    ctx = agent.contexts[2]
+    assert "email_validator" in ctx
+    assert "ReadTimeoutError" not in ctx  # le bruit réseau n'est PAS ré-injecté
+
+
+async def test_infra_noise_suffix_is_replaced_not_stacked(repo, manager):
+    """#459 : une SÉRIE d'aléas infra ne fait pas gonfler last_error — le suffixe
+    est remplacé ; à l'échec terminal, le feedback persisté reste le diagnostic
+    fonctionnel, pas le dernier aléa."""
+
+    class _FunctionalThenInfraForever(_InfraThenGreenSandbox):
+        def run_tests(self, workspace, command="pytest -q"):
+            self.calls += 1
+            if self.calls == 1:
+                return SandboxResult(exit_code=1, stdout="FAILED tests/test_x.py::test_a - assert 1 == 2", stderr="")
+            return SandboxResult(
+                exit_code=1,
+                stdout="urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='pypi.org')",
+                stderr="",
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_RecordingAgent(),
+        sandbox=_FunctionalThenInfraForever(),
+        max_task_attempts=3,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "blocked"
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "failed"
+    assert "FAILED tests/test_x.py::test_a" in t.last_error  # le diagnostic survit
+    assert t.last_error.count("aléa infra") == 1  # suffixe remplacé, pas empilé
+    assert "tentative 3" in t.last_error  # ... et à jour
+
+
 async def test_run_stage_retry_feeds_agent_logs(repo, manager):
     # Échec au stage `run` (process agent) : le feedback vient des logs agent.
     async def _sleep(d):

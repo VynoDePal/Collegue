@@ -475,3 +475,31 @@ async def test_manager_without_task_id_is_safe(repo, tmp_path):
     )
     assert outcome.success is True
     assert outcome.final_status is None  # rien à transitionner sans task_id
+
+
+# --- bruit infra vs diagnostic fonctionnel (#459) -----------------------------------
+
+
+def test_is_infra_noise_detects_network_tracebacks():
+    from collegue.executor.pipeline import is_infra_noise
+
+    assert is_infra_noise("urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='pypi.org')")
+    assert is_infra_noise("requests.exceptions.ConnectionError: Connection refused")
+    assert is_infra_noise("503 Server Error: Service Unavailable")
+
+
+def test_is_infra_noise_never_flags_functional_diagnostics():
+    from collegue.executor.pipeline import is_infra_noise
+
+    assert not is_infra_noise("")
+    assert not is_infra_noise("FAILED tests/test_x.py::test_a - assert 1 == 2")
+    # Une ligne FAILED présente = fonctionnel, même si du bruit réseau l'entoure.
+    assert not is_infra_noise(
+        "urllib3.exceptions.ReadTimeoutError: ...\nFAILED tests/test_x.py::test_a - ConnectionError"
+    )
+    assert not is_infra_noise("ADÉQUATION REFUSÉE — le diff ne réalise pas l'issue : schéma sans logique")
+    # Un échec FONCTIONNEL qui mentionne une exception réseau reste actionnable
+    # (projets web : TestClient/mocks lèvent ConnectionError dans les FAILED).
+    assert not is_infra_noise("FAILED tests/test_api.py::test_remote - requests.exceptions.ConnectionError: refusé")
+    # Le « ERROR: » de pip (deux-points) est du bruit d'install, PAS du pytest.
+    assert is_infra_noise("ERROR: Could not install packages due to an OSError: ReadTimeoutError")
