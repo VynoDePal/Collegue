@@ -294,3 +294,74 @@ def test_sweep_skips_symlinks_and_counts_honestly(tmp_path):
 
     assert sweep_stale_temp_clones(tmp_dir=str(tmp_path)) == 0  # lien ignoré
     assert link.exists() and target.exists()
+
+
+# --- apply_seed_diff : 3-way (#479) -----------------------------------------------
+
+
+def _capture_staged_diff(ws_path):
+    _git(ws_path, "add", "-A")
+    return _git_out(ws_path, "diff", "--staged", "--binary", "--full-index")
+
+
+def test_seed_diff_survives_main_advance(tmp_path):
+    """#479 : l'intégration sérielle (#434) fait avancer main entre deux
+    tentatives — le seed capturé contre l'ancien main doit encore s'appliquer
+    (3-way) au lieu de repartir du clone vierge (« base déplacée » ×13 en v4)."""
+    import pathlib
+
+    from collegue.executor.workspace import apply_seed_diff
+
+    src = _make_repo(tmp_path / "source", files={"app.py": "l1\nl2\nl3\nl4\nl5\n"})
+    ws1 = prepare_workspace(src, ISSUE)
+    pathlib.Path(ws1.path, "app.py").write_text("l1\nl2\nMODIF-AGENT\nl4\nl5\n")
+    seed = _capture_staged_diff(ws1.path)
+
+    # Merge sériel simulé : main avance (ligne ajoutée en tête, contexte déplacé).
+    src_path = pathlib.Path(src)
+    (src_path / "app.py").write_text("EN-TETE\nl1\nl2\nl3\nl4\nl5\n")
+    _git(src_path, "add", "-A")
+    _git(src_path, "commit", "-q", "-m", "merge sériel d'une PR sœur")
+
+    ws2 = prepare_workspace(src, ISSUE)
+    assert apply_seed_diff(ws2, seed) is True
+    content = pathlib.Path(ws2.path, "app.py").read_text()
+    assert "EN-TETE" in content and "MODIF-AGENT" in content
+
+
+def test_seed_diff_conflict_restores_pristine_clone(tmp_path):
+    """#479 : contrairement à l'apply simple (atomique), un 3-way en CONFLIT
+    laisse marqueurs et ajouts indexés — le fallback doit rendre le clone
+    vierge promis par #436, pas un arbre sale."""
+    import os
+    import pathlib
+
+    from collegue.executor.workspace import apply_seed_diff
+
+    src = _make_repo(tmp_path / "source", files={"app.py": "l1\nl2\nl3\nl4\nl5\n"})
+    ws1 = prepare_workspace(src, ISSUE)
+    pathlib.Path(ws1.path, "app.py").write_text("l1\nl2\nMODIF-AGENT\nl4\nl5\n")
+    pathlib.Path(ws1.path, "neuf.txt").write_text("nouveau fichier du seed\n")
+    seed = _capture_staged_diff(ws1.path)
+
+    # Réécriture CONCURRENTE de la même ligne sur main : conflit réel.
+    src_path = pathlib.Path(src)
+    (src_path / "app.py").write_text("l1\nl2\nREECRITURE-CONCURRENTE\nl4\nl5\n")
+    _git(src_path, "add", "-A")
+    _git(src_path, "commit", "-q", "-m", "réécriture concurrente")
+
+    ws2 = prepare_workspace(src, ISSUE)
+    assert apply_seed_diff(ws2, seed) is False
+    assert _git_out(ws2.path, "status", "--porcelain") == ""  # ni UU, ni A
+    assert "<<<<<<<" not in pathlib.Path(ws2.path, "app.py").read_text()
+    assert not os.path.exists(os.path.join(ws2.path, "neuf.txt"))
+
+
+def test_run_issue_diff_has_full_index(repo):
+    """#479 : la capture du diff autoritatif embarque les index complets —
+    le 3-way du retry retrouve les blobs de base sans ambiguïté."""
+    import re
+
+    ws = prepare_workspace(repo, ISSUE)
+    result = run_issue(FakeCodeAgent(), ws, ISSUE)
+    assert re.search(r"^index [0-9a-f]{40,}\.\.[0-9a-f]{40,}", result.diff, re.M)
