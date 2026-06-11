@@ -66,7 +66,9 @@ def run_issue(
     # ``--binary`` (#455) : sans lui, un diff touchant un binaire (png, woff2…)
     # n'embarque pas son payload → le réensemencement du retry (#436,
     # ``apply_seed_diff``) échoue précisément sur les tâches frontend.
-    diff_res = runner.run_command([git_bin, "diff", "--staged", "--binary"], workspace.path)
+    # ``--full-index`` (#479) : lignes index complètes — le 3-way du retry
+    # retrouve les blobs de base sans ambiguïté d'abréviation.
+    diff_res = runner.run_command([git_bin, "diff", "--staged", "--binary", "--full-index"], workspace.path)
     if not diff_res.ok:
         raise WorkspaceError(f"git diff a échoué: {diff_res.stderr.strip()}")
     names_res = runner.run_command([git_bin, "diff", "--staged", "--name-only"], workspace.path)

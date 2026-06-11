@@ -170,11 +170,18 @@ def sweep_stale_temp_clones(
 def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") -> bool:
     """Ré-applique le diff d'une tentative précédente sur un clone neuf (#436).
 
-    **Best-effort** : un diff qui ne s'applique plus (base déplacée entre deux
-    tentatives, diff corrompu) renvoie ``False`` — l'appelant continue sur le
-    clone vierge (mode historique) au lieu d'échouer. Le diff est appliqué SANS
-    commit : il apparaît comme modifications locales, donc dans le diff
-    autoritatif de la tentative (la PR portera l'état complet, seed + réparation).
+    **Best-effort** : un diff qui ne s'applique plus (conflit réel, diff
+    corrompu) renvoie ``False`` — l'appelant continue sur le clone vierge (mode
+    historique) au lieu d'échouer. Le diff est appliqué SANS commit : il
+    apparaît comme modifications locales, donc dans le diff autoritatif de la
+    tentative (la PR portera l'état complet, seed + réparation).
+
+    Application en **3-way** (#479) : le diff est capturé contre le main du
+    clone de SA tentative, et l'intégration sérielle (#434) fait avancer main
+    entre deux tentatives — l'application simple échouait dès que le contexte
+    avait bougé (« base déplacée », ×13 sur le run FacNor v4). Le clone étant
+    complet, les blobs de base sont présents ; s'ils manquent, git retombe de
+    lui-même sur l'application directe.
     """
     if not (diff or "").strip():
         return False
@@ -183,13 +190,19 @@ def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") ->
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(diff if diff.endswith("\n") else diff + "\n")
-        result = runner.run_command([git_bin, "apply", "--whitespace=nowarn", patch_path], workspace.path)
+        result = runner.run_command([git_bin, "apply", "-3", "--whitespace=nowarn", patch_path], workspace.path)
         if not result.ok:
             logger.warning(
-                "seed_diff inapplicable sur %s (base déplacée ?) — la tentative repart du clone vierge : %s",
+                "seed_diff inapplicable sur %s (conflit réel avec le main avancé ?)"
+                " — la tentative repart du clone vierge : %s",
                 workspace.path,
                 (result.stderr or result.stdout or "").strip()[:300],
             )
+            # #479 : l'apply simple était atomique, pas le 3-way — un conflit
+            # laisse des marqueurs <<<<<<< et des ajouts indexés dans l'arbre.
+            # On restaure le clone vierge promis par le fallback (#436).
+            runner.run_command([git_bin, "reset", "--hard", "--quiet"], workspace.path)
+            runner.run_command([git_bin, "clean", "-fdq"], workspace.path)
         return bool(result.ok)
     finally:
         os.unlink(patch_path)
