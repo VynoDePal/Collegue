@@ -274,17 +274,21 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
                 f"[reconcile] ta PR #{pr.number} a été FERMÉE sans merge en dehors du run — "
                 "son contenu n'est PAS dans le dépôt : repars du dépôt à jour et relivre la tâche."
             )
-            requeue_task_for_redo(manager, task.id, message=message)
-            task.status = TASK_STATUS_TODO
-            task.attempt_count = max(1, int(getattr(task, "attempt_count", 0) or 0))
-            task.last_error = message
+            fields = requeue_task_for_redo(manager, task.id, message=message)
+            for key, value in fields.items():
+                setattr(task, key, value)  # overlay mémoire aligné (#460)
             audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="closed_requeued")
             logger.info("tâche %s : PR #%s fermée sans merge → redo (#442)", task.id, pr.number)
             reconciled += 1
     return reconciled
 
 
-def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count: int = 1) -> None:
+# #460 : marqueur du préfixe posé par requeue_task_for_redo dans best_feedback —
+# détecté pour ne jamais empiler deux motifs de redo (le précédent est consommé).
+_REQUEUE_FEEDBACK_MARKER = " (échecs connus de la meilleure tentative : "
+
+
+def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count: int = 1) -> dict:
     """Re-file une tâche pour un REDO complet après un événement externe (#434).
 
     Cas nominal : la PR d'une tâche ``in_review`` est devenue non mergeable
@@ -297,13 +301,34 @@ def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count:
     ``attempt_count=1`` (défaut) : un conflit d'infrastructure ne consomme pas le
     budget de retries fonctionnels — on garde juste le minimum (> 0) pour que le
     feedback soit injecté.
+
+    #460 : le message est AUSSI posé dans ``best_feedback`` — en mode réparation
+    (#436, ``best_diff`` présent et échecs connus), le prompt n'utilise QUE
+    ``best_feedback`` : un message laissé dans le seul ``last_error`` serait
+    éclipsé et n'atteindrait jamais l'agent (constaté en run réel FacNor v3 :
+    l'opérateur a dû écrire ``best_feedback`` à la main en base). L'existant est
+    conservé en suffixe (les échecs connus restent visibles).
+
+    Retourne les champs posés, pour que l'appelant aligne son overlay mémoire.
     """
-    manager.update_task(
-        task_id,
-        status=TASK_STATUS_TODO,
-        attempt_count=max(1, int(attempt_count)),
-        last_error=str(message),
-    )
+    fields = {
+        "status": TASK_STATUS_TODO,
+        "attempt_count": max(1, int(attempt_count)),
+        "last_error": str(message),
+    }
+    task = manager.get_task(task_id) if hasattr(manager, "get_task") else None
+    previous_feedback = getattr(task, "best_feedback", None) if task is not None else None
+    if previous_feedback and _REQUEUE_FEEDBACK_MARKER in previous_feedback:
+        # Dé-nidifier : un requeue précédent a déjà préfixé — son motif est
+        # consommé, seul le diagnostic d'origine reste pertinent (borné, même
+        # convention que le suffixe « aléa infra » de #459).
+        previous_feedback = previous_feedback.split(_REQUEUE_FEEDBACK_MARKER, 1)[1][:-1]
+    if previous_feedback:
+        fields["best_feedback"] = f"{message}{_REQUEUE_FEEDBACK_MARKER}{previous_feedback})"
+    else:
+        fields["best_feedback"] = str(message)
+    manager.update_task(task_id, **fields)
+    return fields
 
 
 async def run_project(
