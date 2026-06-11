@@ -79,6 +79,7 @@ class DockerSandbox:
         image: str = DEFAULT_SANDBOX_IMAGE,
         *,
         network: str = "none",
+        dns: Optional[Tuple[str, ...]] = None,
         memory: str = "512m",
         cpus: str = "1.0",
         pids_limit: int = 256,
@@ -93,6 +94,12 @@ class DockerSandbox:
     ):
         self.image = image
         self.network = network
+        # Résolveurs DNS explicites (#485) : le résolveur Docker par défaut
+        # produit des « Temporary failure in name resolution » en rafale sur
+        # les passes réseau du gate (#414/#439) — tentatives brûlées sur de
+        # l'infra. Vide (défaut) = comportement Docker inchangé. Une adresse
+        # invalide fait échouer `docker run` (stderr visible dans le gate).
+        self.dns = tuple(dns or ())
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
@@ -155,6 +162,10 @@ class DockerSandbox:
             "--stop-timeout",
             "5",
         ]
+        # #485 : résolveurs DNS explicites — uniquement si configurés (argv par
+        # défaut strictement inchangé).
+        for server in self.dns:
+            argv += ["--dns", server]
         if self.read_only:
             argv += ["--read-only"]  # root FS en lecture seule
         argv += [

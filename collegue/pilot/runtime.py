@@ -77,12 +77,20 @@ def _build_manager(settings_obj):  # pragma: no cover - infra réelle (integrati
     return ProjectStateManager.from_url(url)
 
 
+def _sandbox_dns(settings_obj) -> tuple:
+    """Résolveurs DNS du sandbox (#485) — ``SANDBOX_DNS``, IPs séparées par des virgules."""
+    raw = str(getattr(settings_obj, "SANDBOX_DNS", "") or "")
+    return tuple(server.strip() for server in raw.split(",") if server.strip())
+
+
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.sandbox import DockerSandbox
 
     # OpenHands appelle un LLM → le sandbox a besoin du réseau pour ce run précis
-    # (le défaut durci est ``network="none"``).
-    return DockerSandbox(network="bridge")
+    # (le défaut durci est ``network="none"``). #485 : résolveurs DNS explicites
+    # opt-in (SANDBOX_DNS) — le résolveur Docker par défaut était instable en
+    # run réel (gate ET coder, le sandbox est partagé).
+    return DockerSandbox(network="bridge", dns=_sandbox_dns(settings_obj))
 
 
 def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (integration)
