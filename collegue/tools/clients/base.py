@@ -126,10 +126,12 @@ class APIClient(ABC):  # noqa: B024
         return False
 
     def _execute_with_retry(self, operation: Callable[[], T], operation_name: str = "request") -> T:
-
         last_error = None
+        attempts = 0
+        last_status = 0
 
         for attempt in range(self.max_retries + 1):
+            attempts = attempt + 1
             try:
                 return operation()
             except Exception as e:
@@ -138,6 +140,7 @@ class APIClient(ABC):  # noqa: B024
                 response = getattr(e, "response", None)
                 if response is not None:
                     status_code = getattr(response, "status_code", status_code)
+                last_status = status_code
 
                 if not self._should_retry(e, status_code, attempt):
                     break
@@ -146,9 +149,16 @@ class APIClient(ABC):  # noqa: B024
                 self.logger.warning(f"{operation_name} failed (attempt {attempt + 1}), retrying in {delay}s: {e}")
                 time.sleep(delay)
 
-        # All retries exhausted
-        error_msg = f"{operation_name} failed after {self.max_retries + 1} attempts: {last_error}"
-        self.logger.error(error_msg)
+        # #465 : compteur RÉEL (un 404 court-circuite au 1er essai — afficher
+        # « after 4 attempts » était mensonger et noyait le diagnostic) ; un 404
+        # non retenté est souvent ATTENDU (sondage d'existence : contents/<fichier>
+        # sur une branche fraîche) → debug, pas error. Les vraies pannes (retries
+        # épuisés, 4xx/5xx autres) restent en error.
+        error_msg = f"{operation_name} failed after {attempts} attempt(s): {last_error}"
+        if last_status == 404:
+            self.logger.debug(error_msg)
+        else:
+            self.logger.error(error_msg)
         raise APIError(error_msg)
 
     def handle_response(self, response: Any, endpoint: str) -> APIResponse:
