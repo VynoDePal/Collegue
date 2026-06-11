@@ -141,6 +141,39 @@ class RunAuditLog:
         self._persist = wants_persist
         self.events: List[RunEvent] = []
         self.cost = RunCostLedger()
+        # #462 : réamorcer le cumul depuis la dernière métrique persistée —
+        # symétrique de load_run_start (resume). Sans ça, chaque restart de
+        # process publiait son cumul LOCAL comme cumul du run : run FacNor v3
+        # en 3 segments → 5,38 M tokens annoncés pour 8,98 M réellement
+        # consommés (-40 %), budget et reporting faux dès la première reprise.
+        if self._persist:
+            self._reseed_cost_from_metrics()
+
+    def _reseed_cost_from_metrics(self) -> None:
+        """Repart du dernier cumul ``run_cost_usd``/``run_tokens`` persisté (#462).
+
+        Best-effort : un manager sans ``get_metrics`` ou une lecture en échec
+        laissent simplement le ledger à zéro (comportement historique).
+        """
+        getter = getattr(self._manager, "get_metrics", None)
+        if getter is None:
+            return
+        usd, tokens = 0.0, 0
+        try:
+            # Toute la lecture sous le try (y compris le parsing) : une ligne
+            # corrompue (NaN/inf écrit à la main) ne doit pas empêcher le run
+            # de DÉMARRER — l'audit ne casse jamais le run.
+            for metric in getter(self.project_id):  # ordonné par id : la dernière valeur gagne
+                if metric.name == METRIC_RUN_COST_USD and math.isfinite(metric.value):
+                    usd = float(metric.value)
+                elif metric.name == METRIC_RUN_TOKENS and math.isfinite(metric.value):
+                    tokens = int(metric.value)
+        except Exception:
+            return
+        if usd > 0:
+            self.cost.usd = usd
+        if tokens > 0:
+            self.cost.tokens = tokens
 
     def record(self, kind: str, *, iteration: Optional[int] = None, **detail: Any) -> RunEvent:
         """Enregistre un événement (et le persiste si activé). Best-effort."""
