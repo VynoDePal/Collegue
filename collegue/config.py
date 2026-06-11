@@ -111,6 +111,18 @@ class Settings(BaseSettings):
     # Exiger qu'un diff touche au moins un fichier de test (sinon : simple
     # signal ⚠️ dans le rapport de gate / corps de PR).
     GATE_REQUIRE_TEST_CHANGES: bool = False
+    # Smoke run (#458) : passe finale qui DÉMARRE l'application livrée dans le
+    # conteneur du gate et vérifie qu'elle répond (< 500) — détecte les
+    # divergences d'init tests/prod (tests verts via create_all, prod en 500
+    # sur schema.sql incomplet). SMOKE_COMMAND : démarrage explicite (doit
+    # écouter sur 127.0.0.1:8765) ; vide → auto-détection FastAPI. SMOKE_PATHS :
+    # chemins sondés, séparés par des virgules.
+    GATE_SMOKE_RUN: bool = False
+    GATE_SMOKE_COMMAND: str = ""
+    GATE_SMOKE_PATHS: str = "/"
+    # Budget d'attente de réponse (s) — à garder sous le timeout du conteneur
+    # sandbox (120 s par défaut, partagé avec pip/pytest/npm).
+    GATE_SMOKE_TIMEOUT: float = 30.0
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

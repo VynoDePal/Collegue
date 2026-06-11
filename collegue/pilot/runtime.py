@@ -119,6 +119,17 @@ def _gate_options(settings_obj) -> dict:
         options["test_command"] = str(test_command)
     if bool(getattr(settings_obj, "GATE_ADEQUACY", False)):
         options["adequacy_checker"] = _build_adequacy_checker(settings_obj)
+    # Smoke run (#458, opt-in) : démarrer l'app livrée et vérifier qu'elle répond.
+    if bool(getattr(settings_obj, "GATE_SMOKE_RUN", False)):
+        options["smoke_run"] = True
+        smoke_command = getattr(settings_obj, "GATE_SMOKE_COMMAND", None)
+        if smoke_command:
+            options["smoke_command"] = str(smoke_command)
+        raw_paths = str(getattr(settings_obj, "GATE_SMOKE_PATHS", "") or "")
+        smoke_paths = tuple(path.strip() for path in raw_paths.split(",") if path.strip())
+        if smoke_paths:
+            options["smoke_paths"] = smoke_paths
+        options["smoke_timeout"] = float(getattr(settings_obj, "GATE_SMOKE_TIMEOUT", 30.0))
     return options
 
 
