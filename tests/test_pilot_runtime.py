@@ -321,6 +321,11 @@ def test_gate_options_built_from_settings():
     assert options["smoke_command"] == "python serve.py"
     assert options["smoke_paths"] == ("/health", "/factures/")
     assert options["smoke_timeout"] == 30.0
+
+    # #483 : le préfixe « MÉTHODE: » traverse le mapping config sans altération
+    # (le parsing vit dans la sonde, pas ici).
+    with_post = SimpleNamespace(GATE_SMOKE_RUN=True, GATE_SMOKE_PATHS="/, POST:/auth/register")
+    assert _gate_options(with_post)["smoke_paths"] == ("/", "POST:/auth/register")
     assert "smoke_run" not in _gate_options(SimpleNamespace())  # défaut : off
 
 

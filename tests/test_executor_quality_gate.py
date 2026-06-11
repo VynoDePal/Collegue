@@ -428,13 +428,13 @@ def _free_port():
         return sock.getsockname()[1]
 
 
-def _run_probe(command, timeout=10.0, port=None):
+def _run_probe(command, timeout=10.0, port=None, paths=("/",)):
     import subprocess
     import sys
 
     from collegue.executor.quality_gate import _smoke_probe_script
 
-    script = _smoke_probe_script(command, ("/",), timeout, port=port or _free_port())
+    script = _smoke_probe_script(command, paths, timeout, port=port or _free_port())
     return subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True, timeout=60)
 
 
@@ -1312,3 +1312,85 @@ def test_requirements_removed_markdown_neutralizes_injection():
     )
     markdown = report.to_markdown()
     assert "```" not in markdown.split("Lignes supprimées : ", 1)[1].splitlines()[0]
+
+
+# --- sondes smoke à méthode (#483) ---------------------------------------------------
+
+
+def test_smoke_probe_script_parses_method_prefix():
+    """#483 : préfixe « MÉTHODE: » optionnel — GET par défaut (compat #458),
+    payload JSON générique embarqué pour les méthodes à corps."""
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script("python serve.py", ("POST:/auth/register", "health", "/"), 5.0)
+    assert "('POST', '/auth/register')" in script
+    assert "('GET', '/health')" in script
+    assert "('GET', '/')" in script
+    assert "Content-Type" in script
+    assert "smoke-458@example.com" in script
+    compile(script, "<smoke>", "exec")  # anti-SyntaxError du template %-formaté
+
+
+async def test_smoke_default_paths_cover_auth_posts(tmp_path):
+    """Revue #483 (anti-inertie, leçon #461-v4) : le défaut de SIGNATURE — pas
+    seulement de config — couvre les POST d'auth. Un appelant qui active
+    smoke_run sans fournir de chemins (harness qui bypasse _gate_options)
+    sonde quand même le flux d'écriture central."""
+    from collegue.executor.quality_gate import DEFAULT_SMOKE_PATHS
+
+    assert "POST:/auth/register" in DEFAULT_SMOKE_PATHS
+    assert "POST:/auth/login" in DEFAULT_SMOKE_PATHS
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "('POST', '/auth/register')" in command
+    assert "('POST', '/auth/login')" in command
+
+
+def test_smoke_probe_red_when_post_500_but_get_200(tmp_path):
+    """LE cas de l'issue #483 (répété v3 puis v4) : GET / → 200 mais
+    POST /auth/register → 500 out-of-the-box — le smoke doit être ROUGE."""
+    import sys
+
+    port = _free_port()
+    server = tmp_path / "serve.py"
+    server.write_text(
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def do_POST(self):\n"
+        "        # simule le crash passlib/bcrypt à l'exécution du handler\n"
+        "        self.send_response(500); self.end_headers()\n"
+        "    def log_message(self, *a): pass\n"
+        f"HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n",
+        encoding="utf-8",
+    )
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/", "POST:/auth/register"))
+    assert result.returncode == 1
+    assert "GET / -> 200" in result.stdout
+    assert "POST /auth/register -> 500" in result.stdout
+
+
+def test_smoke_probe_green_when_post_4xx(tmp_path):
+    """#483 : un 4xx sur POST (validation du payload, modèle strict) reste
+    toléré — même sémantique que les GET (#458) : l'app A répondu."""
+    import sys
+
+    port = _free_port()
+    server = tmp_path / "serve.py"
+    server.write_text(
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def do_POST(self):\n"
+        "        self.send_response(422); self.end_headers()\n"
+        "    def log_message(self, *a): pass\n"
+        f"HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n",
+        encoding="utf-8",
+    )
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/", "POST:/auth/register"))
+    assert result.returncode == 0
+    assert "POST /auth/register -> 422" in result.stdout
