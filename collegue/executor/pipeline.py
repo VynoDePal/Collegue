@@ -79,6 +79,10 @@ _INFRA_NOISE_SIGNATURES = (
     "502 Server Error",
     "503 Server Error",
     "504 Server Error",
+    # Kill du conteneur sandbox au timeout (#461) : quand pip pend sur PyPI, le
+    # conteneur peut être tué avant d'imprimer un traceback réseau — la note du
+    # sandbox est alors le seul indice, et ce n'est pas un diagnostic actionnable.
+    "[sandbox] délai dépassé après",
 )
 
 

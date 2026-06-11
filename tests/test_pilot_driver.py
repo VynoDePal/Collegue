@@ -984,6 +984,138 @@ class _InfraThenGreenSandbox:
         return SandboxResult(exit_code=0, stdout="4 passed", stderr="")
 
 
+class _InfraGateForeverSandbox:
+    """Gate rouge sur bruit RÉSEAU pur (timeout PyPI, aucune ligne FAILED)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.calls += 1
+        return SandboxResult(
+            exit_code=1,
+            stdout="urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files.pythonhosted.org')",
+            stderr="",
+        )
+
+
+async def test_infra_gate_failure_does_not_consume_attempt_budget(repo, manager):
+    """#461 : un gate rouge au diagnostic purement infra ne décompte pas le
+    budget fonctionnel (grâce bornée) — puis recommence à décompter au-delà de
+    MAX_INFRA_GATE_GRACE (pas de boucle infinie sur PyPI down)."""
+    from collegue.pilot.driver import MAX_INFRA_GATE_GRACE
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=FakeCodeAgent(),
+        sandbox=_InfraGateForeverSandbox(),
+        max_task_attempts=2,
+        sleep_fn=_sleep,
+    )
+    # MAX_INFRA_GATE_GRACE aléas graciés + 2 tentatives décomptées → terminal 2/2.
+    assert result.stop_reason == "blocked"
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "failed"
+    assert t.attempt_count == 2
+    assert MAX_INFRA_GATE_GRACE == 2  # contrat de borne (pas de boucle infinie)
+
+
+async def test_graced_retry_still_backs_off(repo, manager):
+    """#461 (revue) : une grâce laisse attempts à 0 — sans plancher, le retry
+    repartirait SANS backoff contre l'infra qui vient de timeouter."""
+    pid = _linear_project(manager, 1)
+    sleeps = []
+
+    async def _sleep(d):
+        sleeps.append(d)
+
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=FakeCodeAgent(),
+        sandbox=_InfraGateForeverSandbox(),
+        max_task_attempts=1,
+        sleep_fn=_sleep,
+    )
+    assert sleeps and all(d >= 15.0 for d in sleeps)
+
+
+def test_repair_mode_active_with_best_diff_even_at_zero_attempts(manager):
+    """#461 (revue) : une grâce peut laisser attempt_count=0 avec une tentative
+    verte mémorisée — la PRÉSENCE de best_diff suffit à activer la réparation."""
+    from collegue.pilot.driver import _issue_from_task
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(
+        tid,
+        attempt_count=0,
+        best_diff="diff --git a/x.py b/x.py\n+x",
+        best_passed=34,
+        best_failed=0,
+        last_error="[gate/gate_failed] tentative 0/3 (aléa infra non décompté) — ReadTimeoutError",
+    )
+    context = _issue_from_task(manager.get_tasks(pid)[0]).context
+    assert "RÉPARATION CIBLÉE" in context
+    assert "34 test(s) verts" in context
+
+
+async def test_infra_gate_grace_recorded_in_audit(repo, manager):
+    from collegue.pilot.audit import RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=FakeCodeAgent(),
+        sandbox=_InfraGateForeverSandbox(),
+        max_task_attempts=1,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    graced = [e for e in audit.events if e.kind in ("task_retry", "task_failed") and e.detail.get("infra_grace")]
+    assert len(graced) == 2  # MAX_INFRA_GATE_GRACE
+    assert [e.detail["infra_grace"] for e in graced] == [1, 2]
+
+
+async def test_functional_gate_failure_still_consumes_budget(repo, manager):
+    """Contre-épreuve #461 : un échec FONCTIONNEL (lignes FAILED) décompte
+    normalement — la grâce ne s'applique qu'au bruit infra."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=FakeCodeAgent(),
+        sandbox=_FlakySandbox(fail_times=99),
+        max_task_attempts=2,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "blocked"
+    t = manager.get_tasks(pid)[0]
+    assert t.attempt_count == 2  # aucun gracié
+
+
 async def test_infra_noise_does_not_clobber_actionable_feedback(repo, manager):
     """#459 : un timeout PyPI à la tentative 2 n'écrase pas le diagnostic
     actionnable de la tentative 1 — l'agent (tentative 3) et l'opérateur voient

@@ -477,6 +477,18 @@ async def test_require_deps_install_makes_install_blocking(tmp_path):
     assert ") && python -m pytest" in command
 
 
+def test_installability_command_has_network_retries(tmp_path):
+    """#461 : la passe dépend de PyPI — pip ré-essaie (--retries/--timeout)
+    avant que le moteur ne voie un gate rouge (une micro-coupure réseau coûtait
+    une tentative fonctionnelle entière)."""
+    from collegue.executor import installability_command
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    command = installability_command(str(tmp_path))
+    assert command.count("--retries 5") == 2  # requirements + pytest
+    assert command.count("--timeout 30") == 2
+
+
 def test_installability_command_requires_requirements(tmp_path):
     from collegue.executor import installability_command
 
