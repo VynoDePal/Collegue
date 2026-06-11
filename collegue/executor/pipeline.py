@@ -25,14 +25,14 @@ items du board) — délibérément hors périmètre ici.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Optional
 
 from collegue.executor.agent import AgentResult, CodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner
 from collegue.executor.pr import PrClients, PrResult, open_pr
 from collegue.executor.quality_gate import QualityReport, Reviewer, run_quality_gate
-from collegue.executor.runner import ExecutionResult, run_issue
+from collegue.executor.runner import ExecutionResult, capture_diff, run_issue
 from collegue.executor.workspace import Workspace, apply_seed_diff, prepare_workspace
 from collegue.sandbox.executor import TIMEOUT_NOTE
 
@@ -322,6 +322,17 @@ async def execute_issue(
             issue=issue,
             **dict(gate_options or {}),
         )
+        if getattr(report, "requirements_added", ()):
+            # #481 : le gate a amendé requirements.txt (remédiation déterministe)
+            # — recapturer le diff autoritatif, sinon la PR (open_pr pousse
+            # files_changed) et la mémoire de retry (#436, best_diff) partiraient
+            # SANS le correctif (récidive du bug livré). Stage borné à
+            # requirements.txt : le gate écrit des artefacts dans le workspace
+            # monté (node_modules, __pycache__, fichiers du smoke) qu'un add -A
+            # global embarquerait dans la PR. Une WorkspaceError ici est
+            # absorbée par la barrière #435 (engine_error, retentable).
+            diff, files_changed = capture_diff(workspace, runner=runner, paths=("requirements.txt",))
+            execution = replace(execution, diff=diff, files_changed=files_changed, changed=bool(files_changed))
         if not report.passed:
             return ExecutionOutcome(
                 success=False,

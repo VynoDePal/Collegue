@@ -57,30 +57,57 @@ def run_issue(
 
     agent_result = agent.implement_issue(workspace.path, issue)
 
-    # Diff autoritatif : on stage tout (inclut les fichiers neufs/supprimés) puis on
-    # lit le diff vs HEAD. `git diff --staged` retourne 0 même quand il y a des
-    # changements ; un code non nul = vraie erreur de plomberie → on lève.
-    add = runner.run_command([git_bin, "add", "-A"], workspace.path)
+    diff, files_changed = capture_diff(workspace, runner=runner, git_bin=git_bin)
+    changed = bool(files_changed)
+    return ExecutionResult(
+        agent_result=agent_result,
+        changed=changed,
+        diff=diff,
+        files_changed=files_changed,
+        success=bool(agent_result.success and changed),
+    )
+
+
+def capture_diff(
+    workspace: Workspace,
+    *,
+    runner: Optional[CommandRunner] = None,
+    git_bin: str = "git",
+    paths: Optional[Tuple[str, ...]] = None,
+) -> Tuple[str, Tuple[str, ...]]:
+    """Diff autoritatif du workspace (``git add -A`` → ``diff --staged``) + fichiers touchés.
+
+    Factorisé (#481) : le pipeline recapture le diff quand le gate a amendé le
+    workspace (remédiation requirements) — sans recapture, la PR et la mémoire
+    de retry (#436) partiraient SANS le correctif.
+
+    ``paths`` (#481, revue) : borne le **stage** à ces chemins — le gate écrit
+    des artefacts dans le workspace monté (``__pycache__``, ``node_modules``,
+    fichiers du smoke run) : un ``add -A`` global post-gate les embarquerait
+    dans la PR et ferait sauter ``best_diff`` (> ``MAX_BEST_DIFF_CHARS``). Le
+    diff lu reste l'état STAGED complet (les changements de l'agent, déjà
+    stagés par :func:`run_issue`, en font partie).
+
+    On stage tout (inclut les fichiers neufs/supprimés) puis on lit le diff vs
+    HEAD. ``git diff --staged`` retourne 0 même quand il y a des changements ;
+    un code non nul = vraie erreur de plomberie → :class:`WorkspaceError`.
+    ``--binary`` (#455) : sans lui, un diff touchant un binaire (png, woff2…)
+    n'embarque pas son payload → le réensemencement du retry échoue précisément
+    sur les tâches frontend. ``--full-index`` (#479) : lignes index complètes —
+    le 3-way du retry retrouve les blobs de base sans ambiguïté d'abréviation.
+    """
+    runner = runner or LocalCommandRunner()
+    add_argv = [git_bin, "add", "-A"]
+    if paths:
+        add_argv += ["--", *paths]
+    add = runner.run_command(add_argv, workspace.path)
     if not add.ok:
         raise WorkspaceError(f"git add a échoué: {add.stderr.strip() or add.stdout.strip()}")
-    # ``--binary`` (#455) : sans lui, un diff touchant un binaire (png, woff2…)
-    # n'embarque pas son payload → le réensemencement du retry (#436,
-    # ``apply_seed_diff``) échoue précisément sur les tâches frontend.
-    # ``--full-index`` (#479) : lignes index complètes — le 3-way du retry
-    # retrouve les blobs de base sans ambiguïté d'abréviation.
     diff_res = runner.run_command([git_bin, "diff", "--staged", "--binary", "--full-index"], workspace.path)
     if not diff_res.ok:
         raise WorkspaceError(f"git diff a échoué: {diff_res.stderr.strip()}")
     names_res = runner.run_command([git_bin, "diff", "--staged", "--name-only"], workspace.path)
     if not names_res.ok:
         raise WorkspaceError(f"git diff --name-only a échoué: {names_res.stderr.strip()}")
-
     files_changed = tuple(line for line in names_res.stdout.splitlines() if line.strip())
-    changed = bool(files_changed)
-    return ExecutionResult(
-        agent_result=agent_result,
-        changed=changed,
-        diff=diff_res.stdout,
-        files_changed=files_changed,
-        success=bool(agent_result.success and changed),
-    )
+    return diff_res.stdout, files_changed

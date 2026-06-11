@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     # paquets pré-installés de l'image sandbox (réseau PyPI requis).
     GATE_REQUIRE_DEPS_INSTALL: bool = False
     GATE_CHECK_INSTALLABILITY: bool = False
+    # #481 : remédiation déterministe des dépendances manquantes pendant le gate
+    # (table module→paquet + relance bornée, sans LLM). Défaut ON — opt-out.
+    GATE_FIX_REQUIREMENTS: bool = True
     # Adéquation diff↔issue (#437) : contrôle LLM fail-closed « ce diff
     # implémente-t-il l'issue ? » lancé quand le reste du gate est vert — une
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne

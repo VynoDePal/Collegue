@@ -114,6 +114,10 @@ def _gate_options(settings_obj) -> dict:
         "check_installability": bool(getattr(settings_obj, "GATE_CHECK_INSTALLABILITY", False)),
         "require_test_changes": bool(getattr(settings_obj, "GATE_REQUIRE_TEST_CHANGES", False)),
     }
+    # #481 : remédiation requirements (défaut ON côté gate) — clé émise
+    # seulement en opt-out, pour ne pas grossir les options par défaut.
+    if not bool(getattr(settings_obj, "GATE_FIX_REQUIREMENTS", True)):
+        options["fix_missing_requirements"] = False
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)
