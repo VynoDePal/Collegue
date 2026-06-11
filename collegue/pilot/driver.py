@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.pipeline import execute_issue, failure_feedback, log_tail
+from collegue.executor.pipeline import execute_issue, failure_feedback, is_infra_noise, log_tail
 from collegue.executor.workspace import branch_for_issue, cleanup_workspace
 from collegue.pilot.audit import (
     BUDGET_EVENT,
@@ -92,6 +92,11 @@ DEFAULT_MAX_INFLIGHT_REVIEWS = 1
 MAX_BEST_DIFF_CHARS = 200_000
 _PASSED_RE = re.compile(r"(\d+) passed")
 _FAILED_RE = re.compile(r"(\d+) failed")
+
+
+# #459 : suffixe « aléa infra » accroché au diagnostic préservé — remplacé à
+# chaque nouvel aléa (jamais empilé), pour que last_error reste borné.
+_INFRA_NOISE_SUFFIX_RE = re.compile(r" \(\+ aléa infra[^)]*\)$")
 
 
 def _attempt_score(outcome) -> Optional[Tuple[int, int]]:
@@ -626,6 +631,19 @@ async def run_project(
             diagnostic = failure_feedback(outcome)
             if diagnostic:
                 last_error += " — " + diagnostic
+            # #459 : un aléa d'infrastructure (timeout PyPI, 5xx) n'écrase pas un
+            # diagnostic actionnable — sinon l'échec terminal (et le redo) hérite
+            # du feedback le MOINS utile de la série. Le suffixe est REMPLACÉ,
+            # jamais empilé (borné sur les séries d'aléas).
+            previous_error = str(getattr(task, "last_error", None) or "")
+            # On ne classifie que la partie DIAGNOSTIC (après « — ») : le préfixe
+            # « [stage/reason] tentative N/M » casserait le garde FAILED-en-tête
+            # de is_infra_noise et désarmerait la protection pour tout projet web
+            # dont les échecs de tests mentionnent ConnectionError.
+            previous_diag = previous_error.split(" — ", 1)[-1]
+            if diagnostic and is_infra_noise(diagnostic) and previous_error and not is_infra_noise(previous_diag):
+                base = _INFRA_NOISE_SUFFIX_RE.sub("", previous_error)
+                last_error = f"{base} (+ aléa infra à la tentative {attempts} : [{outcome.stage}/{outcome.reason}])"
             task.last_error = last_error
 
             # #436 : mémoriser la MEILLEURE tentative (diff + score + échecs). Le

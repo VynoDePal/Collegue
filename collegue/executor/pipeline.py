@@ -63,6 +63,44 @@ def log_tail(text: str, limit: int = 2000) -> str:
     return "…" + text[-limit:]
 
 
+# Signatures d'aléa d'INFRASTRUCTURE (réseau, dépôt de paquets, 5xx fournisseur)
+# dans un feedback d'échec (#459). Heuristique volontairement étroite : ces
+# motifs n'apparaissent pas dans un diagnostic fonctionnel.
+_INFRA_NOISE_SIGNATURES = (
+    "ReadTimeoutError",
+    "ReadTimeout",
+    "ConnectTimeoutError",
+    "ConnectTimeout",
+    "ConnectionError",
+    "ConnectionResetError",
+    "NewConnectionError",
+    "Temporary failure in name resolution",
+    "Connection refused",
+    "502 Server Error",
+    "503 Server Error",
+    "504 Server Error",
+)
+
+
+def is_infra_noise(feedback: str) -> bool:
+    """Vrai si ``feedback`` ressemble à un aléa d'infrastructure (#459).
+
+    Un timeout PyPI pendant le gate produit un traceback réseau SANS ligne
+    FAILED : ré-injecté tel quel, il ÉCRASE le diagnostic actionnable de la
+    tentative précédente (cas réel FacNor v3 : « email-validator manquant »
+    éclipsé par du bruit urllib3 — requeue opérateur nécessaire). Une ligne
+    FAILED/ERROR présente = diagnostic fonctionnel, jamais classé bruit.
+    """
+    text = feedback or ""
+    if not text:
+        return False
+    # « FAILED  » / « ERROR  » avec espace : les formes pytest. (pip écrit
+    # « ERROR: » avec deux-points — c'est justement du bruit d'install à classer.)
+    if any(line.strip().startswith(("FAILED ", "ERROR ")) for line in text.splitlines()):
+        return False
+    return any(signature in text for signature in _INFRA_NOISE_SIGNATURES)
+
+
 def failure_feedback(outcome: "ExecutionOutcome") -> str:
     """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
 
