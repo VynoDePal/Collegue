@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.pipeline import execute_issue, failure_feedback, is_infra_noise, log_tail
+from collegue.executor.pipeline import REASON_GATE_FAILED, execute_issue, failure_feedback, is_infra_noise, log_tail
 from collegue.executor.workspace import branch_for_issue, cleanup_workspace
 from collegue.pilot.audit import (
     BUDGET_EVENT,
@@ -283,6 +283,12 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
     return reconciled
 
 
+# #461 : aléas d'infrastructure pendant le GATE (timeout PyPI dans la passe
+# d'installabilité, 5xx) — nombre max d'échecs non décomptés du budget de
+# tentatives FONCTIONNELLES, par tâche et par run. Borné : si l'infra reste
+# rouge, on recommence à décompter (pas de boucle infinie sur PyPI down).
+MAX_INFRA_GATE_GRACE = 2
+
 # #460 : marqueur du préfixe posé par requeue_task_for_redo dans best_feedback —
 # détecté pour ne jamais empiler deux motifs de redo (le précédent est consommé).
 _REQUEUE_FEEDBACK_MARKER = " (échecs connus de la meilleure tentative : "
@@ -482,6 +488,9 @@ async def run_project(
     # #443 : dernier workspace CONSERVÉ par tâche (échec → debug). Toute nouvelle
     # tentative purge le précédent — au plus UN clone par tâche échouée survit.
     kept_workspaces: dict = {}
+    # #461 : aléas infra du gate non décomptés (task_id → nombre), borné par
+    # MAX_INFRA_GATE_GRACE — un timeout PyPI ne brûle plus une tentative saine.
+    infra_gate_grace: dict = {}
 
     while True:
         if len(processed) >= cap:
@@ -648,12 +657,25 @@ async def run_project(
             if outcome.quality_report is not None and outcome.quality_report.test_output:
                 detail["test_output_tail"] = log_tail(outcome.quality_report.test_output, 1000)
 
-            attempts = int(getattr(task, "attempt_count", 0) or 0) + 1
-            task.attempt_count = attempts
             # Synthèse CRISP (#424) : lignes FAILED/ERROR de pytest en priorité —
             # c'est ce qui sera ré-injecté dans le prompt de la tentative suivante.
-            last_error = f"[{outcome.stage}/{outcome.reason}] tentative {attempts}/{max_task_attempts}"
             diagnostic = failure_feedback(outcome)
+            # #461 : « le livrable ne s'installe pas » (fonctionnel — le but de la
+            # passe #439) et « PyPI n'a pas répondu » (infra transitoire)
+            # produisaient le même gate_failed décompté du budget : chaque
+            # micro-coupure réseau rapprochait une tâche SAINE de l'échec
+            # terminal. Un gate rouge au diagnostic purement infra ne consomme
+            # pas de tentative fonctionnelle (grâce bornée par tâche).
+            infra_gate_failure = outcome.reason == REASON_GATE_FAILED and is_infra_noise(diagnostic)
+            grace_used = int(infra_gate_grace.get(task.id, 0))
+            if infra_gate_failure and grace_used < MAX_INFRA_GATE_GRACE:
+                infra_gate_grace[task.id] = grace_used + 1
+                attempts = int(getattr(task, "attempt_count", 0) or 0)  # NON décompté
+                detail["infra_grace"] = grace_used + 1
+            else:
+                attempts = int(getattr(task, "attempt_count", 0) or 0) + 1
+            task.attempt_count = attempts
+            last_error = f"[{outcome.stage}/{outcome.reason}] tentative {attempts}/{max_task_attempts}"
             if diagnostic:
                 last_error += " — " + diagnostic
             # #459 : un aléa d'infrastructure (timeout PyPI, 5xx) n'écrase pas un

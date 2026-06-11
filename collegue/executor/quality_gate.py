@@ -231,10 +231,14 @@ def installability_command(workspace: str) -> Optional[str]:
     """
     if not os.path.isfile(os.path.join(workspace, "requirements.txt")):
         return None
+    # --retries/--timeout EXPLICITES (#461) : une micro-coupure PyPI pendant la
+    # passe coûtait une tentative fonctionnelle entière (échec terminal FacNor
+    # v3, itération 14) — pip ré-essaie d'abord, le moteur ne décompte qu'après.
+    pip_flags = "--no-cache-dir -q --retries 5 --timeout 60"
     return (
         f"python -m venv --clear {_GATE_VENV}"
-        f" && {_GATE_VENV}/bin/python -m pip install --no-cache-dir -q -r requirements.txt"
-        f" && {_GATE_VENV}/bin/python -m pip install --no-cache-dir -q pytest"
+        f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} -r requirements.txt"
+        f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} pytest"
         f" && {_GATE_VENV}/bin/python -m pytest --collect-only -q"
     )
 
