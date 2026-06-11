@@ -221,6 +221,76 @@ async def test_gate_frontend_opt_out(tmp_path):
     assert "npm" not in command
 
 
+# --- gate frontend en sous-répertoire (#457, layout monorepo) ----------------------
+
+
+def test_frontend_dirs_detects_root_and_first_level(tmp_path):
+    """#457 : la racine d'abord (comportement #438), puis les sous-répertoires de
+    1er niveau — node_modules et répertoires cachés ignorés, tri déterministe."""
+    from collegue.executor.quality_gate import _frontend_dirs
+
+    _write_pkg(tmp_path, scripts={})
+    for sub in ("frontend", "web", "node_modules", ".hidden"):
+        (tmp_path / sub).mkdir()
+        _write_pkg(tmp_path / sub, scripts={})
+    (tmp_path / "backend").mkdir()  # sans package.json → ignoré
+    assert _frontend_dirs(str(tmp_path)) == [".", "frontend", "web"]
+
+
+def test_frontend_dirs_empty_without_any_package_json(tmp_path):
+    from collegue.executor.quality_gate import _frontend_dirs
+
+    (tmp_path / "backend").mkdir()
+    assert _frontend_dirs(str(tmp_path)) == []
+
+
+def test_frontend_gate_command_subdir_runs_inside_it(tmp_path):
+    """#457 : pour un package.json en sous-répertoire, la commande `cd` dedans et
+    lit SES scripts/tsconfig (pas ceux de la racine)."""
+    from collegue.executor import frontend_gate_command
+
+    front = tmp_path / "frontend"
+    front.mkdir()
+    _write_pkg(front, scripts={}, dev_deps={"typescript": "^5"})
+    (front / "tsconfig.json").write_text("{}", encoding="utf-8")
+    command = frontend_gate_command(str(tmp_path), subdir="frontend")
+    assert command is not None
+    assert "cd -- frontend && " in command
+    assert "tsc --noEmit" in command  # tsconfig du SOUS-répertoire détecté
+    assert command.index("cd -- frontend") < command.index("npm ci")
+
+    # Pas de package.json dans le sous-répertoire → None.
+    assert frontend_gate_command(str(tmp_path), subdir="autre") is None
+
+
+async def test_gate_runs_frontend_pass_for_subdir_package_json(tmp_path):
+    """#457 (cas réel FacNor v3) : package.json livré dans frontend/ SEULEMENT →
+    la passe npm doit tourner quand même (42 erreurs TS mergées tout gate vert)."""
+    front = tmp_path / "frontend"
+    front.mkdir()
+    _write_pkg(front, scripts={"build": "vite build"})
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "cd -- frontend && " in command
+    assert "npm run build" in command
+    assert command.index("pytest") < command.index("npm run build")
+    assert ") && " in command  # fail-closed : l'échec npm rend le gate rouge
+
+
+async def test_gate_runs_one_frontend_pass_per_detected_dir(tmp_path):
+    """#457 : racine + sous-répertoire → une passe npm PAR répertoire détecté."""
+    _write_pkg(tmp_path, scripts={"build": "vite build"})
+    front = tmp_path / "frontend"
+    front.mkdir()
+    _write_pkg(front, scripts={"build": "tsc && vite build"})
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert command.count("npm run build") == 2
+    assert "cd -- frontend && " in command
+
+
 # --- installabilité du livrable (#439) ---------------------------------------------
 
 
