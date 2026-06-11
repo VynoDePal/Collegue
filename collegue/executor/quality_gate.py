@@ -239,6 +239,24 @@ def installability_command(workspace: str) -> Optional[str]:
     )
 
 
+# #463 : note visible quand « aucun test collecté » (pytest exit 5) est toléré.
+_EXIT5_NOTE = "[gate] pytest : aucun test collecté (exit 5) — toléré, une passe frontend couvre (#463)"
+
+
+def _tolerate_pytest_exit5(command: str) -> str:
+    """Mappe l'exit 5 de pytest (« aucun test collecté ») vers un succès (#463).
+
+    Sur les tâches greenfield/frontend, ne collecter aucun test pytest est
+    NORMAL (le livrable est du TS/JS, couvert par la passe frontend #438) — mais
+    le gate fail-closed confondait exit 5 et tests rouges : la tâche brûlait ses
+    tentatives sur un non-échec puis figeait le DAG. La connaissance vivait dans
+    une rustine du harness de validation au lieu du moteur. N'est appliqué que
+    quand une passe frontend va EFFECTIVEMENT tourner (fail-closed sinon) ;
+    tout autre exit non nul reste un échec.
+    """
+    return f"({command}); _rc=$?; if [ $_rc -eq 5 ]; then echo {shlex.quote(_EXIT5_NOTE)}; elif [ $_rc -ne 0 ]; then exit $_rc; fi"
+
+
 # Bannière insérée entre la passe Python et la passe frontend dans la sortie du gate.
 _FRONTEND_BANNER = "[gate] frontend : install + build + tests (#438)"
 
@@ -698,20 +716,32 @@ async def run_quality_gate(
                 # Strict (#439) : install bloquante. Toléré (#414) : les tests
                 # tournent quand même, l'échec laisse sa note dans la sortie.
                 command = f"({prelude}) && {test_command}" if require_deps_install else f"{prelude}; {test_command}"
+        front_commands: List[str] = []
         if frontend_gate:
             for front_dir in _frontend_dirs(workspace):
                 front = frontend_gate_command(workspace, subdir=front_dir)
                 if front is None:
                     continue
-                # `&&` : chaque passe frontend ne tourne que si la précédente est
-                # verte (le verdict est déjà rouge sinon) et son échec rend le
-                # gate rouge. Une passe PAR répertoire détecté (#457 : la racine
-                # ET les sous-répertoires de 1er niveau — layout monorepo).
+                # Une passe PAR répertoire détecté (#457 : la racine ET les
+                # sous-répertoires de 1er niveau — layout monorepo).
                 banner = _FRONTEND_BANNER if front_dir == "." else f"{_FRONTEND_BANNER} [{front_dir}]"
-                command = f"({command}) && echo {shlex.quote(banner)} && ({front})"
+                front_commands.append(f"echo {shlex.quote(banner)} && ({front})")
+        if front_commands:
+            # #463 : « aucun test pytest collecté » est NORMAL quand une passe
+            # frontend couvre la tâche — exit 5 toléré DANS ce cas seulement.
+            command = _tolerate_pytest_exit5(command)
+        for front in front_commands:
+            # `&&` : chaque passe frontend ne tourne que si la précédente est
+            # verte (le verdict est déjà rouge sinon) et son échec rend le
+            # gate rouge.
+            command = f"({command}) && {front}"
         if check_installability:
             installability = installability_command(workspace)
             if installability is not None:
+                if front_commands:
+                    # La collecte de la passe d'installabilité (#439) renvoie
+                    # AUSSI exit 5 sans test pytest — même tolérance (#463).
+                    installability = _tolerate_pytest_exit5(installability)
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
         if smoke_run:
             smoke = smoke_run_command(workspace, command=smoke_command, paths=smoke_paths, timeout=smoke_timeout)

@@ -291,6 +291,66 @@ async def test_gate_runs_one_frontend_pass_per_detected_dir(tmp_path):
     assert "cd -- frontend && " in command
 
 
+# --- pytest exit 5 : « aucun test collecté » (#463) --------------------------------
+
+
+def test_tolerate_exit5_shell_semantics():
+    """Le wrapper EXÉCUTÉ : exit 5 → 0 (+ note), exit 1 → 1, exit 0 → 0."""
+    import subprocess
+
+    from collegue.executor.quality_gate import _EXIT5_NOTE, _tolerate_pytest_exit5
+
+    def run(inner):
+        return subprocess.run(["sh", "-c", _tolerate_pytest_exit5(inner)], capture_output=True, text=True)
+
+    five = run("exit 5")
+    assert five.returncode == 0
+    assert _EXIT5_NOTE in five.stdout
+    assert run("exit 1").returncode == 1
+    ok = run("echo vert")
+    assert ok.returncode == 0 and _EXIT5_NOTE not in ok.stdout
+
+
+async def test_gate_tolerates_exit5_when_frontend_pass_covers(tmp_path):
+    """#463 (cas réel FacNor v3) : tâche frontend sans test pytest → exit 5
+    toléré (la passe npm couvre), enchaînement préservé."""
+    front = tmp_path / "frontend"
+    front.mkdir()
+    _write_pkg(front, scripts={"build": "vite build"})
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "_rc=$?" in command and "-eq 5" in command  # tolérance présente
+    assert command.index("-eq 5") < command.index("npm")  # ... AVANT la passe npm
+    assert "cd -- frontend && " in command
+
+
+async def test_gate_exit5_still_fails_without_frontend(tmp_path):
+    """Fail-closed conservé : sans passe frontend, exit 5 reste un échec
+    (un projet Python sans AUCUN test ne passe pas le gate en silence)."""
+    sandbox = _FakeSandbox(SandboxResult(exit_code=5, stdout="no tests ran", stderr=""))
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "-eq 5" not in command  # pas de tolérance hors couverture frontend
+    assert report.tests_passed is False
+    assert report.passed is False
+
+
+async def test_gate_exit5_tolerance_applies_to_installability_collect(tmp_path):
+    """#463 : la collecte de la passe d'installabilité (#439) renvoie aussi
+    exit 5 sans test pytest — même tolérance quand le front couvre."""
+    front = tmp_path / "frontend"
+    front.mkdir()
+    _write_pkg(front, scripts={"build": "vite build"})
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), check_installability=True
+    )
+    _ws, command = sandbox.calls[0]
+    assert command.count("-eq 5") == 2  # pytest principal + collecte installabilité
+
+
 # --- smoke run (#458) ---------------------------------------------------------------
 
 
