@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Optional
@@ -112,11 +113,14 @@ def prepare_revert(
     if not os.path.isdir(os.path.join(source, ".git")):
         raise RevertError(f"repo_source n'est pas un dépôt git: {repo_source}")
 
+    owns_parent = dest_root is None
     parent = dest_root or tempfile.mkdtemp(prefix="collegue-revert-")
     os.makedirs(parent, exist_ok=True)
     dest = os.path.join(parent, "workspace")
     clone = runner.run_command([git_bin, "clone", "--quiet", source, dest], parent)
     if not clone.ok:
+        if owns_parent:  # #466 : un clone raté ne laisse pas de répertoire orphelin
+            shutil.rmtree(parent, ignore_errors=True)
         raise RevertError(f"git clone a échoué: {clone.stderr.strip() or clone.stdout.strip()}")
 
     # L'identité de commit est fournie par ``revert_commit`` (en ``-c``), pas besoin de
@@ -124,6 +128,8 @@ def prepare_revert(
     revert_branch = branch or f"{REVERT_BRANCH_PREFIX}{sha[:12]}"
     checkout = runner.run_command([git_bin, "checkout", "-q", "-b", revert_branch], dest)
     if not checkout.ok:
+        if owns_parent:
+            shutil.rmtree(parent, ignore_errors=True)
         raise RevertError(f"git checkout -b {revert_branch} a échoué: {checkout.stderr.strip()}")
 
     result = revert_commit(dest, sha, merge_parent=merge_parent, runner=runner, git_bin=git_bin)
