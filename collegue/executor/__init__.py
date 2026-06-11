@@ -32,6 +32,7 @@ from collegue.executor.quality_gate import (
     issue_expects_code,
     outcome_from_review,
     run_quality_gate,
+    smoke_run_command,
     tests_touched,
 )
 from collegue.executor.revert import (
@@ -77,6 +78,7 @@ __all__ = [
     "run_quality_gate",
     "frontend_gate_command",
     "installability_command",
+    "smoke_run_command",
     "outcome_from_review",
     "AdequacyChecker",
     "AdequacyOutcome",

@@ -310,6 +310,19 @@ def test_gate_options_built_from_settings():
     options = _gate_options(with_adequacy)
     assert options["adequacy_checker"] is not None
 
+    # GATE_SMOKE_RUN (#458, opt-in) : commande + chemins sondés câblés.
+    with_smoke = SimpleNamespace(
+        GATE_SMOKE_RUN=True,
+        GATE_SMOKE_COMMAND="python serve.py",
+        GATE_SMOKE_PATHS="/health, /factures/",
+    )
+    options = _gate_options(with_smoke)
+    assert options["smoke_run"] is True
+    assert options["smoke_command"] == "python serve.py"
+    assert options["smoke_paths"] == ("/health", "/factures/")
+    assert options["smoke_timeout"] == 30.0
+    assert "smoke_run" not in _gate_options(SimpleNamespace())  # défaut : off
+
 
 # --- isolation ------------------------------------------------------------------
 

@@ -79,6 +79,142 @@ def deps_install_prelude(workspace: str, *, strict: bool = False) -> Optional[st
 _INSTALLABILITY_BANNER = "[gate] installabilité : venv nu + requirements + collecte (#439)"
 _GATE_VENV = "/tmp/.gate_venv"
 
+# Passe smoke-run (#458) : port d'écoute imposé dans le conteneur du gate.
+_SMOKE_BANNER = "[gate] smoke run : l'app démarre et répond (#458)"
+_SMOKE_PORT = 8765
+_SMOKE_HEREDOC = "COLLEGUE_SMOKE_458"
+
+# Entrées FastAPI usuelles : (chemin relatif, cible uvicorn). Détection
+# délibérément conservatrice — sans entrée reconnue, la passe est SKIPPÉE
+# (pas de faux rouge sur un projet non-web), sauf commande explicite.
+_ASGI_APP_CANDIDATES = (
+    ("main.py", "main:app"),
+    ("app.py", "app:app"),
+    (os.path.join("app", "main.py"), "app.main:app"),
+    (os.path.join("src", "main.py"), "src.main:app"),
+)
+
+# Sonde exécutée DANS le conteneur du gate : démarre le serveur, attend qu'il
+# réponde, vérifie chaque chemin (<500 = vivant ; 4xx toléré — route protégée
+# ou méthode — l'app A répondu), imprime la queue du log serveur en cas d'échec.
+# %%-formaté (pas f-string) : le code python embarqué garde ses accolades.
+_SMOKE_PROBE_TEMPLATE = """\
+import subprocess, sys, time, urllib.error, urllib.request
+
+command = %(command)r
+paths = %(paths)r
+timeout = %(timeout)r
+log = open("/tmp/.collegue_smoke.log", "w+", encoding="utf-8", errors="replace")
+proc = subprocess.Popen(command, shell=True, stdout=log, stderr=subprocess.STDOUT)
+base = "http://127.0.0.1:%(port)d"
+deadline = time.time() + timeout
+verdicts = []
+for path in paths:
+    status = None
+    attempted = False
+    # Au moins UNE tentative par chemin, même si le précédent a épuisé le délai
+    # (sinon : faux rouge « sans réponse » sur un chemin jamais contacté).
+    while not attempted or time.time() < deadline:
+        attempted = True
+        if proc.poll() is not None:
+            break  # le serveur est mort avant de répondre
+        try:
+            status = urllib.request.urlopen(base + path, timeout=2).status
+            break
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            break
+        except Exception:
+            time.sleep(0.5)
+    verdicts.append((path, status))
+time.sleep(0.3)  # resserre la fenêtre « répond une fois puis meurt »
+ok = proc.poll() is None and all(s is not None and s < 500 for _p, s in verdicts)
+for path, status in verdicts:
+    print("[gate] smoke run", path, "->", status if status is not None else "sans réponse")
+if proc.poll() is not None:
+    print(
+        "[gate] smoke run : le processus serveur s'est terminé (code", str(proc.poll()) + ")",
+        "— la commande de démarrage doit rester au premier plan",
+    )
+if not ok:
+    log.flush()
+    log.seek(0)
+    print("[gate] smoke run ÉCHEC — queue du log serveur :")
+    print(log.read()[-4000:])
+proc.terminate()
+sys.exit(0 if ok else 1)
+"""
+
+
+def _detect_asgi_app(workspace: str) -> Optional[str]:
+    """Cible uvicorn (``module:app``) si le workspace expose une app FastAPI (#458)."""
+    for rel, target in _ASGI_APP_CANDIDATES:
+        path = os.path.join(workspace, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                # Lecture bornée : fichier non fiable (écrit par l'agent), et
+                # « FastAPI( » vit toujours en tête de module.
+                source = handle.read(65536)
+        except OSError:
+            continue
+        if "FastAPI(" in source:
+            return target
+    return None
+
+
+def _smoke_probe_script(command: str, paths: Tuple[str, ...], timeout: float, *, port: int = _SMOKE_PORT) -> str:
+    """Source python de la sonde smoke-run (pur — testable par ``compile``)."""
+    # `/` de tête normalisé : sans lui, urlopen("…:8765health") lèverait à
+    # chaque tentative et brûlerait tout le délai en silence.
+    normalized = tuple(path if path.startswith("/") else "/" + path for path in paths) or ("/",)
+    return _SMOKE_PROBE_TEMPLATE % {
+        "command": command,
+        "paths": normalized,
+        "timeout": float(timeout),
+        "port": int(port),
+    }
+
+
+def smoke_run_command(
+    workspace: str,
+    *,
+    command: Optional[str] = None,
+    paths: Tuple[str, ...] = ("/",),
+    timeout: float = 30.0,
+) -> Optional[str]:
+    """Commande de la passe smoke-run (#458). Fail-closed une fois déclenchée.
+
+    Le gate validait le livrable par pytest + revue sans JAMAIS lancer
+    l'application : toute divergence entre l'init des tests et celui de la prod
+    passait sous le radar (FacNor v3 : 34 tests verts via ``create_all``, mais
+    ``schema.sql`` incomplet → flux central en 500 sur installation fraîche,
+    tous gates verts — pour la 2e campagne consécutive).
+
+    - ``command`` : commande de démarrage explicite — elle doit écouter sur
+      ``127.0.0.1:8765`` et **rester au premier plan** (un wrapper qui
+      daemonise est vu comme « serveur mort ») ; sinon auto-détection FastAPI
+      (cf. :data:`_ASGI_APP_CANDIDATES`) → ``python -m uvicorn`` ;
+    - ``paths`` : chemins sondés — chacun doit répondre **< 500** (4xx toléré :
+      l'app a répondu ; 5xx ou silence = rouge) ;
+    - ``timeout`` : budget total d'attente de réponse (secondes) — à garder
+      sous le timeout du conteneur sandbox (120 s par défaut, partagé avec
+      pip/pytest/npm) ;
+    - ``None`` si aucune app détectable ET pas de commande explicite (projet
+      non-web : la passe ne s'applique pas).
+
+    S'exécute dans le **même** conteneur que les autres passes (les deps du
+    projet y sont déjà installées, #414) ; tout meurt avec le conteneur.
+    """
+    if not command:
+        target = _detect_asgi_app(workspace)
+        if target is None:
+            return None
+        command = f"python -m uvicorn {target} --host 127.0.0.1 --port {_SMOKE_PORT}"
+    script = _smoke_probe_script(command, paths, timeout)
+    return f"python - <<'{_SMOKE_HEREDOC}'\n{script}{_SMOKE_HEREDOC}"
+
 
 def installability_command(workspace: str) -> Optional[str]:
     """Passe d'installabilité en environnement NU (#439). Fail-closed.
@@ -511,6 +647,10 @@ async def run_quality_gate(
     check_installability: bool = False,
     adequacy_checker: Optional[AdequacyChecker] = None,
     require_test_changes: bool = False,
+    smoke_run: bool = False,
+    smoke_command: Optional[str] = None,
+    smoke_paths: Tuple[str, ...] = ("/",),
+    smoke_timeout: float = 30.0,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -536,6 +676,13 @@ async def run_quality_gate(
     critères (« livraison fantôme ») ne passe plus.
     ``require_test_changes`` (#437) : exige qu'au moins un fichier de test soit
     touché par le diff (sinon, simple signal ``tests_touched`` dans le rapport).
+    ``smoke_run`` (#458) : passe finale qui DÉMARRE l'application dans le même
+    conteneur et vérifie qu'elle répond (cf. :func:`smoke_run_command`) — sans
+    elle, une divergence d'init tests/prod livre un produit en 500 avec tous
+    les gates verts. ``smoke_command`` : démarrage explicite (écoute sur
+    127.0.0.1:8765) ; ``smoke_paths`` : chemins sondés (chacun doit répondre
+    < 500). Skippée si aucune app n'est détectable et qu'aucune commande n'est
+    fournie.
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
@@ -566,6 +713,12 @@ async def run_quality_gate(
             installability = installability_command(workspace)
             if installability is not None:
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
+        if smoke_run:
+            smoke = smoke_run_command(workspace, command=smoke_command, paths=smoke_paths, timeout=smoke_timeout)
+            if smoke is not None:
+                # Dernière passe (le heredoc doit clore la commande) : l'app est
+                # lancée dans le même conteneur, après install des deps (#414).
+                command = f"({command}) && echo {shlex.quote(_SMOKE_BANNER)} && {smoke}"
         test_res = sandbox.run_tests(workspace, command)
         tests_passed = test_res.ok
         test_exit_code = test_res.exit_code

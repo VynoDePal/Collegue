@@ -291,6 +291,152 @@ async def test_gate_runs_one_frontend_pass_per_detected_dir(tmp_path):
     assert "cd -- frontend && " in command
 
 
+# --- smoke run (#458) ---------------------------------------------------------------
+
+
+def _write_fastapi_app(tmp_path, rel="main.py"):
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+
+
+def test_detect_asgi_app_finds_fastapi_entrypoints(tmp_path):
+    from collegue.executor.quality_gate import _detect_asgi_app
+
+    assert _detect_asgi_app(str(tmp_path)) is None  # rien à détecter
+    _write_fastapi_app(tmp_path, "app/main.py")
+    assert _detect_asgi_app(str(tmp_path)) == "app.main:app"
+    _write_fastapi_app(tmp_path, "main.py")
+    assert _detect_asgi_app(str(tmp_path)) == "main:app"  # racine prioritaire
+
+    # Un main.py SANS FastAPI n'est pas une app détectable.
+    (tmp_path / "main.py").write_text("print('cli')\n", encoding="utf-8")
+    (tmp_path / "app" / "main.py").write_text("print('cli')\n", encoding="utf-8")
+    assert _detect_asgi_app(str(tmp_path)) is None
+
+
+def test_smoke_run_command_none_without_app_nor_command(tmp_path):
+    from collegue.executor import smoke_run_command
+
+    assert smoke_run_command(str(tmp_path)) is None
+
+
+def test_smoke_run_command_autodetects_fastapi(tmp_path):
+    from collegue.executor import smoke_run_command
+
+    _write_fastapi_app(tmp_path)
+    command = smoke_run_command(str(tmp_path))
+    assert command is not None
+    assert "python -m uvicorn main:app" in command
+    assert "127.0.0.1" in command and "8765" in command
+    assert command.startswith("python - <<'COLLEGUE_SMOKE_458'")
+
+
+def test_smoke_run_command_explicit_command_and_paths(tmp_path):
+    # Commande explicite : pas besoin d'app détectable ; les chemins sont embarqués.
+    from collegue.executor import smoke_run_command
+
+    command = smoke_run_command(str(tmp_path), command="python serve.py", paths=("/health", "/factures/"))
+    assert command is not None
+    assert "'python serve.py'" in command
+    assert "/health" in command and "/factures/" in command
+
+
+def test_smoke_probe_script_is_valid_python(tmp_path):
+    """La sonde embarquée doit COMPILER (une SyntaxError dans le template rendrait
+    la passe rouge en prod pour une mauvaise raison)."""
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script('uvicorn "x":app', ("/", "/a b"), 30.0)
+    compile(script, "<smoke>", "exec")
+
+
+def test_smoke_probe_script_normalizes_leading_slash():
+    # Sans `/` de tête, urlopen("…:8765health") lèverait à chaque tentative et
+    # brûlerait tout le délai en silence (faux « sans réponse »).
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script("python serve.py", ("health", "/ok"), 5.0)
+    assert "'/health'" in script and "'/ok'" in script
+
+
+def _free_port():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _run_probe(command, timeout=10.0, port=None):
+    import subprocess
+    import sys
+
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script(command, ("/",), timeout, port=port or _free_port())
+    return subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True, timeout=60)
+
+
+def test_smoke_probe_green_against_real_server():
+    """La sonde EXÉCUTÉE (pas seulement compilée) : un serveur HTTP réel qui
+    répond sur / → exit 0. Port libre pour ne pas dépendre de l'état local —
+    en prod la sonde tourne sur 8765 dans son conteneur isolé."""
+    import sys
+
+    port = _free_port()
+    proc = _run_probe(f"{sys.executable} -m http.server {port} --bind 127.0.0.1", port=port)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "-> 200" in proc.stdout
+
+
+def test_smoke_probe_red_when_server_exits():
+    """Un « serveur » qui se termine aussitôt → rouge, avec le diagnostic
+    « doit rester au premier plan » (et pas un simple silence)."""
+    import sys
+
+    proc = _run_probe(f"{sys.executable} -c 'pass'", timeout=5.0)
+    assert proc.returncode == 1
+    assert "premier plan" in proc.stdout
+
+
+async def test_gate_smoke_run_appended_last(tmp_path):
+    """#458 : la passe smoke-run est enchaînée fail-closed EN DERNIER (le heredoc
+    clôt la commande), après les autres passes."""
+    _write_fastapi_app(tmp_path)
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path),
+        DIFF,
+        ctx=None,
+        sandbox=sandbox,
+        reviewer=FakeReviewer(),
+        smoke_run=True,
+        check_installability=True,
+    )
+    _ws, command = sandbox.calls[0]
+    assert "smoke run" in command
+    assert "python -m uvicorn main:app" in command
+    assert command.index("installabilité") < command.index("smoke run")
+    assert command.rstrip().endswith("COLLEGUE_SMOKE_458")
+
+
+async def test_gate_smoke_run_default_off_and_skipped_without_app(tmp_path):
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "smoke" not in command  # opt-in
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    sandbox2 = _green()
+    await run_quality_gate(str(bare), DIFF, ctx=None, sandbox=sandbox2, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command2 = sandbox2.calls[0]
+    assert "smoke" not in command2  # aucune app détectable → passe skippée
+
+
 # --- installabilité du livrable (#439) ---------------------------------------------
 
 
