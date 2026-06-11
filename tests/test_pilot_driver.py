@@ -984,6 +984,82 @@ class _InfraThenGreenSandbox:
         return SandboxResult(exit_code=0, stdout="4 passed", stderr="")
 
 
+class _TimedOutAgent:
+    """Agent tué par le timeout sandbox : aucun usage émis, note sandbox dans les logs."""
+
+    def implement_issue(self, workspace, issue):
+        return AgentResult(success=False, logs="travail en cours...\n[sandbox] délai dépassé après 2400s")
+
+
+async def test_usage_lost_on_sandbox_timeout_is_audited(repo, manager):
+    """#464 : une tentative tuée de l'extérieur n'a pas pu émettre sa ligne
+    [collegue-usage] — la perte est JOURNALISÉE (usage_lost) au lieu d'un trou
+    silencieux dans le ledger."""
+    from collegue.pilot.audit import USAGE_LOST, RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(
+        manager, repo, pid, dry_run=False, agent=_TimedOutAgent(), audit=audit, max_task_attempts=1, sleep_fn=_sleep
+    )
+    lost = [e for e in audit.events if e.kind == USAGE_LOST]
+    assert len(lost) == 1
+    assert lost[0].detail == {"task_id": manager.get_tasks(pid)[0].id, "reason": "sandbox_timeout"}
+
+
+async def test_no_usage_lost_event_when_usage_reported_or_no_timeout(repo, manager):
+    from collegue.pilot.audit import COST_OBSERVED, USAGE_LOST, RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    # Échec SANS note de timeout (agent 503) → pas d'événement usage_lost.
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_FlakyAgent(fail_times=99),
+        audit=audit,
+        max_task_attempts=1,
+        sleep_fn=_sleep,
+    )
+    assert not [e for e in audit.events if e.kind == USAGE_LOST]
+
+    # Timeout MAIS usage incrémental déjà émis → record_cost, pas usage_lost
+    # (perte bornée au dernier delta : déjà de l'usage compté, pas un trou).
+    class _TimedOutWithUsage:
+        def implement_issue(self, workspace, issue):
+            return AgentResult(
+                success=False,
+                logs="[collegue-usage] partiel\n[sandbox] délai dépassé après 2400s",
+                prompt_tokens=100,
+                completion_tokens=40,
+                cost_usd=0.01,
+            )
+
+    pid2 = _linear_project(manager, 1)
+    audit2 = RunAuditLog(pid2)
+    await _run(
+        manager,
+        repo,
+        pid2,
+        dry_run=False,
+        agent=_TimedOutWithUsage(),
+        audit=audit2,
+        max_task_attempts=1,
+        sleep_fn=_sleep,
+    )
+    assert not [e for e in audit2.events if e.kind == USAGE_LOST]
+    observed = [e for e in audit2.events if e.kind == COST_OBSERVED]
+    assert observed and observed[0].detail["tokens"] == 140
+
+
 class _InfraGateForeverSandbox:
     """Gate rouge sur bruit RÉSEAU pur (timeout PyPI, aucune ligne FAILED)."""
 

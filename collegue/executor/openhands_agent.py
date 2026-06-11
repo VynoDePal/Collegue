@@ -34,11 +34,19 @@ from collegue.executor.agent import AgentResult, IssueSpec
 # Point d'entrée headless d'OpenHands (module exécuté dans le conteneur sandbox).
 OPENHANDS_ENTRYPOINT = "openhands.core.main"
 
-# Contrat d'usage LLM du canal coder (#441) : le runner (entrypoint OpenHands ou
-# tout wrapper SDK) imprime, par appel LLM ou en fin de run, une ligne
+# Contrat d'usage LLM du canal coder (#441, précisé par #464) : le runner
+# (entrypoint OpenHands ou tout wrapper SDK) imprime une ligne
 #   [collegue-usage] {"prompt_tokens": 1200, "completion_tokens": 480, "cost_usd": 0.0021}
-# Toutes les occurrences sont SOMMÉES par :func:`parse_usage_from_logs` et
-# alimentent le ledger de coût du run via ``AgentResult``.
+# Toutes les occurrences sont SOMMÉES par :func:`parse_usage_from_logs` —
+# chaque ligne doit donc porter un DELTA (l'usage d'UN appel LLM), jamais un
+# cumul (sommer des cumuls compterait double). Émission INCRÉMENTALE exigée
+# (#464) : une ligne par appel, au fil de l'eau — un runner qui n'émet qu'un
+# agrégat final dans un ``finally`` perd TOUT son usage quand le process est
+# tué de l'extérieur (timeout sandbox → ``docker kill``, OOM) : c'est
+# précisément la tentative la plus longue, donc la plus coûteuse, qui devient
+# invisible du ledger (run FacNor v3 : 41 min de tokens hors budget). Résiduel
+# assumé : un kill en plein appel perd au plus le DERNIER delta non émis (et ce
+# cas n'émet pas d'événement ``usage_lost`` — il y a déjà de l'usage compté).
 USAGE_MARKER = "[collegue-usage]"
 
 

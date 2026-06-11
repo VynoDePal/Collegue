@@ -36,6 +36,10 @@ BUDGET_EVENT = "budget_event"
 CHECKPOINT_SAVED = "checkpoint_saved"
 RUN_STOP = "run_stop"
 COST_OBSERVED = "cost_observed"
+# #464 : exécution coder terminée par un kill externe (timeout sandbox) SANS
+# ligne d'usage — la dépense de la tentative est invisible du ledger ; on
+# journalise la perte au lieu de laisser un trou silencieux.
+USAGE_LOST = "usage_lost"
 
 # Noms des métriques persistées pour le ledger de coût par run.
 METRIC_RUN_COST_USD = "run_cost_usd"
