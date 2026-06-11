@@ -102,3 +102,31 @@ def test_revert_pr_preview_is_pure():
     assert "§6" in out["body"]
     with pytest.raises(RevertError):
         revert_pr_preview("nope")
+
+
+# --- pas de clone orphelin quand prepare_revert échoue (#466) -----------------------
+
+
+def test_failed_clone_leaves_no_orphan_dir(tmp_path, monkeypatch):
+    import tempfile
+
+    from collegue.executor.revert import RevertError, prepare_revert
+
+    created = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _tracking_mkdtemp(*a, **k):
+        path = real_mkdtemp(*a, **k)
+        created.append(path)
+        return path
+
+    import collegue.executor.revert as revert_mod
+
+    monkeypatch.setattr(revert_mod.tempfile, "mkdtemp", _tracking_mkdtemp)
+    with pytest.raises(RevertError):
+        prepare_revert(str(tmp_path / "pas-un-depot"), "a" * 40)
+    # RevertError AVANT mkdtemp (source invalide) ou APRÈS (clone raté) : dans
+    # les deux cas, aucun répertoire collegue-revert-* ne survit.
+    import os
+
+    assert all(not os.path.exists(p) for p in created)

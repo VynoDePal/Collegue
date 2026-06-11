@@ -433,6 +433,69 @@ async def test_retry_then_success_purges_kept_failure_workspace(repo, manager):
     assert all(not os.path.exists(p) for p in agent.paths)
 
 
+async def test_kept_workspace_path_is_persisted_and_cleared(repo, manager):
+    """#466 : le chemin du clone conservé est PERSISTÉ (tasks.kept_workspace) —
+    le dict mémoire de #443 repartait vide à chaque restart, les clones des
+    segments précédents re-fuyaient."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _WorkspaceTrackingAgent()
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=agent,
+        sandbox=_Sandbox(ok=False),
+        max_task_attempts=1,
+        sleep_fn=_sleep,
+    )
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "failed"
+    assert t.kept_workspace == agent.paths[-1]  # persisté
+    assert os.path.exists(t.kept_workspace)
+
+    # « Restart » : la tâche est re-filée et réussit → le clone du segment
+    # précédent est purgé via le chemin PERSISTÉ et la colonne remise à zéro.
+    manager.update_task(t.id, status="todo", attempt_count=0, last_error=None)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_WorkspaceTrackingAgent(), sleep_fn=_sleep)
+    assert result.stop_reason == "completed"
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "in_review"
+    assert t.kept_workspace is None
+    assert all(not os.path.exists(p) for p in agent.paths)
+
+
+async def test_startup_sweep_purges_kept_workspaces_of_done_tasks(repo, manager, tmp_path):
+    """#466 (cas réel v3) : la tâche 4 a réussi au segment 3 mais les clones des
+    segments 1-2 restaient sur disque — le balayage de démarrage les purge dès
+    que la tâche est in_review/merged/done."""
+    import shutil
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 2)
+    t0, t1 = manager.get_tasks(pid)
+    stale = tmp_path / "collegue-exec-stale" / "workspace"
+    stale.mkdir(parents=True)
+    manager.update_task(t0.id, status="merged", kept_workspace=str(stale))
+    # Tâche en échec TERMINAL : son clone de debug est CONSERVÉ par le balayage.
+    debug = tmp_path / "collegue-exec-debug" / "workspace"
+    debug.mkdir(parents=True)
+    manager.update_task(t1.id, status="failed", kept_workspace=str(debug))
+
+    await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), sleep_fn=_sleep)
+    assert not stale.parent.exists()  # purgé (tâche aboutie)
+    assert debug.parent.exists()  # conservé (debug encore utile)
+    assert manager.get_tasks(pid)[0].kept_workspace is None
+    assert manager.get_tasks(pid)[1].kept_workspace == str(debug)
+    shutil.rmtree(debug.parent, ignore_errors=True)
+
+
 async def test_cleanup_workspaces_opt_out_keeps_everything(repo, manager):
     from collegue.executor import cleanup_workspace
 

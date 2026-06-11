@@ -17,7 +17,9 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
+from typing import Optional
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.command import LocalCommandRunner
@@ -109,8 +111,60 @@ def cleanup_workspace(workspace_or_path) -> None:
         return
     path = os.path.abspath(str(path))
     parent = os.path.dirname(path)
-    target = parent if os.path.basename(parent).startswith("collegue-exec-") else path
+    # #466 : les clones de revert (`collegue-revert-*/workspace`) suivent le même
+    # layout que les clones d'exécution — même purge du répertoire racine.
+    _OWN_PREFIXES = ("collegue-exec-", "collegue-revert-")
+    if os.path.basename(parent).startswith(_OWN_PREFIXES):
+        target = parent
+    else:
+        # Garde de confinement (#466) : des chemins issus de la PERSISTANCE
+        # (tasks.kept_workspace) arrivent désormais ici — une valeur corrompue
+        # (« / », « /home »…) deviendrait un rmtree récursif non borné sur un
+        # moteur autonome qui se relance seul. Hors préfixes connus, on ne
+        # supprime que STRICTEMENT sous le répertoire temporaire.
+        tmp_root = os.path.realpath(tempfile.gettempdir())
+        if not os.path.realpath(path).startswith(tmp_root + os.sep):
+            logger.warning("cleanup_workspace : chemin hors périmètre, suppression refusée : %s", path)
+            return
+        target = path
     shutil.rmtree(target, ignore_errors=True)
+
+
+def sweep_stale_temp_clones(
+    *,
+    prefixes: tuple = ("collegue-revert-",),
+    max_age_seconds: float = 7 * 24 * 3600,
+    tmp_dir: Optional[str] = None,
+) -> int:
+    """Supprime les clones temporaires ORPHELINS plus vieux que ``max_age_seconds`` (#466).
+
+    Les répertoires ``collegue-revert-*`` ne sont référencés nulle part (ni état,
+    ni audit) : sans balayage, ils s'accumulent sans borne sur un moteur qui
+    tourne des jours. Critère d'ancienneté (mtime) plutôt que d'inventaire — un
+    revert FRAIS (sa branche locale est le livrable pour le push humain/H3) n'est
+    jamais touché. Best-effort, ne lève jamais. Renvoie le nombre supprimé.
+    """
+    root = tmp_dir or tempfile.gettempdir()
+    removed = 0
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return 0
+    deadline = time.time() - float(max_age_seconds)
+    for entry in entries:
+        if not entry.startswith(tuple(prefixes)):
+            continue
+        candidate = os.path.join(root, entry)
+        try:
+            if os.path.islink(candidate):
+                continue  # rmtree refuse les symlinks — et on ne suit jamais un lien
+            if os.path.isdir(candidate) and os.path.getmtime(candidate) < deadline:
+                shutil.rmtree(candidate, ignore_errors=True)
+                if not os.path.exists(candidate):  # compteur honnête
+                    removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") -> bool:

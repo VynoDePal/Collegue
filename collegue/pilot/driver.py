@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.pipeline import REASON_GATE_FAILED, execute_issue, failure_feedback, is_infra_noise, log_tail
-from collegue.executor.workspace import branch_for_issue, cleanup_workspace
+from collegue.executor.workspace import branch_for_issue, cleanup_workspace, sweep_stale_temp_clones
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
@@ -291,6 +291,11 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
 # rouge, on recommence à décompter (pas de boucle infinie sur PyPI down).
 MAX_INFRA_GATE_GRACE = 2
 
+# #466 : statuts pour lesquels un workspace d'échec conservé (#443) ne sert
+# plus (la tâche a abouti) — purgé au balayage de démarrage, quel que soit le
+# segment qui l'avait conservé.
+_KEPT_WORKSPACE_DONE_STATUSES = frozenset({"in_review", "merged", "done"})
+
 # #460 : marqueur du préfixe posé par requeue_task_for_redo dans best_feedback —
 # détecté pour ne jamais empiler deux motifs de redo (le précédent est consommé).
 _REQUEUE_FEEDBACK_MARKER = " (échecs connus de la meilleure tentative : "
@@ -498,6 +503,21 @@ async def run_project(
     # MAX_INFRA_GATE_GRACE — un timeout PyPI ne brûle plus une tentative saine.
     infra_gate_grace: dict = {}
 
+    # #466 : balayage de démarrage. (a) Les workspaces conservés PERSISTÉS des
+    # tâches désormais abouties — le dict en mémoire de #443 repartait vide à
+    # chaque restart, les clones des segments précédents re-fuyaient. (b) Les
+    # clones de revert orphelins trop vieux (rien ne les référence).
+    if cleanup_workspaces and not dry_run:
+        for t in tasks:
+            kept = getattr(t, "kept_workspace", None)
+            if kept and getattr(t, "status", None) in _KEPT_WORKSPACE_DONE_STATUSES:
+                cleanup_workspace(kept)
+                t.kept_workspace = None
+                manager.update_task(t.id, kept_workspace=None)
+        swept = sweep_stale_temp_clones()
+        if swept:
+            logger.info("balayage démarrage : %d clone(s) collegue-revert-* périmé(s) supprimé(s)", swept)
+
     while True:
         if len(processed) >= cap:
             stop_reason = STOP_SAFETY_CAP
@@ -644,14 +664,23 @@ async def run_project(
         if cleanup_workspaces:
             if outcome.success:
                 cleanup_workspace(outcome.workspace)
-                previous = kept_workspaces.pop(task.id, None)
+                # #466 : le chemin PERSISTÉ couvre les clones conservés par un
+                # segment précédent (le dict mémoire repartait vide au restart).
+                previous = kept_workspaces.pop(task.id, None) or getattr(task, "kept_workspace", None)
                 if previous:
                     cleanup_workspace(previous)
+                if getattr(task, "kept_workspace", None):
+                    task.kept_workspace = None
+                    if not dry_run:
+                        manager.update_task(task.id, kept_workspace=None)
             elif outcome.workspace is not None:
-                previous = kept_workspaces.get(task.id)
-                if previous:
+                previous = kept_workspaces.get(task.id) or getattr(task, "kept_workspace", None)
+                if previous and previous != outcome.workspace.path:
                     cleanup_workspace(previous)
                 kept_workspaces[task.id] = outcome.workspace.path
+                task.kept_workspace = outcome.workspace.path
+                if not dry_run:
+                    manager.update_task(task.id, kept_workspace=outcome.workspace.path)
 
         # Overlay en mémoire (+ persistance en réel). Succès → in_review (déjà
         # persisté par execute_issue). Échec : tant qu'il reste des tentatives

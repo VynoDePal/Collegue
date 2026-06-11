@@ -212,3 +212,85 @@ def test_cleanup_workspace_tolerates_missing_and_none():
     cleanup_workspace("/tmp/collegue-exec-inexistant/workspace")  # ne lève pas
     cleanup_workspace(None)
     cleanup_workspace("")
+
+
+# --- GC des clones temporaires (#466) -----------------------------------------------
+
+
+def test_cleanup_workspace_strips_revert_parent(tmp_path):
+    from collegue.executor.workspace import cleanup_workspace
+
+    parent = tmp_path / "collegue-revert-abc123"
+    ws = parent / "workspace"
+    ws.mkdir(parents=True)
+    cleanup_workspace(str(ws))
+    assert not parent.exists()  # le répertoire racine part avec
+
+
+def test_sweep_stale_temp_clones_age_based(tmp_path):
+    """#466 : seuls les répertoires PÉRIMÉS du préfixe sont supprimés — un revert
+    frais (sa branche locale est le livrable) et les autres préfixes survivent."""
+    import os
+    import time
+
+    from collegue.executor.workspace import sweep_stale_temp_clones
+
+    old_dir = tmp_path / "collegue-revert-old"
+    fresh_dir = tmp_path / "collegue-revert-fresh"
+    other = tmp_path / "collegue-exec-old"
+    for d in (old_dir, fresh_dir, other):
+        d.mkdir()
+    stale = time.time() - 8 * 24 * 3600
+    os.utime(old_dir, (stale, stale))
+    os.utime(other, (stale, stale))
+
+    removed = sweep_stale_temp_clones(tmp_dir=str(tmp_path))
+    assert removed == 1
+    assert not old_dir.exists()
+    assert fresh_dir.exists() and other.exists()
+
+
+def test_sweep_tolerates_missing_tmp_dir(tmp_path):
+    from collegue.executor.workspace import sweep_stale_temp_clones
+
+    assert sweep_stale_temp_clones(tmp_dir=str(tmp_path / "absent")) == 0
+
+
+def test_cleanup_workspace_refuses_paths_outside_perimeter(monkeypatch, tmp_path):
+    """#466 (revue) : un kept_workspace corrompu en base (« / », « /home »…) ne
+    doit JAMAIS devenir un rmtree récursif — hors préfixes collegue-*, seule une
+    cible strictement sous le tempdir est supprimée."""
+    import collegue.executor.workspace as ws_mod
+    from collegue.executor.workspace import cleanup_workspace
+
+    deleted = []
+    monkeypatch.setattr(ws_mod.shutil, "rmtree", lambda p, **k: deleted.append(p))
+
+    cleanup_workspace("/")
+    cleanup_workspace("/home/quelquun")
+    cleanup_workspace(str(tmp_path.parent.parent / "hors-tmp") if "/tmp" not in str(tmp_path) else "/opt/x")
+    assert deleted == []  # tout refusé
+
+    # Sous le tempdir sans préfixe connu : supprimé (comportement historique).
+    import tempfile
+
+    inside = tempfile.mkdtemp(prefix="autre-")
+    cleanup_workspace(inside)
+    assert deleted == [inside]
+
+
+def test_sweep_skips_symlinks_and_counts_honestly(tmp_path):
+    import os
+    import time
+
+    from collegue.executor.workspace import sweep_stale_temp_clones
+
+    target = tmp_path / "cible"
+    target.mkdir()
+    link = tmp_path / "collegue-revert-lien"
+    link.symlink_to(target)
+    stale = time.time() - 8 * 24 * 3600
+    os.utime(target, (stale, stale))
+
+    assert sweep_stale_temp_clones(tmp_dir=str(tmp_path)) == 0  # lien ignoré
+    assert link.exists() and target.exists()

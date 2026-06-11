@@ -23,6 +23,7 @@ from typing import Optional
 
 from collegue.executor.command import CommandRunner, LocalCommandRunner
 from collegue.executor.revert import RevertError, RevertResult, prepare_revert
+from collegue.executor.workspace import cleanup_workspace
 
 DEFAULT_HEALTH_COMMAND = "pytest -q"
 # Sorties signalant qu'AUCUN test n'a réellement tourné (exit 0 trompeur).
@@ -176,6 +177,12 @@ def guard_post_merge(
     reverted = bool(revert and revert.reverted)
     revert_failed = not reverted
     branch = getattr(revert, "branch", None)
+    if revert_failed and revert is not None and getattr(revert, "workspace", None):
+        # #466 : un revert en échec (abort, workspace laissé propre) n'a produit
+        # AUCUNE branche utile — son clone est purgé au lieu de fuir dans /tmp.
+        # Un revert RÉUSSI garde le sien : sa branche locale est le livrable
+        # (push humain / H3) ; le balayage d'ancienneté le ramassera au-delà.
+        cleanup_workspace(revert.workspace)
     if revert_failed:
         summary = f"ÉCHEC du revert de {merge_sha[:12]} — intervention humaine requise ({health.reason})"
         audit_kind = "auto_revert_failed"

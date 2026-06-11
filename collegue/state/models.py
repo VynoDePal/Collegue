@@ -119,6 +119,9 @@ class Task(Base):
     best_passed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     best_failed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     best_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # #466 : chemin du workspace d'échec CONSERVÉ pour debug (#443) — persisté
+    # pour que la purge au succès/merge fonctionne à travers les restarts.
+    kept_workspace: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
     )
