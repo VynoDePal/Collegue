@@ -31,7 +31,13 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.pipeline import REASON_GATE_FAILED, execute_issue, failure_feedback, is_infra_noise, log_tail
+from collegue.executor.pipeline import (
+    execute_issue,
+    failure_feedback,
+    is_infra_gate_failure,
+    is_infra_noise,
+    log_tail,
+)
 from collegue.executor.workspace import branch_for_issue, cleanup_workspace, sweep_stale_temp_clones
 from collegue.pilot.audit import (
     BUDGET_EVENT,
@@ -709,8 +715,10 @@ async def run_project(
             # produisaient le même gate_failed décompté du budget : chaque
             # micro-coupure réseau rapprochait une tâche SAINE de l'échec
             # terminal. Un gate rouge au diagnostic purement infra ne consomme
-            # pas de tentative fonctionnelle (grâce bornée par tâche).
-            infra_gate_failure = outcome.reason == REASON_GATE_FAILED and is_infra_noise(diagnostic)
+            # pas de tentative fonctionnelle (grâce bornée par tâche). La
+            # classification (#477) couvre aussi la cascade « install en échec
+            # réseau → ModuleNotFoundError de collecte » via deps_install_failed.
+            infra_gate_failure = is_infra_gate_failure(outcome)
             grace_used = int(infra_gate_grace.get(task.id, 0))
             graced = infra_gate_failure and grace_used < MAX_INFRA_GATE_GRACE
             if graced:
@@ -735,7 +743,11 @@ async def run_project(
             # de is_infra_noise et désarmerait la protection pour tout projet web
             # dont les échecs de tests mentionnent ConnectionError.
             previous_diag = previous_error.split(" — ", 1)[-1]
-            if diagnostic and is_infra_noise(diagnostic) and previous_error and not is_infra_noise(previous_diag):
+            # #477 : la cascade d'install graciée porte un diagnostic d'apparence
+            # fonctionnelle (ModuleNotFoundError fantôme) — la classification du
+            # GATE fait foi, pas la forme du texte : elle aussi préserve.
+            infra_diag = infra_gate_failure or is_infra_noise(diagnostic)
+            if diagnostic and infra_diag and previous_error and not is_infra_noise(previous_diag):
                 base = _INFRA_NOISE_SUFFIX_RE.sub("", previous_error)
                 last_error = f"{base} (+ aléa infra à la tentative {attempts} : [{outcome.stage}/{outcome.reason}])"
             task.last_error = last_error

@@ -106,6 +106,43 @@ def is_infra_noise(feedback: str) -> bool:
     return any(signature in text for signature in _INFRA_NOISE_SIGNATURES)
 
 
+def is_infra_gate_failure(outcome: "ExecutionOutcome") -> bool:
+    """Vrai si un échec de gate est imputable à un aléa d'infrastructure (#477).
+
+    Deux chemins :
+
+    - le diagnostic court (:func:`failure_feedback`) porte une signature réseau
+      (cas nominal #459/#461 : traceback pip sans ligne pytest) ;
+    - l'installation des dépendances a échoué (``deps_install_failed``, #439)
+      **et** la sortie complète du gate contient une signature réseau. La
+      cascade « pip timeout → ModuleNotFoundError à la collecte » produit des
+      lignes ``ERROR `` d'apparence fonctionnelle qui désarmaient la grâce #461
+      alors que la cause première était un aléa PyPI/DNS (cas réel FacNor v4 :
+      échec terminal de la tâche 6 sur un pur ReadTimeoutError pip).
+
+    Un échec d'install SANS signature réseau (requirements invalide, paquet
+    inexistant) reste fonctionnel : c'est précisément ce que la passe #439
+    doit sanctionner. Et un gate rouge à tests VERTS (revue bloquante,
+    adéquation #437) n'est jamais gracié : le verdict est fonctionnel même si
+    l'install a connu un aléa réseau en chemin (les deux cas cibles — timeout
+    pip, cascade de collecte — ont toujours des tests rouges).
+    """
+    if outcome.reason != REASON_GATE_FAILED:
+        return False
+    report = outcome.quality_report
+    if report is not None and report.tests_passed:
+        # Gate rouge à tests VERTS (revue bloquante, adéquation #437,
+        # require_test_changes) : verdict fonctionnel — même si la queue de
+        # sortie charrie un aléa réseau d'install, il n'est pas la cause.
+        return False
+    if is_infra_noise(failure_feedback(outcome)):
+        return True
+    if report is not None and getattr(report, "deps_install_failed", False):
+        output = report.test_output or ""
+        return any(signature in output for signature in _INFRA_NOISE_SIGNATURES)
+    return False
+
+
 def failure_feedback(outcome: "ExecutionOutcome") -> str:
     """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
 
@@ -132,7 +169,12 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
         return ("ADÉQUATION REFUSÉE — le diff ne réalise pas l'issue : " + justification)[:700]
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
-        fails = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED", "ERROR"))]
+        # « FAILED  » / « ERROR  » avec espace : les formes du short summary
+        # pytest, alignées sur is_infra_noise (#477). Sans l'espace, la ligne
+        # pip « ERROR: Exception: » (deux-points) était relayée comme diagnostic
+        # « fonctionnel » — inactionnable — et le traceback réseau (ReadTimeout…)
+        # était jeté : la grâce #461 ne voyait jamais la signature infra.
+        fails = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED ", "ERROR "))]
         if fails:
             return " ; ".join(fails[:6])[:700]
         return log_tail(output, 400)

@@ -506,3 +506,116 @@ def test_is_infra_noise_never_flags_functional_diagnostics():
     # Kill du conteneur au timeout (#461) : la note sandbox est le seul indice
     # quand pip pend sans avoir imprimé de traceback réseau.
     assert is_infra_noise("Collecting fastapi\n[sandbox] délai dépassé après 120s")
+
+
+# --- classification infra d'un échec de gate (#477) ----------------------------------
+
+
+def _gate_outcome(output, *, deps_install_failed=False, reason="gate_failed", tests_passed=False):
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome
+    from collegue.executor.runner import ExecutionResult
+
+    return ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(success=True, logs="journal"),
+            changed=True,
+            diff="",
+            files_changed=("a.py",),
+            success=True,
+        ),
+        quality_report=QualityReport(
+            tests_passed=tests_passed,
+            test_exit_code=0 if tests_passed else 1,
+            test_output=output,
+            review_summary="",
+            review_findings=(),
+            review_blocking=tests_passed,  # gate rouge à tests verts = revue bloquante (#437)
+            passed=False,
+            deps_install_failed=deps_install_failed,
+        ),
+        reason=reason,
+    )
+
+
+# Sortie réelle du run FacNor v4 (12:17, tâche 6) : pip échoue sur un timeout
+# PyPI — la ligne « ERROR: Exception: » (deux-points) précède le traceback réseau.
+_PIP_TIMEOUT_OUTPUT = (
+    "Collecting fastapi\n"
+    "ERROR: Exception:\n"
+    "Traceback (most recent call last):\n"
+    '  File "/usr/local/lib/python3.12/site-packages/pip/_vendor/urllib3/response.py", line 438, in _error_catcher\n'
+    "    yield\n"
+    "pip._vendor.urllib3.exceptions.ReadTimeoutError: "
+    "HTTPSConnectionPool(host='pypi.org', port=443): Read timed out.\n"
+)
+
+
+def test_failure_feedback_ignores_pip_error_colon_lines():
+    """#477 : « ERROR: Exception: » (pip) n'est PAS un diagnostic pytest — le
+    feedback doit retomber sur la queue de sortie, qui PORTE la signature réseau,
+    pour que la grâce #461 puisse classer l'échec en aléa infra."""
+    from collegue.executor.pipeline import failure_feedback, is_infra_noise
+
+    outcome = _gate_outcome(_PIP_TIMEOUT_OUTPUT)
+    feedback = failure_feedback(outcome)
+    assert feedback != "ERROR: Exception:"
+    assert "ReadTimeoutError" in feedback
+    assert is_infra_noise(feedback)
+
+
+def test_is_infra_gate_failure_on_pip_timeout():
+    from collegue.executor.pipeline import is_infra_gate_failure
+
+    assert is_infra_gate_failure(_gate_outcome(_PIP_TIMEOUT_OUTPUT))
+    # Même sortie mais échec hors gate (run/no_op) : jamais gracié.
+    assert not is_infra_gate_failure(_gate_outcome(_PIP_TIMEOUT_OUTPUT, reason="no_op"))
+
+
+def test_is_infra_gate_failure_on_install_cascade():
+    """#477 : install en échec réseau (prelude #414 fail-open) → la collecte
+    cascade en « ERROR tests/… » d'apparence fonctionnelle. deps_install_failed
+    + signature réseau dans la sortie complète ⇒ aléa infra quand même."""
+    from collegue.executor.pipeline import failure_feedback, is_infra_gate_failure, is_infra_noise
+
+    cascade = (
+        "Temporary failure in name resolution\n"
+        "[gate] installation des dépendances en échec — tests lancés quand même (#414)\n"
+        "ERROR tests/test_auth.py - ModuleNotFoundError: No module named 'httpx'\n"
+    )
+    outcome = _gate_outcome(cascade, deps_install_failed=True)
+    # Le diagnostic court reste fonctionnel (lignes ERROR pytest)…
+    assert not is_infra_noise(failure_feedback(outcome))
+    # … mais la classification du gate, elle, voit la cause première réseau.
+    assert is_infra_gate_failure(outcome)
+
+
+def test_is_infra_gate_failure_keeps_functional_install_failures():
+    """Un échec d'install SANS signature réseau (requirements invalide) reste
+    fonctionnel : c'est le contrat que la passe #439 doit sanctionner."""
+    from collegue.executor.pipeline import is_infra_gate_failure
+
+    functional = (
+        "ERROR: No matching distribution found for paquet-inexistant==1.0\n"
+        "[gate] installation des dépendances en échec — tests lancés quand même (#414)\n"
+        "ERROR tests/test_auth.py - ModuleNotFoundError: No module named 'paquet_inexistant'\n"
+    )
+    assert not is_infra_gate_failure(_gate_outcome(functional, deps_install_failed=True))
+
+
+def test_is_infra_gate_failure_never_graces_green_tests():
+    """Garde (revue #477) : gate rouge pour revue bloquante / adéquation (#437)
+    avec tests VERTS — même si l'install a connu un aléa réseau en chemin (note
+    #414 + signature dans la sortie), le verdict est fonctionnel : pas de grâce."""
+    from collegue.executor.pipeline import is_infra_gate_failure
+
+    green_but_blocked = (
+        "Temporary failure in name resolution\n"
+        "[gate] installation des dépendances en échec — tests lancés quand même (#414)\n"
+        "12 passed in 1.02s\n"
+    )
+    outcome = _gate_outcome(green_but_blocked, deps_install_failed=True, tests_passed=True)
+    assert not is_infra_gate_failure(outcome)

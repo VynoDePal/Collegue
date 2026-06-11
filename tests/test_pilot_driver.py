@@ -1255,6 +1255,50 @@ async def test_functional_gate_failure_still_consumes_budget(repo, manager):
     assert t.attempt_count == 2  # aucun gracié
 
 
+class _InstallCascadeGateSandbox:
+    """Cascade #477 : install réseau en échec (note #414 fail-open) → la collecte
+    produit des « ERROR tests/… » d'apparence fonctionnelle — cause première infra."""
+
+    def run_tests(self, workspace, command="pytest -q"):
+        from collegue.executor.quality_gate import _INSTALL_FAILED_NOTE
+
+        return SandboxResult(
+            exit_code=1,
+            stdout=(
+                "Temporary failure in name resolution\n"
+                f"{_INSTALL_FAILED_NOTE}\n"
+                "ERROR tests/test_auth.py - ModuleNotFoundError: No module named 'httpx'\n"
+            ),
+            stderr="",
+        )
+
+
+async def test_install_cascade_network_failure_is_graced(repo, manager):
+    """#477 : la cascade « pip timeout → ModuleNotFoundError de collecte » est
+    classée aléa infra via deps_install_failed + signature réseau — graciée,
+    alors que son diagnostic court (lignes ERROR pytest) semble fonctionnel."""
+    from collegue.pilot.audit import RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=FakeCodeAgent(),
+        sandbox=_InstallCascadeGateSandbox(),
+        max_task_attempts=1,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    graced = [e for e in audit.events if e.kind in ("task_retry", "task_failed") and e.detail.get("infra_grace")]
+    assert len(graced) == 2  # MAX_INFRA_GATE_GRACE : la cascade est bien graciée
+
+
 async def test_infra_noise_does_not_clobber_actionable_feedback(repo, manager):
     """#459 : un timeout PyPI à la tentative 2 n'écrase pas le diagnostic
     actionnable de la tentative 1 — l'agent (tentative 3) et l'opérateur voient
