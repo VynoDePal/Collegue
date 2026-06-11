@@ -124,11 +124,15 @@ class Settings(BaseSettings):
     # conteneur du gate et vérifie qu'elle répond (< 500) — détecte les
     # divergences d'init tests/prod (tests verts via create_all, prod en 500
     # sur schema.sql incomplet). SMOKE_COMMAND : démarrage explicite (doit
-    # écouter sur 127.0.0.1:8765) ; vide → auto-détection FastAPI. SMOKE_PATHS :
-    # chemins sondés, séparés par des virgules.
+    # écouter sur 127.0.0.1:8765) ; vide → auto-détection FastAPI.
     GATE_SMOKE_RUN: bool = False
     GATE_SMOKE_COMMAND: str = ""
-    GATE_SMOKE_PATHS: str = "/"
+    # Chemins sondés, séparés par des virgules ; préfixe optionnel « MÉTHODE: »
+    # (#483, ex. POST:/auth/register — payload JSON générique, 4xx toléré /
+    # 5xx rouge). Défaut : racine + routes d'auth (le flux d'écriture central,
+    # mort out-of-the-box deux runs de suite avec un smoke GET-only) — coût nul
+    # sur une app sans ces routes (404 < 500, toléré).
+    GATE_SMOKE_PATHS: str = "/, POST:/auth/register, POST:/auth/login"
     # Budget d'attente de réponse (s) — à garder sous le timeout du conteneur
     # sandbox (120 s par défaut, partagé avec pip/pytest/npm).
     GATE_SMOKE_TIMEOUT: float = 30.0

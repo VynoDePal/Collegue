@@ -91,6 +91,30 @@ _SMOKE_BANNER = "[gate] smoke run : l'app démarre et répond (#458)"
 _SMOKE_PORT = 8765
 _SMOKE_HEREDOC = "COLLEGUE_SMOKE_458"
 
+# Méthodes HTTP reconnues dans la syntaxe enrichie des chemins sondés (#483) :
+# « POST:/auth/register ». Sans préfixe reconnu → GET (compat #458).
+_SMOKE_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+# Chemins sondés par défaut (#483) : racine + routes d'auth — le flux d'écriture
+# central, mort « out-of-the-box » deux runs de suite avec un smoke GET-only.
+# Défaut de SIGNATURE (et pas seulement de config) : un appelant qui active
+# smoke_run sans fournir de chemins (ex. harness qui bypasse _gate_options)
+# bénéficie de la couverture — sinon le fix serait inerte au run réel, comme
+# #461 l'a été en v4. Coût nul sur une app sans ces routes (404/405 < 500).
+DEFAULT_SMOKE_PATHS = ("/", "POST:/auth/register", "POST:/auth/login")
+# Payload générique des sondes à corps (#483) : champs usuels des routes d'auth.
+# Pydantic ignore les champs en trop par défaut → une route register/login VALIDE
+# ce corps et exécute son handler (le 500 passlib/bcrypt « out-of-the-box » de
+# FacNor v4 devient visible) ; un modèle strict répond 422 — toléré, l'app a répondu.
+_SMOKE_PROBE_PAYLOAD = json.dumps(
+    {
+        "email": "smoke-458@example.com",
+        "username": "smoke458",
+        "password": "Smoke-Run-458!",
+        "full_name": "Smoke Run",
+        "name": "Smoke Run",
+    }
+).encode()
+
 # Entrées FastAPI usuelles : (chemin relatif, cible uvicorn). Détection
 # délibérément conservatrice — sans entrée reconnue, la passe est SKIPPÉE
 # (pas de faux rouge sur un projet non-web), sauf commande explicite.
@@ -109,14 +133,15 @@ _SMOKE_PROBE_TEMPLATE = """\
 import subprocess, sys, time, urllib.error, urllib.request
 
 command = %(command)r
-paths = %(paths)r
+paths = %(paths)r  # paires (méthode, chemin) — cf. _smoke_probe_script (#483)
+payload = %(payload)r
 timeout = %(timeout)r
 log = open("/tmp/.collegue_smoke.log", "w+", encoding="utf-8", errors="replace")
 proc = subprocess.Popen(command, shell=True, stdout=log, stderr=subprocess.STDOUT)
 base = "http://127.0.0.1:%(port)d"
 deadline = time.time() + timeout
 verdicts = []
-for path in paths:
+for method, path in paths:
     status = None
     attempted = False
     # Au moins UNE tentative par chemin, même si le précédent a épuisé le délai
@@ -126,18 +151,21 @@ for path in paths:
         if proc.poll() is not None:
             break  # le serveur est mort avant de répondre
         try:
-            status = urllib.request.urlopen(base + path, timeout=2).status
+            data = payload if method not in ("GET", "HEAD") else None
+            headers = {"Content-Type": "application/json"} if data is not None else {}
+            req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+            status = urllib.request.urlopen(req, timeout=2).status
             break
         except urllib.error.HTTPError as exc:
             status = exc.code
             break
         except Exception:
             time.sleep(0.5)
-    verdicts.append((path, status))
+    verdicts.append((method, path, status))
 time.sleep(0.3)  # resserre la fenêtre « répond une fois puis meurt »
-ok = proc.poll() is None and all(s is not None and s < 500 for _p, s in verdicts)
-for path, status in verdicts:
-    print("[gate] smoke run", path, "->", status if status is not None else "sans réponse")
+ok = proc.poll() is None and all(s is not None and s < 500 for _m, _p, s in verdicts)
+for method, path, status in verdicts:
+    print("[gate] smoke run", method, path, "->", status if status is not None else "sans réponse")
 if proc.poll() is not None:
     print(
         "[gate] smoke run : le processus serveur s'est terminé (code", str(proc.poll()) + ")",
@@ -173,12 +201,24 @@ def _detect_asgi_app(workspace: str) -> Optional[str]:
 
 def _smoke_probe_script(command: str, paths: Tuple[str, ...], timeout: float, *, port: int = _SMOKE_PORT) -> str:
     """Source python de la sonde smoke-run (pur — testable par ``compile``)."""
+    # #483 : préfixe « MÉTHODE: » optionnel (whitelist _SMOKE_METHODS) — sans
+    # lui, GET (compat #458). Les méthodes à corps envoient le payload JSON
+    # générique : 4xx toléré (validation — l'app A répondu), 5xx rouge.
     # `/` de tête normalisé : sans lui, urlopen("…:8765health") lèverait à
     # chaque tentative et brûlerait tout le délai en silence.
-    normalized = tuple(path if path.startswith("/") else "/" + path for path in paths) or ("/",)
+    probes = []
+    for raw in paths:
+        method, sep, rest = raw.partition(":")
+        if sep and method.strip().upper() in _SMOKE_METHODS:
+            method, path = method.strip().upper(), rest.strip()
+        else:
+            method, path = "GET", raw
+        probes.append((method, path if path.startswith("/") else "/" + path))
+    normalized = tuple(probes) or (("GET", "/"),)
     return _SMOKE_PROBE_TEMPLATE % {
         "command": command,
         "paths": normalized,
+        "payload": _SMOKE_PROBE_PAYLOAD,
         "timeout": float(timeout),
         "port": int(port),
     }
@@ -188,7 +228,7 @@ def smoke_run_command(
     workspace: str,
     *,
     command: Optional[str] = None,
-    paths: Tuple[str, ...] = ("/",),
+    paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     timeout: float = 30.0,
 ) -> Optional[str]:
     """Commande de la passe smoke-run (#458). Fail-closed une fois déclenchée.
@@ -204,7 +244,10 @@ def smoke_run_command(
       daemonise est vu comme « serveur mort ») ; sinon auto-détection FastAPI
       (cf. :data:`_ASGI_APP_CANDIDATES`) → ``python -m uvicorn`` ;
     - ``paths`` : chemins sondés — chacun doit répondre **< 500** (4xx toléré :
-      l'app a répondu ; 5xx ou silence = rouge) ;
+      l'app a répondu ; 5xx ou silence = rouge). Préfixe « MÉTHODE: » optionnel
+      (#483, ex. ``POST:/auth/register``) : les méthodes à corps envoient un
+      payload JSON générique (champs usuels d'auth) — un register qui crashe à
+      l'exécution (500 out-of-the-box) ne passe plus avec un simple GET vert ;
     - ``timeout`` : budget total d'attente de réponse (secondes) — à garder
       sous le timeout du conteneur sandbox (120 s par défaut, partagé avec
       pip/pytest/npm) ;
@@ -927,7 +970,7 @@ async def run_quality_gate(
     require_test_changes: bool = False,
     smoke_run: bool = False,
     smoke_command: Optional[str] = None,
-    smoke_paths: Tuple[str, ...] = ("/",),
+    smoke_paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     smoke_timeout: float = 30.0,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
@@ -961,8 +1004,9 @@ async def run_quality_gate(
     elle, une divergence d'init tests/prod livre un produit en 500 avec tous
     les gates verts. ``smoke_command`` : démarrage explicite (écoute sur
     127.0.0.1:8765) ; ``smoke_paths`` : chemins sondés (chacun doit répondre
-    < 500). Skippée si aucune app n'est détectable et qu'aucune commande n'est
-    fournie.
+    < 500), préfixe « MÉTHODE: » optionnel (#483, ex. ``POST:/auth/register`` —
+    payload JSON générique, 4xx toléré, 5xx rouge). Skippée si aucune app n'est
+    détectable et qu'aucune commande n'est fournie.
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
