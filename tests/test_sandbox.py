@@ -275,3 +275,17 @@ def test_sandbox_workspace_persists(tmp_path):
     sb.run_command("echo persisted > marker.txt", str(tmp_path))
     res = sb.run_command("cat marker.txt", str(tmp_path))
     assert "persisted" in res.stdout
+
+
+def test_build_argv_dns_flags(tmp_path):
+    """#485 : résolveurs DNS explicites traduits en --dns (un flag par serveur)."""
+    sb = DockerSandbox(image="img", network="bridge", dns=("1.1.1.1", "8.8.8.8"))
+    argv = sb._build_run_argv("echo hi", str(tmp_path))
+    joined = " ".join(argv)
+    assert "--dns 1.1.1.1" in joined
+    assert "--dns 8.8.8.8" in joined
+
+
+def test_build_argv_no_dns_by_default(tmp_path):
+    """Défaut : aucun --dns — argv identique au comportement historique durci."""
+    assert "--dns" not in DockerSandbox(image="img")._build_run_argv("x", str(tmp_path))

@@ -136,6 +136,13 @@ class Settings(BaseSettings):
     # Budget d'attente de réponse (s) — à garder sous le timeout du conteneur
     # sandbox (120 s par défaut, partagé avec pip/pytest/npm).
     GATE_SMOKE_TIMEOUT: float = 30.0
+    # DNS du sandbox (#485) : résolveurs passés en `--dns` aux conteneurs qui
+    # ont besoin du réseau (installabilité #439, prélude #414, worker OpenHands).
+    # Le résolveur Docker par défaut produisait des « Temporary failure in name
+    # resolution » en rafale, brûlant des tentatives (graciées par #477, mais
+    # autant réduire l'occurrence). Adresses IP séparées par des virgules
+    # (ex. "1.1.1.1,8.8.8.8") ; vide (défaut) = résolveur Docker.
+    SANDBOX_DNS: str = ""
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

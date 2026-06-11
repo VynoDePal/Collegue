@@ -371,3 +371,14 @@ def test_gate_requirements_append_only_opt_out_emitted_only_on_deviation():
 
     assert "requirements_guard" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
     assert _gate_options(SimpleNamespace(GATE_REQUIREMENTS_APPEND_ONLY=False))["requirements_guard"] is False
+
+
+def test_sandbox_dns_parsed_from_settings():
+    """#485 : SANDBOX_DNS (IPs séparées par des virgules) → tuple pour DockerSandbox."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _sandbox_dns
+
+    assert _sandbox_dns(SimpleNamespace(SANDBOX_DNS="1.1.1.1, 8.8.8.8")) == ("1.1.1.1", "8.8.8.8")
+    assert _sandbox_dns(SimpleNamespace(SANDBOX_DNS="")) == ()
+    assert _sandbox_dns(SimpleNamespace()) == ()  # setting absent → défaut Docker
