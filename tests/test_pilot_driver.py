@@ -827,6 +827,63 @@ def test_requeue_task_for_redo_resets_for_feedback(manager):
     assert t.status == "todo"
     assert t.attempt_count == 1
     assert "conflit" in t.last_error
+    assert "conflit" in t.best_feedback  # #460 : le canal réparation aussi
+
+
+def test_requeue_message_reaches_repair_prompt(manager):
+    """#460 (cas réel FacNor v3) : une tâche en mode réparation (#436 — best_diff
+    présent, échecs connus) re-filée via requeue_task_for_redo doit voir le
+    message du redo dans son PROMPT — avant, seul best_feedback y était injecté
+    et l'opérateur devait l'écrire à la main en base."""
+    from collegue.pilot import requeue_task_for_redo
+    from collegue.pilot.driver import _issue_from_task
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(
+        tid,
+        status="failed",
+        attempt_count=3,
+        best_diff="diff --git a/x.py b/x.py\n+x",
+        best_passed=20,
+        best_failed=2,
+        best_feedback="FAILED tests/test_auth.py::test_login - no such table",
+    )
+    requeue_task_for_redo(manager, tid, message="[opérateur] crée le schéma dans les fixtures de test")
+    task = manager.get_tasks(pid)[0]
+    context = _issue_from_task(task).context
+    assert "RÉPARATION CIBLÉE" in context  # le mode réparation reste actif
+    assert "crée le schéma dans les fixtures" in context  # le message ATTEINT l'agent
+    assert "test_login" in context  # ... sans perdre les échecs connus
+
+
+def test_requeue_without_prior_feedback_sets_message(manager):
+    from collegue.pilot import requeue_task_for_redo
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="in_review")
+    fields = requeue_task_for_redo(manager, tid, message="[reconcile] PR fermée hors-run")
+    assert fields["best_feedback"] == "[reconcile] PR fermée hors-run"
+    t = manager.get_tasks(pid)[0]
+    assert t.best_feedback == "[reconcile] PR fermée hors-run"
+
+
+def test_requeue_twice_replaces_redo_motive_not_stacks(manager):
+    """#460 : deux requeues successifs ne nidifient pas les motifs — le motif
+    précédent est consommé, seul le diagnostic d'ORIGINE est conservé."""
+    from collegue.pilot import requeue_task_for_redo
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="in_review", best_feedback="FAILED tests/test_x.py::t - boom")
+    requeue_task_for_redo(manager, tid, message="[reconcile] PR fermée hors-run")
+    requeue_task_for_redo(manager, tid, message="[merge/conflit] PR en conflit avec main")
+    t = manager.get_tasks(pid)[0]
+    assert "conflit" in t.best_feedback
+    assert "FAILED tests/test_x.py::t - boom" in t.best_feedback  # l'origine survit
+    assert "PR fermée hors-run" not in t.best_feedback  # le motif consommé disparaît
+    assert t.best_feedback.count("échecs connus") == 1  # jamais nidifié
 
 
 # --- ré-injection du feedback d'échec au retry (#424) ------------------------------

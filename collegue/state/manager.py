@@ -150,6 +150,11 @@ class ProjectStateManager:
         with self.session() as s:
             return list(s.scalars(select(Task).where(Task.project_id == project_id).order_by(Task.id)))
 
+    def get_task(self, task_id: int) -> Optional[Task]:
+        """Une tâche par id (``None`` si absente)."""
+        with self.session() as s:
+            return s.get(Task, task_id)
+
     def update_task_status(self, task_id: int, status: str) -> bool:
         with self.session() as s:
             task = s.get(Task, task_id)
