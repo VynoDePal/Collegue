@@ -197,7 +197,7 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     last_error = getattr(task, "last_error", None)
     attempts = int(getattr(task, "attempt_count", 0) or 0)
     best_diff = getattr(task, "best_diff", None)
-    if attempts > 0 and best_diff:
+    if best_diff:  # présence suffisante (#461 : une grâce peut laisser attempts=0)
         # #436 : le workspace du retry est RÉENSEMENCÉ avec la meilleure tentative
         # → consigne en mode réparation CIBLÉE (pas de régénération complète, qui
         # sous variance LLM détruit du travail quasi-abouti — oscillation).
@@ -476,7 +476,11 @@ async def run_project(
         reconcile_in_review_tasks(tasks, manager, clients, owner=owner, repo=repo, audit=audit)
 
     # Avec retries, chaque tâche peut consommer jusqu'à max_task_attempts itérations.
-    cap = max_iterations if max_iterations is not None else len(tasks) * max(2, max_task_attempts) + 5
+    cap = (
+        max_iterations
+        if max_iterations is not None
+        else len(tasks) * (max(2, max_task_attempts) + MAX_INFRA_GATE_GRACE) + 5
+    )
 
     # Reprise : repartir du numéro d'itération du dernier checkpoint (l'état des
     # tâches en DB fournit la vraie reprise — les tâches terminées sont ignorées).
@@ -565,7 +569,10 @@ async def run_project(
         audit.record(TASK_STARTED, iteration=iteration + 1, **started_detail)
         # #436 : au retry, réensemencer le workspace avec la meilleure tentative
         # (le diff survit en DB → la mémoire traverse aussi les redémarrages).
-        seed = getattr(task, "best_diff", None) if int(getattr(task, "attempt_count", 0) or 0) > 0 else None
+        # #436/#461 : la PRÉSENCE de best_diff suffit (un aléa infra gracié,
+        # #461, peut laisser attempt_count à 0 alors qu'une tentative verte est
+        # mémorisée — la régénérer de zéro gaspillerait le travail).
+        seed = getattr(task, "best_diff", None) or None
         outcome = await execute_issue(
             _issue_from_task(task, tasks_by_id),
             repo_source,
@@ -668,7 +675,8 @@ async def run_project(
             # pas de tentative fonctionnelle (grâce bornée par tâche).
             infra_gate_failure = outcome.reason == REASON_GATE_FAILED and is_infra_noise(diagnostic)
             grace_used = int(infra_gate_grace.get(task.id, 0))
-            if infra_gate_failure and grace_used < MAX_INFRA_GATE_GRACE:
+            graced = infra_gate_failure and grace_used < MAX_INFRA_GATE_GRACE
+            if graced:
                 infra_gate_grace[task.id] = grace_used + 1
                 attempts = int(getattr(task, "attempt_count", 0) or 0)  # NON décompté
                 detail["infra_grace"] = grace_used + 1
@@ -676,6 +684,8 @@ async def run_project(
                 attempts = int(getattr(task, "attempt_count", 0) or 0) + 1
             task.attempt_count = attempts
             last_error = f"[{outcome.stage}/{outcome.reason}] tentative {attempts}/{max_task_attempts}"
+            if graced:
+                last_error += " (aléa infra non décompté)"
             if diagnostic:
                 last_error += " — " + diagnostic
             # #459 : un aléa d'infrastructure (timeout PyPI, 5xx) n'écrase pas un
@@ -722,7 +732,10 @@ async def run_project(
                     manager.update_task(
                         task.id, status=TASK_STATUS_TODO, attempt_count=attempts, last_error=last_error, **best_fields
                     )
-                delay = min(backoff * attempts, RETRY_BACKOFF_CAP_SECONDS) if backoff > 0 else 0.0
+                # max(attempts, 1) : une grâce #461 laisse attempts à 0 — sans
+                # plancher, le retry repartirait SANS backoff contre l'infra qui
+                # vient précisément de timeouter.
+                delay = min(backoff * max(attempts, 1), RETRY_BACKOFF_CAP_SECONDS) if backoff > 0 else 0.0
                 audit.record(
                     TASK_RETRY,
                     iteration=iteration,

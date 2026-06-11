@@ -234,7 +234,10 @@ def installability_command(workspace: str) -> Optional[str]:
     # --retries/--timeout EXPLICITES (#461) : une micro-coupure PyPI pendant la
     # passe coûtait une tentative fonctionnelle entière (échec terminal FacNor
     # v3, itération 14) — pip ré-essaie d'abord, le moteur ne décompte qu'après.
-    pip_flags = "--no-cache-dir -q --retries 5 --timeout 60"
+    # --timeout 30 (pas plus) : le conteneur du gate a un budget TOTAL de
+    # 120 s — un timeout socket long plus un retry le dépasserait (kill du
+    # conteneur, le pire diagnostic possible).
+    pip_flags = "--no-cache-dir -q --retries 5 --timeout 30"
     return (
         f"python -m venv --clear {_GATE_VENV}"
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} -r requirements.txt"

@@ -503,3 +503,6 @@ def test_is_infra_noise_never_flags_functional_diagnostics():
     assert not is_infra_noise("FAILED tests/test_api.py::test_remote - requests.exceptions.ConnectionError: refusé")
     # Le « ERROR: » de pip (deux-points) est du bruit d'install, PAS du pytest.
     assert is_infra_noise("ERROR: Could not install packages due to an OSError: ReadTimeoutError")
+    # Kill du conteneur au timeout (#461) : la note sandbox est le seul indice
+    # quand pip pend sans avoir imprimé de traceback réseau.
+    assert is_infra_noise("Collecting fastapi\n[sandbox] délai dépassé après 120s")

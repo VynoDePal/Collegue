@@ -486,7 +486,7 @@ def test_installability_command_has_network_retries(tmp_path):
     (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
     command = installability_command(str(tmp_path))
     assert command.count("--retries 5") == 2  # requirements + pytest
-    assert command.count("--timeout 60") == 2
+    assert command.count("--timeout 30") == 2
 
 
 def test_installability_command_requires_requirements(tmp_path):
