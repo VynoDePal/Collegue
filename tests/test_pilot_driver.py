@@ -1542,3 +1542,148 @@ async def test_empty_project_completes_without_switching(repo, manager):
     # Projet vide : pas de MVP construit → pas de bascule improving (anti-vacuité).
     assert result.project_status is None
     assert manager.get_project(pid).status != "improving"
+
+
+# --- relecture base avant verdict terminal (#480) ---------------------------------
+
+
+class _RequeueOnFailureAudit:
+    """Simule l'opérateur qui requeue (requeue_task_for_redo) PENDANT le run,
+    dès l'échec terminal d'une tâche — l'overlay devient périmé (#480). Hooké
+    sur l'événement d'audit TASK_FAILED, émis APRÈS la persistance du failed
+    (même fenêtre que l'incident réel du run v4)."""
+
+    def __init__(self, pid, mgr, message):
+        from collegue.pilot.audit import RunAuditLog
+
+        self._inner = RunAuditLog(pid)
+        self._mgr = mgr
+        self._message = message
+        self.events = self._inner.events
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def record(self, kind, *, iteration=None, **detail):
+        from collegue.pilot.driver import requeue_task_for_redo
+
+        event = self._inner.record(kind, iteration=iteration, **detail)
+        if kind == "task_failed":
+            requeue_task_for_redo(self._mgr, detail["task_id"], message=self._message)
+        return event
+
+
+class _FailFor:
+    """Échoue (process agent) pour certains titres, délègue à FakeCodeAgent sinon."""
+
+    def __init__(self, titles):
+        self._titles = set(titles)
+        self._ok = FakeCodeAgent()
+
+    def implement_issue(self, workspace, issue):
+        if issue.title in self._titles:
+            return AgentResult(success=False, logs="échec simulé (#480)")
+        return self._ok.implement_issue(workspace, issue)
+
+
+async def test_stale_overlay_with_requeued_todo_does_not_stop_blocked(repo, manager):
+    """#480 (l'incident du run v4) : tâche requeuée `todo` en base pendant le
+    run mais `failed` dans l'overlay + une PR in_review → le verdict terminal
+    doit relire la base : `awaiting_merge` (travail prêt + PR à merger), plus
+    jamais `blocked` la même seconde qu'une PR ouverte."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 2)
+    audit = _RequeueOnFailureAudit(pid, manager, "indice opérateur : repars du dépôt à jour")
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_FailFor({"S0"}),
+        require_merged_deps=True,
+        max_task_attempts=1,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "awaiting_merge"
+    statuses = {t.title: t.status for t in manager.get_tasks(pid)}
+    assert statuses == {"S0": "todo", "S1": "in_review"}
+    in_review = [t.id for t in manager.get_tasks(pid) if t.status == "in_review"]
+    assert result.pending_reviews == in_review  # la PR validée est SIGNALÉE au drain
+    assert any(e.kind == "overlay_refreshed" for e in audit.events)
+
+
+async def test_external_requeue_replayed_after_db_reread(repo, manager):
+    """#480 : le redo externe est rejoué dans le MÊME run, avec son feedback —
+    la relecture réaligne aussi attempt_count/last_error/best_feedback, pas
+    seulement le statut."""
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    agent = _FlakyAgent(fail_times=1)
+    audit = _RequeueOnFailureAudit(pid, manager, "ta PR était en conflit, repars du dépôt à jour")
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=agent,
+        max_task_attempts=1,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "completed"
+    assert manager.get_tasks(pid)[0].status == "in_review"
+    assert "repars du dépôt à jour" in agent.contexts[1]
+
+
+def test_refresh_tasks_from_db_is_best_effort(manager):
+    from collegue.pilot.driver import refresh_tasks_from_db
+
+    pid = _linear_project(manager, 1)
+    tasks = manager.get_tasks(pid)
+
+    class _BrokenManager:
+        def get_tasks(self, pid):
+            raise RuntimeError("base injoignable")
+
+    # Base injoignable → 0, sans lever : l'overlay courant fait foi.
+    assert refresh_tasks_from_db(tasks, _BrokenManager(), pid) == 0
+
+    # Écriture externe → réalignement en place de l'objet existant.
+    manager.update_task(tasks[0].id, status="failed", last_error="x", best_feedback="indice")
+    assert refresh_tasks_from_db(tasks, manager, pid) == 1
+    assert tasks[0].status == "failed"
+    assert tasks[0].last_error == "x"
+    assert tasks[0].best_feedback == "indice"
+    # Idempotent : plus rien à réaligner.
+    assert refresh_tasks_from_db(tasks, manager, pid) == 0
+
+
+async def test_dry_run_never_rereads_db_before_verdict(repo, manager):
+    """#480 (garde vitale) : en dry_run rien n'est persisté — l'overlay est la
+    SEULE vérité. Une relecture écraserait la simulation (tout redeviendrait
+    `todo`) et la boucle tournerait jusqu'au safety_cap."""
+
+    class _CountingManager:
+        def __init__(self, inner):
+            self._inner = inner
+            self.get_tasks_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def get_tasks(self, pid):
+            self.get_tasks_calls += 1
+            return self._inner.get_tasks(pid)
+
+    pid = _linear_project(manager, 2)
+    counting = _CountingManager(manager)
+    result = await _run(counting, repo, pid, dry_run=True)
+    assert result.stop_reason == "completed"
+    assert counting.get_tasks_calls == 1  # le seul chargement initial

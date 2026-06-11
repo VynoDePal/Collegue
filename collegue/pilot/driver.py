@@ -43,6 +43,7 @@ from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
     GATE_DECISION,
+    OVERLAY_REFRESHED,
     PR_OPENED,
     RUN_STOP,
     TASK_FAILED,
@@ -350,6 +351,56 @@ def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count:
     return fields
 
 
+# #480 : champs réalignés depuis la base avant tout verdict terminal. Le statut
+# pilote l'ordonnancement ; les autres portent le feedback d'un requeue externe
+# (requeue_task_for_redo, #460) jusqu'au prompt de la tentative suivante.
+# `kept_workspace` est volontairement EXCLU : le dict mémoire du run courant
+# (#443) fait foi — un réalignement croisé pourrait re-pointer un chemin purgé.
+_OVERLAY_REFRESH_FIELDS = (
+    "status",
+    "attempt_count",
+    "last_error",
+    "best_diff",
+    "best_passed",
+    "best_failed",
+    "best_feedback",
+)
+
+
+def refresh_tasks_from_db(tasks, manager, project_id: int) -> int:
+    """Réaligne l'overlay mémoire sur l'état persisté (#480) ; retourne le nb réaligné.
+
+    L'overlay (objets détachés chargés une fois en tête de :func:`run_project`)
+    devient PÉRIMÉ quand l'état bouge HORS de la boucle — requeue opérateur
+    pendant le run (:func:`requeue_task_for_redo`, usage documenté #460) : la
+    mémoire voit ``failed`` là où la base dit ``todo`` → verdict ``blocked`` à
+    tort, la même seconde qu'une PR ouverte (run FacNor v4 : PR #108 abandonnée,
+    2 relances opérateur — sans humain, run mort à 1/10). Mutation EN PLACE des
+    objets : ``tasks_by_id``, ``pending_reviews`` et le contexte inter-tâches
+    (#412) référencent ces instances. Best-effort : base injoignable ≠ run mort
+    (l'overlay courant fait foi).
+    """
+    try:
+        fresh = {t.id: t for t in manager.get_tasks(project_id)}
+    except Exception as exc:  # noqa: BLE001 - best-effort, même convention que reconcile (#442)
+        logger.warning("relecture base avant verdict (#480) impossible : %s — overlay conservé", exc)
+        return 0
+    realigned = 0
+    for task in tasks:
+        db_task = fresh.get(task.id)
+        if db_task is None:
+            continue
+        changed = False
+        for key in _OVERLAY_REFRESH_FIELDS:
+            value = getattr(db_task, key, None)
+            if getattr(task, key, None) != value:
+                setattr(task, key, value)
+                changed = True
+        if changed:
+            realigned += 1
+    return realigned
+
+
 async def run_project(
     project_id: int,
     repo_source: str,
@@ -539,6 +590,17 @@ async def run_project(
 
         dep_satisfied = SATISFIED_STATUSES_STRICT if require_merged_deps else SATISFIED_STATUSES
         task = next_task(tasks, satisfied=dep_satisfied)
+        if task is None and not dry_run:
+            # #480 : avant TOUT verdict terminal, relire la base — un requeue
+            # externe (#460) a pu remettre des tâches `todo` que l'overlay voit
+            # encore `failed` ; conclure `blocked` sur la seule mémoire éteint
+            # le run (et abandonne les PR in_review validées) à tort. Jamais en
+            # dry_run : rien n'y est persisté, l'overlay est la SEULE vérité.
+            realigned = refresh_tasks_from_db(tasks, manager, project_id)
+            if realigned:
+                logger.info("verdict terminal : %d tâche(s) réalignée(s) depuis la base (#480)", realigned)
+                audit.record(OVERLAY_REFRESHED, iteration=iteration, realigned=realigned)
+                task = next_task(tasks, satisfied=dep_satisfied)
         if task is None:
             # Plus aucune tâche prête. En séquentiel, plus aucun reliquat
             # `in_progress` (remis à `todo` au démarrage) : s'il reste des tâches
