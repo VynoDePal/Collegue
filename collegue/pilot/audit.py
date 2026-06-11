@@ -28,6 +28,7 @@ TASK_STARTED = "task_started"
 TASK_RETRY = "task_retry"  # tâche re-filée `todo` après un échec retentable (#420)
 TASK_FAILED = "task_failed"  # échec TERMINAL d'une tâche, raison + extrait de logs (#421)
 TASK_RECONCILED = "task_reconciled"  # état réaligné sur la vérité GitHub de sa PR (#442)
+OVERLAY_REFRESHED = "overlay_refreshed"  # overlay réaligné sur la base avant verdict terminal (#480)
 DIFF_PRODUCED = "diff_produced"
 GATE_DECISION = "gate_decision"
 PR_OPENED = "pr_opened"
