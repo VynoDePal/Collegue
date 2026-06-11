@@ -77,6 +77,37 @@ def parse_usage_from_logs(logs: str) -> Tuple[int, int, float]:
     return prompt, completion, cost
 
 
+def estimate_cost_usd(prompt_tokens: int, completion_tokens: int, settings_obj=None) -> float:
+    """Coût USD estimé via les prix configurés ``LLM_PRICE_*_PER_1M`` (#484).
+
+    Filet quand litellm ne mappe pas le modèle : le runner émet ``cost_usd: 0``
+    malgré des tokens — sans prix configurés on retourne 0.0 (l'appelant signale
+    alors un coût INCONNU au lieu d'un zéro silencieux). Robuste : prix absent /
+    non numérique / négatif / non fini → 0 (désactivé).
+    """
+    if settings_obj is None:
+        from collegue.config import settings as settings_obj
+
+    def _price(name: str) -> float:
+        try:
+            value = float(getattr(settings_obj, name, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) and value > 0 else 0.0
+
+    prompt_price = _price("LLM_PRICE_PROMPT_PER_1M")
+    completion_price = _price("LLM_PRICE_COMPLETION_PER_1M")
+    if prompt_price <= 0 and completion_price <= 0:
+        return 0.0
+    try:
+        total = max(0, int(prompt_tokens)) * prompt_price + max(0, int(completion_tokens)) * completion_price
+    except OverflowError:
+        # Ligne d'usage empoisonnée (int JSON géant) : estimer 0 plutôt que de
+        # tuer le run — l'audit ne casse jamais le run.
+        return 0.0
+    return total / 1_000_000.0 if math.isfinite(total) else 0.0
+
+
 # Politique retries/backoff par défaut du canal coder (#422) — alignée sur les
 # settings ``CODER_LLM_*`` de ``collegue.config``.
 DEFAULT_CODER_NUM_RETRIES = 8

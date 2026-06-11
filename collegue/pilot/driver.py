@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
+from collegue.executor.openhands_agent import estimate_cost_usd
 from collegue.executor.pipeline import (
     execute_issue,
     failure_feedback,
@@ -42,6 +43,7 @@ from collegue.executor.workspace import branch_for_issue, cleanup_workspace, swe
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
+    COST_UNKNOWN,
     GATE_DECISION,
     OVERLAY_REFRESHED,
     PR_OPENED,
@@ -571,6 +573,9 @@ async def run_project(
     # #461 : aléas infra du gate non décomptés (task_id → nombre), borné par
     # MAX_INFRA_GATE_GRACE — un timeout PyPI ne brûle plus une tentative saine.
     infra_gate_grace: dict = {}
+    # #484 : signal « coût inconnu » émis au plus UNE fois par run/segment
+    # (anti-bruit — le flag en mémoire ne survit pas aux restarts, comme #443).
+    cost_unknown_signaled = False
 
     # #466 : balayage de démarrage. (a) Les workspaces conservés PERSISTÉS des
     # tâches désormais abouties — le dict en mémoire de #443 repartait vide à
@@ -704,10 +709,26 @@ async def run_project(
         # auto-déclaré par l'agent alimente le même ledger (les deux canaux
         # s'additionnent : ils ne comptent jamais les mêmes appels).
         agent_result = outcome.execution.agent_result
-        coder_tokens = int(getattr(agent_result, "prompt_tokens", 0) or 0) + int(
-            getattr(agent_result, "completion_tokens", 0) or 0
-        )
+        coder_prompt = int(getattr(agent_result, "prompt_tokens", 0) or 0)
+        coder_completion = int(getattr(agent_result, "completion_tokens", 0) or 0)
+        coder_tokens = coder_prompt + coder_completion
         coder_usd = float(getattr(agent_result, "cost_usd", 0.0) or 0.0)
+        if coder_tokens and coder_usd <= 0:
+            # #484 : modèle non mappé litellm → cost_usd=0 malgré des tokens.
+            # Prix de secours configurés (LLM_PRICE_*_PER_1M) : coût estimé ;
+            # sinon coût INCONNU — signalé une fois par run/segment au lieu
+            # d'un 0 silencieux qui ressemble à un run gratuit.
+            coder_usd = estimate_cost_usd(coder_prompt, coder_completion)
+            if coder_usd <= 0 and not cost_unknown_signaled:
+                cost_unknown_signaled = True
+                audit.record(
+                    COST_UNKNOWN,
+                    iteration=iteration,
+                    task_id=task.id,
+                    tokens=coder_tokens,
+                    reason="cost_usd nul malgré des tokens (modèle non mappé litellm ?) et aucun prix "
+                    "LLM_PRICE_*_PER_1M configuré — plafond MAX_COST_USD inopérant pour le canal coder",
+                )
         if coder_tokens or coder_usd:
             audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
         elif TIMEOUT_NOTE in (getattr(agent_result, "logs", "") or ""):

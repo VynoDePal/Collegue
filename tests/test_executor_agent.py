@@ -292,3 +292,39 @@ def test_app_does_not_wire_executor():
     app_src = (Path(__file__).resolve().parent.parent / "collegue" / "app.py").read_text(encoding="utf-8")
     assert "collegue.executor" not in app_src
     assert "from collegue.executor" not in app_src
+
+
+# --- prix de secours du canal coder (#484) -------------------------------------------
+
+
+def test_estimate_cost_usd_uses_configured_prices():
+    """#484 : modèle non mappé litellm → cost_usd=0 du runner ; les prix
+    LLM_PRICE_*_PER_1M permettent au moteur d'estimer le coût."""
+    from collegue.executor.openhands_agent import estimate_cost_usd
+
+    prices = _settings(LLM_PRICE_PROMPT_PER_1M=1.5, LLM_PRICE_COMPLETION_PER_1M=9.0)
+    assert estimate_cost_usd(1_000_000, 2_000_000, prices) == pytest.approx(1.5 + 18.0)
+    # Un seul prix configuré : seul ce côté compte.
+    prompt_only = _settings(LLM_PRICE_PROMPT_PER_1M=1.5)
+    assert estimate_cost_usd(1_000_000, 500_000, prompt_only) == pytest.approx(1.5)
+
+
+def test_estimate_cost_usd_disabled_or_aberrant_returns_zero():
+    """Sans prix configurés (ou aberrants), 0.0 — l'appelant signale alors un
+    coût INCONNU au lieu d'un zéro silencieux."""
+    from collegue.executor.openhands_agent import estimate_cost_usd
+
+    assert estimate_cost_usd(1_000_000, 1_000_000, _settings()) == 0.0
+    for bad in (0.0, -3.0, "n/a", float("nan"), float("inf"), None):
+        assert estimate_cost_usd(1_000_000, 0, _settings(LLM_PRICE_PROMPT_PER_1M=bad)) == 0.0
+    # Tokens négatifs neutralisés.
+    assert estimate_cost_usd(-100, -100, _settings(LLM_PRICE_PROMPT_PER_1M=1.0)) == 0.0
+
+
+def test_estimate_cost_usd_survives_poisoned_token_counts():
+    """Revue #484 : un int JSON géant dans la ligne d'usage ne tue pas le run —
+    OverflowError rattrapée, estimation 0 (l'audit ne casse jamais le run)."""
+    from collegue.executor.openhands_agent import estimate_cost_usd
+
+    prices = _settings(LLM_PRICE_PROMPT_PER_1M=1.5)
+    assert estimate_cost_usd(10**400, 0, prices) == 0.0

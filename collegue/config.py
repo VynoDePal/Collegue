@@ -173,6 +173,8 @@ class Settings(BaseSettings):
     # 0 (ou non défini) = plafond désactivé (opt-in ; défaut = aucun changement).
     # Portée : compteur cumulé du process serveur (le moteur autonome = 1 process ;
     # le dashboard est un lecteur séparé). En multi-worker, le cap est par-worker.
+    # Modèles non mappés litellm : cost_usd=0 côté runner → configurer
+    # LLM_PRICE_*_PER_1M, sinon le ledger $ reste à 0 (événement cost_unknown).
     # Providers locaux (LM Studio/Ollama/Unsloth) : coût = 0 → MAX_COST_USD inerte,
     # seul MAX_TOKENS_BUDGET les protège.
     MAX_COST_USD: float = 0.0
@@ -189,6 +191,18 @@ class Settings(BaseSettings):
             return "pause"
         action = str(v).strip().lower()
         return action if action in ("pause", "warn") else "pause"
+
+    # #484 : prix de secours du canal coder (USD par MILLION de tokens). Quand
+    # litellm ne mappe pas le modèle (« Cost calculation failed: This model isn't
+    # mapped yet », ex. gemma-4-31b-it), le runner émet cost_usd=0 malgré des
+    # millions de tokens : run_cost_usd reste à 0. Si l'un de ces prix est > 0,
+    # le moteur estime coût = tokens × prix pour le ledger. 0 (défaut) =
+    # désactivé : un événement d'audit `cost_unknown` signale alors le coût
+    # inconnu (une fois par run/segment) au lieu d'un 0 silencieux. NB : un
+    # provider coder réellement gratuit (LM Studio/Ollama local) déclenchera
+    # aussi le signal — factuellement exact, le cap $ ne protège pas ce canal.
+    LLM_PRICE_PROMPT_PER_1M: float = 0.0
+    LLM_PRICE_COMPLETION_PER_1M: float = 0.0
 
     # ── Auto-merge progressif (Phase 5, H2) ──────────────────────────────────
     # §6 reste le DÉFAUT : approbation humaine avant chaque merge dans main.
