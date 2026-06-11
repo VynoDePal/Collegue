@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
@@ -249,7 +250,131 @@ def installability_command(workspace: str) -> Optional[str]:
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} -r requirements.txt"
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} pytest"
         f" && {_PYTEST_WIDE_COLUMNS} {_GATE_VENV}/bin/python -m pytest --collect-only -q"
+        " --continue-on-collection-errors"
     )
+
+
+# #481 : module importé → paquet PyPI quand les noms divergent (cas connus du
+# run FacNor v4 + classiques). Heuristique sinon : nom-module ≈ nom-paquet.
+_MODULE_TO_PACKAGE = {
+    "jose": "python-jose[cryptography]",
+    "email_validator": "email-validator",
+    "multipart": "python-multipart",
+    "dotenv": "python-dotenv",
+    "jwt": "PyJWT",
+    "yaml": "PyYAML",
+    "PIL": "Pillow",
+    "bs4": "beautifulsoup4",
+    "dateutil": "python-dateutil",
+    "fitz": "PyMuPDF",
+}
+_MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
+_REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9._-]+)")
+# FacNor v4 tâche 2 : 3 paquets découverts en série (chaîne d'imports — Python ne
+# révèle que le PREMIER module manquant d'un fichier, quel que soit le flag pytest).
+_MAX_REMEDIATION_ROUNDS = 3
+
+
+def _canonical(name: str) -> str:
+    """Nom de paquet normalisé PEP 503 (comparaisons requirements)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def missing_modules(output: str) -> List[str]:
+    """Modules de premier niveau des ``ModuleNotFoundError`` (dédupliqués, ordre stable)."""
+    seen: List[str] = []
+    for match in _MISSING_MODULE_RE.finditer(output or ""):
+        module = match.group(1).split(".")[0]
+        if module and module not in seen:
+            seen.append(module)
+    return seen
+
+
+def requirement_for_module(module: str) -> str:
+    """Paquet PyPI proposé pour un module manquant (table, sinon heuristique _ → -)."""
+    return _MODULE_TO_PACKAGE.get(module, module.replace("_", "-"))
+
+
+def _is_local_module(workspace: str, module: str) -> bool:
+    """Vrai si ``module`` correspond à un fichier/répertoire du projet (#481).
+
+    Cherche ``mod``/``mod.py`` à la racine, sous ``src/`` ET sous chaque
+    sous-répertoire de premier niveau : un import plat intra-package
+    (``app/main.py`` qui fait ``import utils`` pour ``app/utils.py``) lève le
+    même ``ModuleNotFoundError`` qu'un paquet manquant — l'installer depuis
+    PyPI serait une dependency confusion (le gate pourrait même VERDIR sur la
+    sémantique d'un paquet homonyme étranger).
+    """
+    prefixes = ["", "src"]
+    try:
+        prefixes += [
+            entry
+            for entry in os.listdir(workspace)
+            if not entry.startswith(".") and entry != "node_modules" and os.path.isdir(os.path.join(workspace, entry))
+        ]
+    except OSError:
+        pass
+    return any(
+        os.path.exists(os.path.join(workspace, prefix, suffix))
+        for prefix in prefixes
+        for suffix in (module, f"{module}.py")
+    )
+
+
+def remediate_missing_requirements(workspace: str, output: str) -> Tuple[str, ...]:
+    """Ajoute à ``requirements.txt`` les paquets des modules manquants (#481).
+
+    Remédiation **déterministe, sans LLM** : « module X introuvable en venv nu »
+    se répare en ajoutant le paquet à ``requirements.txt`` — repasser par un
+    cycle génération + gate complet coûtait un cycle PAR paquet (77,6 % du
+    budget tokens du run v4 brûlé en tentatives échouées, majoritairement sur
+    cette classe). Garde-fous, tous INDISPENSABLES :
+
+    - ``requirements.txt`` doit exister (on ne crée pas le contrat d'install) ;
+    - module LOCAL du workspace (``mod/``, ``mod.py``, ``src/mod``) jamais
+      ajouté — un layout ``src/`` ferait installer un paquet PyPI homonyme du
+      projet (dependency confusion) ;
+    - module de la stdlib jamais ajouté ;
+    - paquet déjà déclaré (nom PEP 503, extras/pins ignorés) jamais dupliqué.
+
+    Retourne les paquets ajoutés (tuple vide si rien à faire).
+    """
+    req_path = os.path.join(workspace, "requirements.txt")
+    if not os.path.isfile(req_path):
+        return ()
+    modules = missing_modules(output)
+    if not modules:
+        return ()
+    try:
+        with open(req_path, encoding="utf-8") as handle:
+            existing_text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        # Fichier illisible/non-UTF8 : pas de remédiation (et surtout pas de
+        # réécriture qui corromprait le fichier) — cycle LLM normal.
+        return ()
+    declared = set()
+    for line in existing_text.splitlines():
+        match = _REQ_NAME_RE.match(line)
+        if match:
+            declared.add(_canonical(match.group(1)))
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    additions: List[str] = []
+    for module in modules:
+        if module in stdlib:
+            continue
+        if _is_local_module(workspace, module):
+            continue  # module local du projet, pas un paquet PyPI
+        package = requirement_for_module(module)
+        if _canonical(_REQ_NAME_RE.match(package).group(1)) in declared:
+            continue  # déjà déclaré : manquant pour une AUTRE raison (pin cassé…)
+        additions.append(package)
+        declared.add(_canonical(_REQ_NAME_RE.match(package).group(1)))
+    if not additions:
+        return ()
+    body = existing_text if existing_text.endswith("\n") or not existing_text else existing_text + "\n"
+    with open(req_path, "w", encoding="utf-8") as handle:
+        handle.write(body + "\n".join(additions) + "\n")
+    return tuple(additions)
 
 
 # #463 : note visible quand « aucun test collecté » (pytest exit 5) est toléré.
@@ -452,6 +577,9 @@ class QualityReport:
     # True pour ne pas générer d'avertissement sur les rapports construits sans
     # cette information).
     tests_touched: bool = True
+    # #481 : paquets ajoutés à requirements.txt par la remédiation déterministe
+    # du gate (modules manquants) — visibles dans la PR et l'audit.
+    requirements_added: Tuple[str, ...] = ()
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -466,6 +594,11 @@ class QualityReport:
                 "> ⚠️ **installation des dépendances déclarées EN ÉCHEC** pendant le gate (#439) — "
                 "le vert peut venir des paquets pré-installés de l'image sandbox, pas du "
                 "`requirements.txt` du projet (installabilité non prouvée)."
+            )
+        if self.requirements_added:
+            lines.append(
+                "> 🔧 **dépendances manquantes ajoutées automatiquement** à `requirements.txt` (#481) : "
+                + ", ".join(f"`{p}`" for p in self.requirements_added)
             )
         lines += [
             "",
@@ -682,6 +815,7 @@ async def run_quality_gate(
     smoke_command: Optional[str] = None,
     smoke_paths: Tuple[str, ...] = ("/",),
     smoke_timeout: float = 30.0,
+    fix_missing_requirements: bool = True,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -721,6 +855,7 @@ async def run_quality_gate(
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
     deps_install_failed = False
+    requirements_added: List[str] = []
     try:
         command = test_command
         if install_deps:
@@ -763,6 +898,22 @@ async def run_quality_gate(
                 # lancée dans le même conteneur, après install des deps (#414).
                 command = f"({command}) && echo {shlex.quote(_SMOKE_BANNER)} && {smoke}"
         test_res = sandbox.run_tests(workspace, command)
+        if fix_missing_requirements:
+            # #481 : une ModuleNotFoundError en venv nu est un trou de
+            # requirements.txt, pas un problème de code — remédiation
+            # déterministe (table module→paquet) + relance de la MÊME commande,
+            # au lieu d'un cycle LLM complet PAR paquet. Borné : une chaîne
+            # d'imports ne révèle qu'un module manquant par passage.
+            for _ in range(_MAX_REMEDIATION_ROUNDS):
+                if test_res.ok:
+                    break
+                added = remediate_missing_requirements(
+                    workspace, "\n".join(part for part in (test_res.stdout, test_res.stderr) if part)
+                )
+                if not added:
+                    break
+                requirements_added.extend(added)
+                test_res = sandbox.run_tests(workspace, command)
         tests_passed = test_res.ok
         test_exit_code = test_res.exit_code
         test_output = "\n".join(part for part in (test_res.stdout, test_res.stderr) if part).strip()
@@ -820,6 +971,7 @@ async def run_quality_gate(
         adequacy_justification=adequacy_justification,
         adequacy_error=adequacy_error,
         tests_touched=touched,
+        requirements_added=tuple(requirements_added),
     )
 
 

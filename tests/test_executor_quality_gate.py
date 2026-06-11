@@ -896,3 +896,220 @@ def test_reviewer_protocol_runtime_checkable():
     assert isinstance(FakeReviewer(), Reviewer)
     assert isinstance(ExpertReviewer(), Reviewer)
     assert not isinstance(object(), Reviewer)
+
+
+# --- remédiation déterministe des dépendances manquantes (#481) ---------------------
+
+
+class _SeqSandbox:
+    """Rend les résultats en séquence (le dernier se répète) — la remédiation
+    relance la même commande dans le même gate."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls = []
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.calls.append((workspace, command))
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]
+
+
+def _missing(module):
+    return SandboxResult(
+        exit_code=2,
+        stdout=f"E   ModuleNotFoundError: No module named '{module}'\nERROR tests/test_x.py\n",
+        stderr="",
+    )
+
+
+def test_installability_command_continues_on_collection_errors(tmp_path):
+    """#481 : la collecte d'installabilité rapporte les erreurs de TOUS les
+    fichiers au lieu de s'interrompre (le flag ne couvre pas les chaînes
+    d'imports — c'est le rôle de la boucle de remédiation)."""
+    from collegue.executor import installability_command
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    assert "--continue-on-collection-errors" in installability_command(str(tmp_path))
+
+
+def test_missing_modules_parsed_and_deduplicated():
+    from collegue.executor.quality_gate import missing_modules
+
+    output = (
+        "E   ModuleNotFoundError: No module named 'httpx'\n"
+        "E   ModuleNotFoundError: No module named 'email_validator'\n"
+        "E   ModuleNotFoundError: No module named 'multipart'\n"
+        "E   ModuleNotFoundError: No module named 'httpx'\n"
+        "E   ModuleNotFoundError: No module named 'a.b'\n"
+    )
+    assert missing_modules(output) == ["httpx", "email_validator", "multipart", "a"]
+    assert missing_modules("") == []
+    assert missing_modules("FAILED tests/test_x.py - assert 1 == 2") == []
+
+
+def test_requirement_for_module_table_and_heuristic():
+    from collegue.executor.quality_gate import requirement_for_module
+
+    assert requirement_for_module("jose") == "python-jose[cryptography]"
+    assert requirement_for_module("email_validator") == "email-validator"
+    assert requirement_for_module("multipart") == "python-multipart"
+    assert requirement_for_module("httpx") == "httpx"
+    assert requirement_for_module("mon_module") == "mon-module"
+
+
+async def test_remediation_fixes_three_missing_packages_in_one_gate(tmp_path):
+    """LE test de l'issue #481 : 3 paquets manquants identifiés et réparés en UN
+    cycle (zéro LLM) — le run v4 brûlait un cycle LLM complet PAR paquet."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    red = SandboxResult(
+        exit_code=2,
+        stdout=(
+            "E   ModuleNotFoundError: No module named 'httpx'\n"
+            "E   ModuleNotFoundError: No module named 'email_validator'\n"
+            "E   ModuleNotFoundError: No module named 'multipart'\n"
+        ),
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="3 passed", stderr="")
+    sandbox = _SeqSandbox([red, green])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.passed is True
+    assert report.requirements_added == ("httpx", "email-validator", "python-multipart")
+    content = (tmp_path / "requirements.txt").read_text(encoding="utf-8")
+    assert all(pkg in content for pkg in ("fastapi", "httpx", "email-validator", "python-multipart"))
+    assert len(sandbox.calls) == 2  # un seul aller-retour de remédiation
+
+
+async def test_remediation_serial_import_chain_bounded(tmp_path):
+    """Cas FacNor exact : une chaîne d'imports ne révèle qu'un module manquant
+    par passage — la boucle bornée les égrène dans le même gate. Et un module
+    qui reste manquant après ajout (paquet cassé) ne boucle pas : fail-closed."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    green = SandboxResult(exit_code=0, stdout="3 passed", stderr="")
+    sandbox = _SeqSandbox([_missing("httpx"), _missing("email_validator"), _missing("multipart"), green])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.passed is True
+    assert report.requirements_added == ("httpx", "email-validator", "python-multipart")
+    assert len(sandbox.calls) == 4
+
+    # Toujours le même module manquant malgré l'ajout → un seul re-essai, gate
+    # rouge (le paquet ajouté reste visible dans le diff pour le cycle suivant).
+    (tmp_path / "requirements2").mkdir()
+    (tmp_path / "requirements2" / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    stuck = _SeqSandbox([_missing("httpx")])
+    report = await run_quality_gate(
+        str(tmp_path / "requirements2"), DIFF, ctx=None, sandbox=stuck, reviewer=FakeReviewer()
+    )
+    assert report.passed is False
+    assert report.requirements_added == ("httpx",)
+    assert len(stuck.calls) == 2
+
+
+async def test_remediation_skips_local_and_stdlib_modules(tmp_path):
+    """Garde-fous : un module LOCAL du projet (layout app/ ou src/) ou stdlib ne
+    devient jamais une dépendance PyPI (dependency confusion)."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pkg.py").write_text("")
+    red = SandboxResult(
+        exit_code=2,
+        stdout=(
+            "E   ModuleNotFoundError: No module named 'app'\n"
+            "E   ModuleNotFoundError: No module named 'pkg'\n"
+            "E   ModuleNotFoundError: No module named 'json'\n"
+        ),
+        stderr="",
+    )
+    sandbox = _SeqSandbox([red])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+    assert len(sandbox.calls) == 1
+    assert (tmp_path / "requirements.txt").read_text(encoding="utf-8") == "fastapi\n"
+
+
+async def test_remediation_skips_flat_import_inside_package(tmp_path):
+    """Revue #481 : ``app/main.py`` qui fait ``import utils`` pour ``app/utils.py``
+    lève le même ModuleNotFoundError qu'un paquet manquant — installer `utils`
+    depuis PyPI serait une dependency confusion (le gate pourrait même verdir
+    sur la sémantique d'un paquet étranger)."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("import utils\n")
+    (tmp_path / "app" / "utils.py").write_text("")
+    sandbox = _SeqSandbox([_missing("utils")])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+    assert len(sandbox.calls) == 1
+
+
+async def test_remediation_skips_unreadable_requirements(tmp_path):
+    """Revue #481 : un requirements.txt non-UTF8 n'est ni remédié ni corrompu —
+    et surtout ne détruit pas le diagnostic du gate (cycle LLM normal)."""
+    (tmp_path / "requirements.txt").write_bytes(b"# d\xe9pendances\nfastapi\n")  # latin-1
+    sandbox = _SeqSandbox([_missing("httpx")])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+    assert "ModuleNotFoundError" in report.test_output  # diagnostic réel préservé
+    assert (tmp_path / "requirements.txt").read_bytes() == b"# d\xe9pendances\nfastapi\n"
+
+
+async def test_remediation_requires_requirements_txt(tmp_path):
+    """Sans requirements.txt, la remédiation ne crée pas le contrat d'install."""
+    sandbox = _SeqSandbox([_missing("httpx")])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+    assert len(sandbox.calls) == 1
+
+
+async def test_remediation_never_duplicates_declared_package(tmp_path):
+    """Un paquet déjà déclaré (pin, extras) n'est jamais dupliqué — s'il manque
+    quand même, la cause est ailleurs (pin cassé) : cycle LLM normal."""
+    (tmp_path / "requirements.txt").write_text("httpx==0.27.0\npython-jose[cryptography]\n", encoding="utf-8")
+    red = SandboxResult(
+        exit_code=2,
+        stdout=("E   ModuleNotFoundError: No module named 'httpx'\nE   ModuleNotFoundError: No module named 'jose'\n"),
+        stderr="",
+    )
+    sandbox = _SeqSandbox([red])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+    assert len(sandbox.calls) == 1
+
+
+async def test_remediation_opt_out(tmp_path):
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _SeqSandbox([_missing("httpx")])
+    report = await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), fix_missing_requirements=False
+    )
+    assert report.requirements_added == ()
+    assert len(sandbox.calls) == 1
+    assert (tmp_path / "requirements.txt").read_text(encoding="utf-8") == "fastapi\n"
+
+
+def test_to_markdown_mentions_added_requirements():
+    report = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+        requirements_added=("httpx", "python-multipart"),
+    )
+    markdown = report.to_markdown()
+    assert "ajoutées automatiquement" in markdown
+    assert "`httpx`" in markdown and "`python-multipart`" in markdown
+    report_clean = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+    )
+    assert "ajoutées automatiquement" not in report_clean.to_markdown()

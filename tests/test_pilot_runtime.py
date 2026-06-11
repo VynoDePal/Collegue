@@ -342,3 +342,16 @@ def test_importing_pilot_does_not_pull_openhands_runtime():
     import collegue.pilot  # noqa: F401
 
     assert not any(name == "openhands" or name.startswith("openhands.") for name in sys.modules)
+
+
+def test_gate_fix_requirements_opt_out_emitted_only_on_deviation():
+    """#481 : la remédiation requirements est ON par défaut côté gate — la clé
+    n'apparaît dans les options qu'en opt-out (les défauts restent inchangés,
+    cf. les assertions d'égalité stricte ci-dessus)."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _gate_options
+
+    assert "fix_missing_requirements" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
+    options = _gate_options(SimpleNamespace(GATE_FIX_REQUIREMENTS=False))
+    assert options["fix_missing_requirements"] is False

@@ -671,3 +671,83 @@ def test_is_infra_gate_failure_never_graces_green_tests():
     )
     outcome = _gate_outcome(green_but_blocked, deps_install_failed=True, tests_passed=True)
     assert not is_infra_gate_failure(outcome)
+
+
+# --- remédiation requirements : recapture du diff (#481) -----------------------------
+
+
+class _SeqGateSandbox:
+    """Rouge (ModuleNotFoundError) puis vert — la remédiation du gate relance.
+
+    Écrit aussi un ARTEFACT dans le workspace monté (comme le ferait le
+    conteneur réel : __pycache__, node_modules, DB du smoke) — la recapture
+    post-remédiation ne doit PAS l'embarquer dans la PR (revue #481)."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls = 0
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.calls += 1
+        import pathlib
+
+        artefacts = pathlib.Path(workspace, "node_modules")
+        artefacts.mkdir(exist_ok=True)
+        (artefacts / "artefact.js").write_text("// écrit par le conteneur du gate\n")
+        return self._results.pop(0) if len(self._results) > 1 else self._results[0]
+
+
+async def test_requirements_remediation_recaptures_diff_for_pr(repo):
+    """#481 : le gate a amendé requirements.txt — le diff autoritatif est
+    RECAPTURÉ, sinon la PR et la mémoire de retry (#436) partiraient sans le
+    correctif (récidive du bug livré)."""
+    red = SandboxResult(
+        exit_code=2,
+        stdout="E   ModuleNotFoundError: No module named 'httpx'\n",
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="2 passed", stderr="")
+    clients = _clients()
+    outcome = await execute_issue(
+        ISSUE,
+        repo,
+        ctx=None,
+        dry_run=False,
+        **_kwargs(
+            agent=FakeCodeAgent(files={"requirements.txt": "fastapi\n", "app.py": "import httpx\n"}),
+            sandbox=_SeqGateSandbox([red, green]),
+            clients=clients,
+        ),
+    )
+    assert outcome.success is True
+    assert outcome.quality_report.requirements_added == ("httpx",)
+    assert "+httpx" in outcome.execution.diff
+    assert "requirements.txt" in outcome.execution.files_changed
+    assert clients.prs.created  # la PR part AVEC le correctif
+    # Revue #481 : les artefacts écrits par le conteneur du gate restent hors PR.
+    assert not any("node_modules" in path for path in outcome.execution.files_changed)
+    assert "artefact.js" not in outcome.execution.diff
+
+
+async def test_remediation_failure_keeps_gate_red_and_diff_updated(repo):
+    """#481 : remédiation insuffisante (toujours rouge) → gate rouge fail-closed,
+    mais le diff recapturé porte l'ajout — cohérence de best_diff (#436)."""
+    red = SandboxResult(
+        exit_code=2,
+        stdout="E   ModuleNotFoundError: No module named 'httpx'\n",
+        stderr="",
+    )
+    outcome = await execute_issue(
+        ISSUE,
+        repo,
+        ctx=None,
+        dry_run=False,
+        **_kwargs(
+            agent=FakeCodeAgent(files={"requirements.txt": "fastapi\n", "app.py": "import httpx\n"}),
+            sandbox=_SeqGateSandbox([red]),
+        ),
+    )
+    assert outcome.success is False
+    assert outcome.reason == "gate_failed"
+    assert outcome.quality_report.requirements_added == ("httpx",)
+    assert "+httpx" in outcome.execution.diff
