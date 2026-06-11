@@ -124,6 +124,66 @@ def test_run_cost_summary_zero_when_no_metrics(manager):
     assert run_cost_summary(manager, pid) == {"usd": 0.0, "tokens": 0}
 
 
+# --- le ledger survit aux restarts de process (#462) -------------------------------
+
+
+def test_ledger_reseeded_after_process_restart(manager):
+    """#462 (cas réel FacNor v3) : run en 3 segments → le run_stop final
+    annonçait 5,38 M tokens pour 8,98 M consommés (-40 %). Un nouveau
+    RunAuditLog persistant repart du dernier cumul persisté, et les métriques
+    suivantes restent un cumul de RUN, pas de segment."""
+    pid = manager.create_project(name="restart")
+    segment1 = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True)
+    segment1.record_cost(usd=0.05, tokens=2_000_000)
+
+    # « Restart de process » : nouvelle construction, même état persisté.
+    segment2 = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True)
+    assert segment2.cost.tokens == 2_000_000  # réamorcé, pas zéro
+    assert segment2.cost.usd == 0.05
+    segment2.record_cost(usd=0.03, tokens=1_500_000)
+    assert run_cost_summary(manager, pid) == {"usd": 0.08, "tokens": 3_500_000}
+
+    segment3 = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True)
+    segment3.record_cost(usd=0.02, tokens=5_000_000)
+    assert run_cost_summary(manager, pid) == {"usd": 0.1, "tokens": 8_500_000}
+
+
+def test_ledger_reseed_only_when_persisting(manager):
+    pid = manager.create_project(name="np")
+    RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True).record_cost(usd=0.05, tokens=100)
+    # Sans persistance (ex. dry_run), pas de réamorçage : ledger local à zéro.
+    fresh = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=False)
+    assert fresh.cost.tokens == 0 and fresh.cost.usd == 0.0
+
+
+def test_ledger_reseed_tolerates_corrupt_metric_rows():
+    """#462 (revue) : une ligne NaN/inf (autre backend, écriture manuelle) ne
+    doit pas empêcher le run de DÉMARRER — l'audit ne casse jamais le run.
+    (SQLite refuse NaN à l'insertion → stub de manager.)"""
+    from types import SimpleNamespace
+
+    class _CorruptMetricsManager:
+        def record_decision(self, *a, **k): ...
+        def add_metric(self, *a, **k): ...
+        def get_metrics(self, project_id, name=None):
+            return [
+                SimpleNamespace(name="run_tokens", value=float("nan")),
+                SimpleNamespace(name="run_cost_usd", value=float("inf")),
+            ]
+
+    log = RunAuditLog(1, manager=_CorruptMetricsManager(), clock=_fixed_clock, persist=True)
+    assert log.cost.tokens == 0 and log.cost.usd == 0.0
+
+
+def test_ledger_reseed_tolerates_manager_without_get_metrics():
+    class _Capable:
+        def record_decision(self, *a, **k): ...
+        def add_metric(self, *a, **k): ...
+
+    log = RunAuditLog(1, manager=_Capable(), persist=True)
+    assert log.cost.tokens == 0  # best-effort : pas de get_metrics → zéro
+
+
 def test_persistence_failure_does_not_break_run():
     # Manager dont record_decision lève : l'audit doit avaler l'erreur (best-effort).
     class _Boom:
