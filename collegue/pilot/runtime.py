@@ -97,6 +97,19 @@ def _sandbox_pip_cache(settings_obj):
     return path
 
 
+def _sandbox_subscription_auth(settings_obj):
+    """Creds d'abonnement OpenHands (Codex/ChatGPT) — ``SANDBOX_SUBSCRIPTION_AUTH_DIR``.
+
+    Chemin HÔTE (ex. ``~/.openhands``) monté en RW dans le worker pour utiliser
+    l'abonnement (sans coût API). Vide/absent → ``None`` (mode clé API inchangé).
+    Ne crée PAS le dossier : il doit contenir des creds valides (login fait en amont).
+    """
+    raw = str(getattr(settings_obj, "SANDBOX_SUBSCRIPTION_AUTH_DIR", "") or "").strip()
+    if not raw:
+        return None
+    return os.path.expanduser(raw)
+
+
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.sandbox import DockerSandbox
 
@@ -108,6 +121,7 @@ def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integrati
         network="bridge",
         dns=_sandbox_dns(settings_obj),
         pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
+        subscription_auth_dir=_sandbox_subscription_auth(settings_obj),  # creds abo Codex/ChatGPT
     )
 
 
