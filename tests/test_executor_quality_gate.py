@@ -718,6 +718,141 @@ async def test_llm_adequacy_checker_round_trip():
     assert "JSON" in system
 
 
+# --- adéquation des TESTS : couverture des critères chiffrables (#499) ---------------
+
+
+_ISSUE_TVA = IssueSpec(
+    number=7,
+    title="Calcul des totaux TVA/TTC",
+    acceptance_criteria=("Le total TTC doit être calculé correctement (HT + TVA).",),
+)
+# Diff qui TOUCHE un test (tests_touched True) — le cas du run v5 : un test qui
+# n'asserte que le code HTTP, jamais les montants.
+_DIFF_WITH_TEST = (
+    "diff --git a/app/tax.py b/app/tax.py\n+def compute(...): ...\n"
+    "diff --git a/tests/test_api.py b/tests/test_api.py\n+    assert resp.status_code == 200\n"
+)
+
+
+async def test_test_adequacy_blocks_when_criteria_not_asserted(tmp_path):
+    """#499 (le cas TVA ×100 du run v5) : feature présente, tests verts, MAIS
+    aucun test n'asserte le critère chiffrable → gate ROUGE."""
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(
+        implemented=True, tests_assert_criteria=False, tests_justification="aucun test n'asserte le montant TTC"
+    )
+    report = await run_quality_gate(
+        str(tmp_path),
+        _DIFF_WITH_TEST,
+        ctx=None,
+        sandbox=_green(),
+        reviewer=FakeReviewer(),
+        issue=_ISSUE_TVA,
+        adequacy_checker=checker,
+    )
+    assert report.tests_passed is True
+    assert report.adequacy_implemented is True
+    assert report.adequacy_tests_assert is False
+    assert report.passed is False  # fail-closed
+    markdown = report.to_markdown()
+    assert "#499" in markdown and "montant TTC" in markdown
+
+
+async def test_test_adequacy_pass_keeps_gate_green(tmp_path):
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(
+        implemented=True, tests_assert_criteria=True, tests_justification="le test asserte le TTC à 0.01 près"
+    )
+    report = await run_quality_gate(
+        str(tmp_path),
+        _DIFF_WITH_TEST,
+        ctx=None,
+        sandbox=_green(),
+        reviewer=FakeReviewer(),
+        issue=_ISSUE_TVA,
+        adequacy_checker=checker,
+    )
+    assert report.adequacy_tests_assert is True
+    assert report.passed is True
+
+
+async def test_test_adequacy_none_is_non_blocking(tmp_path):
+    """Rétrocompat #437 : un checker qui n'évalue pas la couverture (None) ne rend
+    jamais le gate rouge sur ce volet, et l'encart #499 est absent du rapport."""
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(implemented=True)  # tests_assert_criteria laissé à None
+    report = await run_quality_gate(
+        str(tmp_path),
+        _DIFF_WITH_TEST,
+        ctx=None,
+        sandbox=_green(),
+        reviewer=FakeReviewer(),
+        issue=_ISSUE_TVA,
+        adequacy_checker=checker,
+    )
+    assert report.adequacy_tests_assert is None
+    assert report.passed is True
+    assert "#499" not in report.to_markdown()
+
+
+async def test_llm_test_adequacy_round_trip():
+    """#499 : LLMAdequacyChecker émet un 2e verdict (couverture) quand l'adéquation
+    est OK ET le diff touche des tests ET l'issue porte des critères."""
+    from collegue.executor import LLMAdequacyChecker
+
+    prompts = []
+
+    async def fake_sample(prompt, system_prompt):
+        prompts.append((prompt, system_prompt))
+        if "COUVERTURE DE TEST" in system_prompt:
+            return '{"tests_assert_criteria": false, "justification": "aucun test n\'asserte le montant TTC"}'
+        return '{"implemented": true, "justification": "service livré"}'
+
+    checker = LLMAdequacyChecker(fake_sample)
+    outcome = await checker.check(_DIFF_WITH_TEST, _ISSUE_TVA, ctx=None)
+    assert outcome.implemented is True
+    assert outcome.tests_assert_criteria is False
+    assert len(prompts) == 2  # adéquation puis couverture
+    assert "COUVERTURE DE TEST" in prompts[1][1]
+    assert _ISSUE_TVA.title in prompts[1][0]
+
+
+async def test_llm_test_adequacy_skipped_without_criteria_or_tests():
+    """Borne du coût : pas de 2e appel si le diff ne touche pas de test, ou si
+    l'issue n'a pas de critères chiffrables."""
+    from collegue.executor import LLMAdequacyChecker
+
+    calls = {"n": 0}
+
+    async def fake_sample(prompt, system_prompt):
+        calls["n"] += 1
+        return '{"implemented": true, "justification": "ok"}'
+
+    # 5a : diff SANS test → un seul appel, tests_assert reste None.
+    checker = LLMAdequacyChecker(fake_sample)
+    out_a = await checker.check("diff --git a/app/tax.py b/app/tax.py\n+x\n", _ISSUE_TVA, ctx=None)
+    assert calls["n"] == 1 and out_a.tests_assert_criteria is None
+
+    # 5b : issue SANS acceptance_criteria → un seul appel.
+    calls["n"] = 0
+    out_b = await checker.check(_DIFF_WITH_TEST, IssueSpec(number=8, title="X"), ctx=None)
+    assert calls["n"] == 1 and out_b.tests_assert_criteria is None
+
+
+def test_parse_test_adequacy_is_fail_closed():
+    from collegue.executor.quality_gate import _parse_test_adequacy
+
+    ok, _ = _parse_test_adequacy('{"tests_assert_criteria": true, "justification": "asserte le TTC"}')
+    assert ok is True
+    fenced, just = _parse_test_adequacy('```json\n{"tests_assert_criteria": false, "justification": "rien"}\n```')
+    assert fenced is False and "rien" in just
+    assert _parse_test_adequacy("blabla")[0] is False  # illisible ⇒ fail-closed
+    assert _parse_test_adequacy("")[0] is False
+
+
 # --- signal « aucun test touché » (#437) --------------------------------------------
 
 
