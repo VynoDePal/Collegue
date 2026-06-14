@@ -750,6 +750,10 @@ class QualityReport:
     # n'asserte que « 200 » a livré la TVA ×100 du run v5 sans rien voir).
     adequacy_tests_assert: Optional[bool] = None
     adequacy_tests_justification: str = ""
+    # #508 : fichiers parasites AJOUTÉS au commit (logs, bases, .env, node_modules,
+    # __pycache__) — signal NON bloquant par défaut ; rouge seulement si
+    # forbidden_files_block (opt-in). Récidive v4→v5 : `server.log` livré.
+    forbidden_files: Tuple[str, ...] = ()
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -782,6 +786,12 @@ class QualityReport:
                 "une version résolue librement peut casser l'installation vierge (cause du register→500 v4). "
                 "Épingle-les (`==X.Y.Z` ou bornes `>=A,<B`) : "
                 + ", ".join(f"`{_fence_safe_line(line)}`" for line in self.requirements_unpinned)
+            )
+        if self.forbidden_files:
+            lines.append(
+                "> 🧹 **fichiers parasites committés (#508)** — artefacts d'exécution / secrets / "
+                "bases locales à RETIRER du commit et à ajouter au `.gitignore` : "
+                + ", ".join(f"`{_fence_safe_line(p)}`" for p in self.forbidden_files)
             )
         lines += [
             "",
@@ -1026,6 +1036,59 @@ def tests_touched(diff: str) -> bool:
     return any(_TEST_PATH_RE.search(path.lower()) for path in _diff_paths(diff))
 
 
+# Motifs de fichiers qui n'ont rien à faire dans un livrable (#508). Récidive
+# v4→v5 : `server.log` committé dans le produit. Suffixes de basename (artefacts,
+# bases locales, clés/certs privés), variantes `.env` de secrets, et segments de
+# chemin (répertoires vendorés/caches).
+_FORBIDDEN_FILE_SUFFIXES = (".log", ".db", ".sqlite", ".sqlite3", ".pyc", ".pem", ".key")
+_FORBIDDEN_PATH_SEGMENTS = ("node_modules", "__pycache__")
+# Variantes `.env` versionnées SCIEMMENT (gabarits sans secret) — à NE PAS flaguer.
+_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def _is_env_secret(base: str) -> bool:
+    """Vrai pour ``.env`` ET ses variantes de secrets (``.env.local``,
+    ``.env.production``…), faux pour les gabarits non sensibles (``.env.example``)."""
+    if base == ".env":
+        return True
+    return base.startswith(".env.") and not base.endswith(_ENV_TEMPLATE_SUFFIXES)
+
+
+def _is_forbidden_path(path: str) -> bool:
+    """Vrai si ``path`` matche un motif de fichier parasite (#508)."""
+    base = os.path.basename(path)
+    if _is_env_secret(base):
+        return True
+    if base.endswith(_FORBIDDEN_FILE_SUFFIXES):
+        return True
+    return any(segment in path.split("/") for segment in _FORBIDDEN_PATH_SEGMENTS)
+
+
+def forbidden_committed_files(diff: str) -> Tuple[str, ...]:
+    """Fichiers AJOUTÉS par le diff dont le chemin matche un motif interdit (#508).
+
+    Artefacts d'exécution (``*.log``, ``*.pyc``, ``__pycache__/``), bases locales
+    (``*.db``/``*.sqlite``), dépendances vendorées (``node_modules/``) ou secrets
+    (``.env``) n'ont rien à faire dans le livrable. Analyse PURE du diff, aucun
+    coût d'infra (comme :func:`unjustified_requirement_removals`, #482) ; ne
+    retient que les fichiers NEUFS (marqueur ``new file mode``) — éditer un
+    fichier déjà suivi n'est pas le symptôme et resterait silencieux. Résultat
+    déterministe (ordre du diff, dédupliqué).
+    """
+    added: List[str] = []
+    seen: set = set()
+    current: Optional[str] = None
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            current = parts[1].strip() if len(parts) == 2 else None
+        elif line.startswith("new file mode") and current:
+            if _is_forbidden_path(current) and current not in seen:
+                seen.add(current)
+                added.append(current)
+    return tuple(added)
+
+
 _ADEQUACY_SYSTEM = (
     "Tu es un relecteur d'ADÉQUATION (rôle REVIEWER). On te donne une issue (titre, "
     "critères d'acceptation) et le diff livré pour la fermer. Tu ne juges PAS le style : "
@@ -1221,6 +1284,8 @@ async def run_quality_gate(
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
     pin_guard: bool = True,
+    forbidden_files_guard: bool = True,
+    forbidden_files_block: bool = False,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -1275,6 +1340,11 @@ async def run_quality_gate(
     requirements_unpinned: Tuple[str, ...] = ()
     if pin_guard:
         requirements_unpinned = unpinned_requirement_lines(diff)
+    # #508 : garde fichiers parasites — analyse PURE du diff (comme #482). Signal
+    # par défaut ; bloquant seulement si forbidden_files_block (appliqué au verdict).
+    forbidden_files: Tuple[str, ...] = ()
+    if forbidden_files_guard:
+        forbidden_files = forbidden_committed_files(diff)
 
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
@@ -1400,6 +1470,11 @@ async def run_quality_gate(
     )
     if require_test_changes and not touched:
         passed = False
+    # #508 : signal par défaut, bloquant seulement en opt-in. Appliqué APRÈS le
+    # calcul de `passed` (n'entre pas dans would_pass : ne change pas l'économie
+    # d'appels d'adéquation #437).
+    if forbidden_files_block and forbidden_files:
+        passed = False
     return QualityReport(
         tests_passed=tests_passed,
         test_exit_code=test_exit_code,
@@ -1419,6 +1494,7 @@ async def run_quality_gate(
         requirements_unpinned=requirements_unpinned,
         adequacy_tests_assert=adequacy_tests_assert,
         adequacy_tests_justification=adequacy_tests_justification,
+        forbidden_files=forbidden_files,
     )
 
 

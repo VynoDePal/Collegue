@@ -150,6 +150,12 @@ def _gate_options(settings_obj) -> dict:
     # #497 : signal deps non épinglées (défaut ON) — clé émise seulement en opt-out.
     if not bool(getattr(settings_obj, "GATE_PIN_GUARD", True)):
         options["pin_guard"] = False
+    # #508 : garde fichiers parasites — défaut ON (signal), clé émise en opt-out ;
+    # le mode bloquant est opt-in (clé émise seulement quand activé).
+    if not bool(getattr(settings_obj, "GATE_FORBIDDEN_FILES", True)):
+        options["forbidden_files_guard"] = False
+    if bool(getattr(settings_obj, "GATE_FORBIDDEN_FILES_BLOCK", False)):
+        options["forbidden_files_block"] = True
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)

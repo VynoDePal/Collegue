@@ -467,6 +467,22 @@ def test_gate_pin_guard_opt_out_emitted_only_on_deviation():
     assert _gate_options(SimpleNamespace(GATE_PIN_GUARD=False))["pin_guard"] is False
 
 
+def test_gate_forbidden_files_opt_out_and_block_opt_in():
+    """#508 : garde fichiers parasites ON par défaut (clé émise en opt-out) ;
+    le mode bloquant est opt-in (clé émise seulement quand activé)."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _gate_options
+
+    # défaut : aucune clé #508 (préserve l'égalité stricte du chemin défaut)
+    assert "forbidden_files_guard" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
+    assert "forbidden_files_block" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
+    # opt-out de la garde
+    assert _gate_options(SimpleNamespace(GATE_FORBIDDEN_FILES=False))["forbidden_files_guard"] is False
+    # opt-in du mode bloquant
+    assert _gate_options(SimpleNamespace(GATE_FORBIDDEN_FILES_BLOCK=True))["forbidden_files_block"] is True
+
+
 def test_gate_smoke_cors_origin_emitted_only_on_override():
     """#503 : le défaut CORS vit dans la signature du gate — la clé runtime n'est
     émise qu'en override explicite (préserve l'égalité stricte du chemin défaut)."""
