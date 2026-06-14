@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.openhands_agent import estimate_cost_usd
+from collegue.executor.openhands_agent import coder_pricing_resolvable, estimate_cost_usd
 from collegue.executor.pipeline import (
     agent_crash_signature,
     execute_issue,
@@ -47,6 +47,7 @@ from collegue.executor.workspace import branch_for_issue, cleanup_workspace, swe
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
+    COST_PRICING_UNRESOLVED,
     COST_UNKNOWN,
     GATE_DECISION,
     OVERLAY_REFRESHED,
@@ -88,6 +89,11 @@ STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
 STOP_AWAITING_MERGE = "awaiting_merge"  # mode strict (#411) : tout est prêt SAUF des merges humains
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
 STOP_SANDBOX_BROKEN = "sandbox_broken"  # crash-loop d'import agent : image/runner cassé (#498)
+
+
+class CostPricingUnresolvedError(RuntimeError):
+    """Refus de démarrer : prix coder non résolvable et REQUIRE_COST_PRICING (#502)."""
+
 
 # Retry au niveau tâche (#420). Le défaut du MODULE reste 1 (= pas de retry,
 # comportement historique — module isolé, aucun changement sans opt-in) ; le
@@ -457,6 +463,7 @@ async def run_project(
     gate_options=None,
     reconcile_reviews: bool = True,
     cleanup_workspaces: bool = True,
+    require_cost_pricing: bool = False,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -617,6 +624,24 @@ async def run_project(
         swept = sweep_stale_temp_clones()
         if swept:
             logger.info("balayage démarrage : %d clone(s) collegue-revert-* périmé(s) supprimé(s)", swept)
+
+    # #502 : visibilité du coût AU DÉMARRAGE (avant la boucle, en réel seulement).
+    # Si aucun prix de secours coder n'est configuré et que litellm ne mappe pas
+    # le modèle, le ledger $ restera à 0 et MAX_COST_USD sera inopérant côté
+    # coder — l'opérateur doit le savoir maintenant, pas en post-mortem.
+    if not dry_run and not coder_pricing_resolvable():
+        logger.warning(
+            "COÛT $ DU RUN POTENTIELLEMENT INCONNU : aucun prix de secours coder "
+            "(LLM_PRICE_PROMPT_PER_1M / LLM_PRICE_COMPLETION_PER_1M). Si litellm ne mappe pas le "
+            "modèle coder, le ledger $ restera à 0 et MAX_COST_USD sera INOPÉRANT côté coder. "
+            "Configurez LLM_PRICE_*_PER_1M, ou REQUIRE_COST_PRICING=true pour refuser de démarrer."
+        )
+        audit.record(COST_PRICING_UNRESOLVED, iteration=iteration, dry_run=dry_run)
+        if require_cost_pricing:
+            raise CostPricingUnresolvedError(
+                "REQUIRE_COST_PRICING=true et aucun prix coder (LLM_PRICE_*_PER_1M) résolvable : "
+                "run refusé (ledger $ aveugle)."
+            )
 
     while True:
         if len(processed) >= cap:

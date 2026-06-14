@@ -213,6 +213,10 @@ class Settings(BaseSettings):
     # aussi le signal — factuellement exact, le cap $ ne protège pas ce canal.
     LLM_PRICE_PROMPT_PER_1M: float = 0.0
     LLM_PRICE_COMPLETION_PER_1M: float = 0.0
+    # #502 : refuser de DÉMARRER un run réel si aucun prix de secours coder n'est
+    # résolvable (litellm non mappé + LLM_PRICE_* absents → ledger $ aveugle).
+    # Off par défaut : avertissement seulement. Opt-in pour un échec net.
+    REQUIRE_COST_PRICING: bool = False
 
     # ── Auto-merge progressif (Phase 5, H2) ──────────────────────────────────
     # §6 reste le DÉFAUT : approbation humaine avant chaque merge dans main.

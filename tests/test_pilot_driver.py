@@ -2063,3 +2063,70 @@ async def test_budget_unchanged_without_coder_spend(repo, manager):
     pid = _linear_project(manager, 2)
     result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), budget=budget)
     assert result.stop_reason == "completed"
+
+
+# --- visibilité du prix coder au démarrage (#502) -----------------------------------
+
+
+async def test_cost_pricing_unresolved_event_at_startup(repo, manager, monkeypatch):
+    """#502 : sans prix coder configuré, un event est émis AU DÉMARRAGE (avant la
+    boucle) — l'opérateur sait que le ledger $ sera aveugle sans post-mortem."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 2)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), audit=audit)
+    kinds = [e.kind for e in audit.events]
+    assert kinds.count("cost_pricing_unresolved") == 1
+    # Émis AVANT toute tâche (visibilité de démarrage).
+    assert kinds.index("cost_pricing_unresolved") < kinds.index("task_started")
+
+
+async def test_no_cost_pricing_event_when_price_configured(repo, manager, monkeypatch):
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), audit=audit)
+    assert not [e for e in audit.events if e.kind == "cost_pricing_unresolved"]
+
+
+async def test_no_cost_pricing_event_in_dry_run(repo, manager, monkeypatch):
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=True, agent=FakeCodeAgent(), audit=audit)
+    assert not [e for e in audit.events if e.kind == "cost_pricing_unresolved"]
+
+
+async def test_require_cost_pricing_blocks_start(repo, manager, monkeypatch):
+    """#502 (opt-in) : REQUIRE_COST_PRICING refuse de démarrer si prix aveugle."""
+    import pytest
+
+    from collegue import config
+    from collegue.pilot.driver import CostPricingUnresolvedError
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 2)
+    with pytest.raises(CostPricingUnresolvedError):
+        await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), require_cost_pricing=True)
+    assert all(t.status == "todo" for t in manager.get_tasks(pid))  # rien démarré
+
+
+async def test_require_cost_pricing_passes_when_price_set(repo, manager, monkeypatch):
+    from collegue import config
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    pid = _linear_project(manager, 1)
+    result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), require_cost_pricing=True)
+    assert result.stop_reason == "completed"

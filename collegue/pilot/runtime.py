@@ -253,6 +253,8 @@ async def run_project_from_settings(
         # Gouvernance de coût (#441) : ledger + source process branchés en réel.
         audit=audit,
         cost_source=cost_source,
+        # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
+        require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
@@ -269,6 +271,11 @@ async def run_project_from_settings(
         if audit is not None:
             ledger = audit.cost_summary()
             cost_note = f" ; coût≈{ledger.get('usd', 0.0)}$ / {ledger.get('tokens', 0)} tokens"
+            # #502 : un coût à 0 sans prix coder configuré est suspect — le dire.
+            from collegue.executor.openhands_agent import coder_pricing_resolvable
+
+            if not coder_pricing_resolvable(settings_obj):
+                cost_note += " [PRIX CODER NON CONFIGURÉS — coût $ possiblement INCONNU]"
         manager.record_decision(
             project_id,
             f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}{cost_note}",
