@@ -2130,3 +2130,25 @@ async def test_require_cost_pricing_passes_when_price_set(repo, manager, monkeyp
     pid = _linear_project(manager, 1)
     result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), require_cost_pricing=True)
     assert result.stop_reason == "completed"
+
+
+async def test_cost_unknown_deduped_across_serial_segments(repo, manager, monkeypatch):
+    """#504 : en mode sériel strict le pilote est ré-appelé après chaque merge
+    (nouvel audit persistant à chaque segment) — le signal cost_unknown ne doit
+    être persisté qu'UNE fois pour tout le run (run v5 : 12 → 1)."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 1)
+    # Segment 1 : audit persistant → émet cost_unknown (persisté en décisions).
+    audit1 = RunAuditLog(pid, manager=manager, persist=True)
+    await _run(manager, repo, pid, dry_run=False, agent=_UnmappedModelAgent(), audit=audit1)
+    # Nouvelle tâche todo + « restart » (nouvel audit persistant) = 2e segment.
+    manager.add_task(pid, title="T-seg2")
+    audit2 = RunAuditLog(pid, manager=manager, persist=True)
+    await _run(manager, repo, pid, dry_run=False, agent=_UnmappedModelAgent(), audit=audit2)
+    # Au plus UN cost_unknown persisté pour tout le run, malgré 2 segments.
+    cu = [d for d in manager.get_decisions(pid) if d.summary == "[run] cost_unknown"]
+    assert len(cu) == 1

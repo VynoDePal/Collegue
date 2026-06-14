@@ -606,9 +606,6 @@ async def run_project(
     # consécutif) — N d'affilée ⇒ fail-fast (image cassée). Réarmé dès qu'un
     # hash change ou qu'une issue NON-crash survient.
     agent_crash_loop: dict = {}
-    # #484 : signal « coût inconnu » émis au plus UNE fois par run/segment
-    # (anti-bruit — le flag en mémoire ne survit pas aux restarts, comme #443).
-    cost_unknown_signaled = False
 
     # #466 : balayage de démarrage. (a) Les workspaces conservés PERSISTÉS des
     # tâches désormais abouties — le dict en mémoire de #443 repartait vide à
@@ -770,9 +767,11 @@ async def run_project(
             # sinon coût INCONNU — signalé une fois par run/segment au lieu
             # d'un 0 silencieux qui ressemble à un run gratuit.
             coder_usd = estimate_cost_usd(coder_prompt, coder_completion)
-            if coder_usd <= 0 and not cost_unknown_signaled:
-                cost_unknown_signaled = True
-                audit.record(
+            if coder_usd <= 0:
+                # #484/#504 : au plus UNE fois par run/projet — la dédup vit dans
+                # l'audit persistant (décisions), donc elle survit aux restarts du
+                # mode sériel strict (#434, run v5 : 12 cost_unknown → 1).
+                audit.record_once(
                     COST_UNKNOWN,
                     iteration=iteration,
                     task_id=task.id,
