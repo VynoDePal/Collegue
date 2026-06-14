@@ -328,3 +328,14 @@ def test_estimate_cost_usd_survives_poisoned_token_counts():
 
     prices = _settings(LLM_PRICE_PROMPT_PER_1M=1.5)
     assert estimate_cost_usd(10**400, 0, prices) == 0.0
+
+
+def test_coder_pricing_resolvable():
+    """#502 : vrai si un prix de secours coder est configuré (>0)."""
+    from collegue.executor.openhands_agent import coder_pricing_resolvable
+
+    assert coder_pricing_resolvable(_settings(LLM_PRICE_PROMPT_PER_1M=1.5)) is True
+    assert coder_pricing_resolvable(_settings(LLM_PRICE_COMPLETION_PER_1M=9.0)) is True
+    assert coder_pricing_resolvable(_settings()) is False
+    for bad in (0.0, -3.0, "n/a", float("nan")):
+        assert coder_pricing_resolvable(_settings(LLM_PRICE_PROMPT_PER_1M=bad)) is False

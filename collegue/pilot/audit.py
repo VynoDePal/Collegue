@@ -46,6 +46,10 @@ USAGE_LOST = "usage_lost"
 # plafond MAX_COST_USD est aveugle en dollars sur ce canal ; on le signale au
 # lieu de laisser un 0 ressembler à un run gratuit.
 COST_UNKNOWN = "cost_unknown"
+# #502 : aucun prix de secours coder configuré — signalé AU DÉMARRAGE du run
+# (avant la boucle), pour que l'opérateur sache que le ledger $ sera aveugle
+# sans attendre le post-mortem.
+COST_PRICING_UNRESOLVED = "cost_pricing_unresolved"
 
 # Noms des métriques persistées pour le ledger de coût par run.
 METRIC_RUN_COST_USD = "run_cost_usd"

@@ -108,6 +108,28 @@ def estimate_cost_usd(prompt_tokens: int, completion_tokens: int, settings_obj=N
     return total / 1_000_000.0 if math.isfinite(total) else 0.0
 
 
+def coder_pricing_resolvable(settings_obj=None) -> bool:
+    """Vrai si un prix de secours coder (``LLM_PRICE_*_PER_1M``) est configuré (#502).
+
+    Quand litellm ne mappe pas le modèle coder ET qu'aucun prix n'est configuré,
+    le ledger $ reste à 0 et ``MAX_COST_USD`` est inopérant côté coder (3 runs
+    consécutifs aveugles). Ce prédicat permet de l'AVERTIR au démarrage du run
+    plutôt que de le découvrir en post-mortem. Même robustesse que
+    :func:`estimate_cost_usd` (prix absent/non numérique/négatif/non fini → 0).
+    """
+    if settings_obj is None:
+        from collegue.config import settings as settings_obj
+
+    def _price(name: str) -> float:
+        try:
+            value = float(getattr(settings_obj, name, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) and value > 0 else 0.0
+
+    return _price("LLM_PRICE_PROMPT_PER_1M") > 0 or _price("LLM_PRICE_COMPLETION_PER_1M") > 0
+
+
 # Politique retries/backoff par défaut du canal coder (#422) — alignée sur les
 # settings ``CODER_LLM_*`` de ``collegue.config``.
 DEFAULT_CODER_NUM_RETRIES = 8
