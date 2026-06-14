@@ -50,6 +50,8 @@ from collegue.pilot.audit import (
     COST_PRICING_UNRESOLVED,
     COST_UNKNOWN,
     GATE_DECISION,
+    OPERATOR_REQUEUE,
+    OPERATOR_RESET,
     OVERLAY_REFRESHED,
     PR_OPENED,
     RUN_STOP,
@@ -381,6 +383,58 @@ def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count:
     else:
         fields["best_feedback"] = str(message)
     manager.update_task(task_id, **fields)
+    return fields
+
+
+def operator_requeue_task(manager, task_id: int, *, message: str, audit=None) -> dict:
+    """Intervention opérateur : re-file une tâche (#460) ET trace dans ``decisions`` (#506).
+
+    Wrappe :func:`requeue_task_for_redo` (chemin propre : le motif atteint le prompt
+    de la tentative suivante) puis journalise un événement ``OPERATOR_REQUEUE`` (état
+    avant/après) — sans ça, une reprise manuelle reste invisible au post-mortem
+    (run v5 : ``failed`` re-filé par ``UPDATE`` SQL direct, aucune trace). ``audit``
+    est injectable (défaut ``None``) : helper testable/utilisable sans DB d'audit,
+    no-op pur si absent (symétrie :class:`NullAuditLog`).
+    """
+    task = manager.get_task(task_id)
+    if task is None:
+        raise KeyError(f"tâche {task_id} introuvable")
+    before = task.status
+    fields = requeue_task_for_redo(manager, task_id, message=message)
+    if audit is not None:
+        audit.record(
+            OPERATOR_REQUEUE,
+            task_id=task_id,
+            status_before=before,
+            status_after=fields["status"],
+            message=str(message),
+        )
+    return fields
+
+
+def operator_reset_task(manager, task_id: int, *, status: str = TASK_STATUS_TODO, message: str, audit=None) -> dict:
+    """Reset de statut post-incident (#506) : pose ``status`` (défaut ``todo``) + trace.
+
+    Distinct du requeue : NE pose PAS de ``best_feedback`` (un reset n'oriente pas un
+    prompt, il rend juste une tâche terminale — ``failed`` — de nouveau éligible après
+    réparation d'infra ; cas run v5 : image sandbox HS). ``last_error`` horodaté garde
+    le motif lisible. Passe par ``manager.update_task`` (et non un ``UPDATE`` brut) pour
+    conserver le hook ORM ``updated_at``. ``audit`` injectable comme pour le requeue.
+    """
+    task = manager.get_task(task_id)
+    if task is None:
+        raise KeyError(f"tâche {task_id} introuvable")
+    before = task.status
+    fields = {"status": str(status), "last_error": f"[opérateur/reset] {message}"}
+    manager.update_task(task_id, **fields)
+    if audit is not None:
+        audit.record(
+            OPERATOR_RESET,
+            task_id=task_id,
+            status_before=before,
+            status_after=str(status),
+            message=str(message),
+        )
     return fields
 
 

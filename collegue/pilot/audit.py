@@ -50,6 +50,11 @@ COST_UNKNOWN = "cost_unknown"
 # (avant la boucle), pour que l'opérateur sache que le ledger $ sera aveugle
 # sans attendre le post-mortem.
 COST_PRICING_UNRESOLVED = "cost_pricing_unresolved"
+# #506 : interventions OPÉRATEUR hors-boucle (CLI `python -m collegue.pilot task ...`).
+# Tracées dans `decisions` pour qu'un reset/requeue manuel ne soit plus invisible
+# au post-mortem (run v5 : reset failed→todo par UPDATE SQL direct = trou d'audit).
+OPERATOR_REQUEUE = "operator_requeue"  # tâche re-filée via requeue_task_for_redo (motif → prompt)
+OPERATOR_RESET = "operator_reset"  # reset de statut post-incident (état avant/après tracé)
 
 # Noms des métriques persistées pour le ledger de coût par run.
 METRIC_RUN_COST_USD = "run_cost_usd"

@@ -35,6 +35,8 @@ from collegue.pilot.budget import (
 from collegue.pilot.driver import (
     ProjectRunResult,
     TaskOutcome,
+    operator_requeue_task,
+    operator_reset_task,
     reconcile_in_review_tasks,
     requeue_task_for_redo,
     run_project,
@@ -85,6 +87,8 @@ __all__ = [
     "TaskOutcome",
     "requeue_task_for_redo",
     "reconcile_in_review_tasks",
+    "operator_requeue_task",
+    "operator_reset_task",
     # F4 — câblage runtime
     "run_project_from_settings",
     "format_run_report",
