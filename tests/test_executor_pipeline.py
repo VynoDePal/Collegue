@@ -320,6 +320,88 @@ def test_failure_feedback_labels_regression_vs_task_tests():
     assert "ne modifie pas ces tests" in fb
 
 
+def test_failure_feedback_surfaces_forbidden_files_when_blocking():
+    """#508 (suite v6) : quand la garde fichiers parasites a fait rougir le gate,
+    le feedback DOIT dire à l'agent de retirer ces fichiers — même si les tests
+    sont verts (sinon il reçoit la sortie de test trompeuse et boucle, cas réel
+    v6 : server.log jamais signalé, tâche racine bloquée 3 tentatives)."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"),
+        changed=True,
+        diff="",
+        files_changed=("server.log", "app/x.py"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=True,  # tests VERTS
+        test_exit_code=0,
+        test_output="6 passed\nsse-starlette 3.4.4 requires starlette>=0.49.1 ... incompatible.",  # bruit pip
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,  # rouge à cause de #508
+        forbidden_files=("server.log",),
+        forbidden_files_blocking=True,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "#508" in fb
+    assert "server.log" in fb
+    assert "git rm --cached" in fb or "gitignore" in fb
+    assert "incompatible" not in fb  # le bruit pip ne doit PAS être le diagnostic
+
+
+def test_failure_feedback_ignores_forbidden_files_when_signal_only():
+    """#508 (suite v6) : en mode SIGNAL (non bloquant), forbidden_files ne doit PAS
+    masquer la vraie cause d'échec — le feedback reste le diagnostic des tests."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"),
+        changed=True,
+        diff="",
+        files_changed=("tests/test_app.py", "server.log"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=False,
+        test_exit_code=1,
+        test_output="FAILED tests/test_app.py::test_login - AssertionError",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+        forbidden_files=("server.log",),
+        forbidden_files_blocking=False,  # signal seulement
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "test_login" in fb  # la vraie cause (échec de test) est relayée
+    assert "#508" not in fb  # le signal parasite ne prend pas le dessus
+
+
 def test_regression_label_preserves_infra_classification():
     """#507 / non-régression #459/#461/#477 : étiqueter RÉGRESSION ne doit PAS
     désarmer is_infra_noise — une ligne FAILED présente reste fonctionnelle

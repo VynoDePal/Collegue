@@ -754,6 +754,12 @@ class QualityReport:
     # __pycache__) — signal NON bloquant par défaut ; rouge seulement si
     # forbidden_files_block (opt-in). Récidive v4→v5 : `server.log` livré.
     forbidden_files: Tuple[str, ...] = ()
+    # Vrai quand forbidden_files a RÉELLEMENT fait rougir le gate (block opt-in actif
+    # ET liste non vide) — distinct du simple signal. Permet à failure_feedback de ne
+    # surfacer la consigne « retire ces fichiers » que lorsqu'elle est la cause du
+    # rejet (sinon, en mode signal, elle masquerait le vrai motif d'échec). Run v6 :
+    # `server.log` bloquait le gate mais le feedback montrait du bruit pip trompeur.
+    forbidden_files_blocking: bool = False
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -1473,7 +1479,8 @@ async def run_quality_gate(
     # #508 : signal par défaut, bloquant seulement en opt-in. Appliqué APRÈS le
     # calcul de `passed` (n'entre pas dans would_pass : ne change pas l'économie
     # d'appels d'adéquation #437).
-    if forbidden_files_block and forbidden_files:
+    forbidden_blocked = bool(forbidden_files_block and forbidden_files)
+    if forbidden_blocked:
         passed = False
     return QualityReport(
         tests_passed=tests_passed,
@@ -1495,6 +1502,7 @@ async def run_quality_gate(
         adequacy_tests_assert=adequacy_tests_assert,
         adequacy_tests_justification=adequacy_tests_justification,
         forbidden_files=forbidden_files,
+        forbidden_files_blocking=forbidden_blocked,
     )
 
 

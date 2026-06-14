@@ -1611,6 +1611,7 @@ async def test_forbidden_files_signals_but_does_not_block_by_default():
     report = await run_quality_gate("/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer())
     assert report.forbidden_files == ("server.log",)
     assert report.passed is True  # signal, pas rouge
+    assert report.forbidden_files_blocking is False  # mode signal → pas la cause d'un rejet
     md = report.to_markdown()
     assert "#508" in md and "server.log" in md
 
@@ -1626,6 +1627,7 @@ async def test_forbidden_files_blocks_when_opt_in():
     )
     assert report.forbidden_files == ("server.log",)
     assert report.passed is False
+    assert report.forbidden_files_blocking is True  # le flag permet à failure_feedback de surfacer la consigne
 
 
 async def test_forbidden_files_guard_opt_out():
