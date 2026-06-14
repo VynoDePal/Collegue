@@ -139,6 +139,10 @@ class Settings(BaseSettings):
     # Budget d'attente de réponse (s) — à garder sous le timeout du conteneur
     # sandbox (120 s par défaut, partagé avec pip/pytest/npm).
     GATE_SMOKE_TIMEOUT: float = 30.0
+    # #503 : origine cross-origin des sondes smoke. Une route 2xx sans
+    # Access-Control-Allow-Origin compatible = rouge (l'UI serait bloquée au
+    # premier fetch). Vide = contrôle CORS désactivé (apps sans front).
+    GATE_SMOKE_CORS_ORIGIN: str = "http://localhost:5173"
     # DNS du sandbox (#485) : résolveurs passés en `--dns` aux conteneurs qui
     # ont besoin du réseau (installabilité #439, prélude #414, worker OpenHands).
     # Le résolveur Docker par défaut produisait des « Temporary failure in name
