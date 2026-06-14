@@ -162,3 +162,90 @@ def test_config_deadline_validator_neutralizes_bad_values():
     assert Settings(COLLEGUE_RUN_DEADLINE_SECONDS=-5).COLLEGUE_RUN_DEADLINE_SECONDS == 0.0
     assert Settings(COLLEGUE_RUN_DEADLINE_SECONDS=float("nan")).COLLEGUE_RUN_DEADLINE_SECONDS == 0.0
     assert Settings(COLLEGUE_RUN_DEADLINE_SECONDS=30).COLLEGUE_RUN_DEADLINE_SECONDS == 30.0
+
+
+# --- totaux externes (canal coder) repliés dans le budget (#495) --------------------
+
+
+def test_extra_totals_fold_into_budget_cost():
+    """#495 : un canal disjoint (coder) sommé avant comparaison déclenche le cap $."""
+    from collegue.monitoring.metrics import MetricsCollector
+
+    ctrl = BudgetTimeController(
+        started_at=T0,
+        deadline_seconds=0,
+        collector=MetricsCollector(),
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+        clock=_clock(T0),
+        extra_totals=lambda: (1.5, 0),
+    )
+    assert ctrl.should_continue().action == "paused_budget"
+
+
+def test_extra_totals_fold_into_budget_tokens():
+    from collegue.monitoring.metrics import MetricsCollector
+
+    ctrl = BudgetTimeController(
+        started_at=T0,
+        deadline_seconds=0,
+        collector=MetricsCollector(),
+        settings_obj=SimpleNamespace(MAX_COST_USD=0, MAX_TOKENS_BUDGET=1000, BUDGET_EXHAUSTED_ACTION="pause"),
+        clock=_clock(T0),
+        extra_totals=lambda: (0.0, 2000),
+    )
+    assert ctrl.should_continue().action == "paused_budget"
+
+
+def test_extra_totals_source_raises_is_safe():
+    """Le budget ne casse jamais le run : une source qui lève retombe sur le
+    collector seul (continue)."""
+
+    def _boom():
+        raise RuntimeError("source cassée")
+
+    ctrl = BudgetTimeController(
+        started_at=T0,
+        deadline_seconds=0,
+        collector=_Collector(None),
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+        clock=_clock(T0),
+        extra_totals=_boom,
+    )
+    assert ctrl.should_continue().ok is True
+
+
+def test_attach_extra_totals_setter():
+    """#495 : câblage post-construction (chemin harness — controller créé avant
+    run_project)."""
+    from collegue.monitoring.metrics import MetricsCollector
+
+    ctrl = BudgetTimeController(
+        started_at=T0,
+        deadline_seconds=0,
+        collector=MetricsCollector(),
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+        clock=_clock(T0),
+    )
+    assert ctrl.should_continue().ok is True  # rien câblé → sous budget
+    ctrl.attach_extra_totals(lambda: (9.0, 0))
+    assert ctrl.should_continue().action == "paused_budget"
+
+
+def test_no_extra_totals_keeps_collector_call_two_kwargs():
+    """Sans extra_totals, l'appel à would_exceed_budget reste à 2 kwargs exactement
+    (fakes à signature fixe + assertions d'égalité stricte préservés)."""
+    seen = {}
+
+    class _Capturing:
+        def would_exceed_budget(self, max_cost_usd=None, max_tokens=None):
+            seen["keys"] = {"cost": max_cost_usd, "tokens": max_tokens}
+            return None
+
+    BudgetTimeController(
+        started_at=T0,
+        deadline_seconds=0,
+        collector=_Capturing(),
+        settings_obj=SimpleNamespace(MAX_COST_USD=5.0, MAX_TOKENS_BUDGET=10, BUDGET_EXHAUSTED_ACTION="pause"),
+        clock=_clock(T0),
+    ).should_continue()
+    assert seen["keys"] == {"cost": 5.0, "tokens": 10}

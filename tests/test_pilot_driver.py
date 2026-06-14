@@ -2011,3 +2011,52 @@ async def test_agent_crash_loop_fail_fast_survives_variable_preamble(repo, manag
     )
     assert result.stop_reason == "sandbox_broken"
     assert any(e.detail.get("sandbox_broken") for e in audit.events)
+
+
+# --- enforcement du plafond $ sur le canal coder (#495) -----------------------------
+
+
+async def test_coder_spend_enforces_max_cost(repo, manager):
+    """#495 (le test décisif) : la dépense CODER (invisible du MetricsCollector
+    serveur) compte enfin pour MAX_COST_USD — le run se met en pause au lieu de
+    dépenser sans limite dollar (18 M tokens à 0 $ « sous budget » au v4)."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    from collegue.monitoring.metrics import MetricsCollector
+    from collegue.pilot.budget import BudgetTimeController
+
+    class _UsageAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(result, prompt_tokens=10000, completion_tokens=2000, cost_usd=5.0)
+
+    budget = BudgetTimeController(
+        collector=MetricsCollector(),  # collector serveur vide : seule la dépense coder compte
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+    )
+    pid = _linear_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_UsageAgent(), budget=budget)
+    assert result.stop_reason == "paused_budget"
+    statuses = {t.title: t.status for t in manager.get_tasks(pid)}
+    assert statuses["T0"] == "in_review"  # la 1re tâche a abouti
+    assert statuses["T1"] == "todo"  # la 2e n'a JAMAIS démarré (budget atteint)
+
+
+async def test_budget_unchanged_without_coder_spend(repo, manager):
+    """Sans dépense coder déclarée, comportement historique inchangé (pas de pause)."""
+    from types import SimpleNamespace
+
+    from collegue.monitoring.metrics import MetricsCollector
+    from collegue.pilot.budget import BudgetTimeController
+
+    budget = BudgetTimeController(
+        collector=MetricsCollector(),
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+    )
+    pid = _linear_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), budget=budget)
+    assert result.stop_reason == "completed"

@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -515,6 +516,15 @@ async def run_project(
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
+    # #495 : accumulateur CODER-SEUL (disjoint du MetricsCollector serveur) câblé
+    # au budget — sans ça MAX_COST_USD ne mordait jamais sur la dépense coder,
+    # pourtant majoritaire (18 M tokens au v4). Câblé ici car run_project est le
+    # seul point où `budget` est en scope sur TOUS les chemins (runtime ET
+    # harness FacNor qui construit son propre controller).
+    coder_totals = {"usd": 0.0, "tokens": 0}
+    _attach = getattr(budget, "attach_extra_totals", None)
+    if callable(_attach):
+        _attach(lambda: (coder_totals["usd"], coder_totals["tokens"]))
     try:
         max_task_attempts = max(1, int(max_task_attempts))
     except (TypeError, ValueError):
@@ -745,6 +755,13 @@ async def run_project(
                 )
         if coder_tokens or coder_usd:
             audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
+            # #495 : alimente l'accumulateur coder-seul lu par le budget dur.
+            # Même garde que RunCostLedger.add — un coder_usd aberrant (négatif,
+            # NaN/inf) ne doit pas fausser ni empoisonner le total budgétaire.
+            if math.isfinite(coder_usd) and coder_usd > 0:
+                coder_totals["usd"] += coder_usd
+            if coder_tokens > 0:
+                coder_totals["tokens"] += coder_tokens
         elif TIMEOUT_NOTE in (getattr(agent_result, "logs", "") or ""):
             # #464 : tentative tuée de l'extérieur (timeout sandbox) AVANT toute
             # ligne [collegue-usage] — la dépense (la tentative la plus longue,
