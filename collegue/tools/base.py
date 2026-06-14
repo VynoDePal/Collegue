@@ -38,7 +38,17 @@ class ToolValidationError(ToolError):
 
 
 class ToolExecutionError(ToolError):
-    pass
+    """Erreur d'exécution d'un outil.
+
+    ``status_code`` (optionnel) porte le code HTTP d'origine quand l'erreur naît
+    d'un appel API : le wrapper retry des clients (``_execute_with_retry``) le
+    relit via ``getattr(e, "status_code", 0)`` pour rétrograder en ``debug`` les
+    404 ATTENDUS (sondes d'existence) au lieu de les logger en ``error`` (#465/#505).
+    """
+
+    def __init__(self, message: str = "", status_code: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ToolConfigurationError(ToolError):
