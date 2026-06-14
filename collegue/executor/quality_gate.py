@@ -1285,6 +1285,45 @@ def _diff_paths(diff: str) -> Iterator[str]:
         yield path
 
 
+# #500 : un diff qui touche de l'AUTH (routes d'auth, « utilisateur courant ») est
+# le terrain de l'IDOR — la fuite cross-user la plus probable d'une app CRUD
+# générée par LLM (run v5 : clients lisibles/modifiables par tout compte). La
+# détection vit sur le DIFF (pas la config) → active au run réel même si le
+# harness bypasse _gate_options.
+_AUTH_DIFF_MARKERS = (
+    "get_current_user",
+    "current_user",
+    "oauth2passwordbearer",
+    "/auth/",
+    "httpbearer",
+    "import jwt",
+    "from jwt",
+    "jwt.encode",
+    "jwt.decode",
+    "depends(get_current",
+)
+
+# Consigne de revue ciblée, injectée quand le diff touche l'auth. Heuristique
+# best-effort : elle peut RATER une auth maison sans marqueur idiomatique (le
+# standard `security` mentionne alors l'IDOR de façon inconditionnelle comme
+# filet) ; un faux positif ne coûte qu'une consigne en trop — on erre du bon
+# côté en sécurité.
+_OWNERSHIP_REVIEW_CONSIGNE = (
+    "REVUE SÉCURITÉ — ISOLATION PAR PROPRIÉTAIRE (IDOR) : cette app a de "
+    "l'authentification. Toute ressource créée par un utilisateur DOIT être "
+    "filtrée par son propriétaire en lecture, écriture ET suppression. Signale "
+    "en `critical` (catégorie `security`) tout endpoint CRUD (GET/PUT/PATCH/"
+    "DELETE d'une ressource par id) qui n'applique aucun filtre owner — un "
+    "autre utilisateur authentifié pourrait y accéder."
+)
+
+
+def _diff_touches_auth(diff: str) -> bool:
+    """Le diff introduit-il de l'authentification ? (heuristique, insensible casse, #500)."""
+    haystack = (diff or "").lower()
+    return any(marker in haystack for marker in _AUTH_DIFF_MARKERS)
+
+
 def _detect_review_language(diff: str) -> Optional[str]:
     """Langage dominant d'un diff parmi ceux que ``code_review`` sait reviewer.
 
@@ -1357,11 +1396,15 @@ class ExpertReviewer:
             )
 
         tool = self._tool or self._build_tool()
-        request = CodeReviewRequest(
-            code=diff or "(diff vide)",
-            language=language,
-            context=issue.to_prompt() if issue is not None else None,
-        )
+        base_context = issue.to_prompt() if issue is not None else None
+        # #500 : si le diff touche l'auth, injecter la consigne ownership/IDOR —
+        # le diff complet (modèle + routes) est déjà envoyé en `code`, seul le
+        # prompt manquait la consigne (run v5 : IDOR clients non détecté).
+        if _diff_touches_auth(diff):
+            base_context = (
+                f"{base_context}\n\n{_OWNERSHIP_REVIEW_CONSIGNE}" if base_context else _OWNERSHIP_REVIEW_CONSIGNE
+            )
+        request = CodeReviewRequest(code=diff or "(diff vide)", language=language, context=base_context)
         response = await tool.execute_async(request, ctx=ctx)
         return outcome_from_review(response, min_quality=self._min_quality)
 

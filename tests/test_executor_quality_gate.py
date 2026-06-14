@@ -1002,6 +1002,55 @@ async def test_expert_reviewer_maps_tool_response():
     assert request.language == "python"
 
 
+def test_diff_touches_auth_heuristic():
+    """#500 : détection (insensible casse) d'un diff qui touche l'auth."""
+    from collegue.executor.quality_gate import _diff_touches_auth
+
+    assert _diff_touches_auth("diff --git a/api.py b/api.py\n+user = Depends(get_current_user)\n")
+    assert _diff_touches_auth("diff --git a/auth.py b/auth.py\n+@app.post('/auth/login')\n")
+    assert _diff_touches_auth("+OAuth2PasswordBearer(tokenUrl='token')")
+    assert _diff_touches_auth("+import JWT")  # insensible à la casse
+    assert not _diff_touches_auth("diff --git a/calc.py b/calc.py\n+def add(a, b): return a + b\n")
+    assert not _diff_touches_auth("")
+
+
+def test_security_standard_mentions_idor():
+    """#500 : le standard `security` de la revue nomme désormais l'IDOR/ownership."""
+    from collegue.tools.code_review.config import REVIEW_STANDARDS
+
+    assert "IDOR" in REVIEW_STANDARDS["security"]
+    assert "propriétaire" in REVIEW_STANDARDS["security"]
+
+
+async def test_review_injects_ownership_consigne_when_diff_touches_auth():
+    """#500 : un diff auth déclenche l'injection de la consigne ownership dans le
+    contexte de revue — le diff complet (modèle + routes) est déjà envoyé, seul
+    le prompt manquait la consigne (IDOR clients non détecté au run v5)."""
+    auth_diff = (
+        "diff --git a/app/api/clients.py b/app/api/clients.py\n"
+        "+def list_clients(user = Depends(get_current_user)):\n+    return db.query(Client).all()\n"
+    )
+    tool = _FakeTool(_response(0.9))
+    reviewer = ExpertReviewer(tool=tool)
+    await reviewer.review(auth_diff, ctx=None, issue=ISSUE)
+    context = tool.calls[0][0].context
+    assert context.startswith(ISSUE.to_prompt())
+    assert "IDOR" in context and "propriétaire" in context
+
+
+async def test_review_no_ownership_consigne_without_auth():
+    """Pas de bruit : un diff sans auth n'injecte aucune consigne ownership."""
+    neutral = "diff --git a/calc.py b/calc.py\n+def add(a, b):\n+    return a + b\n"
+    tool = _FakeTool(_response(0.9))
+    reviewer = ExpertReviewer(tool=tool)
+    await reviewer.review(neutral, ctx=None, issue=ISSUE)
+    assert tool.calls[0][0].context == ISSUE.to_prompt()
+    # Sans issue ET sans auth → contexte None (inchangé).
+    tool2 = _FakeTool(_response(0.9))
+    await ExpertReviewer(tool=tool2).review(neutral, ctx=None, issue=None)
+    assert tool2.calls[0][0].context is None
+
+
 async def test_review_skipped_for_unsupported_language_diff():
     """#409 : un diff sans fichier de code supporté (SQL seul) → revue IGNORÉE et
     NON bloquante ; l'outil n'est PAS appelé (plus de faux 0.00 sur du non-code).
