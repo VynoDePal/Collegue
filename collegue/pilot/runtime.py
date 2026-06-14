@@ -148,6 +148,15 @@ def _gate_options(settings_obj) -> dict:
         if smoke_paths:
             options["smoke_paths"] = smoke_paths
         options["smoke_timeout"] = float(getattr(settings_obj, "GATE_SMOKE_TIMEOUT", 30.0))
+        # #503 : le défaut vit dans la signature de run_quality_gate (actif même
+        # si le harness bypasse _gate_options) — n'émettre la clé qu'en OVERRIDE
+        # explicite (y compris "" pour désactiver), pour préserver l'égalité
+        # stricte de dict du test runtime sur le chemin par défaut.
+        from collegue.executor.quality_gate import _SMOKE_DEFAULT_ORIGIN
+
+        cors_origin = getattr(settings_obj, "GATE_SMOKE_CORS_ORIGIN", None)
+        if cors_origin is not None and str(cors_origin) != _SMOKE_DEFAULT_ORIGIN:
+            options["smoke_cors_origin"] = str(cors_origin)
     return options
 
 

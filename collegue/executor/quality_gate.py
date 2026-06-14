@@ -101,6 +101,13 @@ _SMOKE_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OP
 # bénéficie de la couverture — sinon le fix serait inerte au run réel, comme
 # #461 l'a été en v4. Coût nul sur une app sans ces routes (404/405 < 500).
 DEFAULT_SMOKE_PATHS = ("/", "POST:/auth/register", "POST:/auth/login")
+# #503 : origine cross-origin envoyée par chaque sonde — distincte de l'app
+# (127.0.0.1:8765). Un backend sans CORS ne renvoie pas d'Access-Control-Allow-
+# Origin couvrant cette origine → l'UI réelle serait bloquée au premier fetch
+# (run v5 : impossible de s'inscrire depuis l'interface). Défaut de SIGNATURE
+# (actif dès smoke_run, même si le harness bypasse _gate_options). Le port Vite
+# usuel des fronts générés. Vide = contrôle CORS désactivé (apps sans front).
+_SMOKE_DEFAULT_ORIGIN = "http://localhost:5173"
 # Payload générique des sondes à corps (#483) : champs usuels des routes d'auth.
 # Pydantic ignore les champs en trop par défaut → une route register/login VALIDE
 # ce corps et exécute son handler (le 500 passlib/bcrypt « out-of-the-box » de
@@ -136,6 +143,7 @@ command = %(command)r
 paths = %(paths)r  # paires (méthode, chemin) — cf. _smoke_probe_script (#483)
 payload = %(payload)r
 timeout = %(timeout)r
+origin = %(origin)r  # #503 : origine cross-origin (vide = contrôle CORS désactivé)
 log = open("/tmp/.collegue_smoke.log", "w+", encoding="utf-8", errors="replace")
 proc = subprocess.Popen(command, shell=True, stdout=log, stderr=subprocess.STDOUT)
 base = "http://127.0.0.1:%(port)d"
@@ -143,6 +151,7 @@ deadline = time.time() + timeout
 verdicts = []
 for method, path in paths:
     status = None
+    acao = None  # Access-Control-Allow-Origin renvoyé (#503)
     attempted = False
     # Au moins UNE tentative par chemin, même si le précédent a épuisé le délai
     # (sinon : faux rouge « sans réponse » sur un chemin jamais contacté).
@@ -152,20 +161,46 @@ for method, path in paths:
             break  # le serveur est mort avant de répondre
         try:
             data = payload if method not in ("GET", "HEAD") else None
-            headers = {"Content-Type": "application/json"} if data is not None else {}
+            headers = {"Origin": origin} if origin else {}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
             req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-            status = urllib.request.urlopen(req, timeout=2).status
+            resp = urllib.request.urlopen(req, timeout=2)
+            status = resp.status
+            acao = resp.headers.get("Access-Control-Allow-Origin")
             break
         except urllib.error.HTTPError as exc:
             status = exc.code
+            acao = exc.headers.get("Access-Control-Allow-Origin") if exc.headers else None
             break
         except Exception:
             time.sleep(0.5)
-    verdicts.append((method, path, status))
+    verdicts.append((method, path, status, acao))
 time.sleep(0.3)  # resserre la fenêtre « répond une fois puis meurt »
-ok = proc.poll() is None and all(s is not None and s < 500 for _m, _p, s in verdicts)
-for method, path, status in verdicts:
+
+
+def _cors_ok(status, acao):
+    # #503 : CORS contrôlé seulement quand l'app A répondu et a ACCEPTÉ la requête
+    # (status < 400). Un 4xx de contrat est déjà signalé par le status ; un 401
+    # protégé n'a pas à exposer CORS. « * » ou écho exact de l'origine = OK.
+    if not origin or status is None or status >= 400:
+        return True
+    return acao in ("*", origin)
+
+
+cors_failures = [(m, p) for m, p, s, a in verdicts if not _cors_ok(s, a)]
+ok = (
+    proc.poll() is None
+    and all(s is not None and s < 500 for _m, _p, s, _a in verdicts)
+    and not cors_failures
+)
+for method, path, status, acao in verdicts:
     print("[gate] smoke run", method, path, "->", status if status is not None else "sans réponse")
+for method, path in cors_failures:
+    print(
+        "[gate] smoke run CORS ABSENT", method, path, "— l'origine", origin,
+        "n'est pas autorisée (Access-Control-Allow-Origin) ; l'UI serait bloquée au premier fetch (#503)",
+    )
 if proc.poll() is not None:
     print(
         "[gate] smoke run : le processus serveur s'est terminé (code", str(proc.poll()) + ")",
@@ -199,7 +234,14 @@ def _detect_asgi_app(workspace: str) -> Optional[str]:
     return None
 
 
-def _smoke_probe_script(command: str, paths: Tuple[str, ...], timeout: float, *, port: int = _SMOKE_PORT) -> str:
+def _smoke_probe_script(
+    command: str,
+    paths: Tuple[str, ...],
+    timeout: float,
+    *,
+    port: int = _SMOKE_PORT,
+    origin: str = _SMOKE_DEFAULT_ORIGIN,
+) -> str:
     """Source python de la sonde smoke-run (pur — testable par ``compile``)."""
     # #483 : préfixe « MÉTHODE: » optionnel (whitelist _SMOKE_METHODS) — sans
     # lui, GET (compat #458). Les méthodes à corps envoient le payload JSON
@@ -221,6 +263,7 @@ def _smoke_probe_script(command: str, paths: Tuple[str, ...], timeout: float, *,
         "payload": _SMOKE_PROBE_PAYLOAD,
         "timeout": float(timeout),
         "port": int(port),
+        "origin": str(origin),
     }
 
 
@@ -230,6 +273,7 @@ def smoke_run_command(
     command: Optional[str] = None,
     paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     timeout: float = 30.0,
+    cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
 ) -> Optional[str]:
     """Commande de la passe smoke-run (#458). Fail-closed une fois déclenchée.
 
@@ -262,7 +306,7 @@ def smoke_run_command(
         if target is None:
             return None
         command = f"python -m uvicorn {target} --host 127.0.0.1 --port {_SMOKE_PORT}"
-    script = _smoke_probe_script(command, paths, timeout)
+    script = _smoke_probe_script(command, paths, timeout, origin=cors_origin)
     return f"python - <<'{_SMOKE_HEREDOC}'\n{script}{_SMOKE_HEREDOC}"
 
 
@@ -1168,6 +1212,7 @@ async def run_quality_gate(
     smoke_command: Optional[str] = None,
     smoke_paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     smoke_timeout: float = 30.0,
+    smoke_cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
     pin_guard: bool = True,
@@ -1261,7 +1306,13 @@ async def run_quality_gate(
                     installability = _tolerate_pytest_exit5(installability)
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
         if smoke_run:
-            smoke = smoke_run_command(workspace, command=smoke_command, paths=smoke_paths, timeout=smoke_timeout)
+            smoke = smoke_run_command(
+                workspace,
+                command=smoke_command,
+                paths=smoke_paths,
+                timeout=smoke_timeout,
+                cors_origin=smoke_cors_origin,
+            )
             if smoke is not None:
                 # Dernière passe (le heredoc doit clore la commande) : l'app est
                 # lancée dans le même conteneur, après install des deps (#414).

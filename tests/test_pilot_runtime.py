@@ -392,3 +392,17 @@ def test_gate_pin_guard_opt_out_emitted_only_on_deviation():
 
     assert "pin_guard" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
     assert _gate_options(SimpleNamespace(GATE_PIN_GUARD=False))["pin_guard"] is False
+
+
+def test_gate_smoke_cors_origin_emitted_only_on_override():
+    """#503 : le défaut CORS vit dans la signature du gate — la clé runtime n'est
+    émise qu'en override explicite (préserve l'égalité stricte du chemin défaut)."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _gate_options
+
+    assert "smoke_cors_origin" not in _gate_options(SimpleNamespace(GATE_SMOKE_RUN=True))
+    over = SimpleNamespace(GATE_SMOKE_RUN=True, GATE_SMOKE_CORS_ORIGIN="https://app.example")
+    assert _gate_options(over)["smoke_cors_origin"] == "https://app.example"
+    off = SimpleNamespace(GATE_SMOKE_RUN=True, GATE_SMOKE_CORS_ORIGIN="")
+    assert _gate_options(off)["smoke_cors_origin"] == ""

@@ -428,13 +428,16 @@ def _free_port():
         return sock.getsockname()[1]
 
 
-def _run_probe(command, timeout=10.0, port=None, paths=("/",)):
+def _run_probe(command, timeout=10.0, port=None, paths=("/",), origin=""):
+    # origin="" par défaut : les tests #458/#483 sondent des serveurs sans CORS
+    # et ne doivent PAS rougir sur le contrôle #503 (qui est testé séparément
+    # avec une origine explicite).
     import subprocess
     import sys
 
     from collegue.executor.quality_gate import _smoke_probe_script
 
-    script = _smoke_probe_script(command, paths, timeout, port=port or _free_port())
+    script = _smoke_probe_script(command, paths, timeout, port=port or _free_port(), origin=origin)
     return subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True, timeout=60)
 
 
@@ -1761,3 +1764,94 @@ async def test_remediation_selfdiagnosed_skips_declared_and_local(tmp_path):
     red2 = SandboxResult(exit_code=1, stdout="E   RuntimeError: please install utils to continue\n", stderr="")
     report2 = await run_quality_gate(str(work2), DIFF, ctx=None, sandbox=_SeqSandbox([red2]), reviewer=FakeReviewer())
     assert report2.requirements_added == ()
+
+
+# --- intégration cross-origin / CORS (#503) -----------------------------------------
+
+
+def test_smoke_probe_script_embeds_origin():
+    """#503 : l'origine cross-origin est bakée par défaut (signature) et le
+    contrôle Access-Control-Allow-Origin est présent dans la sonde."""
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script("python serve.py", ("/",), 5.0)
+    assert "localhost:5173" in script
+    assert "Access-Control-Allow-Origin" in script
+    compile(script, "<smoke>", "exec")
+
+
+def test_smoke_probe_script_origin_disabled_when_empty():
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script("python serve.py", ("/",), 5.0, origin="")
+    assert "localhost:5173" not in script
+    compile(script, "<smoke>", "exec")
+
+
+def _cors_server(tmp_path, port, *, get_status=200, acao_header=None):
+    header = f'        self.send_header("Access-Control-Allow-Origin", "{acao_header}")\n' if acao_header else ""
+    body = (
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        f"        self.send_response({get_status})\n"
+        f"{header}"
+        "        self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        f"HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n"
+    )
+    server = tmp_path / "serve.py"
+    server.write_text(body, encoding="utf-8")
+    return server
+
+
+def test_smoke_probe_red_when_cors_absent(tmp_path):
+    """#503 (le cas du run v5) : GET 200 mais aucun Access-Control-Allow-Origin
+    → l'UI serait bloquée → smoke ROUGE."""
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=200, acao_header=None)
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 1
+    assert "CORS ABSENT" in result.stdout
+
+
+def test_smoke_probe_green_when_cors_wildcard(tmp_path):
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=200, acao_header="*")
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 0
+
+
+def test_smoke_probe_green_when_cors_echoes_origin(tmp_path):
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=200, acao_header="http://localhost:5173")
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 0
+
+
+def test_smoke_probe_cors_ignored_on_4xx(tmp_path):
+    """#503 : une route protégée (401) sans CORS n'est PAS un faux rouge CORS —
+    le contrôle ne s'applique qu'aux réponses < 400."""
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=401, acao_header=None)
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 0  # 401 < 500 et CORS exempté sur >= 400
+
+
+async def test_gate_smoke_threads_cors_origin(tmp_path):
+    """#503 : le défaut de signature traverse run_quality_gate jusqu'à la commande
+    (même sans passer par _gate_options)."""
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "localhost:5173" in command
+    assert "Access-Control-Allow-Origin" in command
