@@ -289,3 +289,32 @@ def test_build_argv_dns_flags(tmp_path):
 def test_build_argv_no_dns_by_default(tmp_path):
     """Défaut : aucun --dns — argv identique au comportement historique durci."""
     assert "--dns" not in DockerSandbox(image="img")._build_run_argv("x", str(tmp_path))
+
+
+def test_build_argv_pip_cache_mount(tmp_path):
+    """#496 : cache pip persistant opt-in → 2e montage + PIP_CACHE_DIR."""
+    cache = tmp_path / "pipcache"
+    cache.mkdir()
+    sb = DockerSandbox(image="img", pip_cache_dir=str(cache))
+    argv = sb._build_run_argv("echo hi", str(tmp_path / "ws"))
+    import os as _os
+
+    cache_real = _os.path.realpath(str(cache))
+    assert f"{cache_real}:/tmp/.pip_cache" in _mounts(argv)
+    assert "PIP_CACHE_DIR=/tmp/.pip_cache" in " ".join(argv)
+
+
+def test_build_argv_no_pip_cache_by_default(tmp_path):
+    """Défaut : aucun cache → argv inchangé (un seul montage workspace)."""
+    argv = DockerSandbox(image="img")._build_run_argv("x", str(tmp_path))
+    assert "PIP_CACHE_DIR" not in " ".join(argv)
+    assert _mounts(argv) == [f"{tmp_path}:/workspace"]
+
+
+def test_build_argv_pip_cache_validated(tmp_path):
+    """#496 : un chemin de cache contenant ':' est refusé (devient un -v)."""
+    import pytest
+
+    sb = DockerSandbox(image="img", pip_cache_dir="/bad:path")
+    with pytest.raises(ValueError):
+        sb._build_run_argv("x", str(tmp_path))

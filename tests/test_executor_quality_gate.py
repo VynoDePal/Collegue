@@ -1855,3 +1855,52 @@ async def test_gate_smoke_threads_cors_origin(tmp_path):
     _ws, command = sandbox.calls[0]
     assert "localhost:5173" in command
     assert "Access-Control-Allow-Origin" in command
+
+
+# --- cache pip persistant opt-in (#496) ---------------------------------------------
+
+
+def test_deps_install_prelude_use_cache_drops_no_cache_dir(tmp_path):
+    from collegue.executor.quality_gate import deps_install_prelude
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    default = deps_install_prelude(str(tmp_path))
+    assert "--no-cache-dir" in default
+    cached = deps_install_prelude(str(tmp_path), use_cache=True)
+    assert "--no-cache-dir" not in cached
+    assert "pip install --user" in cached  # l'install ne disparaît pas
+
+
+def test_installability_command_use_cache(tmp_path):
+    from collegue.executor import installability_command
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    cmd = installability_command(str(tmp_path), use_cache=True)
+    assert "--no-cache-dir" not in cmd
+    assert cmd.count("--retries 5") == 2 and cmd.count("--timeout 30") == 2  # retries #461 intacts
+
+
+class _CacheSandbox(_FakeSandbox):
+    """FakeSandbox qui annonce un cache pip monté (dérivation run_quality_gate)."""
+
+    def __init__(self, result=None):
+        super().__init__(result or SandboxResult(exit_code=0, stdout="2 passed", stderr=""))
+        self.pip_cache_dir = "/host/cache"
+
+
+async def test_gate_keeps_no_cache_dir_without_sandbox_cache(tmp_path):
+    """Défaut (sandbox sans cache) : --no-cache-dir conservé (comportement #414)."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _green()  # pas d'attribut pip_cache_dir
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "--no-cache-dir" in command
+
+
+async def test_gate_uses_cache_when_sandbox_mounts_it(tmp_path):
+    """#496 : si le sandbox monte un cache, le gate retire --no-cache-dir."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _CacheSandbox()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "--no-cache-dir" not in command

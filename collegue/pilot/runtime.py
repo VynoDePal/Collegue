@@ -83,6 +83,20 @@ def _sandbox_dns(settings_obj) -> tuple:
     return tuple(server.strip() for server in raw.split(",") if server.strip())
 
 
+def _sandbox_pip_cache(settings_obj):
+    """Cache pip persistant du sandbox (#496) — ``SANDBOX_PIP_CACHE_DIR`` (chemin hôte).
+
+    Crée le dossier (le conteneur tourne en ``--user`` uid:gid hôte → writable
+    requis). Vide/absent → ``None`` (aucun cache).
+    """
+    raw = str(getattr(settings_obj, "SANDBOX_PIP_CACHE_DIR", "") or "").strip()
+    if not raw:
+        return None
+    path = os.path.expanduser(raw)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.sandbox import DockerSandbox
 
@@ -90,7 +104,11 @@ def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integrati
     # (le défaut durci est ``network="none"``). #485 : résolveurs DNS explicites
     # opt-in (SANDBOX_DNS) — le résolveur Docker par défaut était instable en
     # run réel (gate ET coder, le sandbox est partagé).
-    return DockerSandbox(network="bridge", dns=_sandbox_dns(settings_obj))
+    return DockerSandbox(
+        network="bridge",
+        dns=_sandbox_dns(settings_obj),
+        pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
+    )
 
 
 def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (integration)

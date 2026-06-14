@@ -150,6 +150,12 @@ class Settings(BaseSettings):
     # autant réduire l'occurrence). Adresses IP séparées par des virgules
     # (ex. "1.1.1.1,8.8.8.8") ; vide (défaut) = résolveur Docker.
     SANDBOX_DNS: str = ""
+    # #496 : cache pip persistant du sandbox (partie 2 de #485). Chemin HÔTE
+    # monté sur /tmp/.pip_cache (+ PIP_CACHE_DIR) pour les passes réseau du gate
+    # (#414/#439) : évite de retélécharger PyPI à chaque run. Le runtime crée le
+    # dossier (writable par l'uid hôte). Vide (défaut) = aucun cache. N'enlève
+    # --no-cache-dir QUE si le volume est monté (sinon cache dans le tmpfs /tmp).
+    SANDBOX_PIP_CACHE_DIR: str = ""
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

@@ -50,7 +50,7 @@ DEFAULT_TEST_COMMAND = f"{_PYTEST_WIDE_COLUMNS} python -m pytest -q"
 _INSTALL_FAILED_NOTE = "[gate] installation des dépendances en échec — tests lancés quand même (#414)"
 
 
-def deps_install_prelude(workspace: str, *, strict: bool = False) -> Optional[str]:
+def deps_install_prelude(workspace: str, *, strict: bool = False, use_cache: bool = False) -> Optional[str]:
     """Préambule shell installant les dépendances du projet avant les tests (#414).
 
     Le conteneur de tests est **éphémère** et distinct de celui où l'agent a
@@ -70,11 +70,15 @@ def deps_install_prelude(workspace: str, *, strict: bool = False) -> Optional[st
       l'installabilité des dépendances déclarées fait partie du contrat ;
     - ``None`` si le workspace ne déclare aucune dépendance installable.
     """
+    # #496 : ``use_cache=True`` retire ``--no-cache-dir`` — réservé au cas où le
+    # sandbox monte un cache pip persistant (sinon le cache irait dans le tmpfs
+    # /tmp, compté dans --memory). Dérivé du sandbox côté run_quality_gate.
+    no_cache = "" if use_cache else "--no-cache-dir "
     parts: List[str] = []
     if os.path.isfile(os.path.join(workspace, "requirements.txt")):
-        parts.append("python -m pip install --user --no-cache-dir -q -r requirements.txt")
+        parts.append(f"python -m pip install --user {no_cache}-q -r requirements.txt")
     if os.path.isfile(os.path.join(workspace, "pyproject.toml")) or os.path.isfile(os.path.join(workspace, "setup.py")):
-        parts.append("python -m pip install --user --no-cache-dir -q -e .")
+        parts.append(f"python -m pip install --user {no_cache}-q -e .")
     if not parts:
         return None
     if strict:
@@ -310,7 +314,7 @@ def smoke_run_command(
     return f"python - <<'{_SMOKE_HEREDOC}'\n{script}{_SMOKE_HEREDOC}"
 
 
-def installability_command(workspace: str) -> Optional[str]:
+def installability_command(workspace: str, *, use_cache: bool = False) -> Optional[str]:
     """Passe d'installabilité en environnement NU (#439). Fail-closed.
 
     L'image sandbox pré-installe une stack web pour servir l'**agent** (#414) :
@@ -331,7 +335,8 @@ def installability_command(workspace: str) -> Optional[str]:
     # --timeout 30 (pas plus) : le conteneur du gate a un budget TOTAL de
     # 120 s — un timeout socket long plus un retry le dépasserait (kill du
     # conteneur, le pire diagnostic possible).
-    pip_flags = "--no-cache-dir -q --retries 5 --timeout 30"
+    # #496 : --no-cache-dir retiré si un cache pip est monté (use_cache).
+    pip_flags = f"{'' if use_cache else '--no-cache-dir '}-q --retries 5 --timeout 30"
     return (
         f"python -m venv --clear {_GATE_VENV}"
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} -r requirements.txt"
@@ -1252,6 +1257,11 @@ async def run_quality_gate(
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
+    # #496 : le cache pip n'est utilisé que si le sandbox monte effectivement le
+    # volume — sinon le cache irait dans le tmpfs /tmp, compté dans --memory.
+    # Source de vérité UNIQUE = l'attribut du sandbox (pas un kwarg
+    # désynchronisable) ; getattr → tout double de test sans l'attribut → False.
+    use_pip_cache = bool(getattr(sandbox, "pip_cache_dir", None))
 
     # #482 : garde append-only sur requirements.txt — analyse PURE du diff,
     # AVANT les passes d'infra. Les tests tournent quand même : la mémoire de
@@ -1273,7 +1283,7 @@ async def run_quality_gate(
     try:
         command = test_command
         if install_deps:
-            prelude = deps_install_prelude(workspace, strict=require_deps_install)
+            prelude = deps_install_prelude(workspace, strict=require_deps_install, use_cache=use_pip_cache)
             if prelude is not None:
                 # Strict (#439) : install bloquante. Toléré (#414) : les tests
                 # tournent quand même, l'échec laisse sa note dans la sortie.
@@ -1298,7 +1308,7 @@ async def run_quality_gate(
             # gate rouge.
             command = f"({command}) && {front}"
         if check_installability:
-            installability = installability_command(workspace)
+            installability = installability_command(workspace, use_cache=use_pip_cache)
             if installability is not None:
                 if front_commands:
                     # La collecte de la passe d'installabilité (#439) renvoie
