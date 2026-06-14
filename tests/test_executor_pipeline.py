@@ -673,6 +673,76 @@ def test_is_infra_gate_failure_never_graces_green_tests():
     assert not is_infra_gate_failure(outcome)
 
 
+# --- crash d'import agent pré-LLM (#498) ---------------------------------------------
+
+
+def _agent_error_outcome(logs, *, prompt_tokens=0, completion_tokens=0, reason="agent_error"):
+    from collegue.executor import AgentResult, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome
+    from collegue.executor.runner import ExecutionResult
+
+    return ExecutionOutcome(
+        success=False,
+        stage="run",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(
+                success=False, logs=logs, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+            ),
+            changed=False,
+            diff="",
+            files_changed=(),
+            success=False,
+        ),
+        reason=reason,
+    )
+
+
+_IMPORT_CRASH_LOGS = (
+    "Traceback (most recent call last):\n"
+    '  File "/opt/oh_runner.py", line 31, in main\n'
+    "    from openhands.sdk import LLM, Conversation\n"
+    "ModuleNotFoundError: No module named 'lmnr'\n"
+)
+
+
+def test_is_infra_agent_crash_on_import_traceback():
+    """#498 : crash d'import pré-LLM (agent_error, 0 token, ModuleNotFoundError)
+    = aléa d'infra global (image cassée), pas un échec fonctionnel."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS))
+
+
+def test_is_infra_agent_crash_requires_zero_tokens():
+    """L'agent a appelé le LLM (tokens > 0) puis échoué : échec FONCTIONNEL,
+    jamais classé crash d'infra — même si les logs mentionnent un import."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert not is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS, completion_tokens=50))
+
+
+def test_is_infra_agent_crash_requires_import_signature():
+    """0 token mais pas de traceback d'import (assertion, autre crash) → non classé."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert not is_infra_agent_crash(_agent_error_outcome("AssertionError: x != y\n"))
+
+
+def test_is_infra_agent_crash_handles_importerror():
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert is_infra_agent_crash(_agent_error_outcome("ImportError: cannot import name 'sdk' from 'openhands'\n"))
+
+
+def test_is_infra_agent_crash_only_on_agent_error():
+    """Un no_op ou un gate_failed avec les mêmes logs n'est pas un crash agent."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert not is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS, reason="no_op"))
+    assert not is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS, reason="gate_failed"))
+
+
 # --- remédiation requirements : recapture du diff (#481) -----------------------------
 
 
@@ -819,3 +889,29 @@ async def test_requirements_regeneration_stops_at_gate(repo):
     assert outcome.reason == "gate_failed"
     assert outcome.quality_report.requirements_removed == ("python-jose[cryptography]",)
     assert clients.prs.created == []
+
+
+def test_agent_crash_signature_is_stable_across_variable_preamble():
+    """#498 (revue) : deux crashs de la MÊME cause avec préambule variable (ANSI,
+    timestamps, chemin workspace randomisé) produisent la MÊME signature — sinon
+    le fail-fast crash-loop ne se déclencherait jamais en conditions réelles."""
+    from collegue.executor.pipeline import agent_crash_signature
+
+    crash_a = (
+        "\x1b[36m2026-06-12 01:00:01 WARNING litellm\x1b[0m\n"
+        "running in /tmp/collegue-exec-aAaAaA/workspace\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/oh_runner.py", line 31, in main\n'
+        "ModuleNotFoundError: No module named 'lmnr'\n"
+    )
+    crash_b = (
+        "\x1b[36m2026-06-12 02:33:47 WARNING litellm\x1b[0m\n"
+        "running in /tmp/collegue-exec-zZzZzZ/workspace\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/oh_runner.py", line 31, in main\n'
+        "ModuleNotFoundError: No module named 'lmnr'\n"
+    )
+    assert agent_crash_signature(crash_a) == agent_crash_signature(crash_b)
+    # Un paquet manquant DIFFÉRENT donne une signature différente.
+    crash_c = crash_b.replace("'lmnr'", "'httpx'")
+    assert agent_crash_signature(crash_c) != agent_crash_signature(crash_b)

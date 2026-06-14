@@ -86,6 +86,16 @@ _INFRA_NOISE_SIGNATURES = (
     TIMEOUT_NOTE,
 )
 
+# #498 : un crash du process AGENT (coder OpenHands) AVANT tout appel LLM a une
+# signature nette — traceback d'import dans les logs (image/runner cassé, ex.
+# lmnr 0.7.53 incompatible au faux départ FacNor v5) ET 0 token consommé. C'est
+# un aléa d'INFRASTRUCTURE (cause globale, indépendante de la tâche), pas un
+# échec fonctionnel : il ne doit pas décompter le budget de tentatives.
+_IMPORT_CRASH_SIGNATURES = (
+    "ModuleNotFoundError",
+    "ImportError",
+)
+
 
 def is_infra_noise(feedback: str) -> bool:
     """Vrai si ``feedback`` ressemble à un aléa d'infrastructure (#459).
@@ -141,6 +151,50 @@ def is_infra_gate_failure(outcome: "ExecutionOutcome") -> bool:
         output = report.test_output or ""
         return any(signature in output for signature in _INFRA_NOISE_SIGNATURES)
     return False
+
+
+def is_infra_agent_crash(outcome: "ExecutionOutcome") -> bool:
+    """Vrai si un ``agent_error`` est un crash d'IMPORT pré-LLM (#498).
+
+    Signature : ``reason == agent_error`` ET 0 token consommé (aucun appel LLM
+    utile) ET un traceback d'import (``ModuleNotFoundError``/``ImportError``)
+    dans les logs de l'agent. C'est un aléa d'infrastructure GLOBAL (image/runner
+    sandbox cassé, ex. faux départ FacNor v5 : lmnr 0.7.53 incompatible) — gracié
+    comme un aléa de gate (#461), borné par ``MAX_INFRA_GATE_GRACE`` côté pilote.
+
+    Un ``agent_error`` FONCTIONNEL (l'agent a appelé le LLM puis échoué) consomme
+    des tokens → jamais classé crash d'infra.
+    """
+    if outcome.reason != REASON_AGENT_ERROR:
+        return False
+    result = getattr(outcome.execution, "agent_result", None)
+    if result is None:
+        return False
+    if int(getattr(result, "total_tokens", 0) or 0) > 0:
+        return False
+    logs = getattr(result, "logs", "") or ""
+    return any(sig in logs for sig in _IMPORT_CRASH_SIGNATURES)
+
+
+def agent_crash_signature(logs: str) -> str:
+    """Identité STABLE d'un crash d'import pour la détection de crash-loop (#498).
+
+    Hacher la queue brute des logs serait fragile : codes ANSI, bannière/version
+    OpenHands, warnings horodatés et chemins de workspace ``/tmp/collegue-exec-…``
+    randomisés font varier les octets à chaque crash → deux crashs de la MÊME
+    cause produiraient des hash différents et le fail-fast ne tirerait jamais. On
+    isole donc la (dernière) ligne d'exception d'import — ``ModuleNotFoundError:
+    No module named 'lmnr'`` — qui ne porte ni PID ni adresse ni chemin variable.
+    À défaut, repli sur les lignes d'import du traceback, sinon la queue bornée.
+    """
+    lines = [ln.strip() for ln in (logs or "").splitlines() if ln.strip()]
+    crash_lines = [ln for ln in lines if ln.startswith(_IMPORT_CRASH_SIGNATURES)]
+    if crash_lines:
+        return crash_lines[-1]
+    import_lines = [ln for ln in lines if any(sig in ln for sig in _IMPORT_CRASH_SIGNATURES)]
+    if import_lines:
+        return import_lines[-1]
+    return log_tail(logs, 1000)
 
 
 # #478 : marqueur de troncature du short summary pytest (ASCII « ... » — distinct
