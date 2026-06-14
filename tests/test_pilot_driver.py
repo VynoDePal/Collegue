@@ -1804,3 +1804,210 @@ async def test_no_cost_unknown_when_cost_reported(repo, manager):
     await _run(manager, repo, pid, dry_run=False, agent=_PaidAgent(), audit=audit)
     assert not [e for e in audit.events if e.kind == "cost_unknown"]
     assert audit.cost.usd == pytest.approx(0.002)
+
+
+# --- crash-loop agent : grâce + fail-fast (#498) ------------------------------------
+
+
+class _ImportCrashAgent:
+    """Crash d'import pré-LLM (image/runner cassé) : agent_error, 0 token,
+    traceback IDENTIQUE à chaque appel — le cas du faux départ FacNor v5."""
+
+    def __init__(self, logs="Traceback...\nModuleNotFoundError: No module named 'lmnr'"):
+        self._logs = logs
+        self.calls = 0
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        return AgentResult(success=False, logs=self._logs)
+
+
+async def test_agent_import_crash_is_graced(repo, manager):
+    """#498 : un crash d'import pré-LLM est gracié comme un aléa de gate (#461) —
+    il ne décompte pas le budget fonctionnel de la tâche (events infra_grace)."""
+    from collegue.pilot.audit import RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(
+        manager, repo, pid, dry_run=False, agent=_ImportCrashAgent(), max_task_attempts=1, audit=audit, sleep_fn=_sleep
+    )
+    graced = [e for e in audit.events if e.kind in ("task_retry", "task_failed") and e.detail.get("infra_grace")]
+    assert graced, "le crash d'import doit être gracié avant le fail-fast"
+
+
+async def test_agent_import_crash_loop_fail_fast(repo, manager):
+    """#498 : un crash d'import qui se rejoue à l'IDENTIQUE arrête le run en
+    sandbox_broken (cause globale) AVANT d'épuiser tout le budget — au run v5 le
+    run mourait blocked en abandonnant 11 tâches."""
+    from collegue.pilot.audit import RunAuditLog
+    from collegue.pilot.driver import MAX_AGENT_CRASH_LOOP
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 5)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_ImportCrashAgent(),
+        max_task_attempts=3,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "sandbox_broken"
+    broken = [e for e in audit.events if e.detail.get("sandbox_broken")]
+    assert len(broken) == 1
+    assert broken[0].detail["crash_streak"] >= MAX_AGENT_CRASH_LOOP
+    # Fail-fast : arrêt au MAX_AGENT_CRASH_LOOP-ième crash, bien avant le cap
+    # (5 tâches × 3 tentatives) ; aucune tâche n'a abouti.
+    assert result.iterations == MAX_AGENT_CRASH_LOOP
+    assert not any(o.success for o in result.processed)
+    assert all(t.status != "merged" for t in manager.get_tasks(pid))
+
+
+async def test_distinct_agent_crashes_rearm_loop(repo, manager):
+    """Contre-épreuve #498 : des tracebacks DIFFÉRENTS (hash qui change) ne
+    déclenchent pas le fail-fast — le compteur se réarme à chaque hash distinct."""
+
+    class _VaryingCrashAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def implement_issue(self, workspace, issue):
+            self.calls += 1
+            return AgentResult(
+                success=False, logs=f"Traceback...\nModuleNotFoundError: No module named 'mod{self.calls}'"
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 2)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_VaryingCrashAgent(),
+        max_task_attempts=1,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason != "sandbox_broken"
+
+
+async def test_functional_agent_error_with_tokens_not_graced(repo, manager):
+    """Frontière #498 : un agent_error AVEC tokens (l'agent a appelé le LLM) est
+    fonctionnel — décompté normalement, jamais gracié ni traité en crash-loop."""
+    import dataclasses
+
+    from collegue.pilot.audit import RunAuditLog
+
+    class _FunctionalErrorAgent:
+        def implement_issue(self, workspace, issue):
+            return dataclasses.replace(
+                AgentResult(success=False, logs="Traceback...\nModuleNotFoundError: No module named 'x'"),
+                prompt_tokens=1000,
+                completion_tokens=200,
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_FunctionalErrorAgent(),
+        max_task_attempts=1,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason != "sandbox_broken"
+    t = manager.get_tasks(pid)[0]
+    assert t.attempt_count == 1  # décompté, pas gracié
+
+
+async def test_agent_crash_loop_rearmed_by_success(repo, manager):
+    """#498 (revue) : un succès réarme la détection. 3 tâches qui crashent (1 fois
+    chacune, graciée) PUIS réussissent — sans réarmement-sur-succès, les 3 crashs
+    s'accumuleraient à streak=3 et déclencheraient le fail-fast à tort."""
+
+    class _CrashThenSucceedAgent:
+        """Crash d'import à la 1re tentative de CHAQUE tâche, succès ensuite."""
+
+        def __init__(self):
+            self.seen = {}
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            self.seen[issue.title] = self.seen.get(issue.title, 0) + 1
+            if self.seen[issue.title] == 1:
+                return AgentResult(success=False, logs="Traceback...\nModuleNotFoundError: No module named 'lmnr'")
+            return self._ok.implement_issue(workspace, issue)
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 3)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_CrashThenSucceedAgent(),
+        max_task_attempts=2,
+        sleep_fn=_sleep,
+    )
+    # Chaque succès a réarmé le compteur → jamais 3 crashs CONSÉCUTIFS.
+    assert result.stop_reason != "sandbox_broken"
+    assert all(t.status in ("in_review", "merged") for t in manager.get_tasks(pid))
+
+
+async def test_agent_crash_loop_fail_fast_survives_variable_preamble(repo, manager):
+    """#498 (revue) : le fail-fast tire même quand le préambule des logs varie
+    (timestamps/chemins) tant que la ligne d'exception est identique."""
+    from collegue.pilot.audit import RunAuditLog
+
+    class _NoisyImportCrashAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def implement_issue(self, workspace, issue):
+            self.calls += 1
+            return AgentResult(
+                success=False,
+                logs=(
+                    f"2026-06-12 0{self.calls}:00:0{self.calls} WARNING litellm\n"
+                    f"running in /tmp/collegue-exec-rand{self.calls}/workspace\n"
+                    "Traceback (most recent call last):\n"
+                    "ModuleNotFoundError: No module named 'lmnr'\n"
+                ),
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 5)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_NoisyImportCrashAgent(),
+        max_task_attempts=3,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "sandbox_broken"
+    assert any(e.detail.get("sandbox_broken") for e in audit.events)

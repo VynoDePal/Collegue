@@ -25,6 +25,7 @@ Module **isolé** : non importé par ``app.py`` (F4 câblera).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -33,8 +34,10 @@ from typing import List, Optional, Tuple
 from collegue.executor.agent import IssueSpec
 from collegue.executor.openhands_agent import estimate_cost_usd
 from collegue.executor.pipeline import (
+    agent_crash_signature,
     execute_issue,
     failure_feedback,
+    is_infra_agent_crash,
     is_infra_gate_failure,
     is_infra_noise,
     log_tail,
@@ -83,6 +86,7 @@ STOP_DEADLINE = "deadline_reached"
 STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
 STOP_AWAITING_MERGE = "awaiting_merge"  # mode strict (#411) : tout est prêt SAUF des merges humains
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
+STOP_SANDBOX_BROKEN = "sandbox_broken"  # crash-loop d'import agent : image/runner cassé (#498)
 
 # Retry au niveau tâche (#420). Le défaut du MODULE reste 1 (= pas de retry,
 # comportement historique — module isolé, aucun changement sans opt-in) ; le
@@ -311,6 +315,12 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
 # tentatives FONCTIONNELLES, par tâche et par run. Borné : si l'infra reste
 # rouge, on recommence à décompter (pas de boucle infinie sur PyPI down).
 MAX_INFRA_GATE_GRACE = 2
+
+# #498 : N crashs agent CONSÉCUTIFS au traceback IDENTIQUE (hash des logs) =
+# image/runner sandbox cassé, cause GLOBALE — inutile de gracier puis brûler le
+# budget tâche par tâche. Fail-fast du run (stop_reason=sandbox_broken). Seuil
+# bas car la signature est sûre (crash d'import, 0 token consommé).
+MAX_AGENT_CRASH_LOOP = 3
 
 # #466 : statuts pour lesquels un workspace d'échec conservé (#443) ne sert
 # plus (la tâche a abouti) — purgé au balayage de démarrage, quel que soit le
@@ -573,6 +583,10 @@ async def run_project(
     # #461 : aléas infra du gate non décomptés (task_id → nombre), borné par
     # MAX_INFRA_GATE_GRACE — un timeout PyPI ne brûle plus une tentative saine.
     infra_gate_grace: dict = {}
+    # #498 : compteur de crashs agent au traceback IDENTIQUE (hash → nombre
+    # consécutif) — N d'affilée ⇒ fail-fast (image cassée). Réarmé dès qu'un
+    # hash change ou qu'une issue NON-crash survient.
+    agent_crash_loop: dict = {}
     # #484 : signal « coût inconnu » émis au plus UNE fois par run/segment
     # (anti-bruit — le flag en mémoire ne survit pas aux restarts, comme #443).
     cost_unknown_signaled = False
@@ -792,6 +806,7 @@ async def run_project(
         # et stockés dans tasks.last_error.
         if outcome.success:
             task.status = TASK_STATUS_IN_REVIEW
+            agent_crash_loop = {}  # #498 : un succès réarme la détection de crash-loop
         else:
             detail = {"task_id": task.id, "stage": outcome.stage, "reason": outcome.reason}
             if getattr(outcome, "error", None):  # exception d'infrastructure (#435)
@@ -805,6 +820,43 @@ async def run_project(
             # Synthèse CRISP (#424) : lignes FAILED/ERROR de pytest en priorité —
             # c'est ce qui sera ré-injecté dans le prompt de la tentative suivante.
             diagnostic = failure_feedback(outcome)
+
+            # #498 : détection de crash-loop agent. Un crash d'import pré-LLM
+            # (0 token, image/runner cassé) qui se rejoue à l'IDENTIQUE (même
+            # hash de logs) sur plusieurs tâches/tentatives = cause GLOBALE —
+            # inutile de gracier puis brûler tâche par tâche : on arrête le run
+            # avec un diagnostic clair (rebuild d'image). Le `break` sort AVANT
+            # d'incrémenter attempts/persister un échec : la tâche reste
+            # retentable au prochain run (après rebuild).
+            agent_crash = is_infra_agent_crash(outcome)
+            if agent_crash:
+                crash_logs = outcome.execution.agent_result.logs or ""
+                # Identité STABLE (ligne d'exception, pas la queue brute) : les
+                # logs réels portent ANSI/timestamps/chemins variables qui
+                # casseraient un hash de la queue → fail-fast jamais déclenché.
+                crash_sig = hashlib.sha1(agent_crash_signature(crash_logs).encode("utf-8")).hexdigest()
+                streak = agent_crash_loop.get(crash_sig, 0) + 1
+                agent_crash_loop = {crash_sig: streak}  # un hash différent réarme à zéro
+                if streak >= MAX_AGENT_CRASH_LOOP:
+                    stop_reason = STOP_SANDBOX_BROKEN
+                    audit.record(
+                        TASK_FAILED,
+                        iteration=iteration,
+                        attempt=int(getattr(task, "attempt_count", 0) or 0),
+                        max_attempts=max_task_attempts,
+                        sandbox_broken=True,
+                        crash_streak=streak,
+                        **detail,
+                    )
+                    logger.error(
+                        "crash-loop agent : %d crashs d'import IDENTIQUES (image/sandbox cassé ?) — "
+                        "arrêt du run (sandbox_broken). Reconstruire l'image puis relancer.",
+                        streak,
+                    )
+                    break
+            else:
+                agent_crash_loop = {}  # toute issue NON-crash réarme le compteur
+
             # #461 : « le livrable ne s'installe pas » (fonctionnel — le but de la
             # passe #439) et « PyPI n'a pas répondu » (infra transitoire)
             # produisaient le même gate_failed décompté du budget : chaque
@@ -813,7 +865,8 @@ async def run_project(
             # pas de tentative fonctionnelle (grâce bornée par tâche). La
             # classification (#477) couvre aussi la cascade « install en échec
             # réseau → ModuleNotFoundError de collecte » via deps_install_failed.
-            infra_gate_failure = is_infra_gate_failure(outcome)
+            # #498 : un crash d'import pré-LLM est gracié comme un aléa de gate.
+            infra_gate_failure = is_infra_gate_failure(outcome) or agent_crash
             grace_used = int(infra_gate_grace.get(task.id, 0))
             graced = infra_gate_failure and grace_used < MAX_INFRA_GATE_GRACE
             if graced:
