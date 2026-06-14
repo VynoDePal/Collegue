@@ -309,3 +309,72 @@ async def test_driver_default_audit_is_noop(repo, manager):
         dry_run=True,
     )
     assert result.stop_reason == "completed"
+
+
+# --- record_once : dédup d'un signal à portée run, restarts inclus (#504) ------------
+
+
+def test_record_once_emits_once_per_log_in_memory():
+    """#504 : un signal « run » n'est émis qu'une fois dans un même log (mémoire)."""
+    from collegue.pilot.audit import COST_UNKNOWN
+
+    log = RunAuditLog(project_id=1, clock=_fixed_clock)
+    e1 = log.record_once(COST_UNKNOWN, iteration=1, tokens=10)
+    e2 = log.record_once(COST_UNKNOWN, iteration=2, tokens=20)
+    assert e1 is not None and e2 is None
+    assert len([e for e in log.events if e.kind == COST_UNKNOWN]) == 1
+
+
+def test_record_once_dedups_across_persistent_restarts(manager):
+    """#504 (le cas du run v5) : en mode sériel strict le pilote est ré-appelé
+    après chaque merge — la dédup doit survivre aux restarts (état persisté),
+    pas un flag mémoire (12 cost_unknown → 1)."""
+    from collegue.pilot.audit import COST_UNKNOWN
+
+    pid = manager.create_project(name="once")
+    seg1 = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True)
+    assert seg1.record_once(COST_UNKNOWN, iteration=1, tokens=100) is not None
+    # « restart » : nouveau log persistant, même DB.
+    seg2 = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True)
+    assert seg2.record_once(COST_UNKNOWN, iteration=2, tokens=100) is None
+    seg3 = RunAuditLog(pid, manager=manager, clock=_fixed_clock, persist=True)
+    assert seg3.record_once(COST_UNKNOWN, iteration=3, tokens=100) is None
+    cu = [d for d in manager.get_decisions(pid) if d.summary == "[run] cost_unknown"]
+    assert len(cu) == 1
+
+
+def test_record_once_isolated_per_project(manager):
+    from collegue.pilot.audit import COST_UNKNOWN
+
+    pid_a = manager.create_project(name="a")
+    pid_b = manager.create_project(name="b")
+    assert RunAuditLog(pid_a, manager=manager, persist=True).record_once(COST_UNKNOWN, tokens=1) is not None
+    # pid_b n'est pas affecté par le signal de pid_a.
+    assert RunAuditLog(pid_b, manager=manager, persist=True).record_once(COST_UNKNOWN, tokens=1) is not None
+
+
+def test_record_once_tolerates_manager_read_failure():
+    """Best-effort : une lecture en échec ne casse pas le run (au pire un doublon)."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.audit import COST_UNKNOWN
+
+    class _BrokenManager:
+        def record_decision(self, *a, **k):
+            return 1
+
+        def add_metric(self, *a, **k):
+            return None
+
+        def get_decision_journal(self, *a, **k):
+            raise RuntimeError("DB indispo")
+
+    log = RunAuditLog(project_id=1, manager=_BrokenManager(), persist=True)
+    # Ne lève pas ; émet (retombe sur « pas encore signalé »).
+    assert log.record_once(COST_UNKNOWN, tokens=1) is not None
+
+
+def test_null_audit_record_once_noop():
+    from collegue.pilot.audit import COST_UNKNOWN
+
+    assert NullAuditLog().record_once(COST_UNKNOWN, tokens=1) is None
