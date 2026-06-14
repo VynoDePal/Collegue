@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     # #497 : signal (NON bloquant) des dépendances directes ajoutées sans
     # contrainte de version dans requirements.txt (cause du register→500 v4).
     GATE_PIN_GUARD: bool = True
+    # #508 : garde fichiers parasites — un fichier NEUF au chemin interdit
+    # (*.log, *.db, *.sqlite(3), *.pyc, .env, node_modules/, __pycache__/) est
+    # SIGNALÉ dans le rapport de gate. Défaut ON (signal). off → tolérance.
+    GATE_FORBIDDEN_FILES: bool = True
+    # Rendre la garde #508 BLOQUANTE (gate rouge) au lieu d'un simple signal.
+    GATE_FORBIDDEN_FILES_BLOCK: bool = False
     # Adéquation diff↔issue (#437) : contrôle LLM fail-closed « ce diff
     # implémente-t-il l'issue ? » lancé quand le reste du gate est vert — une
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne

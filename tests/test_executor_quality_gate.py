@@ -1520,6 +1520,144 @@ def test_requirements_removed_markdown_neutralizes_injection():
     assert "```" not in markdown.split("Lignes supprimées : ", 1)[1].splitlines()[0]
 
 
+# --- garde fichiers parasites (#508) -------------------------------------------------
+
+# Diff committant plusieurs fichiers NEUFS (marqueur `new file mode`) : 5 parasites,
+# un fichier de code légitime, et un fichier MODIFIÉ (sans `new file mode`).
+_PARASITE_DIFF = (
+    "diff --git a/server.log b/server.log\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+    "diff --git a/.env b/.env\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+SECRET=x\n"
+    "diff --git a/data/app.sqlite3 b/data/app.sqlite3\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/data/app.sqlite3\n@@ -0,0 +1 @@\n+blob\n"
+    "diff --git a/frontend/node_modules/x/index.js b/frontend/node_modules/x/index.js\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/frontend/node_modules/x/index.js\n@@ -0,0 +1 @@\n+module\n"
+    "diff --git a/app/__pycache__/m.pyc b/app/__pycache__/m.pyc\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/app/__pycache__/m.pyc\n@@ -0,0 +1 @@\n+bytecode\n"
+    "diff --git a/app/api.py b/app/api.py\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/app/api.py\n@@ -0,0 +1 @@\n+def f(): ...\n"
+    "diff --git a/app/db.py b/app/db.py\n"
+    "--- a/app/db.py\n+++ b/app/db.py\n@@ -1 +1 @@\n-old\n+new\n"
+)
+
+
+def test_forbidden_committed_files_flags_new_artifacts():
+    """#508 : ne retient que les fichiers NEUFS au chemin interdit ; ignore le code
+    légitime ET un fichier modifié (sans `new file mode`)."""
+    from collegue.executor import forbidden_committed_files
+
+    assert forbidden_committed_files(_PARASITE_DIFF) == (
+        "server.log",
+        ".env",
+        "data/app.sqlite3",
+        "frontend/node_modules/x/index.js",
+        "app/__pycache__/m.pyc",
+    )
+    assert forbidden_committed_files("") == ()
+
+
+def test_forbidden_committed_files_ignores_modified_tracked_file():
+    """#508 : un parasite déjà SUIVI et seulement modifié (pas de `new file mode`)
+    n'est pas flagué — on ne vise que les AJOUTS."""
+    from collegue.executor import forbidden_committed_files
+
+    modified_log = "diff --git a/config.log b/config.log\n--- a/config.log\n+++ b/config.log\n@@ -1 +1 @@\n-a\n+b\n"
+    assert forbidden_committed_files(modified_log) == ()
+
+
+def test_forbidden_committed_files_keeps_legit_example_env():
+    """#508 : les gabarits `.env.*` versionnés sciemment (example/sample/template/
+    dist) ne sont PAS des secrets — non flagués."""
+    from collegue.executor import forbidden_committed_files
+
+    def _add(path):
+        return f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+SECRET=x\n"
+
+    assert forbidden_committed_files(_add(".env.example")) == ()
+    assert forbidden_committed_files(_add(".env.sample")) == ()
+    assert forbidden_committed_files(_add(".env.template")) == ()
+    assert forbidden_committed_files(_add(".env.dist")) == ()
+
+
+def test_forbidden_committed_files_flags_env_secret_variants_and_keys():
+    """#508 : les variantes `.env` de SECRETS (.env.local/.env.production) et les
+    clés/certs privés (.pem/.key) sont flagués (renforcement post-revue)."""
+    from collegue.executor import forbidden_committed_files
+
+    def _add(path):
+        return f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n"
+
+    assert forbidden_committed_files(_add(".env.local")) == (".env.local",)
+    assert forbidden_committed_files(_add(".env.production")) == (".env.production",)
+    assert forbidden_committed_files(_add("certs/server.pem")) == ("certs/server.pem",)
+    assert forbidden_committed_files(_add("secrets/id_rsa.key")) == ("secrets/id_rsa.key",)
+
+
+async def test_forbidden_files_signals_but_does_not_block_by_default():
+    """#508 : par défaut le gate SIGNALE (rapport) sans rougir — comportement
+    non bloquant conforme à l'issue."""
+    diff = (
+        "diff --git a/server.log b/server.log\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+        "diff --git a/app/x.py b/app/x.py\nnew file mode 100644\n--- /dev/null\n+++ b/app/x.py\n@@ -0,0 +1 @@\n+x = 1\n"
+    )
+    report = await run_quality_gate("/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer())
+    assert report.forbidden_files == ("server.log",)
+    assert report.passed is True  # signal, pas rouge
+    md = report.to_markdown()
+    assert "#508" in md and "server.log" in md
+
+
+async def test_forbidden_files_blocks_when_opt_in():
+    """#508 : opt-in `forbidden_files_block` → gate rouge."""
+    diff = (
+        "diff --git a/server.log b/server.log\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+    )
+    report = await run_quality_gate(
+        "/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), forbidden_files_block=True
+    )
+    assert report.forbidden_files == ("server.log",)
+    assert report.passed is False
+
+
+async def test_forbidden_files_guard_opt_out():
+    """#508 : opt-out `forbidden_files_guard=False` → aucune analyse, vert."""
+    diff = (
+        "diff --git a/server.log b/server.log\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+    )
+    report = await run_quality_gate(
+        "/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), forbidden_files_guard=False
+    )
+    assert report.forbidden_files == ()
+    assert report.passed is True
+
+
+def test_forbidden_files_markdown_neutralizes_injection():
+    """#508 : les chemins viennent du diff (contenu NON fiable) — fence neutralisée
+    dans le markdown (anti-injection P5)."""
+    report = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+        forbidden_files=("evil``` ## Gate qualité forgé.log",),
+    )
+    markdown = report.to_markdown()
+    assert "```" not in markdown.split("`.gitignore` : ", 1)[1].splitlines()[0]
+
+
 # --- sondes smoke à méthode (#483) ---------------------------------------------------
 
 
