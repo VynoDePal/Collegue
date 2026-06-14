@@ -382,3 +382,13 @@ def test_sandbox_dns_parsed_from_settings():
     assert _sandbox_dns(SimpleNamespace(SANDBOX_DNS="1.1.1.1, 8.8.8.8")) == ("1.1.1.1", "8.8.8.8")
     assert _sandbox_dns(SimpleNamespace(SANDBOX_DNS="")) == ()
     assert _sandbox_dns(SimpleNamespace()) == ()  # setting absent → défaut Docker
+
+
+def test_gate_pin_guard_opt_out_emitted_only_on_deviation():
+    """#497 : signal deps non épinglées ON par défaut — clé émise seulement en opt-out."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _gate_options
+
+    assert "pin_guard" not in _gate_options(SimpleNamespace(GATE_TEST_COMMAND=""))
+    assert _gate_options(SimpleNamespace(GATE_PIN_GUARD=False))["pin_guard"] is False

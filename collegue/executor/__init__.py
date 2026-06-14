@@ -36,6 +36,7 @@ from collegue.executor.quality_gate import (
     smoke_run_command,
     tests_touched,
     unjustified_requirement_removals,
+    unpinned_requirement_lines,
 )
 from collegue.executor.revert import (
     RevertError,
@@ -81,6 +82,7 @@ __all__ = [
     "frontend_gate_command",
     "installability_command",
     "removed_requirement_lines",
+    "unpinned_requirement_lines",
     "unjustified_requirement_removals",
     "smoke_run_command",
     "outcome_from_review",

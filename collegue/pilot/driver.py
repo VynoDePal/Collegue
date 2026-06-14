@@ -113,7 +113,9 @@ MAX_BEST_DIFF_CHARS = 200_000
 # venv nu, 12 tests verts par ailleurs).
 REQUIREMENTS_APPEND_ONLY_RULE = (
     "Règle stricte : requirements.txt est APPEND-ONLY — ne le régénère jamais, ne supprime "
-    "ni ne remplace AUCUNE ligne existante ; ajoute uniquement les dépendances manquantes."
+    "ni ne remplace AUCUNE ligne existante ; ajoute uniquement les dépendances manquantes, "
+    "chacune ÉPINGLÉE à une version (== X.Y.Z, ou bornes >=A,<B) — une dépendance nue casse "
+    "l'installation vierge (passlib non contraint + bcrypt résolu librement → register en 500)."
 )
 _PASSED_RE = re.compile(r"(\d+) passed")
 _FAILED_RE = re.compile(r"(\d+) failed")

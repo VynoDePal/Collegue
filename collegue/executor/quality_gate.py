@@ -631,6 +631,10 @@ class QualityReport:
     # #482 : lignes de requirements.txt de la base supprimées sans que l'issue
     # le demande — requirements.txt est append-only ; non vide ⇒ gate rouge.
     requirements_removed: Tuple[str, ...] = ()
+    # #497 : lignes de paquet ajoutées à requirements.txt SANS contrainte de
+    # version (dépendances directes non épinglées) — signal NON bloquant ; cause
+    # racine du register→500 v4 (passlib figé + bcrypt résolu librement).
+    requirements_unpinned: Tuple[str, ...] = ()
     # #499 : les critères chiffrables de l'issue sont-ils assertés par les tests
     # du diff ? None = non évalué (rétrocompat) ; False ⇒ gate rouge (un test qui
     # n'asserte que « 200 » a livré la TVA ×100 du run v5 sans rien voir).
@@ -661,6 +665,13 @@ class QualityReport:
                 "> ⛔ **lignes de `requirements.txt` supprimées sans que l'issue le demande (#482)** — "
                 "`requirements.txt` est append-only. Lignes supprimées : "
                 + ", ".join(f"`{_fence_safe_line(line)}`" for line in self.requirements_removed)
+            )
+        if self.requirements_unpinned:
+            lines.append(
+                "> ⚠️ **dépendances directes non épinglées** ajoutées à `requirements.txt` (#497) — "
+                "une version résolue librement peut casser l'installation vierge (cause du register→500 v4). "
+                "Épingle-les (`==X.Y.Z` ou bornes `>=A,<B`) : "
+                + ", ".join(f"`{_fence_safe_line(line)}`" for line in self.requirements_unpinned)
             )
         lines += [
             "",
@@ -747,6 +758,10 @@ def issue_expects_code(issue: IssueSpec) -> bool:
 # Nom de paquet en tête d'une ligne de requirements ; les lignes d'option
 # (-r/-e/--index-url), commentaires et vides n'ont pas de nom.
 _REQ_LINE_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]+\])?")
+# #497 : opérateurs de contrainte de version PEP 508. Une ligne qui en porte au
+# moins un (après le nom+extras) est « épinglée » ; « @ » (source figée,
+# `pkg @ https://…` / `pkg @ git+…`) vaut aussi épinglage.
+_REQ_PIN_RE = re.compile(r"(===|==|~=|!=|>=|<=|<|>|@)")
 
 
 def _requirement_name(line: str) -> Optional[str]:
@@ -846,6 +861,51 @@ def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = Non
             continue  # suppression demandée par l'issue
         kept.append(line)
     return tuple(kept)
+
+
+def unpinned_requirement_lines(diff: str) -> Tuple[str, ...]:
+    """Lignes de paquet AJOUTÉES à ``requirements.txt`` sans contrainte de version (#497).
+
+    Cause racine du register→500 du run v4 : ``passlib`` 1.7.4 figé + ``bcrypt``
+    résolu librement (≥ 5) → incompatible sur installation vierge. Une dépendance
+    directe nue (``fastapi``) laisse pip résoudre n'importe quelle version future,
+    cassant la reproductibilité. Signal **NON bloquant** : on liste les lignes
+    pour la PR (le smoke POST #483 reste le filet aval qui attrape le 500).
+
+    Analyse les lignes ``+`` de ``requirements.txt`` (monorepo-aware, basename) :
+    paquet nu → retenu ; paquet contraint (``==``/``>=,<``/``~=``/``pkg @ url``)
+    → silencieux ; lignes d'option (``-r``, ``--index-url``), commentaires, vides
+    → ignorés. N'analyse que l'argument ``diff`` (= diff de l'agent) : les ajouts
+    nus de la remédiation déterministe (#481, ``httpx``) sont écrits APRÈS et
+    re-capturés ailleurs — jamais dans ce diff.
+    """
+    unpinned: List[str] = []
+    seen: set = set()
+    in_requirements = False
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            path = parts[1].strip() if len(parts) == 2 else ""
+            in_requirements = os.path.basename(path) == "requirements.txt"
+            continue
+        if line.startswith(("--- ", "+++ ")) or not in_requirements or not line.startswith("+"):
+            continue
+        text = line[1:].strip()
+        name = _requirement_name(text)  # None pour option/commentaire/vide
+        if name is None or name in seen:
+            continue
+        # Retirer le nom+extras en tête : ce qui reste porte les contraintes.
+        # `passlib[bcrypt]==1.7.4` épinglé ; `passlib[bcrypt]` non (l'extra n'est
+        # pas une contrainte de version). Le marqueur d'environnement (après
+        # « ; », ex. `; python_version<'3.8'`) est retiré : son `<`/`==` n'est
+        # pas une contrainte de version du paquet.
+        match = _REQ_LINE_NAME_RE.match(text)
+        remainder = (text[match.end() :] if match else text).split(";", 1)[0]
+        if _REQ_PIN_RE.search(remainder):
+            continue
+        seen.add(name)
+        unpinned.append(text)
+    return tuple(unpinned)
 
 
 _TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__)(/|$)|(^|/)test_[^/]+$|[^/]+[._]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$")
@@ -1049,6 +1109,7 @@ async def run_quality_gate(
     smoke_timeout: float = 30.0,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
+    pin_guard: bool = True,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -1092,6 +1153,12 @@ async def run_quality_gate(
     requirements_removed: Tuple[str, ...] = ()
     if requirements_guard:
         requirements_removed = unjustified_requirement_removals(diff, issue)
+    # #497 : signal NON bloquant des dépendances directes non épinglées — analyse
+    # PURE du diff de l'agent (les ajouts #481 arrivent après, re-capturés
+    # ailleurs). N'entre PAS dans would_pass (signal seulement, par défaut).
+    requirements_unpinned: Tuple[str, ...] = ()
+    if pin_guard:
+        requirements_unpinned = unpinned_requirement_lines(diff)
 
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
@@ -1227,6 +1294,7 @@ async def run_quality_gate(
         tests_touched=touched,
         requirements_added=tuple(requirements_added),
         requirements_removed=requirements_removed,
+        requirements_unpinned=requirements_unpinned,
         adequacy_tests_assert=adequacy_tests_assert,
         adequacy_tests_justification=adequacy_tests_justification,
     )
