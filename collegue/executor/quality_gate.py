@@ -27,7 +27,7 @@ import os
 import re
 import shlex
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from collegue.executor.agent import IssueSpec
@@ -582,10 +582,15 @@ class Reviewer(Protocol):
 
 @dataclass(frozen=True)
 class AdequacyOutcome:
-    """Verdict d'adéquation diff↔issue (#437)."""
+    """Verdict d'adéquation diff↔issue (#437) + couverture des critères (#499)."""
 
     implemented: bool
     justification: str = ""
+    # #499 : les critères CHIFFRABLES/observables de l'issue sont-ils ASSERTÉS par
+    # au moins un test du diff ? None = non évalué (rétrocompat #437 : un checker
+    # qui ne le renseigne pas ne bloque jamais sur ce volet).
+    tests_assert_criteria: Optional[bool] = None
+    tests_justification: str = ""
 
 
 @runtime_checkable
@@ -626,6 +631,11 @@ class QualityReport:
     # #482 : lignes de requirements.txt de la base supprimées sans que l'issue
     # le demande — requirements.txt est append-only ; non vide ⇒ gate rouge.
     requirements_removed: Tuple[str, ...] = ()
+    # #499 : les critères chiffrables de l'issue sont-ils assertés par les tests
+    # du diff ? None = non évalué (rétrocompat) ; False ⇒ gate rouge (un test qui
+    # n'asserte que « 200 » a livré la TVA ×100 du run v5 sans rien voir).
+    adequacy_tests_assert: Optional[bool] = None
+    adequacy_tests_justification: str = ""
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -685,6 +695,14 @@ class QualityReport:
             lines += ["", f"**Adéquation à l'issue (#437)** : {badge}"]
             if detail:
                 lines.append(f"> {_fence_safe_line(detail)}")
+        if self.adequacy_tests_assert is False:
+            lines += [
+                "",
+                "> ⛔ **couverture des critères par les tests insuffisante (#499)** — un critère "
+                "chiffrable/observable de l'issue n'est asserté par aucun test du diff.",
+            ]
+            if self.adequacy_tests_justification:
+                lines.append(f"> {_fence_safe_line(self.adequacy_tests_justification)}")
         if not self.tests_touched:
             lines += [
                 "",
@@ -866,6 +884,36 @@ def _parse_adequacy(text: str) -> AdequacyOutcome:
     return AdequacyOutcome(False, f"réponse illisible du contrôle d'adéquation : {raw[:300]}")
 
 
+# #499 : contrôle de COUVERTURE DES TESTS — distinct de l'adéquation #437 (la
+# feature est-elle là ?). Ici : les critères chiffrables de l'issue sont-ils
+# ASSERTÉS par les tests ? Au run v5, la TVA ×100 a été livrée 12/12 car aucun
+# test n'assertait les totaux (status 200 suffisait).
+_TEST_ADEQUACY_SYSTEM = (
+    "Tu es un relecteur de COUVERTURE DE TEST (rôle REVIEWER). On te donne une issue "
+    "(critères d'acceptation chiffrables/observables) et le diff livré. Tu juges UNIQUEMENT "
+    "si CHAQUE critère chiffrable/observable de l'issue est ASSERTÉ par au moins un test du "
+    "diff (assertion sur la VALEUR/le CALCUL/le COMPORTEMENT, pas seulement un code HTTP 200). "
+    'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}. '
+    "false si un critère chiffrable n'est couvert par aucune assertion (ex. : aucun test "
+    "n'asserte le montant TTC) — nomme alors le critère non couvert dans la justification."
+)
+
+
+def _parse_test_adequacy(text: str) -> Tuple[bool, str]:
+    """Parsing tolérant du verdict de couverture des tests (#499) — fail-closed."""
+    raw = (text or "").strip()
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            return bool(data.get("tests_assert_criteria")), str(data.get("justification") or "")[:500]
+        except ValueError:
+            pass
+    if not raw:
+        return False, "réponse vide du contrôle de couverture des tests"
+    return False, f"réponse illisible du contrôle de couverture des tests : {raw[:300]}"
+
+
 class LLMAdequacyChecker:
     """:class:`AdequacyChecker` par LLM (#437) — fail-closed.
 
@@ -885,7 +933,21 @@ class LLMAdequacyChecker:
             "Ce diff implémente-t-il concrètement l'issue ?"
         )
         text = await self._sample_fn(prompt, _ADEQUACY_SYSTEM)
-        return _parse_adequacy(text)
+        outcome = _parse_adequacy(text)
+        # #499 : ne contrôler la COUVERTURE des critères que si l'adéquation est
+        # OK (sinon déjà rouge), que le diff touche des tests (sinon
+        # tests_touched/require_test_changes gère) ET que l'issue porte des
+        # critères chiffrables — borne le coût LLM et les faux rouges.
+        if not outcome.implemented or not tests_touched(diff) or not issue.acceptance_criteria:
+            return outcome
+        test_prompt = (
+            f"## Issue à fermer\n{issue.to_prompt()}\n\n"
+            f"## Diff livré\n```diff\n{(diff or '(diff vide)')[: self._max_diff_chars]}\n```\n\n"
+            "Les critères chiffrables/observables de l'issue sont-ils assertés par au moins un test du diff ?"
+        )
+        test_text = await self._sample_fn(test_prompt, _TEST_ADEQUACY_SYSTEM)
+        asserts, justif = _parse_test_adequacy(test_text)
+        return replace(outcome, tests_assert_criteria=asserts, tests_justification=justif)
 
 
 def _default_adequacy_sample_fn():  # pragma: no cover - chemin réel (integration)
@@ -910,18 +972,31 @@ class FakeAdequacyChecker:
     """:class:`AdequacyChecker` déterministe pour la CI (aucun LLM)."""
 
     def __init__(
-        self, *, implemented: bool = True, justification: str = "conforme", raises: Optional[Exception] = None
+        self,
+        *,
+        implemented: bool = True,
+        justification: str = "conforme",
+        raises: Optional[Exception] = None,
+        tests_assert_criteria: Optional[bool] = None,
+        tests_justification: str = "",
     ):
         self._implemented = implemented
         self._justification = justification
         self._raises = raises
+        self._tests_assert_criteria = tests_assert_criteria
+        self._tests_justification = tests_justification
         self.calls: List[int] = []
 
     async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome:
         self.calls.append(issue.number)
         if self._raises is not None:
             raise self._raises
-        return AdequacyOutcome(implemented=self._implemented, justification=self._justification)
+        return AdequacyOutcome(
+            implemented=self._implemented,
+            justification=self._justification,
+            tests_assert_criteria=self._tests_assert_criteria,
+            tests_justification=self._tests_justification,
+        )
 
 
 class FakeReviewer:
@@ -1111,16 +1186,29 @@ async def run_quality_gate(
     adequacy_implemented: Optional[bool] = None
     adequacy_justification = ""
     adequacy_error: Optional[str] = None
+    adequacy_tests_assert: Optional[bool] = None
+    adequacy_tests_justification = ""
     if adequacy_checker is not None and issue is not None and would_pass:
         try:
             adequacy = await adequacy_checker.check(diff, issue, ctx)
             adequacy_implemented = bool(adequacy.implemented)
             adequacy_justification = adequacy.justification
+            # #499 : couverture des critères par les tests (None = non évalué).
+            adequacy_tests_assert = adequacy.tests_assert_criteria
+            adequacy_tests_justification = adequacy.tests_justification
         except Exception as exc:  # noqa: BLE001 - fail-closed ; BaseException (budget) remonte
             adequacy_error = str(exc) or repr(exc)
 
     touched = tests_touched(diff)
-    passed = would_pass and adequacy_implemented is not False and adequacy_error is None
+    # #499 : `is not False` — None (non évalué) et True passent ; seul False
+    # bloque (rétrocompat #437 : un checker qui n'évalue pas la couverture ne
+    # rend jamais le gate rouge sur ce volet).
+    passed = (
+        would_pass
+        and adequacy_implemented is not False
+        and adequacy_tests_assert is not False
+        and adequacy_error is None
+    )
     if require_test_changes and not touched:
         passed = False
     return QualityReport(
@@ -1139,6 +1227,8 @@ async def run_quality_gate(
         tests_touched=touched,
         requirements_added=tuple(requirements_added),
         requirements_removed=requirements_removed,
+        adequacy_tests_assert=adequacy_tests_assert,
+        adequacy_tests_justification=adequacy_tests_justification,
     )
 
 

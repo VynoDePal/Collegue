@@ -863,6 +863,46 @@ def test_failure_feedback_names_removed_requirements():
     assert len(feedback) <= 700
 
 
+def test_failure_feedback_names_uncovered_criterion():
+    """#499 (revue) : feature présente, tests VERTS, mais un critère chiffrable
+    n'est asserté par aucun test — le feedback de retry doit NOMMER le critère
+    non couvert, sinon l'agent reçoit la sortie verte et boucle sans converger."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    outcome = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(success=True, logs="journal"),
+            changed=True,
+            diff="",
+            files_changed=("tests/test_api.py",),
+            success=True,
+        ),
+        quality_report=QualityReport(
+            tests_passed=True,
+            test_exit_code=0,
+            test_output="12 passed in 1.02s",
+            review_summary="",
+            review_findings=(),
+            review_blocking=False,
+            passed=False,
+            adequacy_implemented=True,
+            adequacy_tests_assert=False,
+            adequacy_tests_justification="aucun test n'asserte le montant TTC",
+        ),
+        reason="gate_failed",
+    )
+    feedback = failure_feedback(outcome)
+    assert "#499" in feedback
+    assert "montant TTC" in feedback
+    assert "12 passed" not in feedback  # la sortie verte ne doit PAS être le feedback
+    assert len(feedback) <= 700
+
+
 async def test_requirements_regeneration_stops_at_gate(repo):
     """#482 bout en bout : l'agent régénère requirements.txt en perdant une ligne
     de la base → gate rouge, aucune PR."""

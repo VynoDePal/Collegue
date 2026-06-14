@@ -252,6 +252,17 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     if report is not None and getattr(report, "adequacy_implemented", None) is False:
         justification = getattr(report, "adequacy_justification", "") or "le diff n'implémente pas l'issue"
         return ("ADÉQUATION REFUSÉE — le diff ne réalise pas l'issue : " + justification)[:700]
+    if report is not None and getattr(report, "adequacy_tests_assert", None) is False:
+        # #499 : feature présente, tests VERTS, mais un critère chiffrable n'est
+        # asserté par aucun test. La sortie pytest (verte) serait un feedback
+        # trompeur — le motif UTILE est le critère non couvert, pour que l'agent
+        # ajoute l'assertion au lieu de boucler sans converger (cf. #424).
+        justification = getattr(report, "adequacy_tests_justification", "") or "un critère chiffrable n'est pas testé"
+        return (
+            "COUVERTURE DE TEST INSUFFISANTE (#499) — un critère chiffrable de l'issue n'est asserté par "
+            "aucun test : " + justification + ". Ajoute une assertion sur la VALEUR/le CALCUL attendu "
+            "(pas seulement un code HTTP 200)."
+        )[:700]
     removed = tuple(getattr(report, "requirements_removed", ()) or ()) if report is not None else ()
     if removed:
         # #482 : le motif utile est la liste NOMINATIVE des lignes perdues —
