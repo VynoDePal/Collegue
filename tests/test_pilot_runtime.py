@@ -508,3 +508,17 @@ def test_sandbox_pip_cache_parsed_from_settings(tmp_path):
     assert target.is_dir()  # créé (writable par l'uid hôte)
     assert _sandbox_pip_cache(SimpleNamespace(SANDBOX_PIP_CACHE_DIR="")) is None
     assert _sandbox_pip_cache(SimpleNamespace()) is None
+
+
+def test_sandbox_subscription_auth_parsed_from_settings(tmp_path):
+    """Creds d'abonnement : SANDBOX_SUBSCRIPTION_AUTH_DIR → chemin (NON créé) ; vide → None."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _sandbox_subscription_auth
+
+    target = tmp_path / "openhands"
+    # ne crée PAS le dossier (creds doivent préexister, login fait en amont)
+    assert _sandbox_subscription_auth(SimpleNamespace(SANDBOX_SUBSCRIPTION_AUTH_DIR=str(target))) == str(target)
+    assert not target.exists()
+    assert _sandbox_subscription_auth(SimpleNamespace(SANDBOX_SUBSCRIPTION_AUTH_DIR="")) is None
+    assert _sandbox_subscription_auth(SimpleNamespace()) is None

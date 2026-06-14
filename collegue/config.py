@@ -162,6 +162,11 @@ class Settings(BaseSettings):
     # dossier (writable par l'uid hôte). Vide (défaut) = aucun cache. N'enlève
     # --no-cache-dir QUE si le volume est monté (sinon cache dans le tmpfs /tmp).
     SANDBOX_PIP_CACHE_DIR: str = ""
+    # Creds d'abonnement OpenHands (Codex via ChatGPT, subscription_login). Chemin
+    # HÔTE (ex. ~/.openhands) monté en LECTURE-ÉCRITURE sur /home/sandbox/.openhands
+    # du worker : permet au coder d'utiliser l'abo (sans coût API) et de persister le
+    # token rafraîchi. Vide (défaut) = aucun montage (mode clé API inchangé).
+    SANDBOX_SUBSCRIPTION_AUTH_DIR: str = ""
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0

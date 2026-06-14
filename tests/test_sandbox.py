@@ -318,3 +318,46 @@ def test_build_argv_pip_cache_validated(tmp_path):
     sb = DockerSandbox(image="img", pip_cache_dir="/bad:path")
     with pytest.raises(ValueError):
         sb._build_run_argv("x", str(tmp_path))
+
+
+def test_build_argv_subscription_auth_mount(tmp_path):
+    """Creds d'abonnement opt-in → montage RW sur $HOME/.openhands (HOME dérivé de env)."""
+    auth = tmp_path / "openhands"
+    auth.mkdir()
+    sb = DockerSandbox(image="img", subscription_auth_dir=str(auth), env={"HOME": "/home/sandbox"})
+    argv = sb._build_run_argv("echo hi", str(tmp_path / "ws"))
+    import os as _os
+
+    auth_real = _os.path.realpath(str(auth))
+    assert f"{auth_real}:/home/sandbox/.openhands" in _mounts(argv)
+
+
+def test_build_argv_subscription_auth_requires_home_outside_tmp(tmp_path):
+    """Fail-loud : sans HOME hors /tmp, le tmpfs masquerait les creds → ValueError."""
+    import pytest
+
+    auth = tmp_path / "openhands"
+    auth.mkdir()
+    # HOME non fourni → défaut /tmp (masqué par le tmpfs) → refus explicite
+    sb = DockerSandbox(image="img", subscription_auth_dir=str(auth))
+    with pytest.raises(ValueError):
+        sb._build_run_argv("x", str(tmp_path))
+    # HOME explicitement sous /tmp → refus aussi
+    sb2 = DockerSandbox(image="img", subscription_auth_dir=str(auth), env={"HOME": "/tmp/x"})
+    with pytest.raises(ValueError):
+        sb2._build_run_argv("x", str(tmp_path))
+
+
+def test_build_argv_no_subscription_auth_by_default(tmp_path):
+    """Défaut : aucun montage de creds abo (argv = workspace seul)."""
+    argv = DockerSandbox(image="img")._build_run_argv("x", str(tmp_path))
+    assert _mounts(argv) == [f"{tmp_path}:/workspace"]
+
+
+def test_build_argv_subscription_auth_validated(tmp_path):
+    """Un chemin de creds contenant ':' est refusé (devient un -v)."""
+    import pytest
+
+    sb = DockerSandbox(image="img", subscription_auth_dir="/bad:path", env={"HOME": "/home/sandbox"})
+    with pytest.raises(ValueError):
+        sb._build_run_argv("x", str(tmp_path))
