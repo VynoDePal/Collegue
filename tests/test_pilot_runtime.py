@@ -247,8 +247,81 @@ def test_parser_execute_and_overrides():
 
 
 def test_parser_requires_mandatory_args():
+    # #506 : la validation des args du run a migré d'argparse vers main() pour
+    # cohabiter avec les sous-commandes opérateur (argparse ne peut pas conditionner
+    # `required` sur l'absence de sous-commande). parse_args réussit désormais ;
+    # le SystemExit est levé par main() (parser.error) quand un args requis manque.
+    import collegue.pilot.__main__ as cli
+
+    ns = build_parser().parse_args(["--owner", "o"])  # plus de SystemExit ici
+    assert ns.command is None and ns.project_id is None
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["--owner", "o"])  # manque project-id/repo-source/repo
+        cli.main(["--owner", "o"])  # manque project-id/repo-source/repo
+
+
+# --- CLI sous-commandes opérateur (#506) ----------------------------------------
+
+
+def test_parser_task_requeue_subcommand():
+    ns = build_parser().parse_args(["task", "requeue", "42", "--message", "boom"])
+    assert ns.command == "task"
+    assert ns.task_command == "requeue"
+    assert ns.task_id == 42
+    assert ns.message == "boom"
+
+
+def test_parser_task_reset_subcommand_defaults_todo():
+    ns = build_parser().parse_args(["task", "reset", "7", "--message", "m"])
+    assert ns.task_command == "reset"
+    assert ns.task_id == 7
+    assert ns.status == "todo"
+    ns2 = build_parser().parse_args(["task", "reset", "7", "--message", "m", "--status", "blocked"])
+    assert ns2.status == "blocked"
+
+
+def test_parser_task_requeue_requires_message():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["task", "requeue", "1"])  # --message obligatoire
+
+
+def test_parser_default_run_has_no_command():
+    # rétro-compat : sans sous-commande, command reste None (chemin run inchangé).
+    ns = build_parser().parse_args(["--project-id", "3", "--repo-source", "/r", "--owner", "o", "--repo", "app"])
+    assert ns.command is None
+
+
+def test_main_task_command_traces_decision(monkeypatch, tmp_path):
+    # Glue _run_task_command end-to-end SANS Docker/réseau : manager SQLite en mémoire,
+    # injecté via monkeypatch de runtime._build_manager + runtime._settings.
+    import collegue.pilot.__main__ as cli
+    import collegue.pilot.runtime as runtime
+    from collegue.state import ProjectStateManager
+
+    url = f"sqlite:///{tmp_path / 'state.db'}"
+    manager = ProjectStateManager.from_url(url, create=True)
+    pid = manager.create_project(name="p")
+    tid = manager.add_task(pid, title="T")
+    manager.update_task(tid, status="failed")
+
+    monkeypatch.setattr(runtime, "_settings", lambda: SimpleNamespace(STATE_DATABASE_URL=url))
+    monkeypatch.setattr(runtime, "_build_manager", lambda _s: manager)
+
+    rc = cli.main(["task", "reset", str(tid), "--message", "reset post-incident"])
+    assert rc == 0
+    assert manager.get_task(tid).status == "todo"
+    assert any(getattr(d, "summary", "") == "[run] operator_reset" for d in manager.get_decisions(pid))
+
+
+def test_main_task_command_unknown_task_returns_1(monkeypatch, tmp_path):
+    import collegue.pilot.__main__ as cli
+    import collegue.pilot.runtime as runtime
+    from collegue.state import ProjectStateManager
+
+    url = f"sqlite:///{tmp_path / 'state.db'}"
+    manager = ProjectStateManager.from_url(url, create=True)
+    monkeypatch.setattr(runtime, "_settings", lambda: SimpleNamespace(STATE_DATABASE_URL=url))
+    monkeypatch.setattr(runtime, "_build_manager", lambda _s: manager)
+    assert cli.main(["task", "reset", "9999", "--message", "x"]) == 1
 
 
 # --- CLI main (glue + codes de sortie) ------------------------------------------

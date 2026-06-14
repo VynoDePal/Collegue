@@ -949,6 +949,96 @@ def test_requeue_twice_replaces_redo_motive_not_stacks(manager):
     assert t.best_feedback.count("échecs connus") == 1  # jamais nidifié
 
 
+# --- interventions opérateur tracées (#506) ---------------------------------------
+
+
+def test_operator_requeue_task_traces_decision(manager):
+    """#506 : un requeue opérateur délègue à requeue_task_for_redo (#460) ET trace
+    un événement OPERATOR_REQUEUE persisté dans `decisions` — la reprise manuelle
+    n'est plus invisible au post-mortem."""
+    from collegue.pilot import operator_requeue_task
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="failed", attempt_count=3)
+    audit = RunAuditLog(pid, manager=manager, persist=True)
+
+    fields = operator_requeue_task(manager, tid, message="[opérateur] image sandbox réparée", audit=audit)
+
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "todo" and fields["status"] == "todo"
+    assert "image sandbox" in t.last_error
+    assert "image sandbox" in t.best_feedback  # délègue à requeue_task_for_redo (#460)
+    evt = [e for e in audit.events if e.kind == "operator_requeue"]
+    assert len(evt) == 1
+    assert evt[0].detail["status_before"] == "failed"
+    assert evt[0].detail["status_after"] == "todo"
+    assert "image sandbox" in evt[0].detail["message"]
+    # trace PERSISTÉE dans decisions (cœur de l'issue) :
+    assert any(getattr(d, "summary", "") == "[run] operator_requeue" for d in manager.get_decisions(pid))
+
+
+def test_operator_reset_task_traces_before_after(manager):
+    """#506 : un reset pose le statut + trace l'état avant/après, SANS poser de
+    best_feedback (un reset n'oriente pas un prompt, distinct du requeue)."""
+    from collegue.pilot import operator_reset_task
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="failed")
+    audit = RunAuditLog(pid, manager=manager, persist=True)
+
+    operator_reset_task(manager, tid, message="reset post-incident sandbox", audit=audit)
+
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "todo"
+    assert "reset post-incident" in t.last_error
+    assert not t.best_feedback  # distinct du requeue : aucun motif de réparation injecté
+    evt = [e for e in audit.events if e.kind == "operator_reset"]
+    assert len(evt) == 1
+    assert evt[0].detail["status_before"] == "failed"
+    assert evt[0].detail["status_after"] == "todo"
+    assert any(getattr(d, "summary", "") == "[run] operator_reset" for d in manager.get_decisions(pid))
+
+
+def test_operator_reset_task_custom_status(manager):
+    from collegue.pilot import operator_reset_task
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="failed")
+    fields = operator_reset_task(manager, tid, status="blocked", message="bloqué en attente d'arbitrage")
+    assert fields["status"] == "blocked"
+    assert manager.get_tasks(pid)[0].status == "blocked"
+
+
+def test_operator_helpers_unknown_task_raises(manager):
+    from collegue.pilot import operator_requeue_task, operator_reset_task
+
+    with pytest.raises(KeyError):
+        operator_reset_task(manager, 9999, message="x")
+    with pytest.raises(KeyError):
+        operator_requeue_task(manager, 9999, message="x")
+
+
+def test_operator_helpers_audit_none_is_noop_but_works(manager):
+    """audit=None : le travail manager est fait, aucune exception (helpers
+    utilisables/testables sans DB d'audit — symétrie NullAuditLog)."""
+    from collegue.pilot import operator_requeue_task, operator_reset_task
+
+    pid = _linear_project(manager, 2)
+    tids = [t.id for t in manager.get_tasks(pid)]
+    manager.update_task(tids[0], status="failed")
+    manager.update_task(tids[1], status="failed")
+    operator_reset_task(manager, tids[0], message="reset")  # audit défaut None
+    operator_requeue_task(manager, tids[1], message="redo")
+    statuses = {t.id: t.status for t in manager.get_tasks(pid)}
+    assert statuses[tids[0]] == "todo"
+    assert statuses[tids[1]] == "todo"
+
+
 # --- ré-injection du feedback d'échec au retry (#424) ------------------------------
 
 
