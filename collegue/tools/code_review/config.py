@@ -12,7 +12,10 @@ REVIEW_STANDARDS = {
         "hachage de mot de passe faible ou non salé (MD5, SHA1, SHA-256 nu), "
         "comparaison de mots de passe/jetons non à temps constant, "
         "jetons d'authentification falsifiables (base64/JSON non signés), "
-        "validation des entrées manquante, contrôle d'autorisation absent"
+        "validation des entrées manquante, contrôle d'autorisation absent, "
+        "isolation par propriétaire absente sur une ressource multi-utilisateurs "
+        "(IDOR : un endpoint CRUD qui lit/modifie/supprime une ressource sans la "
+        "filtrer par l'utilisateur courant)"
     ),
     "performance": "Patterns inefficaces (boucles O(n²), allocations inutiles)",
     "dry": "Duplication de code (Don't Repeat Yourself)",
