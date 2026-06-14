@@ -1131,6 +1131,25 @@ def test_missing_modules_parsed_and_deduplicated():
     assert missing_modules("FAILED tests/test_x.py - assert 1 == 2") == []
 
 
+def test_selfdiagnosed_packages_parsed():
+    """#501 : les messages auto-diagnostiqués nomment un PAQUET (pas un module)."""
+    from collegue.executor.quality_gate import selfdiagnosed_packages
+
+    multipart = (
+        'RuntimeError: Form data requires "python-multipart" to be installed. '
+        "You can install it with pip install python-multipart"
+    )
+    assert selfdiagnosed_packages(multipart) == ["python-multipart"]  # dédup guillemets + pip install
+    httpx = "RuntimeError: The starlette.testclient module requires the httpx package to be installed."
+    assert selfdiagnosed_packages(httpx) == ["httpx"]
+    assert selfdiagnosed_packages("RuntimeError: please install email-validator to enable this") == ["email-validator"]
+    assert selfdiagnosed_packages("pip install -r requirements.txt") == []  # flag jamais capturé
+    assert selfdiagnosed_packages("please install the dependency manually") == []  # mot générique (denylist)
+    assert selfdiagnosed_packages("pip install git+https://x/y.git") == []  # « git » en denylist
+    assert selfdiagnosed_packages("E   ModuleNotFoundError: No module named 'httpx'") == []  # autre chemin
+    assert selfdiagnosed_packages("") == []
+
+
 def test_requirement_for_module_table_and_heuristic():
     from collegue.executor.quality_gate import requirement_for_module
 
@@ -1688,3 +1707,57 @@ def test_to_markdown_mentions_unpinned_requirements():
         passed=True,
     )
     assert "non épinglées" not in clean.to_markdown()
+
+
+async def test_remediation_fixes_starlette_multipart_form(tmp_path):
+    """#501 (le cas du run v5 T2) : « Form data requires "python-multipart" » —
+    PAS une ModuleNotFoundError — réparé en un cycle, zéro LLM."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    red = SandboxResult(
+        exit_code=1,
+        stdout='E   RuntimeError: Form data requires "python-multipart" to be installed.\nERROR tests/test_auth.py\n',
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="3 passed", stderr="")
+    sandbox = _SeqSandbox([red, green])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.passed is True
+    assert report.requirements_added == ("python-multipart",)
+    assert "python-multipart" in (tmp_path / "requirements.txt").read_text(encoding="utf-8")
+    assert len(sandbox.calls) == 2  # un seul aller-retour, zéro cycle LLM
+
+
+async def test_remediation_fixes_starlette_httpx_package_form(tmp_path):
+    """#501 : forme SANS guillemets « requires the httpx package to be installed »."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    red = SandboxResult(
+        exit_code=1,
+        stdout="E   RuntimeError: The starlette.testclient module requires the httpx package to be installed.\n",
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="2 passed", stderr="")
+    sandbox = _SeqSandbox([red, green])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ("httpx",)
+    assert report.passed is True
+    assert len(sandbox.calls) == 2
+
+
+async def test_remediation_selfdiagnosed_skips_declared_and_local(tmp_path):
+    """#501 : garde-fous — paquet déjà déclaré (dédup) et module local (dependency
+    confusion) ne sont jamais ajoutés."""
+    # déjà déclaré → pas de doublon
+    (tmp_path / "requirements.txt").write_text("fastapi\npython-multipart\n", encoding="utf-8")
+    red = SandboxResult(exit_code=1, stdout='E   RuntimeError: Form data requires "python-multipart"...\n', stderr="")
+    sandbox = _SeqSandbox([red])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+
+    # module local du projet → jamais installé depuis PyPI
+    work2 = tmp_path / "w2"
+    work2.mkdir()
+    (work2 / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (work2 / "utils.py").write_text("")
+    red2 = SandboxResult(exit_code=1, stdout="E   RuntimeError: please install utils to continue\n", stderr="")
+    report2 = await run_quality_gate(str(work2), DIFF, ctx=None, sandbox=_SeqSandbox([red2]), reviewer=FakeReviewer())
+    assert report2.requirements_added == ()

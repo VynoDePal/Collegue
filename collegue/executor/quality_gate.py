@@ -312,6 +312,26 @@ _MODULE_TO_PACKAGE = {
     "fitz": "PyMuPDF",
 }
 _MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
+# #501 : formes « paquet auto-diagnostiqué » — Starlette/FastAPI/pydantic
+# interceptent l'import manquant et lèvent LEUR message ; le nom capturé est
+# DÉJÀ un paquet PyPI (pas un module). 4 alternatives couvrant les formes réelles
+# observées (run v5 + tests pipeline #478) — l'ancrage [A-Za-z0-9] exclut tout
+# flag pip (« -r », « --no-cache ») :
+#   - requires "X" to be installed   (python-multipart, guillemets)
+#   - requires the X package         (httpx via starlette.testclient, sans guillemets)
+#   - please install X               (générique)
+#   - pip install X                  (« You can install it with pip install X »)
+_SELFDIAGNOSED_PACKAGE_RE = re.compile(
+    r"""(?:requires|needs)\s+["']([A-Za-z0-9][A-Za-z0-9._-]*)["']\s+to\s+be\s+installed"""
+    r"""|requires\s+the\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s+package\s+to\s+be\s+installed"""
+    r"""|please\s+install\s+([A-Za-z0-9][A-Za-z0-9._-]*)"""
+    r"""|pip\s+install\s+([A-Za-z0-9][A-Za-z0-9._-]*)"""
+)
+# #501 : mots génériques captés à tort par les formes larges (« please install
+# the dependency », « pip install git+… ») — un nom bidon échouerait de toute
+# façon à l'install (gate rouge, fail-closed), mais on évite la pollution de
+# requirements.txt en amont.
+_SELFDIAGNOSED_DENYLIST = frozenset({"the", "a", "an", "it", "this", "that", "your", "my", "git", "user", "package"})
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9._-]+)")
 # FacNor v4 tâche 2 : 3 paquets découverts en série (chaîne d'imports — Python ne
 # révèle que le PREMIER module manquant d'un fichier, quel que soit le flag pytest).
@@ -330,6 +350,29 @@ def missing_modules(output: str) -> List[str]:
         module = match.group(1).split(".")[0]
         if module and module not in seen:
             seen.append(module)
+    return seen
+
+
+def selfdiagnosed_packages(output: str) -> List[str]:
+    """Paquets PyPI nommés par les messages auto-diagnostiqués (#501).
+
+    Starlette/FastAPI/pydantic interceptent l'``ImportError`` et lèvent « X
+    requires "Y" to be installed » / « requires the Y package » / « please
+    install Y » : le nom capturé est DÉJÀ un paquet (pas un module), à ajouter
+    tel quel à ``requirements.txt``. Au run v5, « Form data requires
+    "python-multipart" » a brûlé une tentative car ce n'est pas une
+    ModuleNotFoundError. Dédupliqué (PEP 503), ordre stable.
+    """
+    seen: List[str] = []
+    seen_keys: set = set()
+    for match in _SELFDIAGNOSED_PACKAGE_RE.finditer(output or ""):
+        name = next((g for g in match.groups() if g), None)
+        if not name or name.lower() in _SELFDIAGNOSED_DENYLIST:
+            continue
+        key = _canonical(name)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            seen.append(name)
     return seen
 
 
@@ -386,7 +429,11 @@ def remediate_missing_requirements(workspace: str, output: str) -> Tuple[str, ..
     if not os.path.isfile(req_path):
         return ()
     modules = missing_modules(output)
-    if not modules:
+    # #501 : les messages auto-diagnostiqués (Starlette « requires "X" ») ne sont
+    # PAS des ModuleNotFoundError — sans cette source, l'early-return ci-dessous
+    # raterait le cas multipart/httpx du run v5.
+    packages = selfdiagnosed_packages(output)
+    if not modules and not packages:
         return ()
     try:
         with open(req_path, encoding="utf-8") as handle:
@@ -412,6 +459,20 @@ def remediate_missing_requirements(workspace: str, output: str) -> Tuple[str, ..
             continue  # déjà déclaré : manquant pour une AUTRE raison (pin cassé…)
         additions.append(package)
         declared.add(_canonical(_REQ_NAME_RE.match(package).group(1)))
+    # #501 : paquets auto-diagnostiqués (déjà des noms PyPI — PAS de
+    # requirement_for_module, PAS de filtre stdlib). Mêmes gardes : dédup via
+    # `declared` (mis à jour ci-dessus, donc l'ordre modules-puis-paquets évite
+    # les doublons) et anti-module-local (« please install utils » pour un
+    # utils.py local = dependency confusion).
+    for package in packages:
+        base = _REQ_NAME_RE.match(package)
+        if base is None:
+            continue
+        key = _canonical(base.group(1))
+        if key in declared or _is_local_module(workspace, base.group(1)):
+            continue
+        additions.append(package)
+        declared.add(key)
     if not additions:
         return ()
     body = existing_text if existing_text.endswith("\n") or not existing_text else existing_text + "\n"
