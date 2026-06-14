@@ -228,6 +228,55 @@ def _detruncate_summary_line(line: str, output: str) -> str:
     return line
 
 
+def _summary_line_path(line: str) -> str:
+    """Chemin du fichier de test d'une ligne de short summary pytest (#507).
+
+    Forme : ``FAILED <path>::<test> - <msg>`` ou ``ERROR <path> - <msg>`` — le
+    path est le token qui suit ``FAILED ``/``ERROR ``, borné au premier ``::``
+    (nodeid) puis à l'espace (path nu « ERROR p - m »). Best-effort : chaîne vide
+    si non reconnaissable (le label sera alors omis).
+    """
+    for prefix in ("FAILED ", "ERROR "):
+        if line.startswith(prefix):
+            token = line[len(prefix) :].lstrip()
+            token = token.split("::", 1)[0].split(" ", 1)[0]
+            return token.strip()
+    return ""
+
+
+def _label_failure_line(line: str, changed: frozenset[str]) -> str:
+    """Étiquette une ligne FAILED/ERROR selon la PROVENANCE du test (#507).
+
+    Croise le fichier de test en échec avec le périmètre du diff de la tentative
+    (``files_changed``) : un test que le diff N'A PAS touché et qui casse = une
+    RÉGRESSION sur l'existant (le coder doit corriger SON code, pas le test).
+    Étiquette posée en SUFFIXE — jamais en préfixe : :func:`is_infra_noise` et
+    :func:`is_infra_gate_failure` testent ``startswith("FAILED "/"ERROR ")`` ;
+    un préfixe reclasserait à tort un échec fonctionnel en bruit infra et le
+    gracierait (#461). Best-effort : sans périmètre connu ou path illisible, la
+    ligne est relayée inchangée (pas de label spéculatif).
+    """
+    if not changed:
+        return line
+    path = _summary_line_path(line)
+    if not path:
+        return line
+    # Match tolérant au sous-répertoire : en monorepo, un GATE_TEST_COMMAND du type
+    # « cd backend && pytest » émet des nodeids relatifs au sous-dir (`tests/x.py`)
+    # alors que files_changed (git --name-only) est TOUJOURS racine-relatif
+    # (`backend/tests/x.py`). Le path pytest est donc un suffixe (frontière `/`) du
+    # path git. On n'autorise que ce sens (pytest plus court) : appeler une vraie
+    # régression « test de la tâche » est sans danger (la ligne FAILED reste
+    # relayée), tandis que l'inverse — étiqueter à tort RÉGRESSION un test que
+    # l'agent vient d'ajouter — lui ordonnerait de ne pas le corriger.
+    if path in changed or any(c.endswith("/" + path) for c in changed):
+        return f"{line} [tests de la tâche]"
+    return (
+        f"{line} [RÉGRESSION tests pré-existants — ton diff a cassé l'existant : "
+        "ne modifie pas ces tests, corrige ton code]"
+    )
+
+
 def failure_feedback(outcome: "ExecutionOutcome") -> str:
     """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
 
@@ -245,6 +294,11 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     Adéquation refusée (#437) : les tests sont VERTS — le motif utile est la
     justification du contrôle (« la feature n'est pas implémentée »), pas la
     sortie des tests.
+
+    Provenance (#507) : chaque ligne FAILED/ERROR est étiquetée selon que le
+    fichier de test appartient ou non au diff de la tentative (``files_changed``)
+    — le coder distingue ainsi une RÉGRESSION qu'il a introduite sur des tests
+    pré-existants d'un défaut de sa propre feature.
     """
     if outcome.error:
         return log_tail(outcome.error, 400)
@@ -284,7 +338,11 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
         if fails:
             # #478 : filet — le diagnostic complet est repris du traceback quand
             # le short summary a été tronqué à la largeur du terminal.
-            return " ; ".join(_detruncate_summary_line(line, output) for line in fails[:6])[:700]
+            # #507 : ORDRE crucial — dé-troncature D'ABORD (son `.endswith("...")`
+            # doit voir la ligne brute), étiquetage de provenance ENSUITE.
+            changed = frozenset(getattr(outcome.execution, "files_changed", ()) or ())
+            labelled = (_label_failure_line(_detruncate_summary_line(line, output), changed) for line in fails[:6])
+            return " ; ".join(labelled)[:700]
         return log_tail(output, 400)
     return log_tail(outcome.execution.agent_result.logs, 400)
 

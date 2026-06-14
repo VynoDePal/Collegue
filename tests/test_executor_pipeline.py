@@ -251,7 +251,12 @@ def test_failure_feedback_is_crisp_and_actionable():
         quality_report=_report("bruit\nFAILED tests/a.py::t1 - boom\nencore du bruit\nERROR tests/b.py - setup\n"),
         reason="gate_failed",
     )
-    assert failure_feedback(gate) == "FAILED tests/a.py::t1 - boom ; ERROR tests/b.py - setup"
+    # #507 : files_changed=("a.py",) ne couvre ni tests/a.py ni tests/b.py → les
+    # deux lignes sont étiquetées RÉGRESSION (suffixe ; format figé ici).
+    _regr = (
+        "[RÉGRESSION tests pré-existants — ton diff a cassé l'existant : ne modifie pas ces tests, corrige ton code]"
+    )
+    assert failure_feedback(gate) == (f"FAILED tests/a.py::t1 - boom {_regr} ; ERROR tests/b.py - setup {_regr}")
 
     # Pas de ligne FAILED → queue bornée de la sortie de tests.
     fuzzy = ExecutionOutcome(
@@ -267,6 +272,146 @@ def test_failure_feedback_is_crisp_and_actionable():
     # Échec au stage run (aucun rapport) → logs agent.
     run = ExecutionOutcome(success=False, stage="run", workspace=ws, execution=execution, reason="agent_error")
     assert failure_feedback(run) == "journal de l'agent"
+
+
+def test_failure_feedback_labels_regression_vs_task_tests():
+    """#507 : une ligne FAILED dont le fichier de test est dans le diff de la
+    tentative est étiquetée « tests de la tâche » ; un test pré-existant cassé
+    (hors diff) est étiqueté RÉGRESSION avec la consigne « ne modifie pas ces
+    tests »."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="journal"),
+        changed=True,
+        diff="",
+        files_changed=("collegue/pdf.py", "tests/test_pdf.py"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=False,
+        test_exit_code=1,
+        test_output=(
+            "FAILED tests/test_pdf.py::test_export - assert\n"  # touché par le diff
+            "FAILED tests/test_auth.py::test_login - KeyError\n"  # PAS touché → régression
+        ),
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    # test de la tâche : étiqueté comme tel, jamais en régression
+    assert "tests/test_pdf.py::test_export - assert [tests de la tâche]" in fb
+    # test pré-existant cassé : étiqueté RÉGRESSION avec consigne « ne modifie pas ces tests »
+    assert "tests/test_auth.py::test_login" in fb
+    assert "RÉGRESSION tests pré-existants" in fb
+    assert "ne modifie pas ces tests" in fb
+
+
+def test_regression_label_preserves_infra_classification():
+    """#507 / non-régression #459/#461/#477 : étiqueter RÉGRESSION ne doit PAS
+    désarmer is_infra_noise — une ligne FAILED présente reste fonctionnelle
+    (jamais bruit infra graciable), car le label est en SUFFIXE."""
+    from collegue.executor.pipeline import failure_feedback, is_infra_noise
+
+    fb = failure_feedback(_gate_outcome("FAILED tests/test_x.py::t - requests.exceptions.ConnectionError: refusé\n"))
+    assert "RÉGRESSION" in fb  # _gate_outcome a files_changed=("a.py",) → hors diff
+    assert not is_infra_noise(fb)  # une ligne FAILED présente = jamais bruit infra
+
+
+def test_label_failure_line_best_effort():
+    """#507 : helpers purs — extraction du path et étiquetage best-effort."""
+    from collegue.executor.pipeline import _label_failure_line, _summary_line_path
+
+    assert _summary_line_path("FAILED tests/a.py::t - m") == "tests/a.py"
+    assert _summary_line_path("ERROR tests/b.py - setup") == "tests/b.py"
+    assert _summary_line_path("12 passed in 1.02s") == ""
+    # nodeid de classe et paramétré → path borné au premier ::
+    assert _summary_line_path("FAILED tests/a.py::TestC::test_m - msg") == "tests/a.py"
+    assert _summary_line_path("FAILED tests/a.py::test_x[a b] - msg") == "tests/a.py"
+    # ERROR avec nodeid (erreur de collecte sur un test précis) → path quand même
+    assert _summary_line_path("ERROR tests/x.py::TestC::test_m - boom") == "tests/x.py"
+    # périmètre vide → ligne inchangée (pas de label spéculatif)
+    assert _label_failure_line("FAILED tests/a.py::t - m", frozenset()) == "FAILED tests/a.py::t - m"
+    # path illisible → inchangé
+    assert _label_failure_line("12 passed", frozenset({"a.py"})) == "12 passed"
+    # path dans le diff → étiqueté « tests de la tâche »
+    assert _label_failure_line("FAILED a.py::t - m", frozenset({"a.py"})) == "FAILED a.py::t - m [tests de la tâche]"
+    # cas NOMINAL : path de test repo-relatif présent dans le diff (verrouille le
+    # bornage au :: — une régression qui renverrait "tests/test_pdf.py::t" casserait ici)
+    assert (
+        _label_failure_line("FAILED tests/test_pdf.py::t - m", frozenset({"tests/test_pdf.py", "collegue/pdf.py"}))
+        == "FAILED tests/test_pdf.py::t - m [tests de la tâche]"
+    )
+
+
+def test_label_failure_line_monorepo_subdir_match():
+    """#507 : en monorepo (GATE_TEST_COMMAND « cd backend && pytest »), le nodeid
+    pytest est relatif au sous-dir alors que files_changed est racine-relatif —
+    le match tolérant au suffixe évite un faux RÉGRESSION sur un test de la tâche."""
+    from collegue.executor.pipeline import _label_failure_line
+
+    # pytest émet "tests/test_x.py" ; git --name-only "backend/tests/test_x.py"
+    assert (
+        _label_failure_line("FAILED tests/test_x.py::t - m", frozenset({"backend/tests/test_x.py"}))
+        == "FAILED tests/test_x.py::t - m [tests de la tâche]"
+    )
+    # garde-fou : un sous-chemin DIFFÉRENT ne matche pas (pas de suffixe /)
+    assert "RÉGRESSION" in _label_failure_line("FAILED tests/test_x.py::t - m", frozenset({"backend/test_x.py"}))
+
+
+def test_failure_feedback_detruncation_then_label_same_line():
+    """#507 / #478 : dans un même feedback, la dé-troncature s'applique AVANT
+    l'étiquetage — une inversion casserait silencieusement le `.endswith("...")`
+    de #478. Le message dé-tronqué ET le label doivent coexister."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    output = (
+        "FAILED tests/test_pkg.py::t - ModuleNotFoundError: requires the httpx pack...\n"
+        "E   ModuleNotFoundError: requires the httpx package installed\n"
+    )
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"),
+        changed=True,
+        diff="",
+        files_changed=("tests/test_pkg.py", "src/pkg.py"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=False,
+        test_exit_code=1,
+        test_output=output,
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "ModuleNotFoundError: requires the httpx package installed" in fb  # dé-troncature #478
+    assert "[tests de la tâche]" in fb  # étiquetage #507 (test dans le diff)
 
 
 async def test_reviewer_error_is_contained_not_propagated(repo):
