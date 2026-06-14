@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from collegue.monitoring.metrics import BudgetStatus, get_metrics_collector
 
@@ -72,11 +72,16 @@ class BudgetTimeController:
         collector=None,
         settings_obj: Optional[object] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        extra_totals: Optional[Callable[[], Tuple[float, int]]] = None,
     ):
         self._clock = clock or _utcnow
         self._started_at = _aware(started_at) or _aware(self._clock())
         self._settings = settings_obj
         self._collector = collector
+        # #495 : source de totaux (usd, tokens) d'un canal DISJOINT du collector
+        # (le canal coder). Câblable post-construction via attach_extra_totals —
+        # le harness FacNor construit le controller AVANT run_project.
+        self._extra_totals = extra_totals
         if deadline_seconds is None:
             deadline_seconds = getattr(self._resolve_settings(), "COLLEGUE_RUN_DEADLINE_SECONDS", 0.0) or 0.0
         self._deadline_seconds = float(deadline_seconds)
@@ -94,6 +99,17 @@ class BudgetTimeController:
 
     def _collector_obj(self):
         return self._collector or get_metrics_collector()
+
+    def attach_extra_totals(self, source: Callable[[], Tuple[float, int]]) -> None:
+        """Câble une source de totaux (usd, tokens) d'un canal disjoint (#495).
+
+        Appelé par ``run_project`` pour brancher l'accumulateur CODER-SEUL — le
+        seul point en scope sur TOUS les chemins (runtime ET harness FacNor, qui
+        construit son propre controller). Ne jamais y brancher ``audit.cost`` ni
+        ``cost_source`` (qui incluent la portion process déjà dans le collector
+        → double comptage).
+        """
+        self._extra_totals = source
 
     def _now(self) -> datetime:
         """Heure courante *aware* (coercition UTC si l'horloge injectée est naïve)."""
@@ -130,10 +146,23 @@ class BudgetTimeController:
         # les settings injectés (cohérent avec la deadline), et on respecte
         # BUDGET_EXHAUSTED_ACTION : "warn" = non bloquant (comme enforce_budget).
         settings = self._resolve_settings()
-        status = self._collector_obj().would_exceed_budget(
-            max_cost_usd=getattr(settings, "MAX_COST_USD", None),
-            max_tokens=getattr(settings, "MAX_TOKENS_BUDGET", None),
-        )
+        kwargs = {
+            "max_cost_usd": getattr(settings, "MAX_COST_USD", None),
+            "max_tokens": getattr(settings, "MAX_TOKENS_BUDGET", None),
+        }
+        # #495 : somme du canal coder (disjoint du collector) avant comparaison.
+        # Émis SEULEMENT si non nul → l'appel par défaut reste à 2 kwargs (fakes
+        # à signature fixe + assertions d'égalité stricte préservés).
+        if self._extra_totals is not None:
+            try:
+                extra_usd, extra_tokens = self._extra_totals()
+                extra_usd, extra_tokens = float(extra_usd or 0.0), int(extra_tokens or 0)
+            except Exception:  # noqa: BLE001 - le budget ne casse jamais le run
+                extra_usd, extra_tokens = 0.0, 0
+            if extra_usd or extra_tokens:
+                kwargs["base_cost"] = extra_usd
+                kwargs["base_tokens"] = extra_tokens
+        status = self._collector_obj().would_exceed_budget(**kwargs)
         if status is not None:
             action = str(getattr(settings, "BUDGET_EXHAUSTED_ACTION", "pause") or "pause").strip().lower()
             reason = f"budget {status.limit_type} atteint : {status.current:.4f} >= {status.limit:.4f}"
