@@ -295,6 +295,11 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     justification du contrôle (« la feature n'est pas implémentée »), pas la
     sortie des tests.
 
+    Fichiers parasites bloquants (#508) : quand la garde bloquante a fait rougir le
+    gate, le motif utile est la liste des fichiers à RETIRER — la sortie des tests
+    (souvent verte) masquerait cette consigne (run v6 : `server.log` jamais signalé,
+    tâche racine bloquée 3 tentatives).
+
     Provenance (#507) : chaque ligne FAILED/ERROR est étiquetée selon que le
     fichier de test appartient ou non au diff de la tentative (``files_changed``)
     — le coder distingue ainsi une RÉGRESSION qu'il a introduite sur des tests
@@ -326,6 +331,19 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
             "REQUIREMENTS APPEND-ONLY (#482) — lignes de requirements.txt présentes sur la base et "
             "SUPPRIMÉES par ton diff : " + " ; ".join(removed[:10]) + ". Ré-ajoute-les telles quelles "
             "(n'en supprime aucune) et conserve le reste de ton travail."
+        )[:700]
+    if report is not None and getattr(report, "forbidden_files_blocking", False):
+        # #508 : le gate est rouge PARCE QUE le diff committe des fichiers parasites
+        # (garde bloquante opt-in). Sans cette branche, failure_feedback retombait
+        # sur la sortie des tests — souvent VERTE, terminée par du bruit pip — et
+        # l'agent ne savait JAMAIS qu'il fallait retirer ces fichiers (run v6 : la
+        # tâche racine a brûlé ses 3 tentatives sur un `server.log` jamais signalé).
+        forbidden = tuple(getattr(report, "forbidden_files", ()) or ())
+        return (
+            "FICHIERS PARASITES COMMITTÉS (#508) — ton diff ajoute des fichiers qui n'ont rien à "
+            "faire dans le livrable (artefacts d'exécution / secrets / bases locales / dépendances "
+            "vendorées) et le gate les REFUSE : " + " ; ".join(forbidden[:10]) + ". Retire-les du "
+            "commit (git rm --cached) et ajoute leurs motifs au .gitignore ; conserve le reste de ton travail."
         )[:700]
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
