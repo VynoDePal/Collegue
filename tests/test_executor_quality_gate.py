@@ -1578,3 +1578,113 @@ def test_smoke_probe_green_when_post_4xx(tmp_path):
     result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/", "POST:/auth/register"))
     assert result.returncode == 0
     assert "POST /auth/register -> 422" in result.stdout
+
+
+# --- signal dépendances non épinglées (#497) ----------------------------------------
+
+
+def test_unpinned_requirement_lines_detects_bare_deps():
+    """#497 : les dépendances directes nues sont signalées ; contraintes ⇒ silencieux."""
+    from collegue.executor import unpinned_requirement_lines
+
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+fastapi\n+passlib\n+bcrypt==5.0.0\n+uvicorn>=0.20,<1\n+httpx~=0.27\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("fastapi", "passlib")
+
+
+def test_unpinned_requirement_lines_ignores_options_and_comments():
+    from collegue.executor import unpinned_requirement_lines
+
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+# commentaire\n+-r base.txt\n+--index-url https://x\n+\n+rich\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("rich",)
+
+
+def test_unpinned_requirement_lines_extras_and_url():
+    from collegue.executor import unpinned_requirement_lines
+
+    # extra nu → signalé ; extra + pin → silencieux ; URL (source figée) → silencieux ; dédup.
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+passlib[bcrypt]\n+python-jose[cryptography]==3.3.0\n+pkg @ https://files/pkg.whl\n+fastapi\n+fastapi\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("passlib[bcrypt]", "fastapi")
+
+
+def test_unpinned_requirement_lines_env_marker_not_a_pin():
+    """#497 (revue) : un marqueur d'environnement (`; python_version<'3.8'`)
+    n'est PAS une contrainte de version du paquet — un paquet nu avec marqueur
+    reste signalé."""
+    from collegue.executor import unpinned_requirement_lines
+
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+importlib-metadata; python_version<'3.8'\n+typing-extensions==4.0; python_version<'3.10'\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("importlib-metadata; python_version<'3.8'",)
+
+
+def test_unpinned_requirement_lines_monorepo_and_noise():
+    from collegue.executor import unpinned_requirement_lines
+
+    nested = (
+        "diff --git a/backend/requirements.txt b/backend/requirements.txt\n"
+        "--- a/backend/requirements.txt\n+++ b/backend/requirements.txt\n+fastapi\n"
+    )
+    assert unpinned_requirement_lines(nested) == ("fastapi",)
+    code = "diff --git a/app/x.py b/app/x.py\n--- a/app/x.py\n+++ b/app/x.py\n+fastapi\n"
+    assert unpinned_requirement_lines(code) == ()
+    assert unpinned_requirement_lines("") == ()
+
+
+async def test_unpinned_signal_is_not_blocking(tmp_path):
+    """#497 : signal NON bloquant par défaut — le gate reste vert, la PR liste."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n+fastapi\n"
+    )
+    report = await run_quality_gate(
+        str(tmp_path), diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE
+    )
+    assert report.passed is True
+    assert report.requirements_unpinned == ("fastapi",)
+    assert "non épinglées" in report.to_markdown()
+
+
+async def test_pin_guard_opt_out(tmp_path):
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n+fastapi\n"
+    )
+    report = await run_quality_gate(
+        str(tmp_path), diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE, pin_guard=False
+    )
+    assert report.requirements_unpinned == ()
+
+
+def test_to_markdown_mentions_unpinned_requirements():
+    report = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+        requirements_unpinned=("fastapi", "passlib"),
+    )
+    markdown = report.to_markdown()
+    assert "non épinglées" in markdown and "`fastapi`" in markdown and "`passlib`" in markdown
+    clean = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+    )
+    assert "non épinglées" not in clean.to_markdown()

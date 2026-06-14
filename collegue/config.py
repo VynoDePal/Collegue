@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     # ROUGE (feedback nominatif). Analyse pure du diff, aucun coût d'infra ;
     # off → suppression silencieuse tolérée (comportement historique).
     GATE_REQUIREMENTS_APPEND_ONLY: bool = True
+    # #497 : signal (NON bloquant) des dépendances directes ajoutées sans
+    # contrainte de version dans requirements.txt (cause du register→500 v4).
+    GATE_PIN_GUARD: bool = True
     # Adéquation diff↔issue (#437) : contrôle LLM fail-closed « ce diff
     # implémente-t-il l'issue ? » lancé quand le reste du gate est vert — une
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne

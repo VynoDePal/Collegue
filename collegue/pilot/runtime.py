@@ -129,6 +129,9 @@ def _gate_options(settings_obj) -> dict:
     # #482 : garde append-only requirements — même convention (défaut ON).
     if not bool(getattr(settings_obj, "GATE_REQUIREMENTS_APPEND_ONLY", True)):
         options["requirements_guard"] = False
+    # #497 : signal deps non épinglées (défaut ON) — clé émise seulement en opt-out.
+    if not bool(getattr(settings_obj, "GATE_PIN_GUARD", True)):
+        options["pin_guard"] = False
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)

@@ -1701,6 +1701,7 @@ def test_repair_prompt_carries_requirements_append_only_rule():
         id=1, title="T", acceptance="", issue_number=None, depends_on=[], attempt_count=0, last_error=None
     )
     assert "APPEND-ONLY" not in _issue_from_task(fresh).context
+    assert "ÉPINGLÉE" not in _issue_from_task(fresh).context  # #497 : pas sur le prompt initial
 
     retry = SimpleNamespace(
         id=1,
@@ -1711,7 +1712,9 @@ def test_repair_prompt_carries_requirements_append_only_rule():
         attempt_count=1,
         last_error="[gate/gate_failed] tentative 1/3 — FAILED tests/test_x.py",
     )
-    assert REQUIREMENTS_APPEND_ONLY_RULE in _issue_from_task(retry).context
+    retry_ctx = _issue_from_task(retry).context
+    assert REQUIREMENTS_APPEND_ONLY_RULE in retry_ctx
+    assert "ÉPINGLÉE" in retry_ctx  # #497 : consigne d'épinglage sur le retry
 
     repair = SimpleNamespace(
         id=1,
