@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from typing import List, Mapping, Optional, Tuple, Union
 
 DEFAULT_SANDBOX_IMAGE = "collegue-sandbox:latest"
+# #496 : point de montage du cache pip persistant dans le conteneur.
+SANDBOX_PIP_CACHE_MOUNT = "/tmp/.pip_cache"
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
@@ -70,8 +72,10 @@ class DockerSandbox:
     """Exécute des commandes dans un conteneur Docker isolé et durci.
 
     Isolation (AC#1 « ne peut pas lire le FS hôte ») : seul ``workspace`` est monté
-    (sur ``/workspace``) ; aucun autre chemin hôte n'est exposé. Persistance (AC#2) :
-    ``workspace`` est un répertoire réel réutilisé d'une exécution à l'autre.
+    (sur ``/workspace``) ; aucun autre chemin hôte n'est exposé — sauf un cache pip
+    OPT-IN sur ``/tmp/.pip_cache`` si ``pip_cache_dir`` est fourni (#496).
+    Persistance (AC#2) : ``workspace`` est un répertoire réel réutilisé d'une
+    exécution à l'autre.
     """
 
     def __init__(
@@ -80,6 +84,7 @@ class DockerSandbox:
         *,
         network: str = "none",
         dns: Optional[Tuple[str, ...]] = None,
+        pip_cache_dir: Optional[str] = None,
         memory: str = "512m",
         cpus: str = "1.0",
         pids_limit: int = 256,
@@ -100,6 +105,12 @@ class DockerSandbox:
         # l'infra. Vide (défaut) = comportement Docker inchangé. Une adresse
         # invalide fait échouer `docker run` (stderr visible dans le gate).
         self.dns = tuple(dns or ())
+        # Cache pip persistant opt-in (#496, partie 2 de #485). Monté sur
+        # /tmp/.pip_cache + PIP_CACHE_DIR : les passes réseau du gate (#414/#439)
+        # ne retéléchargent plus tout PyPI à chaque run (aléas DNS/timeout
+        # réduits, temps mur amorti — jusqu'à 4 passes avec la remédiation #481).
+        # Vide (défaut) = aucun montage, argv inchangé. Validé comme un -v.
+        self.pip_cache_dir = pip_cache_dir or None
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
@@ -166,6 +177,16 @@ class DockerSandbox:
         # défaut strictement inchangé).
         for server in self.dns:
             argv += ["--dns", server]
+        # #496 : cache pip persistant — 2e montage hôte opt-in (cf. docstring
+        # d'isolation). Le bind sur /tmp/.pip_cache MASQUE le tmpfs à ce
+        # sous-chemin → les pages du cache ne comptent pas dans --memory. Validé
+        # (realpath + refus ':'/racine) car il devient un -v ; le confinement
+        # workspace_root NE s'applique PAS (le cache vit hors du workspace).
+        if self.pip_cache_dir:
+            cache = os.path.realpath(os.path.abspath(self.pip_cache_dir))
+            if ":" in cache or cache == os.path.sep:
+                raise ValueError(f"pip_cache_dir invalide (':' ou racine): {cache}")
+            argv += ["-v", f"{cache}:{SANDBOX_PIP_CACHE_MOUNT}", "-e", f"PIP_CACHE_DIR={SANDBOX_PIP_CACHE_MOUNT}"]
         if self.read_only:
             argv += ["--read-only"]  # root FS en lecture seule
         argv += [

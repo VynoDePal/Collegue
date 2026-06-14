@@ -406,3 +406,16 @@ def test_gate_smoke_cors_origin_emitted_only_on_override():
     assert _gate_options(over)["smoke_cors_origin"] == "https://app.example"
     off = SimpleNamespace(GATE_SMOKE_RUN=True, GATE_SMOKE_CORS_ORIGIN="")
     assert _gate_options(off)["smoke_cors_origin"] == ""
+
+
+def test_sandbox_pip_cache_parsed_from_settings(tmp_path):
+    """#496 : SANDBOX_PIP_CACHE_DIR → chemin créé ; vide/absent → None."""
+    from types import SimpleNamespace
+
+    from collegue.pilot.runtime import _sandbox_pip_cache
+
+    target = tmp_path / "pipcache"
+    assert _sandbox_pip_cache(SimpleNamespace(SANDBOX_PIP_CACHE_DIR=str(target))) == str(target)
+    assert target.is_dir()  # créé (writable par l'uid hôte)
+    assert _sandbox_pip_cache(SimpleNamespace(SANDBOX_PIP_CACHE_DIR="")) is None
+    assert _sandbox_pip_cache(SimpleNamespace()) is None
