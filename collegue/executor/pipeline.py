@@ -277,6 +277,44 @@ def _label_failure_line(line: str, changed: frozenset[str]) -> str:
     )
 
 
+# #507 (suivi v6) : bruit pip NON-fatal (exit 0). Un conflit de version avec une
+# dépendance de l'IMAGE sandbox (openhands & co — hors périmètre du livrable) est
+# signalé par pip SANS bloquer ; ce bruit NOIE le feedback de repli (run v6 : la
+# tâche racine a brûlé 3 tentatives, le coder empilant des pins inutiles au lieu de
+# voir le vrai motif). On le retire du diagnostic RELAYÉ au coder. Sûr vis-à-vis de
+# la grâce #461 : AUCUNE de ces signatures n'est une signature réseau
+# (_INFRA_NOISE_SIGNATURES), et on ne touche JAMAIS ``report.test_output``.
+_PIP_NOISE_SIGNATURES = (
+    "pip's dependency resolver does not currently take into account",
+    "[notice] A new release of pip is available",
+    "[notice] To update, run:",
+    "WARNING: The script ",
+    "Consider adding this directory to PATH",
+    "Defaulting to user installation because normal site-packages is not writeable",
+)
+
+
+def filter_pip_noise(output: str) -> str:
+    """Retire les lignes de bruit pip NON-fatal d'un diagnostic (#507).
+
+    Cible : avertissements du resolver, notices de mise à jour pip, warnings de
+    PATH, et la ligne de conflit ``X requires Y, but you have Z which is
+    incompatible.`` (deps de l'image, hors livrable). Ne retire AUCUNE signature
+    réseau (#461) ni ligne pytest ``FAILED``/``ERROR``.
+    """
+    if not output:
+        return output
+    kept = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if any(sig in stripped for sig in _PIP_NOISE_SIGNATURES):
+            continue
+        if "but you have" in stripped and "incompatible" in stripped:  # conflit de version pip
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def failure_feedback(outcome: "ExecutionOutcome") -> str:
     """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
 
@@ -361,7 +399,17 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
             changed = frozenset(getattr(outcome.execution, "files_changed", ()) or ())
             labelled = (_label_failure_line(_detruncate_summary_line(line, output), changed) for line in fails[:6])
             return " ; ".join(labelled)[:700]
-        return log_tail(output, 400)
+        # #507 : pas de ligne pytest exploitable → on relaie la queue, MAIS nettoyée
+        # du bruit pip non-fatal (conflit avec les deps de l'image, notices). Si tout
+        # était du bruit, on le DIT au lieu de relayer un diagnostic trompeur. La
+        # signature réseau (#461) survit au filtre → la grâce reste armée.
+        cleaned = filter_pip_noise(output)
+        if not cleaned.strip():
+            return (
+                "Gate rouge sans diagnostic pytest exploitable — la sortie ne contenait que du bruit "
+                "d'installation pip non bloquant (conflit avec des dépendances de l'image, hors livrable)."
+            )
+        return log_tail(cleaned, 400)
     return log_tail(outcome.execution.agent_result.logs, 400)
 
 
