@@ -1899,6 +1899,39 @@ async def test_no_cost_unknown_when_cost_reported(repo, manager):
     assert audit.cost.usd == pytest.approx(0.002)
 
 
+async def test_authoritative_zero_cost_not_repriced(repo, manager, monkeypatch):
+    """#504 : un coût 0 AUTORITAIRE (abonnement, cost_authoritative=True) n'est PAS
+    re-tarifé au prix de secours #484 — même AVEC des prix configurés — et n'émet
+    aucun cost_unknown. Le ledger $ reflète la réalité (run non facturé) ; les
+    tokens restent comptés. (Sans le flag, ce même cas serait estimé : cf.
+    test_coder_cost_estimated_when_litellm_unmapped.)"""
+    import dataclasses
+
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 9.0, raising=False)
+
+    class _SubscriptionAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(
+                result, prompt_tokens=1_000_000, completion_tokens=100_000, cost_usd=0.0, cost_authoritative=True
+            )
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_SubscriptionAgent(), audit=audit)
+    assert result.stop_reason == "completed"
+    assert audit.cost.usd == 0.0  # PAS de coût fantôme malgré des prix configurés
+    assert audit.cost.tokens == 1_100_000  # tokens toujours comptés
+    assert not [e for e in audit.events if e.kind == "cost_unknown"]  # 0 autoritaire ≠ inconnu
+
+
 # --- crash-loop agent : grâce + fail-fast (#498) ------------------------------------
 
 

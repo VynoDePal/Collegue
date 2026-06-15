@@ -815,7 +815,11 @@ async def run_project(
         coder_completion = int(getattr(agent_result, "completion_tokens", 0) or 0)
         coder_tokens = coder_prompt + coder_completion
         coder_usd = float(getattr(agent_result, "cost_usd", 0.0) or 0.0)
-        if coder_tokens and coder_usd <= 0:
+        # #504 : un coût 0 AUTORITAIRE (abonnement, billable=false) n'est PAS un coût
+        # inconnu — ne pas le re-tarifer au prix de secours (#484), sinon le ledger
+        # porte un coût FANTÔME sur un run pourtant gratuit (run v6 : ~$2 fantômes).
+        coder_authoritative = bool(getattr(agent_result, "cost_authoritative", False))
+        if coder_tokens and coder_usd <= 0 and not coder_authoritative:
             # #484 : modèle non mappé litellm → cost_usd=0 malgré des tokens.
             # Prix de secours configurés (LLM_PRICE_*_PER_1M) : coût estimé ;
             # sinon coût INCONNU — signalé une fois par run/segment au lieu
