@@ -78,3 +78,44 @@ def test_success_after_transient_failure_no_final_log(caplog):
     with caplog.at_level("DEBUG", logger=client.logger.name):
         assert client._execute_with_retry(_op, "GET ref") == "ok"
     assert not [r for r in caplog.records if "failed after" in r.message]
+
+
+def test_tool_execution_error_404_logs_at_debug(caplog):
+    """#505 : un ToolExecutionError porteur de status_code=404 (cas GitHubClient,
+    qui convertit le 404 HTTP en exception métier) part en debug, plus en error —
+    le rétrogradage #465 atteint enfin ce chemin (~60 lignes de bruit au run v5)."""
+    from collegue.tools.base import ToolExecutionError
+
+    client = _Client()
+    with caplog.at_level("DEBUG", logger=client.logger.name):
+        with pytest.raises(APIError):
+            client._execute_with_retry(
+                _always_raise(ToolExecutionError("Ressource introuvable: contents/x", status_code=404)),
+                "GET contents/x",
+            )
+    records = [r for r in caplog.records if "failed after" in r.message]
+    assert records and all(r.levelname == "DEBUG" for r in records)
+
+
+def test_tool_execution_error_401_stays_error(caplog):
+    """401 reste une vraie erreur (console) — auth invalide, pas du bruit attendu."""
+    from collegue.tools.base import ToolExecutionError
+
+    client = _Client()
+    with caplog.at_level("DEBUG", logger=client.logger.name):
+        with pytest.raises(APIError):
+            client._execute_with_retry(
+                _always_raise(ToolExecutionError("Token invalide", status_code=401)),
+                "GET user",
+            )
+    records = [r for r in caplog.records if "failed after" in r.message]
+    assert records and all(r.levelname == "ERROR" for r in records)
+
+
+def test_tool_execution_error_default_status_is_zero():
+    """Compat signature : message seul → status_code défaut 0 (sous-classes incluses)."""
+    from collegue.tools.base import ToolExecutionError, ToolQuotaError, ToolRateLimitError
+
+    assert ToolExecutionError("x").status_code == 0
+    assert ToolRateLimitError("x").status_code == 0
+    assert ToolQuotaError("x").status_code == 0

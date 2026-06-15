@@ -50,16 +50,24 @@ OPENHANDS_ENTRYPOINT = "openhands.core.main"
 USAGE_MARKER = "[collegue-usage]"
 
 
-def parse_usage_from_logs(logs: str) -> Tuple[int, int, float]:
-    """``(prompt_tokens, completion_tokens, cost_usd)`` sommés depuis les logs (#441).
+def parse_usage_from_logs(logs: str) -> Tuple[int, int, float, bool]:
+    """``(prompt_tokens, completion_tokens, cost_usd, cost_authoritative)`` (#441/#504).
 
     Best-effort : une ligne marquée mais illisible est ignorée (l'usage est une
-    télémétrie, jamais une cause d'échec). ``(0, 0, 0.0)`` si rien n'est rapporté
-    — le ledger distingue « zéro rapporté » de « gouvernance morte » par la
-    présence des événements ``cost_observed``.
+    télémétrie, jamais une cause d'échec). ``(0, 0, 0.0, False)`` si rien n'est
+    rapporté — le ledger distingue « zéro rapporté » de « gouvernance morte » par
+    la présence des événements ``cost_observed``.
+
+    ``cost_authoritative`` (#504) : ``True`` dès qu'une ligne porte ``billable:
+    false`` — le coder SAIT que le run n'est pas facturé (abonnement Codex/ChatGPT,
+    coût réel **0**). Le pilote ne doit alors PAS re-tarifer ce 0 au prix de secours
+    (#484) : ce serait un coût FANTÔME (run v6 : ledger ~$2 sur un run abonnement
+    pourtant gratuit). Absent / ``billable: true`` → un ``cost_usd`` nul reste un
+    coût INCONNU (modèle non mappé litellm) → re-tarification #484 légitime.
     """
     prompt = completion = 0
     cost = 0.0
+    cost_authoritative = False
     for line in (logs or "").splitlines():
         index = line.find(USAGE_MARKER)
         if index < 0:
@@ -72,9 +80,11 @@ def parse_usage_from_logs(logs: str) -> Tuple[int, int, float]:
             usd = float(data.get("cost_usd") or 0.0)
             if math.isfinite(usd) and usd > 0:
                 cost += usd
+            if data.get("billable") is False:
+                cost_authoritative = True  # #504 : 0 AUTORITAIRE (run non facturé)
         except (ValueError, TypeError, AttributeError):
             continue
-    return prompt, completion, cost
+    return prompt, completion, cost, cost_authoritative
 
 
 def estimate_cost_usd(prompt_tokens: int, completion_tokens: int, settings_obj=None) -> float:
@@ -106,6 +116,28 @@ def estimate_cost_usd(prompt_tokens: int, completion_tokens: int, settings_obj=N
         # tuer le run — l'audit ne casse jamais le run.
         return 0.0
     return total / 1_000_000.0 if math.isfinite(total) else 0.0
+
+
+def coder_pricing_resolvable(settings_obj=None) -> bool:
+    """Vrai si un prix de secours coder (``LLM_PRICE_*_PER_1M``) est configuré (#502).
+
+    Quand litellm ne mappe pas le modèle coder ET qu'aucun prix n'est configuré,
+    le ledger $ reste à 0 et ``MAX_COST_USD`` est inopérant côté coder (3 runs
+    consécutifs aveugles). Ce prédicat permet de l'AVERTIR au démarrage du run
+    plutôt que de le découvrir en post-mortem. Même robustesse que
+    :func:`estimate_cost_usd` (prix absent/non numérique/négatif/non fini → 0).
+    """
+    if settings_obj is None:
+        from collegue.config import settings as settings_obj
+
+    def _price(name: str) -> float:
+        try:
+            value = float(getattr(settings_obj, name, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) and value > 0 else 0.0
+
+    return _price("LLM_PRICE_PROMPT_PER_1M") > 0 or _price("LLM_PRICE_COMPLETION_PER_1M") > 0
 
 
 # Politique retries/backoff par défaut du canal coder (#422) — alignée sur les
@@ -241,7 +273,7 @@ class OpenHandsAgent:
         self._last_launch = self._clock()
         result = self._sandbox.run_command(self.build_command(issue), workspace)
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-        prompt_tokens, completion_tokens, cost_usd = parse_usage_from_logs(logs)
+        prompt_tokens, completion_tokens, cost_usd, cost_authoritative = parse_usage_from_logs(logs)
         return AgentResult(
             success=result.ok,
             logs=logs,
@@ -249,4 +281,5 @@ class OpenHandsAgent:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cost_usd=cost_usd,
+            cost_authoritative=cost_authoritative,
         )

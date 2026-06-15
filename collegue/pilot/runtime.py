@@ -83,6 +83,33 @@ def _sandbox_dns(settings_obj) -> tuple:
     return tuple(server.strip() for server in raw.split(",") if server.strip())
 
 
+def _sandbox_pip_cache(settings_obj):
+    """Cache pip persistant du sandbox (#496) — ``SANDBOX_PIP_CACHE_DIR`` (chemin hôte).
+
+    Crée le dossier (le conteneur tourne en ``--user`` uid:gid hôte → writable
+    requis). Vide/absent → ``None`` (aucun cache).
+    """
+    raw = str(getattr(settings_obj, "SANDBOX_PIP_CACHE_DIR", "") or "").strip()
+    if not raw:
+        return None
+    path = os.path.expanduser(raw)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _sandbox_subscription_auth(settings_obj):
+    """Creds d'abonnement OpenHands (Codex/ChatGPT) — ``SANDBOX_SUBSCRIPTION_AUTH_DIR``.
+
+    Chemin HÔTE (ex. ``~/.openhands``) monté en RW dans le worker pour utiliser
+    l'abonnement (sans coût API). Vide/absent → ``None`` (mode clé API inchangé).
+    Ne crée PAS le dossier : il doit contenir des creds valides (login fait en amont).
+    """
+    raw = str(getattr(settings_obj, "SANDBOX_SUBSCRIPTION_AUTH_DIR", "") or "").strip()
+    if not raw:
+        return None
+    return os.path.expanduser(raw)
+
+
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.sandbox import DockerSandbox
 
@@ -90,7 +117,12 @@ def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integrati
     # (le défaut durci est ``network="none"``). #485 : résolveurs DNS explicites
     # opt-in (SANDBOX_DNS) — le résolveur Docker par défaut était instable en
     # run réel (gate ET coder, le sandbox est partagé).
-    return DockerSandbox(network="bridge", dns=_sandbox_dns(settings_obj))
+    return DockerSandbox(
+        network="bridge",
+        dns=_sandbox_dns(settings_obj),
+        pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
+        subscription_auth_dir=_sandbox_subscription_auth(settings_obj),  # creds abo Codex/ChatGPT
+    )
 
 
 def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (integration)
@@ -129,6 +161,15 @@ def _gate_options(settings_obj) -> dict:
     # #482 : garde append-only requirements — même convention (défaut ON).
     if not bool(getattr(settings_obj, "GATE_REQUIREMENTS_APPEND_ONLY", True)):
         options["requirements_guard"] = False
+    # #497 : signal deps non épinglées (défaut ON) — clé émise seulement en opt-out.
+    if not bool(getattr(settings_obj, "GATE_PIN_GUARD", True)):
+        options["pin_guard"] = False
+    # #508 : garde fichiers parasites — défaut ON (signal), clé émise en opt-out ;
+    # le mode bloquant est opt-in (clé émise seulement quand activé).
+    if not bool(getattr(settings_obj, "GATE_FORBIDDEN_FILES", True)):
+        options["forbidden_files_guard"] = False
+    if bool(getattr(settings_obj, "GATE_FORBIDDEN_FILES_BLOCK", False)):
+        options["forbidden_files_block"] = True
     test_command = getattr(settings_obj, "GATE_TEST_COMMAND", None)
     if test_command:
         options["test_command"] = str(test_command)
@@ -145,6 +186,15 @@ def _gate_options(settings_obj) -> dict:
         if smoke_paths:
             options["smoke_paths"] = smoke_paths
         options["smoke_timeout"] = float(getattr(settings_obj, "GATE_SMOKE_TIMEOUT", 30.0))
+        # #503 : le défaut vit dans la signature de run_quality_gate (actif même
+        # si le harness bypasse _gate_options) — n'émettre la clé qu'en OVERRIDE
+        # explicite (y compris "" pour désactiver), pour préserver l'égalité
+        # stricte de dict du test runtime sur le chemin par défaut.
+        from collegue.executor.quality_gate import _SMOKE_DEFAULT_ORIGIN
+
+        cors_origin = getattr(settings_obj, "GATE_SMOKE_CORS_ORIGIN", None)
+        if cors_origin is not None and str(cors_origin) != _SMOKE_DEFAULT_ORIGIN:
+            options["smoke_cors_origin"] = str(cors_origin)
     return options
 
 
@@ -250,6 +300,8 @@ async def run_project_from_settings(
         # Gouvernance de coût (#441) : ledger + source process branchés en réel.
         audit=audit,
         cost_source=cost_source,
+        # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
+        require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
     )
 
     # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
@@ -266,6 +318,11 @@ async def run_project_from_settings(
         if audit is not None:
             ledger = audit.cost_summary()
             cost_note = f" ; coût≈{ledger.get('usd', 0.0)}$ / {ledger.get('tokens', 0)} tokens"
+            # #502 : un coût à 0 sans prix coder configuré est suspect — le dire.
+            from collegue.executor.openhands_agent import coder_pricing_resolvable
+
+            if not coder_pricing_resolvable(settings_obj):
+                cost_note += " [PRIX CODER NON CONFIGURÉS — coût $ possiblement INCONNU]"
         manager.record_decision(
             project_id,
             f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}{cost_note}",

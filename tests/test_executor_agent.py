@@ -255,11 +255,23 @@ def test_parse_usage_from_logs_sums_marked_lines():
         "[collegue-usage] pas du json (ignoré, best-effort)\n"
         '[collegue-usage] {"prompt_tokens": -5, "cost_usd": "NaN"}\n'
     )
-    prompt, completion, cost = parse_usage_from_logs(logs)
+    prompt, completion, cost, authoritative = parse_usage_from_logs(logs)
     assert prompt == 2000
     assert completion == 500
     assert cost == pytest.approx(0.0021)
-    assert parse_usage_from_logs("") == (0, 0, 0.0)
+    assert authoritative is False  # #504 : aucune ligne billable=false → coût non autoritaire
+    assert parse_usage_from_logs("") == (0, 0, 0.0, False)
+
+
+def test_parse_usage_marks_authoritative_on_billable_false():
+    """#504 : une ligne ``billable: false`` (abonnement, non facturé) marque le coût
+    AUTORITAIRE même nul → le pilote ne re-tarifera pas au prix de secours #484."""
+    from collegue.executor.openhands_agent import parse_usage_from_logs
+
+    logs = '[collegue-usage] {"prompt_tokens": 5000, "completion_tokens": 800, "cost_usd": 0, "billable": false}\n'
+    prompt, completion, cost, authoritative = parse_usage_from_logs(logs)
+    assert (prompt, completion, cost) == (5000, 800, 0.0)
+    assert authoritative is True  # 0 AUTORITAIRE (run non facturé)
 
 
 def test_openhands_implement_issue_reports_usage():
@@ -328,3 +340,14 @@ def test_estimate_cost_usd_survives_poisoned_token_counts():
 
     prices = _settings(LLM_PRICE_PROMPT_PER_1M=1.5)
     assert estimate_cost_usd(10**400, 0, prices) == 0.0
+
+
+def test_coder_pricing_resolvable():
+    """#502 : vrai si un prix de secours coder est configuré (>0)."""
+    from collegue.executor.openhands_agent import coder_pricing_resolvable
+
+    assert coder_pricing_resolvable(_settings(LLM_PRICE_PROMPT_PER_1M=1.5)) is True
+    assert coder_pricing_resolvable(_settings(LLM_PRICE_COMPLETION_PER_1M=9.0)) is True
+    assert coder_pricing_resolvable(_settings()) is False
+    for bad in (0.0, -3.0, "n/a", float("nan")):
+        assert coder_pricing_resolvable(_settings(LLM_PRICE_PROMPT_PER_1M=bad)) is False

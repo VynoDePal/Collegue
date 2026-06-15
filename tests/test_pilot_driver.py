@@ -949,6 +949,96 @@ def test_requeue_twice_replaces_redo_motive_not_stacks(manager):
     assert t.best_feedback.count("échecs connus") == 1  # jamais nidifié
 
 
+# --- interventions opérateur tracées (#506) ---------------------------------------
+
+
+def test_operator_requeue_task_traces_decision(manager):
+    """#506 : un requeue opérateur délègue à requeue_task_for_redo (#460) ET trace
+    un événement OPERATOR_REQUEUE persisté dans `decisions` — la reprise manuelle
+    n'est plus invisible au post-mortem."""
+    from collegue.pilot import operator_requeue_task
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="failed", attempt_count=3)
+    audit = RunAuditLog(pid, manager=manager, persist=True)
+
+    fields = operator_requeue_task(manager, tid, message="[opérateur] image sandbox réparée", audit=audit)
+
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "todo" and fields["status"] == "todo"
+    assert "image sandbox" in t.last_error
+    assert "image sandbox" in t.best_feedback  # délègue à requeue_task_for_redo (#460)
+    evt = [e for e in audit.events if e.kind == "operator_requeue"]
+    assert len(evt) == 1
+    assert evt[0].detail["status_before"] == "failed"
+    assert evt[0].detail["status_after"] == "todo"
+    assert "image sandbox" in evt[0].detail["message"]
+    # trace PERSISTÉE dans decisions (cœur de l'issue) :
+    assert any(getattr(d, "summary", "") == "[run] operator_requeue" for d in manager.get_decisions(pid))
+
+
+def test_operator_reset_task_traces_before_after(manager):
+    """#506 : un reset pose le statut + trace l'état avant/après, SANS poser de
+    best_feedback (un reset n'oriente pas un prompt, distinct du requeue)."""
+    from collegue.pilot import operator_reset_task
+    from collegue.pilot.audit import RunAuditLog
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="failed")
+    audit = RunAuditLog(pid, manager=manager, persist=True)
+
+    operator_reset_task(manager, tid, message="reset post-incident sandbox", audit=audit)
+
+    t = manager.get_tasks(pid)[0]
+    assert t.status == "todo"
+    assert "reset post-incident" in t.last_error
+    assert not t.best_feedback  # distinct du requeue : aucun motif de réparation injecté
+    evt = [e for e in audit.events if e.kind == "operator_reset"]
+    assert len(evt) == 1
+    assert evt[0].detail["status_before"] == "failed"
+    assert evt[0].detail["status_after"] == "todo"
+    assert any(getattr(d, "summary", "") == "[run] operator_reset" for d in manager.get_decisions(pid))
+
+
+def test_operator_reset_task_custom_status(manager):
+    from collegue.pilot import operator_reset_task
+
+    pid = _linear_project(manager, 1)
+    tid = manager.get_tasks(pid)[0].id
+    manager.update_task(tid, status="failed")
+    fields = operator_reset_task(manager, tid, status="blocked", message="bloqué en attente d'arbitrage")
+    assert fields["status"] == "blocked"
+    assert manager.get_tasks(pid)[0].status == "blocked"
+
+
+def test_operator_helpers_unknown_task_raises(manager):
+    from collegue.pilot import operator_requeue_task, operator_reset_task
+
+    with pytest.raises(KeyError):
+        operator_reset_task(manager, 9999, message="x")
+    with pytest.raises(KeyError):
+        operator_requeue_task(manager, 9999, message="x")
+
+
+def test_operator_helpers_audit_none_is_noop_but_works(manager):
+    """audit=None : le travail manager est fait, aucune exception (helpers
+    utilisables/testables sans DB d'audit — symétrie NullAuditLog)."""
+    from collegue.pilot import operator_requeue_task, operator_reset_task
+
+    pid = _linear_project(manager, 2)
+    tids = [t.id for t in manager.get_tasks(pid)]
+    manager.update_task(tids[0], status="failed")
+    manager.update_task(tids[1], status="failed")
+    operator_reset_task(manager, tids[0], message="reset")  # audit défaut None
+    operator_requeue_task(manager, tids[1], message="redo")
+    statuses = {t.id: t.status for t in manager.get_tasks(pid)}
+    assert statuses[tids[0]] == "todo"
+    assert statuses[tids[1]] == "todo"
+
+
 # --- ré-injection du feedback d'échec au retry (#424) ------------------------------
 
 
@@ -1701,6 +1791,7 @@ def test_repair_prompt_carries_requirements_append_only_rule():
         id=1, title="T", acceptance="", issue_number=None, depends_on=[], attempt_count=0, last_error=None
     )
     assert "APPEND-ONLY" not in _issue_from_task(fresh).context
+    assert "ÉPINGLÉE" not in _issue_from_task(fresh).context  # #497 : pas sur le prompt initial
 
     retry = SimpleNamespace(
         id=1,
@@ -1711,7 +1802,9 @@ def test_repair_prompt_carries_requirements_append_only_rule():
         attempt_count=1,
         last_error="[gate/gate_failed] tentative 1/3 — FAILED tests/test_x.py",
     )
-    assert REQUIREMENTS_APPEND_ONLY_RULE in _issue_from_task(retry).context
+    retry_ctx = _issue_from_task(retry).context
+    assert REQUIREMENTS_APPEND_ONLY_RULE in retry_ctx
+    assert "ÉPINGLÉE" in retry_ctx  # #497 : consigne d'épinglage sur le retry
 
     repair = SimpleNamespace(
         id=1,
@@ -1804,3 +1897,381 @@ async def test_no_cost_unknown_when_cost_reported(repo, manager):
     await _run(manager, repo, pid, dry_run=False, agent=_PaidAgent(), audit=audit)
     assert not [e for e in audit.events if e.kind == "cost_unknown"]
     assert audit.cost.usd == pytest.approx(0.002)
+
+
+async def test_authoritative_zero_cost_not_repriced(repo, manager, monkeypatch):
+    """#504 : un coût 0 AUTORITAIRE (abonnement, cost_authoritative=True) n'est PAS
+    re-tarifé au prix de secours #484 — même AVEC des prix configurés — et n'émet
+    aucun cost_unknown. Le ledger $ reflète la réalité (run non facturé) ; les
+    tokens restent comptés. (Sans le flag, ce même cas serait estimé : cf.
+    test_coder_cost_estimated_when_litellm_unmapped.)"""
+    import dataclasses
+
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 9.0, raising=False)
+
+    class _SubscriptionAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(
+                result, prompt_tokens=1_000_000, completion_tokens=100_000, cost_usd=0.0, cost_authoritative=True
+            )
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_SubscriptionAgent(), audit=audit)
+    assert result.stop_reason == "completed"
+    assert audit.cost.usd == 0.0  # PAS de coût fantôme malgré des prix configurés
+    assert audit.cost.tokens == 1_100_000  # tokens toujours comptés
+    assert not [e for e in audit.events if e.kind == "cost_unknown"]  # 0 autoritaire ≠ inconnu
+
+
+# --- crash-loop agent : grâce + fail-fast (#498) ------------------------------------
+
+
+class _ImportCrashAgent:
+    """Crash d'import pré-LLM (image/runner cassé) : agent_error, 0 token,
+    traceback IDENTIQUE à chaque appel — le cas du faux départ FacNor v5."""
+
+    def __init__(self, logs="Traceback...\nModuleNotFoundError: No module named 'lmnr'"):
+        self._logs = logs
+        self.calls = 0
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        return AgentResult(success=False, logs=self._logs)
+
+
+async def test_agent_import_crash_is_graced(repo, manager):
+    """#498 : un crash d'import pré-LLM est gracié comme un aléa de gate (#461) —
+    il ne décompte pas le budget fonctionnel de la tâche (events infra_grace)."""
+    from collegue.pilot.audit import RunAuditLog
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(
+        manager, repo, pid, dry_run=False, agent=_ImportCrashAgent(), max_task_attempts=1, audit=audit, sleep_fn=_sleep
+    )
+    graced = [e for e in audit.events if e.kind in ("task_retry", "task_failed") and e.detail.get("infra_grace")]
+    assert graced, "le crash d'import doit être gracié avant le fail-fast"
+
+
+async def test_agent_import_crash_loop_fail_fast(repo, manager):
+    """#498 : un crash d'import qui se rejoue à l'IDENTIQUE arrête le run en
+    sandbox_broken (cause globale) AVANT d'épuiser tout le budget — au run v5 le
+    run mourait blocked en abandonnant 11 tâches."""
+    from collegue.pilot.audit import RunAuditLog
+    from collegue.pilot.driver import MAX_AGENT_CRASH_LOOP
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 5)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_ImportCrashAgent(),
+        max_task_attempts=3,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "sandbox_broken"
+    broken = [e for e in audit.events if e.detail.get("sandbox_broken")]
+    assert len(broken) == 1
+    assert broken[0].detail["crash_streak"] >= MAX_AGENT_CRASH_LOOP
+    # Fail-fast : arrêt au MAX_AGENT_CRASH_LOOP-ième crash, bien avant le cap
+    # (5 tâches × 3 tentatives) ; aucune tâche n'a abouti.
+    assert result.iterations == MAX_AGENT_CRASH_LOOP
+    assert not any(o.success for o in result.processed)
+    assert all(t.status != "merged" for t in manager.get_tasks(pid))
+
+
+async def test_distinct_agent_crashes_rearm_loop(repo, manager):
+    """Contre-épreuve #498 : des tracebacks DIFFÉRENTS (hash qui change) ne
+    déclenchent pas le fail-fast — le compteur se réarme à chaque hash distinct."""
+
+    class _VaryingCrashAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def implement_issue(self, workspace, issue):
+            self.calls += 1
+            return AgentResult(
+                success=False, logs=f"Traceback...\nModuleNotFoundError: No module named 'mod{self.calls}'"
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 2)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_VaryingCrashAgent(),
+        max_task_attempts=1,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason != "sandbox_broken"
+
+
+async def test_functional_agent_error_with_tokens_not_graced(repo, manager):
+    """Frontière #498 : un agent_error AVEC tokens (l'agent a appelé le LLM) est
+    fonctionnel — décompté normalement, jamais gracié ni traité en crash-loop."""
+    import dataclasses
+
+    from collegue.pilot.audit import RunAuditLog
+
+    class _FunctionalErrorAgent:
+        def implement_issue(self, workspace, issue):
+            return dataclasses.replace(
+                AgentResult(success=False, logs="Traceback...\nModuleNotFoundError: No module named 'x'"),
+                prompt_tokens=1000,
+                completion_tokens=200,
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_FunctionalErrorAgent(),
+        max_task_attempts=1,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason != "sandbox_broken"
+    t = manager.get_tasks(pid)[0]
+    assert t.attempt_count == 1  # décompté, pas gracié
+
+
+async def test_agent_crash_loop_rearmed_by_success(repo, manager):
+    """#498 (revue) : un succès réarme la détection. 3 tâches qui crashent (1 fois
+    chacune, graciée) PUIS réussissent — sans réarmement-sur-succès, les 3 crashs
+    s'accumuleraient à streak=3 et déclencheraient le fail-fast à tort."""
+
+    class _CrashThenSucceedAgent:
+        """Crash d'import à la 1re tentative de CHAQUE tâche, succès ensuite."""
+
+        def __init__(self):
+            self.seen = {}
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            self.seen[issue.title] = self.seen.get(issue.title, 0) + 1
+            if self.seen[issue.title] == 1:
+                return AgentResult(success=False, logs="Traceback...\nModuleNotFoundError: No module named 'lmnr'")
+            return self._ok.implement_issue(workspace, issue)
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 3)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_CrashThenSucceedAgent(),
+        max_task_attempts=2,
+        sleep_fn=_sleep,
+    )
+    # Chaque succès a réarmé le compteur → jamais 3 crashs CONSÉCUTIFS.
+    assert result.stop_reason != "sandbox_broken"
+    assert all(t.status in ("in_review", "merged") for t in manager.get_tasks(pid))
+
+
+async def test_agent_crash_loop_fail_fast_survives_variable_preamble(repo, manager):
+    """#498 (revue) : le fail-fast tire même quand le préambule des logs varie
+    (timestamps/chemins) tant que la ligne d'exception est identique."""
+    from collegue.pilot.audit import RunAuditLog
+
+    class _NoisyImportCrashAgent:
+        def __init__(self):
+            self.calls = 0
+
+        def implement_issue(self, workspace, issue):
+            self.calls += 1
+            return AgentResult(
+                success=False,
+                logs=(
+                    f"2026-06-12 0{self.calls}:00:0{self.calls} WARNING litellm\n"
+                    f"running in /tmp/collegue-exec-rand{self.calls}/workspace\n"
+                    "Traceback (most recent call last):\n"
+                    "ModuleNotFoundError: No module named 'lmnr'\n"
+                ),
+            )
+
+    async def _sleep(d):
+        pass
+
+    pid = _sibling_project(manager, 5)
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_NoisyImportCrashAgent(),
+        max_task_attempts=3,
+        audit=audit,
+        sleep_fn=_sleep,
+    )
+    assert result.stop_reason == "sandbox_broken"
+    assert any(e.detail.get("sandbox_broken") for e in audit.events)
+
+
+# --- enforcement du plafond $ sur le canal coder (#495) -----------------------------
+
+
+async def test_coder_spend_enforces_max_cost(repo, manager):
+    """#495 (le test décisif) : la dépense CODER (invisible du MetricsCollector
+    serveur) compte enfin pour MAX_COST_USD — le run se met en pause au lieu de
+    dépenser sans limite dollar (18 M tokens à 0 $ « sous budget » au v4)."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    from collegue.monitoring.metrics import MetricsCollector
+    from collegue.pilot.budget import BudgetTimeController
+
+    class _UsageAgent:
+        def __init__(self):
+            self._ok = FakeCodeAgent()
+
+        def implement_issue(self, workspace, issue):
+            result = self._ok.implement_issue(workspace, issue)
+            return dataclasses.replace(result, prompt_tokens=10000, completion_tokens=2000, cost_usd=5.0)
+
+    budget = BudgetTimeController(
+        collector=MetricsCollector(),  # collector serveur vide : seule la dépense coder compte
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+    )
+    pid = _linear_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, agent=_UsageAgent(), budget=budget)
+    assert result.stop_reason == "paused_budget"
+    statuses = {t.title: t.status for t in manager.get_tasks(pid)}
+    assert statuses["T0"] == "in_review"  # la 1re tâche a abouti
+    assert statuses["T1"] == "todo"  # la 2e n'a JAMAIS démarré (budget atteint)
+
+
+async def test_budget_unchanged_without_coder_spend(repo, manager):
+    """Sans dépense coder déclarée, comportement historique inchangé (pas de pause)."""
+    from types import SimpleNamespace
+
+    from collegue.monitoring.metrics import MetricsCollector
+    from collegue.pilot.budget import BudgetTimeController
+
+    budget = BudgetTimeController(
+        collector=MetricsCollector(),
+        settings_obj=SimpleNamespace(MAX_COST_USD=1.0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"),
+    )
+    pid = _linear_project(manager, 2)
+    result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), budget=budget)
+    assert result.stop_reason == "completed"
+
+
+# --- visibilité du prix coder au démarrage (#502) -----------------------------------
+
+
+async def test_cost_pricing_unresolved_event_at_startup(repo, manager, monkeypatch):
+    """#502 : sans prix coder configuré, un event est émis AU DÉMARRAGE (avant la
+    boucle) — l'opérateur sait que le ledger $ sera aveugle sans post-mortem."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 2)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), audit=audit)
+    kinds = [e.kind for e in audit.events]
+    assert kinds.count("cost_pricing_unresolved") == 1
+    # Émis AVANT toute tâche (visibilité de démarrage).
+    assert kinds.index("cost_pricing_unresolved") < kinds.index("task_started")
+
+
+async def test_no_cost_pricing_event_when_price_configured(repo, manager, monkeypatch):
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), audit=audit)
+    assert not [e for e in audit.events if e.kind == "cost_pricing_unresolved"]
+
+
+async def test_no_cost_pricing_event_in_dry_run(repo, manager, monkeypatch):
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+    await _run(manager, repo, pid, dry_run=True, agent=FakeCodeAgent(), audit=audit)
+    assert not [e for e in audit.events if e.kind == "cost_pricing_unresolved"]
+
+
+async def test_require_cost_pricing_blocks_start(repo, manager, monkeypatch):
+    """#502 (opt-in) : REQUIRE_COST_PRICING refuse de démarrer si prix aveugle."""
+    import pytest
+
+    from collegue import config
+    from collegue.pilot.driver import CostPricingUnresolvedError
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 2)
+    with pytest.raises(CostPricingUnresolvedError):
+        await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), require_cost_pricing=True)
+    assert all(t.status == "todo" for t in manager.get_tasks(pid))  # rien démarré
+
+
+async def test_require_cost_pricing_passes_when_price_set(repo, manager, monkeypatch):
+    from collegue import config
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 1.5, raising=False)
+    pid = _linear_project(manager, 1)
+    result = await _run(manager, repo, pid, dry_run=False, agent=FakeCodeAgent(), require_cost_pricing=True)
+    assert result.stop_reason == "completed"
+
+
+async def test_cost_unknown_deduped_across_serial_segments(repo, manager, monkeypatch):
+    """#504 : en mode sériel strict le pilote est ré-appelé après chaque merge
+    (nouvel audit persistant à chaque segment) — le signal cost_unknown ne doit
+    être persisté qu'UNE fois pour tout le run (run v5 : 12 → 1)."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 1)
+    # Segment 1 : audit persistant → émet cost_unknown (persisté en décisions).
+    audit1 = RunAuditLog(pid, manager=manager, persist=True)
+    await _run(manager, repo, pid, dry_run=False, agent=_UnmappedModelAgent(), audit=audit1)
+    # Nouvelle tâche todo + « restart » (nouvel audit persistant) = 2e segment.
+    manager.add_task(pid, title="T-seg2")
+    audit2 = RunAuditLog(pid, manager=manager, persist=True)
+    await _run(manager, repo, pid, dry_run=False, agent=_UnmappedModelAgent(), audit=audit2)
+    # Au plus UN cost_unknown persisté pour tout le run, malgré 2 segments.
+    cu = [d for d in manager.get_decisions(pid) if d.summary == "[run] cost_unknown"]
+    assert len(cu) == 1

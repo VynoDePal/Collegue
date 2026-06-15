@@ -25,16 +25,20 @@ Module **isolé** : non importé par ``app.py`` (F4 câblera).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.openhands_agent import estimate_cost_usd
+from collegue.executor.openhands_agent import coder_pricing_resolvable, estimate_cost_usd
 from collegue.executor.pipeline import (
+    agent_crash_signature,
     execute_issue,
     failure_feedback,
+    is_infra_agent_crash,
     is_infra_gate_failure,
     is_infra_noise,
     log_tail,
@@ -43,8 +47,11 @@ from collegue.executor.workspace import branch_for_issue, cleanup_workspace, swe
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
+    COST_PRICING_UNRESOLVED,
     COST_UNKNOWN,
     GATE_DECISION,
+    OPERATOR_REQUEUE,
+    OPERATOR_RESET,
     OVERLAY_REFRESHED,
     PR_OPENED,
     RUN_STOP,
@@ -83,6 +90,12 @@ STOP_DEADLINE = "deadline_reached"
 STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
 STOP_AWAITING_MERGE = "awaiting_merge"  # mode strict (#411) : tout est prêt SAUF des merges humains
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
+STOP_SANDBOX_BROKEN = "sandbox_broken"  # crash-loop d'import agent : image/runner cassé (#498)
+
+
+class CostPricingUnresolvedError(RuntimeError):
+    """Refus de démarrer : prix coder non résolvable et REQUIRE_COST_PRICING (#502)."""
+
 
 # Retry au niveau tâche (#420). Le défaut du MODULE reste 1 (= pas de retry,
 # comportement historique — module isolé, aucun changement sans opt-in) ; le
@@ -108,7 +121,9 @@ MAX_BEST_DIFF_CHARS = 200_000
 # venv nu, 12 tests verts par ailleurs).
 REQUIREMENTS_APPEND_ONLY_RULE = (
     "Règle stricte : requirements.txt est APPEND-ONLY — ne le régénère jamais, ne supprime "
-    "ni ne remplace AUCUNE ligne existante ; ajoute uniquement les dépendances manquantes."
+    "ni ne remplace AUCUNE ligne existante ; ajoute uniquement les dépendances manquantes, "
+    "chacune ÉPINGLÉE à une version (== X.Y.Z, ou bornes >=A,<B) — une dépendance nue casse "
+    "l'installation vierge (passlib non contraint + bcrypt résolu librement → register en 500)."
 )
 _PASSED_RE = re.compile(r"(\d+) passed")
 _FAILED_RE = re.compile(r"(\d+) failed")
@@ -312,6 +327,12 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
 # rouge, on recommence à décompter (pas de boucle infinie sur PyPI down).
 MAX_INFRA_GATE_GRACE = 2
 
+# #498 : N crashs agent CONSÉCUTIFS au traceback IDENTIQUE (hash des logs) =
+# image/runner sandbox cassé, cause GLOBALE — inutile de gracier puis brûler le
+# budget tâche par tâche. Fail-fast du run (stop_reason=sandbox_broken). Seuil
+# bas car la signature est sûre (crash d'import, 0 token consommé).
+MAX_AGENT_CRASH_LOOP = 3
+
 # #466 : statuts pour lesquels un workspace d'échec conservé (#443) ne sert
 # plus (la tâche a abouti) — purgé au balayage de démarrage, quel que soit le
 # segment qui l'avait conservé.
@@ -362,6 +383,58 @@ def requeue_task_for_redo(manager, task_id: int, *, message: str, attempt_count:
     else:
         fields["best_feedback"] = str(message)
     manager.update_task(task_id, **fields)
+    return fields
+
+
+def operator_requeue_task(manager, task_id: int, *, message: str, audit=None) -> dict:
+    """Intervention opérateur : re-file une tâche (#460) ET trace dans ``decisions`` (#506).
+
+    Wrappe :func:`requeue_task_for_redo` (chemin propre : le motif atteint le prompt
+    de la tentative suivante) puis journalise un événement ``OPERATOR_REQUEUE`` (état
+    avant/après) — sans ça, une reprise manuelle reste invisible au post-mortem
+    (run v5 : ``failed`` re-filé par ``UPDATE`` SQL direct, aucune trace). ``audit``
+    est injectable (défaut ``None``) : helper testable/utilisable sans DB d'audit,
+    no-op pur si absent (symétrie :class:`NullAuditLog`).
+    """
+    task = manager.get_task(task_id)
+    if task is None:
+        raise KeyError(f"tâche {task_id} introuvable")
+    before = task.status
+    fields = requeue_task_for_redo(manager, task_id, message=message)
+    if audit is not None:
+        audit.record(
+            OPERATOR_REQUEUE,
+            task_id=task_id,
+            status_before=before,
+            status_after=fields["status"],
+            message=str(message),
+        )
+    return fields
+
+
+def operator_reset_task(manager, task_id: int, *, status: str = TASK_STATUS_TODO, message: str, audit=None) -> dict:
+    """Reset de statut post-incident (#506) : pose ``status`` (défaut ``todo``) + trace.
+
+    Distinct du requeue : NE pose PAS de ``best_feedback`` (un reset n'oriente pas un
+    prompt, il rend juste une tâche terminale — ``failed`` — de nouveau éligible après
+    réparation d'infra ; cas run v5 : image sandbox HS). ``last_error`` horodaté garde
+    le motif lisible. Passe par ``manager.update_task`` (et non un ``UPDATE`` brut) pour
+    conserver le hook ORM ``updated_at``. ``audit`` injectable comme pour le requeue.
+    """
+    task = manager.get_task(task_id)
+    if task is None:
+        raise KeyError(f"tâche {task_id} introuvable")
+    before = task.status
+    fields = {"status": str(status), "last_error": f"[opérateur/reset] {message}"}
+    manager.update_task(task_id, **fields)
+    if audit is not None:
+        audit.record(
+            OPERATOR_RESET,
+            task_id=task_id,
+            status_before=before,
+            status_after=str(status),
+            message=str(message),
+        )
     return fields
 
 
@@ -444,6 +517,7 @@ async def run_project(
     gate_options=None,
     reconcile_reviews: bool = True,
     cleanup_workspaces: bool = True,
+    require_cost_pricing: bool = False,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -505,6 +579,15 @@ async def run_project(
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
+    # #495 : accumulateur CODER-SEUL (disjoint du MetricsCollector serveur) câblé
+    # au budget — sans ça MAX_COST_USD ne mordait jamais sur la dépense coder,
+    # pourtant majoritaire (18 M tokens au v4). Câblé ici car run_project est le
+    # seul point où `budget` est en scope sur TOUS les chemins (runtime ET
+    # harness FacNor qui construit son propre controller).
+    coder_totals = {"usd": 0.0, "tokens": 0}
+    _attach = getattr(budget, "attach_extra_totals", None)
+    if callable(_attach):
+        _attach(lambda: (coder_totals["usd"], coder_totals["tokens"]))
     try:
         max_task_attempts = max(1, int(max_task_attempts))
     except (TypeError, ValueError):
@@ -573,9 +656,10 @@ async def run_project(
     # #461 : aléas infra du gate non décomptés (task_id → nombre), borné par
     # MAX_INFRA_GATE_GRACE — un timeout PyPI ne brûle plus une tentative saine.
     infra_gate_grace: dict = {}
-    # #484 : signal « coût inconnu » émis au plus UNE fois par run/segment
-    # (anti-bruit — le flag en mémoire ne survit pas aux restarts, comme #443).
-    cost_unknown_signaled = False
+    # #498 : compteur de crashs agent au traceback IDENTIQUE (hash → nombre
+    # consécutif) — N d'affilée ⇒ fail-fast (image cassée). Réarmé dès qu'un
+    # hash change ou qu'une issue NON-crash survient.
+    agent_crash_loop: dict = {}
 
     # #466 : balayage de démarrage. (a) Les workspaces conservés PERSISTÉS des
     # tâches désormais abouties — le dict en mémoire de #443 repartait vide à
@@ -591,6 +675,24 @@ async def run_project(
         swept = sweep_stale_temp_clones()
         if swept:
             logger.info("balayage démarrage : %d clone(s) collegue-revert-* périmé(s) supprimé(s)", swept)
+
+    # #502 : visibilité du coût AU DÉMARRAGE (avant la boucle, en réel seulement).
+    # Si aucun prix de secours coder n'est configuré et que litellm ne mappe pas
+    # le modèle, le ledger $ restera à 0 et MAX_COST_USD sera inopérant côté
+    # coder — l'opérateur doit le savoir maintenant, pas en post-mortem.
+    if not dry_run and not coder_pricing_resolvable():
+        logger.warning(
+            "COÛT $ DU RUN POTENTIELLEMENT INCONNU : aucun prix de secours coder "
+            "(LLM_PRICE_PROMPT_PER_1M / LLM_PRICE_COMPLETION_PER_1M). Si litellm ne mappe pas le "
+            "modèle coder, le ledger $ restera à 0 et MAX_COST_USD sera INOPÉRANT côté coder. "
+            "Configurez LLM_PRICE_*_PER_1M, ou REQUIRE_COST_PRICING=true pour refuser de démarrer."
+        )
+        audit.record(COST_PRICING_UNRESOLVED, iteration=iteration, dry_run=dry_run)
+        if require_cost_pricing:
+            raise CostPricingUnresolvedError(
+                "REQUIRE_COST_PRICING=true et aucun prix coder (LLM_PRICE_*_PER_1M) résolvable : "
+                "run refusé (ledger $ aveugle)."
+            )
 
     while True:
         if len(processed) >= cap:
@@ -713,15 +815,21 @@ async def run_project(
         coder_completion = int(getattr(agent_result, "completion_tokens", 0) or 0)
         coder_tokens = coder_prompt + coder_completion
         coder_usd = float(getattr(agent_result, "cost_usd", 0.0) or 0.0)
-        if coder_tokens and coder_usd <= 0:
+        # #504 : un coût 0 AUTORITAIRE (abonnement, billable=false) n'est PAS un coût
+        # inconnu — ne pas le re-tarifer au prix de secours (#484), sinon le ledger
+        # porte un coût FANTÔME sur un run pourtant gratuit (run v6 : ~$2 fantômes).
+        coder_authoritative = bool(getattr(agent_result, "cost_authoritative", False))
+        if coder_tokens and coder_usd <= 0 and not coder_authoritative:
             # #484 : modèle non mappé litellm → cost_usd=0 malgré des tokens.
             # Prix de secours configurés (LLM_PRICE_*_PER_1M) : coût estimé ;
             # sinon coût INCONNU — signalé une fois par run/segment au lieu
             # d'un 0 silencieux qui ressemble à un run gratuit.
             coder_usd = estimate_cost_usd(coder_prompt, coder_completion)
-            if coder_usd <= 0 and not cost_unknown_signaled:
-                cost_unknown_signaled = True
-                audit.record(
+            if coder_usd <= 0:
+                # #484/#504 : au plus UNE fois par run/projet — la dédup vit dans
+                # l'audit persistant (décisions), donc elle survit aux restarts du
+                # mode sériel strict (#434, run v5 : 12 cost_unknown → 1).
+                audit.record_once(
                     COST_UNKNOWN,
                     iteration=iteration,
                     task_id=task.id,
@@ -731,6 +839,13 @@ async def run_project(
                 )
         if coder_tokens or coder_usd:
             audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
+            # #495 : alimente l'accumulateur coder-seul lu par le budget dur.
+            # Même garde que RunCostLedger.add — un coder_usd aberrant (négatif,
+            # NaN/inf) ne doit pas fausser ni empoisonner le total budgétaire.
+            if math.isfinite(coder_usd) and coder_usd > 0:
+                coder_totals["usd"] += coder_usd
+            if coder_tokens > 0:
+                coder_totals["tokens"] += coder_tokens
         elif TIMEOUT_NOTE in (getattr(agent_result, "logs", "") or ""):
             # #464 : tentative tuée de l'extérieur (timeout sandbox) AVANT toute
             # ligne [collegue-usage] — la dépense (la tentative la plus longue,
@@ -792,6 +907,7 @@ async def run_project(
         # et stockés dans tasks.last_error.
         if outcome.success:
             task.status = TASK_STATUS_IN_REVIEW
+            agent_crash_loop = {}  # #498 : un succès réarme la détection de crash-loop
         else:
             detail = {"task_id": task.id, "stage": outcome.stage, "reason": outcome.reason}
             if getattr(outcome, "error", None):  # exception d'infrastructure (#435)
@@ -805,6 +921,43 @@ async def run_project(
             # Synthèse CRISP (#424) : lignes FAILED/ERROR de pytest en priorité —
             # c'est ce qui sera ré-injecté dans le prompt de la tentative suivante.
             diagnostic = failure_feedback(outcome)
+
+            # #498 : détection de crash-loop agent. Un crash d'import pré-LLM
+            # (0 token, image/runner cassé) qui se rejoue à l'IDENTIQUE (même
+            # hash de logs) sur plusieurs tâches/tentatives = cause GLOBALE —
+            # inutile de gracier puis brûler tâche par tâche : on arrête le run
+            # avec un diagnostic clair (rebuild d'image). Le `break` sort AVANT
+            # d'incrémenter attempts/persister un échec : la tâche reste
+            # retentable au prochain run (après rebuild).
+            agent_crash = is_infra_agent_crash(outcome)
+            if agent_crash:
+                crash_logs = outcome.execution.agent_result.logs or ""
+                # Identité STABLE (ligne d'exception, pas la queue brute) : les
+                # logs réels portent ANSI/timestamps/chemins variables qui
+                # casseraient un hash de la queue → fail-fast jamais déclenché.
+                crash_sig = hashlib.sha1(agent_crash_signature(crash_logs).encode("utf-8")).hexdigest()
+                streak = agent_crash_loop.get(crash_sig, 0) + 1
+                agent_crash_loop = {crash_sig: streak}  # un hash différent réarme à zéro
+                if streak >= MAX_AGENT_CRASH_LOOP:
+                    stop_reason = STOP_SANDBOX_BROKEN
+                    audit.record(
+                        TASK_FAILED,
+                        iteration=iteration,
+                        attempt=int(getattr(task, "attempt_count", 0) or 0),
+                        max_attempts=max_task_attempts,
+                        sandbox_broken=True,
+                        crash_streak=streak,
+                        **detail,
+                    )
+                    logger.error(
+                        "crash-loop agent : %d crashs d'import IDENTIQUES (image/sandbox cassé ?) — "
+                        "arrêt du run (sandbox_broken). Reconstruire l'image puis relancer.",
+                        streak,
+                    )
+                    break
+            else:
+                agent_crash_loop = {}  # toute issue NON-crash réarme le compteur
+
             # #461 : « le livrable ne s'installe pas » (fonctionnel — le but de la
             # passe #439) et « PyPI n'a pas répondu » (infra transitoire)
             # produisaient le même gate_failed décompté du budget : chaque
@@ -813,7 +966,8 @@ async def run_project(
             # pas de tentative fonctionnelle (grâce bornée par tâche). La
             # classification (#477) couvre aussi la cascade « install en échec
             # réseau → ModuleNotFoundError de collecte » via deps_install_failed.
-            infra_gate_failure = is_infra_gate_failure(outcome)
+            # #498 : un crash d'import pré-LLM est gracié comme un aléa de gate.
+            infra_gate_failure = is_infra_gate_failure(outcome) or agent_crash
             grace_used = int(infra_gate_grace.get(task.id, 0))
             graced = infra_gate_failure and grace_used < MAX_INFRA_GATE_GRACE
             if graced:

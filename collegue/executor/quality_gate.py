@@ -27,7 +27,7 @@ import os
 import re
 import shlex
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from collegue.executor.agent import IssueSpec
@@ -50,7 +50,7 @@ DEFAULT_TEST_COMMAND = f"{_PYTEST_WIDE_COLUMNS} python -m pytest -q"
 _INSTALL_FAILED_NOTE = "[gate] installation des dépendances en échec — tests lancés quand même (#414)"
 
 
-def deps_install_prelude(workspace: str, *, strict: bool = False) -> Optional[str]:
+def deps_install_prelude(workspace: str, *, strict: bool = False, use_cache: bool = False) -> Optional[str]:
     """Préambule shell installant les dépendances du projet avant les tests (#414).
 
     Le conteneur de tests est **éphémère** et distinct de celui où l'agent a
@@ -70,11 +70,15 @@ def deps_install_prelude(workspace: str, *, strict: bool = False) -> Optional[st
       l'installabilité des dépendances déclarées fait partie du contrat ;
     - ``None`` si le workspace ne déclare aucune dépendance installable.
     """
+    # #496 : ``use_cache=True`` retire ``--no-cache-dir`` — réservé au cas où le
+    # sandbox monte un cache pip persistant (sinon le cache irait dans le tmpfs
+    # /tmp, compté dans --memory). Dérivé du sandbox côté run_quality_gate.
+    no_cache = "" if use_cache else "--no-cache-dir "
     parts: List[str] = []
     if os.path.isfile(os.path.join(workspace, "requirements.txt")):
-        parts.append("python -m pip install --user --no-cache-dir -q -r requirements.txt")
+        parts.append(f"python -m pip install --user {no_cache}-q -r requirements.txt")
     if os.path.isfile(os.path.join(workspace, "pyproject.toml")) or os.path.isfile(os.path.join(workspace, "setup.py")):
-        parts.append("python -m pip install --user --no-cache-dir -q -e .")
+        parts.append(f"python -m pip install --user {no_cache}-q -e .")
     if not parts:
         return None
     if strict:
@@ -101,6 +105,13 @@ _SMOKE_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OP
 # bénéficie de la couverture — sinon le fix serait inerte au run réel, comme
 # #461 l'a été en v4. Coût nul sur une app sans ces routes (404/405 < 500).
 DEFAULT_SMOKE_PATHS = ("/", "POST:/auth/register", "POST:/auth/login")
+# #503 : origine cross-origin envoyée par chaque sonde — distincte de l'app
+# (127.0.0.1:8765). Un backend sans CORS ne renvoie pas d'Access-Control-Allow-
+# Origin couvrant cette origine → l'UI réelle serait bloquée au premier fetch
+# (run v5 : impossible de s'inscrire depuis l'interface). Défaut de SIGNATURE
+# (actif dès smoke_run, même si le harness bypasse _gate_options). Le port Vite
+# usuel des fronts générés. Vide = contrôle CORS désactivé (apps sans front).
+_SMOKE_DEFAULT_ORIGIN = "http://localhost:5173"
 # Payload générique des sondes à corps (#483) : champs usuels des routes d'auth.
 # Pydantic ignore les champs en trop par défaut → une route register/login VALIDE
 # ce corps et exécute son handler (le 500 passlib/bcrypt « out-of-the-box » de
@@ -136,6 +147,7 @@ command = %(command)r
 paths = %(paths)r  # paires (méthode, chemin) — cf. _smoke_probe_script (#483)
 payload = %(payload)r
 timeout = %(timeout)r
+origin = %(origin)r  # #503 : origine cross-origin (vide = contrôle CORS désactivé)
 log = open("/tmp/.collegue_smoke.log", "w+", encoding="utf-8", errors="replace")
 proc = subprocess.Popen(command, shell=True, stdout=log, stderr=subprocess.STDOUT)
 base = "http://127.0.0.1:%(port)d"
@@ -143,6 +155,7 @@ deadline = time.time() + timeout
 verdicts = []
 for method, path in paths:
     status = None
+    acao = None  # Access-Control-Allow-Origin renvoyé (#503)
     attempted = False
     # Au moins UNE tentative par chemin, même si le précédent a épuisé le délai
     # (sinon : faux rouge « sans réponse » sur un chemin jamais contacté).
@@ -152,20 +165,46 @@ for method, path in paths:
             break  # le serveur est mort avant de répondre
         try:
             data = payload if method not in ("GET", "HEAD") else None
-            headers = {"Content-Type": "application/json"} if data is not None else {}
+            headers = {"Origin": origin} if origin else {}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
             req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-            status = urllib.request.urlopen(req, timeout=2).status
+            resp = urllib.request.urlopen(req, timeout=2)
+            status = resp.status
+            acao = resp.headers.get("Access-Control-Allow-Origin")
             break
         except urllib.error.HTTPError as exc:
             status = exc.code
+            acao = exc.headers.get("Access-Control-Allow-Origin") if exc.headers else None
             break
         except Exception:
             time.sleep(0.5)
-    verdicts.append((method, path, status))
+    verdicts.append((method, path, status, acao))
 time.sleep(0.3)  # resserre la fenêtre « répond une fois puis meurt »
-ok = proc.poll() is None and all(s is not None and s < 500 for _m, _p, s in verdicts)
-for method, path, status in verdicts:
+
+
+def _cors_ok(status, acao):
+    # #503 : CORS contrôlé seulement quand l'app A répondu et a ACCEPTÉ la requête
+    # (status < 400). Un 4xx de contrat est déjà signalé par le status ; un 401
+    # protégé n'a pas à exposer CORS. « * » ou écho exact de l'origine = OK.
+    if not origin or status is None or status >= 400:
+        return True
+    return acao in ("*", origin)
+
+
+cors_failures = [(m, p) for m, p, s, a in verdicts if not _cors_ok(s, a)]
+ok = (
+    proc.poll() is None
+    and all(s is not None and s < 500 for _m, _p, s, _a in verdicts)
+    and not cors_failures
+)
+for method, path, status, acao in verdicts:
     print("[gate] smoke run", method, path, "->", status if status is not None else "sans réponse")
+for method, path in cors_failures:
+    print(
+        "[gate] smoke run CORS ABSENT", method, path, "— l'origine", origin,
+        "n'est pas autorisée (Access-Control-Allow-Origin) ; l'UI serait bloquée au premier fetch (#503)",
+    )
 if proc.poll() is not None:
     print(
         "[gate] smoke run : le processus serveur s'est terminé (code", str(proc.poll()) + ")",
@@ -199,7 +238,14 @@ def _detect_asgi_app(workspace: str) -> Optional[str]:
     return None
 
 
-def _smoke_probe_script(command: str, paths: Tuple[str, ...], timeout: float, *, port: int = _SMOKE_PORT) -> str:
+def _smoke_probe_script(
+    command: str,
+    paths: Tuple[str, ...],
+    timeout: float,
+    *,
+    port: int = _SMOKE_PORT,
+    origin: str = _SMOKE_DEFAULT_ORIGIN,
+) -> str:
     """Source python de la sonde smoke-run (pur — testable par ``compile``)."""
     # #483 : préfixe « MÉTHODE: » optionnel (whitelist _SMOKE_METHODS) — sans
     # lui, GET (compat #458). Les méthodes à corps envoient le payload JSON
@@ -221,6 +267,7 @@ def _smoke_probe_script(command: str, paths: Tuple[str, ...], timeout: float, *,
         "payload": _SMOKE_PROBE_PAYLOAD,
         "timeout": float(timeout),
         "port": int(port),
+        "origin": str(origin),
     }
 
 
@@ -230,6 +277,7 @@ def smoke_run_command(
     command: Optional[str] = None,
     paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     timeout: float = 30.0,
+    cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
 ) -> Optional[str]:
     """Commande de la passe smoke-run (#458). Fail-closed une fois déclenchée.
 
@@ -262,11 +310,11 @@ def smoke_run_command(
         if target is None:
             return None
         command = f"python -m uvicorn {target} --host 127.0.0.1 --port {_SMOKE_PORT}"
-    script = _smoke_probe_script(command, paths, timeout)
+    script = _smoke_probe_script(command, paths, timeout, origin=cors_origin)
     return f"python - <<'{_SMOKE_HEREDOC}'\n{script}{_SMOKE_HEREDOC}"
 
 
-def installability_command(workspace: str) -> Optional[str]:
+def installability_command(workspace: str, *, use_cache: bool = False) -> Optional[str]:
     """Passe d'installabilité en environnement NU (#439). Fail-closed.
 
     L'image sandbox pré-installe une stack web pour servir l'**agent** (#414) :
@@ -287,7 +335,8 @@ def installability_command(workspace: str) -> Optional[str]:
     # --timeout 30 (pas plus) : le conteneur du gate a un budget TOTAL de
     # 120 s — un timeout socket long plus un retry le dépasserait (kill du
     # conteneur, le pire diagnostic possible).
-    pip_flags = "--no-cache-dir -q --retries 5 --timeout 30"
+    # #496 : --no-cache-dir retiré si un cache pip est monté (use_cache).
+    pip_flags = f"{'' if use_cache else '--no-cache-dir '}-q --retries 5 --timeout 30"
     return (
         f"python -m venv --clear {_GATE_VENV}"
         f" && {_GATE_VENV}/bin/python -m pip install {pip_flags} -r requirements.txt"
@@ -312,6 +361,26 @@ _MODULE_TO_PACKAGE = {
     "fitz": "PyMuPDF",
 }
 _MISSING_MODULE_RE = re.compile(r"ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'")
+# #501 : formes « paquet auto-diagnostiqué » — Starlette/FastAPI/pydantic
+# interceptent l'import manquant et lèvent LEUR message ; le nom capturé est
+# DÉJÀ un paquet PyPI (pas un module). 4 alternatives couvrant les formes réelles
+# observées (run v5 + tests pipeline #478) — l'ancrage [A-Za-z0-9] exclut tout
+# flag pip (« -r », « --no-cache ») :
+#   - requires "X" to be installed   (python-multipart, guillemets)
+#   - requires the X package         (httpx via starlette.testclient, sans guillemets)
+#   - please install X               (générique)
+#   - pip install X                  (« You can install it with pip install X »)
+_SELFDIAGNOSED_PACKAGE_RE = re.compile(
+    r"""(?:requires|needs)\s+["']([A-Za-z0-9][A-Za-z0-9._-]*)["']\s+to\s+be\s+installed"""
+    r"""|requires\s+the\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s+package\s+to\s+be\s+installed"""
+    r"""|please\s+install\s+([A-Za-z0-9][A-Za-z0-9._-]*)"""
+    r"""|pip\s+install\s+([A-Za-z0-9][A-Za-z0-9._-]*)"""
+)
+# #501 : mots génériques captés à tort par les formes larges (« please install
+# the dependency », « pip install git+… ») — un nom bidon échouerait de toute
+# façon à l'install (gate rouge, fail-closed), mais on évite la pollution de
+# requirements.txt en amont.
+_SELFDIAGNOSED_DENYLIST = frozenset({"the", "a", "an", "it", "this", "that", "your", "my", "git", "user", "package"})
 _REQ_NAME_RE = re.compile(r"^\s*([A-Za-z0-9._-]+)")
 # FacNor v4 tâche 2 : 3 paquets découverts en série (chaîne d'imports — Python ne
 # révèle que le PREMIER module manquant d'un fichier, quel que soit le flag pytest).
@@ -330,6 +399,29 @@ def missing_modules(output: str) -> List[str]:
         module = match.group(1).split(".")[0]
         if module and module not in seen:
             seen.append(module)
+    return seen
+
+
+def selfdiagnosed_packages(output: str) -> List[str]:
+    """Paquets PyPI nommés par les messages auto-diagnostiqués (#501).
+
+    Starlette/FastAPI/pydantic interceptent l'``ImportError`` et lèvent « X
+    requires "Y" to be installed » / « requires the Y package » / « please
+    install Y » : le nom capturé est DÉJÀ un paquet (pas un module), à ajouter
+    tel quel à ``requirements.txt``. Au run v5, « Form data requires
+    "python-multipart" » a brûlé une tentative car ce n'est pas une
+    ModuleNotFoundError. Dédupliqué (PEP 503), ordre stable.
+    """
+    seen: List[str] = []
+    seen_keys: set = set()
+    for match in _SELFDIAGNOSED_PACKAGE_RE.finditer(output or ""):
+        name = next((g for g in match.groups() if g), None)
+        if not name or name.lower() in _SELFDIAGNOSED_DENYLIST:
+            continue
+        key = _canonical(name)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            seen.append(name)
     return seen
 
 
@@ -386,7 +478,11 @@ def remediate_missing_requirements(workspace: str, output: str) -> Tuple[str, ..
     if not os.path.isfile(req_path):
         return ()
     modules = missing_modules(output)
-    if not modules:
+    # #501 : les messages auto-diagnostiqués (Starlette « requires "X" ») ne sont
+    # PAS des ModuleNotFoundError — sans cette source, l'early-return ci-dessous
+    # raterait le cas multipart/httpx du run v5.
+    packages = selfdiagnosed_packages(output)
+    if not modules and not packages:
         return ()
     try:
         with open(req_path, encoding="utf-8") as handle:
@@ -412,6 +508,20 @@ def remediate_missing_requirements(workspace: str, output: str) -> Tuple[str, ..
             continue  # déjà déclaré : manquant pour une AUTRE raison (pin cassé…)
         additions.append(package)
         declared.add(_canonical(_REQ_NAME_RE.match(package).group(1)))
+    # #501 : paquets auto-diagnostiqués (déjà des noms PyPI — PAS de
+    # requirement_for_module, PAS de filtre stdlib). Mêmes gardes : dédup via
+    # `declared` (mis à jour ci-dessus, donc l'ordre modules-puis-paquets évite
+    # les doublons) et anti-module-local (« please install utils » pour un
+    # utils.py local = dependency confusion).
+    for package in packages:
+        base = _REQ_NAME_RE.match(package)
+        if base is None:
+            continue
+        key = _canonical(base.group(1))
+        if key in declared or _is_local_module(workspace, base.group(1)):
+            continue
+        additions.append(package)
+        declared.add(key)
     if not additions:
         return ()
     body = existing_text if existing_text.endswith("\n") or not existing_text else existing_text + "\n"
@@ -582,10 +692,15 @@ class Reviewer(Protocol):
 
 @dataclass(frozen=True)
 class AdequacyOutcome:
-    """Verdict d'adéquation diff↔issue (#437)."""
+    """Verdict d'adéquation diff↔issue (#437) + couverture des critères (#499)."""
 
     implemented: bool
     justification: str = ""
+    # #499 : les critères CHIFFRABLES/observables de l'issue sont-ils ASSERTÉS par
+    # au moins un test du diff ? None = non évalué (rétrocompat #437 : un checker
+    # qui ne le renseigne pas ne bloque jamais sur ce volet).
+    tests_assert_criteria: Optional[bool] = None
+    tests_justification: str = ""
 
 
 @runtime_checkable
@@ -626,6 +741,25 @@ class QualityReport:
     # #482 : lignes de requirements.txt de la base supprimées sans que l'issue
     # le demande — requirements.txt est append-only ; non vide ⇒ gate rouge.
     requirements_removed: Tuple[str, ...] = ()
+    # #497 : lignes de paquet ajoutées à requirements.txt SANS contrainte de
+    # version (dépendances directes non épinglées) — signal NON bloquant ; cause
+    # racine du register→500 v4 (passlib figé + bcrypt résolu librement).
+    requirements_unpinned: Tuple[str, ...] = ()
+    # #499 : les critères chiffrables de l'issue sont-ils assertés par les tests
+    # du diff ? None = non évalué (rétrocompat) ; False ⇒ gate rouge (un test qui
+    # n'asserte que « 200 » a livré la TVA ×100 du run v5 sans rien voir).
+    adequacy_tests_assert: Optional[bool] = None
+    adequacy_tests_justification: str = ""
+    # #508 : fichiers parasites AJOUTÉS au commit (logs, bases, .env, node_modules,
+    # __pycache__) — signal NON bloquant par défaut ; rouge seulement si
+    # forbidden_files_block (opt-in). Récidive v4→v5 : `server.log` livré.
+    forbidden_files: Tuple[str, ...] = ()
+    # Vrai quand forbidden_files a RÉELLEMENT fait rougir le gate (block opt-in actif
+    # ET liste non vide) — distinct du simple signal. Permet à failure_feedback de ne
+    # surfacer la consigne « retire ces fichiers » que lorsqu'elle est la cause du
+    # rejet (sinon, en mode signal, elle masquerait le vrai motif d'échec). Run v6 :
+    # `server.log` bloquait le gate mais le feedback montrait du bruit pip trompeur.
+    forbidden_files_blocking: bool = False
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -651,6 +785,19 @@ class QualityReport:
                 "> ⛔ **lignes de `requirements.txt` supprimées sans que l'issue le demande (#482)** — "
                 "`requirements.txt` est append-only. Lignes supprimées : "
                 + ", ".join(f"`{_fence_safe_line(line)}`" for line in self.requirements_removed)
+            )
+        if self.requirements_unpinned:
+            lines.append(
+                "> ⚠️ **dépendances directes non épinglées** ajoutées à `requirements.txt` (#497) — "
+                "une version résolue librement peut casser l'installation vierge (cause du register→500 v4). "
+                "Épingle-les (`==X.Y.Z` ou bornes `>=A,<B`) : "
+                + ", ".join(f"`{_fence_safe_line(line)}`" for line in self.requirements_unpinned)
+            )
+        if self.forbidden_files:
+            lines.append(
+                "> 🧹 **fichiers parasites committés (#508)** — artefacts d'exécution / secrets / "
+                "bases locales à RETIRER du commit et à ajouter au `.gitignore` : "
+                + ", ".join(f"`{_fence_safe_line(p)}`" for p in self.forbidden_files)
             )
         lines += [
             "",
@@ -685,6 +832,14 @@ class QualityReport:
             lines += ["", f"**Adéquation à l'issue (#437)** : {badge}"]
             if detail:
                 lines.append(f"> {_fence_safe_line(detail)}")
+        if self.adequacy_tests_assert is False:
+            lines += [
+                "",
+                "> ⛔ **couverture des critères par les tests insuffisante (#499)** — un critère "
+                "chiffrable/observable de l'issue n'est asserté par aucun test du diff.",
+            ]
+            if self.adequacy_tests_justification:
+                lines.append(f"> {_fence_safe_line(self.adequacy_tests_justification)}")
         if not self.tests_touched:
             lines += [
                 "",
@@ -729,6 +884,10 @@ def issue_expects_code(issue: IssueSpec) -> bool:
 # Nom de paquet en tête d'une ligne de requirements ; les lignes d'option
 # (-r/-e/--index-url), commentaires et vides n'ont pas de nom.
 _REQ_LINE_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]+\])?")
+# #497 : opérateurs de contrainte de version PEP 508. Une ligne qui en porte au
+# moins un (après le nom+extras) est « épinglée » ; « @ » (source figée,
+# `pkg @ https://…` / `pkg @ git+…`) vaut aussi épinglage.
+_REQ_PIN_RE = re.compile(r"(===|==|~=|!=|>=|<=|<|>|@)")
 
 
 def _requirement_name(line: str) -> Optional[str]:
@@ -830,12 +989,110 @@ def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = Non
     return tuple(kept)
 
 
+def unpinned_requirement_lines(diff: str) -> Tuple[str, ...]:
+    """Lignes de paquet AJOUTÉES à ``requirements.txt`` sans contrainte de version (#497).
+
+    Cause racine du register→500 du run v4 : ``passlib`` 1.7.4 figé + ``bcrypt``
+    résolu librement (≥ 5) → incompatible sur installation vierge. Une dépendance
+    directe nue (``fastapi``) laisse pip résoudre n'importe quelle version future,
+    cassant la reproductibilité. Signal **NON bloquant** : on liste les lignes
+    pour la PR (le smoke POST #483 reste le filet aval qui attrape le 500).
+
+    Analyse les lignes ``+`` de ``requirements.txt`` (monorepo-aware, basename) :
+    paquet nu → retenu ; paquet contraint (``==``/``>=,<``/``~=``/``pkg @ url``)
+    → silencieux ; lignes d'option (``-r``, ``--index-url``), commentaires, vides
+    → ignorés. N'analyse que l'argument ``diff`` (= diff de l'agent) : les ajouts
+    nus de la remédiation déterministe (#481, ``httpx``) sont écrits APRÈS et
+    re-capturés ailleurs — jamais dans ce diff.
+    """
+    unpinned: List[str] = []
+    seen: set = set()
+    in_requirements = False
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            path = parts[1].strip() if len(parts) == 2 else ""
+            in_requirements = os.path.basename(path) == "requirements.txt"
+            continue
+        if line.startswith(("--- ", "+++ ")) or not in_requirements or not line.startswith("+"):
+            continue
+        text = line[1:].strip()
+        name = _requirement_name(text)  # None pour option/commentaire/vide
+        if name is None or name in seen:
+            continue
+        # Retirer le nom+extras en tête : ce qui reste porte les contraintes.
+        # `passlib[bcrypt]==1.7.4` épinglé ; `passlib[bcrypt]` non (l'extra n'est
+        # pas une contrainte de version). Le marqueur d'environnement (après
+        # « ; », ex. `; python_version<'3.8'`) est retiré : son `<`/`==` n'est
+        # pas une contrainte de version du paquet.
+        match = _REQ_LINE_NAME_RE.match(text)
+        remainder = (text[match.end() :] if match else text).split(";", 1)[0]
+        if _REQ_PIN_RE.search(remainder):
+            continue
+        seen.add(name)
+        unpinned.append(text)
+    return tuple(unpinned)
+
+
 _TEST_PATH_RE = re.compile(r"(^|/)(tests?|__tests__)(/|$)|(^|/)test_[^/]+$|[^/]+[._]test\.[a-z]+$|[^/]+\.spec\.[a-z]+$")
 
 
 def tests_touched(diff: str) -> bool:
     """Le diff touche-t-il au moins un fichier de test ? (#437, signal de couverture)."""
     return any(_TEST_PATH_RE.search(path.lower()) for path in _diff_paths(diff))
+
+
+# Motifs de fichiers qui n'ont rien à faire dans un livrable (#508). Récidive
+# v4→v5 : `server.log` committé dans le produit. Suffixes de basename (artefacts,
+# bases locales, clés/certs privés), variantes `.env` de secrets, et segments de
+# chemin (répertoires vendorés/caches).
+_FORBIDDEN_FILE_SUFFIXES = (".log", ".db", ".sqlite", ".sqlite3", ".pyc", ".pem", ".key")
+_FORBIDDEN_PATH_SEGMENTS = ("node_modules", "__pycache__")
+# Variantes `.env` versionnées SCIEMMENT (gabarits sans secret) — à NE PAS flaguer.
+_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def _is_env_secret(base: str) -> bool:
+    """Vrai pour ``.env`` ET ses variantes de secrets (``.env.local``,
+    ``.env.production``…), faux pour les gabarits non sensibles (``.env.example``)."""
+    if base == ".env":
+        return True
+    return base.startswith(".env.") and not base.endswith(_ENV_TEMPLATE_SUFFIXES)
+
+
+def _is_forbidden_path(path: str) -> bool:
+    """Vrai si ``path`` matche un motif de fichier parasite (#508)."""
+    base = os.path.basename(path)
+    if _is_env_secret(base):
+        return True
+    if base.endswith(_FORBIDDEN_FILE_SUFFIXES):
+        return True
+    return any(segment in path.split("/") for segment in _FORBIDDEN_PATH_SEGMENTS)
+
+
+def forbidden_committed_files(diff: str) -> Tuple[str, ...]:
+    """Fichiers AJOUTÉS par le diff dont le chemin matche un motif interdit (#508).
+
+    Artefacts d'exécution (``*.log``, ``*.pyc``, ``__pycache__/``), bases locales
+    (``*.db``/``*.sqlite``), dépendances vendorées (``node_modules/``) ou secrets
+    (``.env``) n'ont rien à faire dans le livrable. Analyse PURE du diff, aucun
+    coût d'infra (comme :func:`unjustified_requirement_removals`, #482) ; ne
+    retient que les fichiers NEUFS (marqueur ``new file mode``) — éditer un
+    fichier déjà suivi n'est pas le symptôme et resterait silencieux. Résultat
+    déterministe (ordre du diff, dédupliqué).
+    """
+    added: List[str] = []
+    seen: set = set()
+    current: Optional[str] = None
+    for line in (diff or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            current = parts[1].strip() if len(parts) == 2 else None
+        elif line.startswith("new file mode") and current:
+            if _is_forbidden_path(current) and current not in seen:
+                seen.add(current)
+                added.append(current)
+    return tuple(added)
 
 
 _ADEQUACY_SYSTEM = (
@@ -866,26 +1123,142 @@ def _parse_adequacy(text: str) -> AdequacyOutcome:
     return AdequacyOutcome(False, f"réponse illisible du contrôle d'adéquation : {raw[:300]}")
 
 
+# #499 : contrôle de COUVERTURE DES TESTS — distinct de l'adéquation #437 (la
+# feature est-elle là ?). Ici : les critères chiffrables de l'issue sont-ils
+# ASSERTÉS par les tests ? Au run v5, la TVA ×100 a été livrée 12/12 car aucun
+# test n'assertait les totaux (status 200 suffisait).
+_TEST_ADEQUACY_SYSTEM = (
+    "Tu es un relecteur de COUVERTURE DE TEST (rôle REVIEWER). On te donne une issue "
+    "(critères d'acceptation chiffrables/observables) et le diff livré. Tu juges UNIQUEMENT "
+    "si CHAQUE critère chiffrable/observable de l'issue est ASSERTÉ par au moins un test du "
+    "diff (assertion sur la VALEUR/le CALCUL/le COMPORTEMENT, pas seulement un code HTTP 200). "
+    "EXCEPTION (#499) : un critère qui exige une MESURE RUNTIME non visible dans un diff "
+    "STATIQUE (ex. « couverture de tests > X% », « latence < Y ms », « débit/perf ») ne peut "
+    "PAS être vérifié par lecture du diff — NE bloque PAS dessus : réponds true s'il ajoute des "
+    "tests RÉELS et substantiels couvrant le domaine du critère (assertions véritables, jamais "
+    "des tests vides/triviaux), et NOMME ce critère comme non vérifiable statiquement dans la "
+    "justification. Continue de bloquer (false) sur tout critère de VALEUR vérifiable dans le "
+    "diff qui n'est asserté par aucun test. "
+    'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}. '
+    "false si un critère chiffrable VÉRIFIABLE n'est couvert par aucune assertion (ex. : aucun "
+    "test n'asserte le montant TTC) — nomme alors le critère non couvert dans la justification."
+)
+
+
+def _parse_test_adequacy(text: str) -> Tuple[bool, str]:
+    """Parsing tolérant du verdict de couverture des tests (#499) — fail-closed."""
+    raw = (text or "").strip()
+    match = re.search(r"\{.*\}", raw, flags=re.S)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            return bool(data.get("tests_assert_criteria")), str(data.get("justification") or "")[:500]
+        except ValueError:
+            pass
+    if not raw:
+        return False, "réponse vide du contrôle de couverture des tests"
+    return False, f"réponse illisible du contrôle de couverture des tests : {raw[:300]}"
+
+
+# #526 : fichiers GÉNÉRÉS (verrous de dépendances) — volumineux, ~aucune info
+# d'adéquation, mais ils SATURENT la fenêtre du juge. Au run v6, un
+# ``package-lock.json`` de ~30k chars poussait ``package.json``/``vite.config``/``src/``
+# HORS de la fenêtre de 20k → le juge concluait « feature absente » sur un frontend
+# pourtant complet (faux rejets en cascade → run bloqué 4/15). On les retire du
+# diff soumis au juge (le diff autoritatif, lui, reste intact).
+_GENERATED_DIFF_FILES = (
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Pipfile.lock",
+    "composer.lock",
+    "Cargo.lock",
+    "go.sum",
+)
+
+
+def strip_generated_from_diff(diff: str) -> str:
+    """Retire les blocs ``diff --git`` des fichiers GÉNÉRÉS (lock files) — #526.
+
+    Découpe le diff sur les frontières ``diff --git`` ; un bloc est retiré si le
+    BASENAME de son chemin de DESTINATION (``b/…``) est un fichier généré.
+    Comparaison par basename EXACT (pas sous-chaîne : ``src/go.sum.parser.ts`` ≠
+    ``go.sum``, conservé) et sur la cible ``b/`` (un rename d'un lock vers un
+    fichier source est conservé). Robuste : un diff sans ce format (ou vide) est
+    renvoyé tel quel.
+    """
+    if not diff:
+        return diff
+    blocks = re.split(r"(?=^diff --git )", diff, flags=re.M)
+    kept = []
+    for block in blocks:
+        header = block.split("\n", 1)[0]
+        is_generated = False
+        if header.startswith("diff --git ") and " b/" in header:
+            dest = header.split(" b/", 1)[1].strip()
+            is_generated = dest.rsplit("/", 1)[-1] in _GENERATED_DIFF_FILES
+        if not is_generated:
+            kept.append(block)
+    return "".join(kept)
+
+
 class LLMAdequacyChecker:
     """:class:`AdequacyChecker` par LLM (#437) — fail-closed.
 
     ``sample_fn`` : ``async (prompt, system_prompt) -> str``, injectable (mocké en
     CI) ; défaut = ``generate_text`` des providers LLM avec la config du serveur.
-    Le diff est borné (``max_diff_chars``) pour rester dans la fenêtre du modèle.
+    Le diff est borné (``max_diff_chars``) pour rester dans la fenêtre du modèle,
+    après retrait des fichiers générés (#526) ; une troncature résiduelle est
+    ANNONCÉE au juge (sinon il conclut à tort à l'absence d'un fichier non vu).
     """
 
-    def __init__(self, sample_fn=None, *, max_diff_chars: int = 20000):
+    def __init__(self, sample_fn=None, *, max_diff_chars: int = 60000):
         self._sample_fn = sample_fn or _default_adequacy_sample_fn()
         self._max_diff_chars = max_diff_chars
 
+    def _diff_for_judge(self, diff: str) -> str:
+        """Diff prêt pour le juge : fichiers générés retirés (#526), borné, et
+        troncature résiduelle EXPLICITEMENT signalée."""
+        cleaned = strip_generated_from_diff(diff or "")
+        if not cleaned:
+            # Distinguer « diff réellement vide » de « tout le diff était des
+            # fichiers générés » : sinon le juge hallucine « livrable absent » sur
+            # une tâche dont le livrable serait justement un fichier généré.
+            return "(diff = uniquement des fichiers générés/verrous)" if (diff or "").strip() else "(diff vide)"
+        if len(cleaned) <= self._max_diff_chars:
+            return cleaned
+        return (
+            cleaned[: self._max_diff_chars]
+            + f"\n\n[... DIFF TRONQUÉ à {self._max_diff_chars} chars sur {len(cleaned)} — "
+            "NE PAS conclure à l'absence d'un fichier qui n'apparaît pas ci-dessus, "
+            "il peut être dans la partie tronquée ...]"
+        )
+
     async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome:
+        bounded = self._diff_for_judge(diff)
         prompt = (
             f"## Issue à fermer\n{issue.to_prompt()}\n\n"
-            f"## Diff livré\n```diff\n{(diff or '(diff vide)')[: self._max_diff_chars]}\n```\n\n"
+            f"## Diff livré\n```diff\n{bounded}\n```\n\n"
             "Ce diff implémente-t-il concrètement l'issue ?"
         )
         text = await self._sample_fn(prompt, _ADEQUACY_SYSTEM)
-        return _parse_adequacy(text)
+        outcome = _parse_adequacy(text)
+        # #499 : ne contrôler la COUVERTURE des critères que si l'adéquation est
+        # OK (sinon déjà rouge), que le diff touche des tests (sinon
+        # tests_touched/require_test_changes gère) ET que l'issue porte des
+        # critères chiffrables — borne le coût LLM et les faux rouges.
+        if not outcome.implemented or not tests_touched(diff) or not issue.acceptance_criteria:
+            return outcome
+        test_prompt = (
+            f"## Issue à fermer\n{issue.to_prompt()}\n\n"
+            f"## Diff livré\n```diff\n{bounded}\n```\n\n"
+            "Les critères chiffrables/observables de l'issue sont-ils assertés par au moins un test du diff ?"
+        )
+        test_text = await self._sample_fn(test_prompt, _TEST_ADEQUACY_SYSTEM)
+        asserts, justif = _parse_test_adequacy(test_text)
+        return replace(outcome, tests_assert_criteria=asserts, tests_justification=justif)
 
 
 def _default_adequacy_sample_fn():  # pragma: no cover - chemin réel (integration)
@@ -910,18 +1283,31 @@ class FakeAdequacyChecker:
     """:class:`AdequacyChecker` déterministe pour la CI (aucun LLM)."""
 
     def __init__(
-        self, *, implemented: bool = True, justification: str = "conforme", raises: Optional[Exception] = None
+        self,
+        *,
+        implemented: bool = True,
+        justification: str = "conforme",
+        raises: Optional[Exception] = None,
+        tests_assert_criteria: Optional[bool] = None,
+        tests_justification: str = "",
     ):
         self._implemented = implemented
         self._justification = justification
         self._raises = raises
+        self._tests_assert_criteria = tests_assert_criteria
+        self._tests_justification = tests_justification
         self.calls: List[int] = []
 
     async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome:
         self.calls.append(issue.number)
         if self._raises is not None:
             raise self._raises
-        return AdequacyOutcome(implemented=self._implemented, justification=self._justification)
+        return AdequacyOutcome(
+            implemented=self._implemented,
+            justification=self._justification,
+            tests_assert_criteria=self._tests_assert_criteria,
+            tests_justification=self._tests_justification,
+        )
 
 
 class FakeReviewer:
@@ -972,8 +1358,12 @@ async def run_quality_gate(
     smoke_command: Optional[str] = None,
     smoke_paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     smoke_timeout: float = 30.0,
+    smoke_cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
+    pin_guard: bool = True,
+    forbidden_files_guard: bool = True,
+    forbidden_files_block: bool = False,
 ) -> QualityReport:
     """Exécute les tests (sandbox) + la revue (reviewer) sur un diff. Fail-closed.
 
@@ -1010,6 +1400,11 @@ async def run_quality_gate(
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
+    # #496 : le cache pip n'est utilisé que si le sandbox monte effectivement le
+    # volume — sinon le cache irait dans le tmpfs /tmp, compté dans --memory.
+    # Source de vérité UNIQUE = l'attribut du sandbox (pas un kwarg
+    # désynchronisable) ; getattr → tout double de test sans l'attribut → False.
+    use_pip_cache = bool(getattr(sandbox, "pip_cache_dir", None))
 
     # #482 : garde append-only sur requirements.txt — analyse PURE du diff,
     # AVANT les passes d'infra. Les tests tournent quand même : la mémoire de
@@ -1017,6 +1412,17 @@ async def run_quality_gate(
     requirements_removed: Tuple[str, ...] = ()
     if requirements_guard:
         requirements_removed = unjustified_requirement_removals(diff, issue)
+    # #497 : signal NON bloquant des dépendances directes non épinglées — analyse
+    # PURE du diff de l'agent (les ajouts #481 arrivent après, re-capturés
+    # ailleurs). N'entre PAS dans would_pass (signal seulement, par défaut).
+    requirements_unpinned: Tuple[str, ...] = ()
+    if pin_guard:
+        requirements_unpinned = unpinned_requirement_lines(diff)
+    # #508 : garde fichiers parasites — analyse PURE du diff (comme #482). Signal
+    # par défaut ; bloquant seulement si forbidden_files_block (appliqué au verdict).
+    forbidden_files: Tuple[str, ...] = ()
+    if forbidden_files_guard:
+        forbidden_files = forbidden_committed_files(diff)
 
     # 1. Tests dans le sandbox. Une incapacité à les exécuter = non passé
     #    (fail-closed), pas une exception qui remonterait.
@@ -1025,7 +1431,7 @@ async def run_quality_gate(
     try:
         command = test_command
         if install_deps:
-            prelude = deps_install_prelude(workspace, strict=require_deps_install)
+            prelude = deps_install_prelude(workspace, strict=require_deps_install, use_cache=use_pip_cache)
             if prelude is not None:
                 # Strict (#439) : install bloquante. Toléré (#414) : les tests
                 # tournent quand même, l'échec laisse sa note dans la sortie.
@@ -1050,7 +1456,7 @@ async def run_quality_gate(
             # gate rouge.
             command = f"({command}) && {front}"
         if check_installability:
-            installability = installability_command(workspace)
+            installability = installability_command(workspace, use_cache=use_pip_cache)
             if installability is not None:
                 if front_commands:
                     # La collecte de la passe d'installabilité (#439) renvoie
@@ -1058,7 +1464,22 @@ async def run_quality_gate(
                     installability = _tolerate_pytest_exit5(installability)
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
         if smoke_run:
-            smoke = smoke_run_command(workspace, command=smoke_command, paths=smoke_paths, timeout=smoke_timeout)
+            # #503 (suivi v6) : le contrôle CORS du smoke n'a de sens QUE si un
+            # frontend existe — un backend ISOLÉ n'a légitimement pas de middleware
+            # CORS et était faussement rejeté (run v6, tâche d'init backend). On
+            # n'exige donc le CORS par DÉFAUT que si un frontend est détecté dans le
+            # workspace ; un ``smoke_cors_origin`` EXPLICITE (≠ défaut) reste toujours
+            # respecté (override opérateur), et "" garde le contrôle désactivé.
+            cors = smoke_cors_origin
+            if cors == _SMOKE_DEFAULT_ORIGIN and not _frontend_dirs(workspace):
+                cors = ""
+            smoke = smoke_run_command(
+                workspace,
+                command=smoke_command,
+                paths=smoke_paths,
+                timeout=smoke_timeout,
+                cors_origin=cors,
+            )
             if smoke is not None:
                 # Dernière passe (le heredoc doit clore la commande) : l'app est
                 # lancée dans le même conteneur, après install des deps (#414).
@@ -1111,17 +1532,36 @@ async def run_quality_gate(
     adequacy_implemented: Optional[bool] = None
     adequacy_justification = ""
     adequacy_error: Optional[str] = None
+    adequacy_tests_assert: Optional[bool] = None
+    adequacy_tests_justification = ""
     if adequacy_checker is not None and issue is not None and would_pass:
         try:
             adequacy = await adequacy_checker.check(diff, issue, ctx)
             adequacy_implemented = bool(adequacy.implemented)
             adequacy_justification = adequacy.justification
+            # #499 : couverture des critères par les tests (None = non évalué).
+            adequacy_tests_assert = adequacy.tests_assert_criteria
+            adequacy_tests_justification = adequacy.tests_justification
         except Exception as exc:  # noqa: BLE001 - fail-closed ; BaseException (budget) remonte
             adequacy_error = str(exc) or repr(exc)
 
     touched = tests_touched(diff)
-    passed = would_pass and adequacy_implemented is not False and adequacy_error is None
+    # #499 : `is not False` — None (non évalué) et True passent ; seul False
+    # bloque (rétrocompat #437 : un checker qui n'évalue pas la couverture ne
+    # rend jamais le gate rouge sur ce volet).
+    passed = (
+        would_pass
+        and adequacy_implemented is not False
+        and adequacy_tests_assert is not False
+        and adequacy_error is None
+    )
     if require_test_changes and not touched:
+        passed = False
+    # #508 : signal par défaut, bloquant seulement en opt-in. Appliqué APRÈS le
+    # calcul de `passed` (n'entre pas dans would_pass : ne change pas l'économie
+    # d'appels d'adéquation #437).
+    forbidden_blocked = bool(forbidden_files_block and forbidden_files)
+    if forbidden_blocked:
         passed = False
     return QualityReport(
         tests_passed=tests_passed,
@@ -1139,6 +1579,11 @@ async def run_quality_gate(
         tests_touched=touched,
         requirements_added=tuple(requirements_added),
         requirements_removed=requirements_removed,
+        requirements_unpinned=requirements_unpinned,
+        adequacy_tests_assert=adequacy_tests_assert,
+        adequacy_tests_justification=adequacy_tests_justification,
+        forbidden_files=forbidden_files,
+        forbidden_files_blocking=forbidden_blocked,
     )
 
 
@@ -1193,6 +1638,45 @@ def _diff_paths(diff: str) -> Iterator[str]:
             continue
         seen.add(path)
         yield path
+
+
+# #500 : un diff qui touche de l'AUTH (routes d'auth, « utilisateur courant ») est
+# le terrain de l'IDOR — la fuite cross-user la plus probable d'une app CRUD
+# générée par LLM (run v5 : clients lisibles/modifiables par tout compte). La
+# détection vit sur le DIFF (pas la config) → active au run réel même si le
+# harness bypasse _gate_options.
+_AUTH_DIFF_MARKERS = (
+    "get_current_user",
+    "current_user",
+    "oauth2passwordbearer",
+    "/auth/",
+    "httpbearer",
+    "import jwt",
+    "from jwt",
+    "jwt.encode",
+    "jwt.decode",
+    "depends(get_current",
+)
+
+# Consigne de revue ciblée, injectée quand le diff touche l'auth. Heuristique
+# best-effort : elle peut RATER une auth maison sans marqueur idiomatique (le
+# standard `security` mentionne alors l'IDOR de façon inconditionnelle comme
+# filet) ; un faux positif ne coûte qu'une consigne en trop — on erre du bon
+# côté en sécurité.
+_OWNERSHIP_REVIEW_CONSIGNE = (
+    "REVUE SÉCURITÉ — ISOLATION PAR PROPRIÉTAIRE (IDOR) : cette app a de "
+    "l'authentification. Toute ressource créée par un utilisateur DOIT être "
+    "filtrée par son propriétaire en lecture, écriture ET suppression. Signale "
+    "en `critical` (catégorie `security`) tout endpoint CRUD (GET/PUT/PATCH/"
+    "DELETE d'une ressource par id) qui n'applique aucun filtre owner — un "
+    "autre utilisateur authentifié pourrait y accéder."
+)
+
+
+def _diff_touches_auth(diff: str) -> bool:
+    """Le diff introduit-il de l'authentification ? (heuristique, insensible casse, #500)."""
+    haystack = (diff or "").lower()
+    return any(marker in haystack for marker in _AUTH_DIFF_MARKERS)
 
 
 def _detect_review_language(diff: str) -> Optional[str]:
@@ -1267,11 +1751,15 @@ class ExpertReviewer:
             )
 
         tool = self._tool or self._build_tool()
-        request = CodeReviewRequest(
-            code=diff or "(diff vide)",
-            language=language,
-            context=issue.to_prompt() if issue is not None else None,
-        )
+        base_context = issue.to_prompt() if issue is not None else None
+        # #500 : si le diff touche l'auth, injecter la consigne ownership/IDOR —
+        # le diff complet (modèle + routes) est déjà envoyé en `code`, seul le
+        # prompt manquait la consigne (run v5 : IDOR clients non détecté).
+        if _diff_touches_auth(diff):
+            base_context = (
+                f"{base_context}\n\n{_OWNERSHIP_REVIEW_CONSIGNE}" if base_context else _OWNERSHIP_REVIEW_CONSIGNE
+            )
+        request = CodeReviewRequest(code=diff or "(diff vide)", language=language, context=base_context)
         response = await tool.execute_async(request, ctx=ctx)
         return outcome_from_review(response, min_quality=self._min_quality)
 

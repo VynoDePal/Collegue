@@ -39,6 +39,14 @@ from dataclasses import dataclass
 from typing import List, Mapping, Optional, Tuple, Union
 
 DEFAULT_SANDBOX_IMAGE = "collegue-sandbox:latest"
+# #496 : point de montage du cache pip persistant dans le conteneur.
+SANDBOX_PIP_CACHE_MOUNT = "/tmp/.pip_cache"
+# Sous-chemin (relatif au HOME du worker) où OpenHands lit/écrit ses creds
+# d'abonnement (Codex/ChatGPT, subscription_login). La cible RÉELLE du montage est
+# dérivée du HOME effectif du conteneur (``env['HOME']``), pas codée en dur : les
+# creds NE peuvent PAS vivre sous /tmp (le ``--tmpfs /tmp`` les masquerait), d'où
+# le fail-loud si HOME pointe sous /tmp (cf. _build_run_argv).
+SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
@@ -70,8 +78,10 @@ class DockerSandbox:
     """Exécute des commandes dans un conteneur Docker isolé et durci.
 
     Isolation (AC#1 « ne peut pas lire le FS hôte ») : seul ``workspace`` est monté
-    (sur ``/workspace``) ; aucun autre chemin hôte n'est exposé. Persistance (AC#2) :
-    ``workspace`` est un répertoire réel réutilisé d'une exécution à l'autre.
+    (sur ``/workspace``) ; aucun autre chemin hôte n'est exposé — sauf un cache pip
+    OPT-IN sur ``/tmp/.pip_cache`` si ``pip_cache_dir`` est fourni (#496).
+    Persistance (AC#2) : ``workspace`` est un répertoire réel réutilisé d'une
+    exécution à l'autre.
     """
 
     def __init__(
@@ -80,6 +90,8 @@ class DockerSandbox:
         *,
         network: str = "none",
         dns: Optional[Tuple[str, ...]] = None,
+        pip_cache_dir: Optional[str] = None,
+        subscription_auth_dir: Optional[str] = None,
         memory: str = "512m",
         cpus: str = "1.0",
         pids_limit: int = 256,
@@ -100,6 +112,17 @@ class DockerSandbox:
         # l'infra. Vide (défaut) = comportement Docker inchangé. Une adresse
         # invalide fait échouer `docker run` (stderr visible dans le gate).
         self.dns = tuple(dns or ())
+        # Cache pip persistant opt-in (#496, partie 2 de #485). Monté sur
+        # /tmp/.pip_cache + PIP_CACHE_DIR : les passes réseau du gate (#414/#439)
+        # ne retéléchargent plus tout PyPI à chaque run (aléas DNS/timeout
+        # réduits, temps mur amorti — jusqu'à 4 passes avec la remédiation #481).
+        # Vide (défaut) = aucun montage, argv inchangé. Validé comme un -v.
+        self.pip_cache_dir = pip_cache_dir or None
+        # Creds d'abonnement (Codex via ChatGPT, subscription_login) montées en
+        # LECTURE-ÉCRITURE (OpenHands rafraîchit le token et le réécrit → persistance
+        # hors-run). Opt-in : vide (défaut) = aucun montage, argv inchangé. Validé
+        # comme un -v (realpath + refus ':'/racine) ; hors confinement workspace_root.
+        self.subscription_auth_dir = subscription_auth_dir or None
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
@@ -166,6 +189,34 @@ class DockerSandbox:
         # défaut strictement inchangé).
         for server in self.dns:
             argv += ["--dns", server]
+        # #496 : cache pip persistant — 2e montage hôte opt-in (cf. docstring
+        # d'isolation). Le bind sur /tmp/.pip_cache MASQUE le tmpfs à ce
+        # sous-chemin → les pages du cache ne comptent pas dans --memory. Validé
+        # (realpath + refus ':'/racine) car il devient un -v ; le confinement
+        # workspace_root NE s'applique PAS (le cache vit hors du workspace).
+        if self.pip_cache_dir:
+            cache = os.path.realpath(os.path.abspath(self.pip_cache_dir))
+            if ":" in cache or cache == os.path.sep:
+                raise ValueError(f"pip_cache_dir invalide (':' ou racine): {cache}")
+            argv += ["-v", f"{cache}:{SANDBOX_PIP_CACHE_MOUNT}", "-e", f"PIP_CACHE_DIR={SANDBOX_PIP_CACHE_MOUNT}"]
+        # Creds d'abonnement (Codex/ChatGPT) : montage RW, cible fixe (HOME du worker).
+        # Même validation que le cache pip ; hors confinement workspace_root (les creds
+        # vivent hors du workspace). RW car OpenHands réécrit le token rafraîchi.
+        if self.subscription_auth_dir:
+            auth = os.path.realpath(os.path.abspath(self.subscription_auth_dir))
+            if ":" in auth or auth == os.path.sep:
+                raise ValueError(f"subscription_auth_dir invalide (':' ou racine): {auth}")
+            # Cible = $HOME/.openhands du worker. HOME effectif = override ``env['HOME']``
+            # (sinon le défaut /tmp injecté plus bas). Les creds NE peuvent PAS vivre sous
+            # /tmp (le ``--tmpfs /tmp`` masquerait le bind) → fail-loud, sinon le montage
+            # serait inerte silencieusement (le coder ne verrait jamais l'auth abo).
+            home = (self.env.get("HOME") or "/tmp").rstrip("/")
+            if home == "/tmp" or home.startswith("/tmp/"):
+                raise ValueError(
+                    "subscription_auth_dir exige env['HOME'] hors /tmp "
+                    "(le tmpfs /tmp masquerait le montage des creds d'abonnement)"
+                )
+            argv += ["-v", f"{auth}:{home}/{SANDBOX_OPENHANDS_AUTH_SUBPATH}"]
         if self.read_only:
             argv += ["--read-only"]  # root FS en lecture seule
         argv += [

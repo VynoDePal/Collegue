@@ -78,13 +78,18 @@ class GitHubClient(APIClient):
                 timeout=self.timeout,
             )
             if response.status_code == 404:
-                raise ToolExecutionError(f"Ressource introuvable: {endpoint}")
+                # #505 : statut porté → _execute_with_retry rétrograde en debug
+                # (sonde d'existence : contents/<fichier> sur branche fraîche =
+                # 404 ATTENDU, ~60 lignes de bruit console au run v5).
+                raise ToolExecutionError(f"Ressource introuvable: {endpoint}", status_code=404)
             if response.status_code == 401:
-                raise ToolExecutionError("Token GitHub invalide ou expiré, ou authentification requise")
+                raise ToolExecutionError(
+                    "Token GitHub invalide ou expiré, ou authentification requise", status_code=401
+                )
             if response.status_code == 403:
                 remaining = response.headers.get("X-RateLimit-Remaining", "?")
                 raise ToolExecutionError(
-                    f"Rate limit GitHub atteint ou permissions insuffisantes. Restant: {remaining}"
+                    f"Rate limit GitHub atteint ou permissions insuffisantes. Restant: {remaining}", status_code=403
                 )
             response.raise_for_status()
             return response

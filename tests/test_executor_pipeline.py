@@ -251,7 +251,12 @@ def test_failure_feedback_is_crisp_and_actionable():
         quality_report=_report("bruit\nFAILED tests/a.py::t1 - boom\nencore du bruit\nERROR tests/b.py - setup\n"),
         reason="gate_failed",
     )
-    assert failure_feedback(gate) == "FAILED tests/a.py::t1 - boom ; ERROR tests/b.py - setup"
+    # #507 : files_changed=("a.py",) ne couvre ni tests/a.py ni tests/b.py → les
+    # deux lignes sont étiquetées RÉGRESSION (suffixe ; format figé ici).
+    _regr = (
+        "[RÉGRESSION tests pré-existants — ton diff a cassé l'existant : ne modifie pas ces tests, corrige ton code]"
+    )
+    assert failure_feedback(gate) == (f"FAILED tests/a.py::t1 - boom {_regr} ; ERROR tests/b.py - setup {_regr}")
 
     # Pas de ligne FAILED → queue bornée de la sortie de tests.
     fuzzy = ExecutionOutcome(
@@ -267,6 +272,281 @@ def test_failure_feedback_is_crisp_and_actionable():
     # Échec au stage run (aucun rapport) → logs agent.
     run = ExecutionOutcome(success=False, stage="run", workspace=ws, execution=execution, reason="agent_error")
     assert failure_feedback(run) == "journal de l'agent"
+
+
+def test_failure_feedback_labels_regression_vs_task_tests():
+    """#507 : une ligne FAILED dont le fichier de test est dans le diff de la
+    tentative est étiquetée « tests de la tâche » ; un test pré-existant cassé
+    (hors diff) est étiqueté RÉGRESSION avec la consigne « ne modifie pas ces
+    tests »."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="journal"),
+        changed=True,
+        diff="",
+        files_changed=("collegue/pdf.py", "tests/test_pdf.py"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=False,
+        test_exit_code=1,
+        test_output=(
+            "FAILED tests/test_pdf.py::test_export - assert\n"  # touché par le diff
+            "FAILED tests/test_auth.py::test_login - KeyError\n"  # PAS touché → régression
+        ),
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    # test de la tâche : étiqueté comme tel, jamais en régression
+    assert "tests/test_pdf.py::test_export - assert [tests de la tâche]" in fb
+    # test pré-existant cassé : étiqueté RÉGRESSION avec consigne « ne modifie pas ces tests »
+    assert "tests/test_auth.py::test_login" in fb
+    assert "RÉGRESSION tests pré-existants" in fb
+    assert "ne modifie pas ces tests" in fb
+
+
+def test_failure_feedback_surfaces_forbidden_files_when_blocking():
+    """#508 (suite v6) : quand la garde fichiers parasites a fait rougir le gate,
+    le feedback DOIT dire à l'agent de retirer ces fichiers — même si les tests
+    sont verts (sinon il reçoit la sortie de test trompeuse et boucle, cas réel
+    v6 : server.log jamais signalé, tâche racine bloquée 3 tentatives)."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"),
+        changed=True,
+        diff="",
+        files_changed=("server.log", "app/x.py"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=True,  # tests VERTS
+        test_exit_code=0,
+        test_output="6 passed\nsse-starlette 3.4.4 requires starlette>=0.49.1 ... incompatible.",  # bruit pip
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,  # rouge à cause de #508
+        forbidden_files=("server.log",),
+        forbidden_files_blocking=True,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "#508" in fb
+    assert "server.log" in fb
+    assert "git rm --cached" in fb or "gitignore" in fb
+    assert "incompatible" not in fb  # le bruit pip ne doit PAS être le diagnostic
+
+
+def test_failure_feedback_ignores_forbidden_files_when_signal_only():
+    """#508 (suite v6) : en mode SIGNAL (non bloquant), forbidden_files ne doit PAS
+    masquer la vraie cause d'échec — le feedback reste le diagnostic des tests."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"),
+        changed=True,
+        diff="",
+        files_changed=("tests/test_app.py", "server.log"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=False,
+        test_exit_code=1,
+        test_output="FAILED tests/test_app.py::test_login - AssertionError",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+        forbidden_files=("server.log",),
+        forbidden_files_blocking=False,  # signal seulement
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "test_login" in fb  # la vraie cause (échec de test) est relayée
+    assert "#508" not in fb  # le signal parasite ne prend pas le dessus
+
+
+def test_regression_label_preserves_infra_classification():
+    """#507 / non-régression #459/#461/#477 : étiqueter RÉGRESSION ne doit PAS
+    désarmer is_infra_noise — une ligne FAILED présente reste fonctionnelle
+    (jamais bruit infra graciable), car le label est en SUFFIXE."""
+    from collegue.executor.pipeline import failure_feedback, is_infra_noise
+
+    fb = failure_feedback(_gate_outcome("FAILED tests/test_x.py::t - requests.exceptions.ConnectionError: refusé\n"))
+    assert "RÉGRESSION" in fb  # _gate_outcome a files_changed=("a.py",) → hors diff
+    assert not is_infra_noise(fb)  # une ligne FAILED présente = jamais bruit infra
+
+
+def test_label_failure_line_best_effort():
+    """#507 : helpers purs — extraction du path et étiquetage best-effort."""
+    from collegue.executor.pipeline import _label_failure_line, _summary_line_path
+
+    assert _summary_line_path("FAILED tests/a.py::t - m") == "tests/a.py"
+    assert _summary_line_path("ERROR tests/b.py - setup") == "tests/b.py"
+    assert _summary_line_path("12 passed in 1.02s") == ""
+    # nodeid de classe et paramétré → path borné au premier ::
+    assert _summary_line_path("FAILED tests/a.py::TestC::test_m - msg") == "tests/a.py"
+    assert _summary_line_path("FAILED tests/a.py::test_x[a b] - msg") == "tests/a.py"
+    # ERROR avec nodeid (erreur de collecte sur un test précis) → path quand même
+    assert _summary_line_path("ERROR tests/x.py::TestC::test_m - boom") == "tests/x.py"
+    # périmètre vide → ligne inchangée (pas de label spéculatif)
+    assert _label_failure_line("FAILED tests/a.py::t - m", frozenset()) == "FAILED tests/a.py::t - m"
+    # path illisible → inchangé
+    assert _label_failure_line("12 passed", frozenset({"a.py"})) == "12 passed"
+    # path dans le diff → étiqueté « tests de la tâche »
+    assert _label_failure_line("FAILED a.py::t - m", frozenset({"a.py"})) == "FAILED a.py::t - m [tests de la tâche]"
+    # cas NOMINAL : path de test repo-relatif présent dans le diff (verrouille le
+    # bornage au :: — une régression qui renverrait "tests/test_pdf.py::t" casserait ici)
+    assert (
+        _label_failure_line("FAILED tests/test_pdf.py::t - m", frozenset({"tests/test_pdf.py", "collegue/pdf.py"}))
+        == "FAILED tests/test_pdf.py::t - m [tests de la tâche]"
+    )
+
+
+def test_label_failure_line_monorepo_subdir_match():
+    """#507 : en monorepo (GATE_TEST_COMMAND « cd backend && pytest »), le nodeid
+    pytest est relatif au sous-dir alors que files_changed est racine-relatif —
+    le match tolérant au suffixe évite un faux RÉGRESSION sur un test de la tâche."""
+    from collegue.executor.pipeline import _label_failure_line
+
+    # pytest émet "tests/test_x.py" ; git --name-only "backend/tests/test_x.py"
+    assert (
+        _label_failure_line("FAILED tests/test_x.py::t - m", frozenset({"backend/tests/test_x.py"}))
+        == "FAILED tests/test_x.py::t - m [tests de la tâche]"
+    )
+    # garde-fou : un sous-chemin DIFFÉRENT ne matche pas (pas de suffixe /)
+    assert "RÉGRESSION" in _label_failure_line("FAILED tests/test_x.py::t - m", frozenset({"backend/test_x.py"}))
+
+
+def test_filter_pip_noise_keeps_network_and_real_content():
+    """#507 : le filtre retire le bruit pip NON-fatal (conflit deps image, notices,
+    PATH) mais PRÉSERVE les signatures réseau (#461) et le contenu légitime."""
+    from collegue.executor.pipeline import filter_pip_noise
+
+    raw = (
+        "Collecting fastapi\n"
+        "ERROR: pip's dependency resolver does not currently take into account all the packages\n"
+        "openhands-ai 1.7.0 requires starlette>=0.49.1, but you have starlette 0.41.3 which is incompatible.\n"
+        "[notice] A new release of pip is available: 25.0.1 -> 26.1.2\n"
+        "WARNING: The script fastapi is installed in '/home/sandbox/.local/bin' which is not on PATH.\n"
+        "pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='x'): Read timed out.\n"
+    )
+    out = filter_pip_noise(raw)
+    assert "incompatible" not in out  # conflit de version retiré
+    assert "dependency resolver" not in out  # warning resolver retiré
+    assert "[notice]" not in out and "is not on PATH" not in out  # notices/PATH retirés
+    assert "ReadTimeoutError" in out  # signature réseau PRÉSERVÉE (#461)
+    assert "Collecting fastapi" in out  # contenu légitime conservé
+
+
+def test_failure_feedback_replaces_pure_pip_noise_with_note():
+    """#507 : une queue UNIQUEMENT composée de bruit pip non-fatal (pas de FAILED)
+    n'est plus relayée telle quelle — le coder reçoit une note explicite (run v6 :
+    3 tentatives brûlées à empiler des pins sur ce bruit)."""
+    from collegue.executor.pipeline import failure_feedback
+
+    noise = (
+        "ERROR: pip's dependency resolver does not currently take into account all the packages\n"
+        "openhands-ai 1.7.0 requires starlette>=0.49.1, but you have starlette 0.41.3 which is incompatible.\n"
+        "[notice] A new release of pip is available: 25.0.1 -> 26.1.2\n"
+    )
+    fb = failure_feedback(_gate_outcome(noise))
+    assert "incompatible" not in fb  # le bruit ne fuit plus
+    assert "bruit d'installation pip" in fb  # note explicite à la place
+
+
+def test_failure_feedback_pip_noise_preserves_infra_grace():
+    """#507 / #461 : bruit pip + un ReadTimeout (sans FAILED) → le feedback garde la
+    signature réseau → is_infra_gate_failure gracie toujours l'aléa."""
+    from collegue.executor.pipeline import failure_feedback, is_infra_gate_failure
+
+    out = (
+        "[notice] A new release of pip is available: 25.0.1 -> 26.1.2\n"
+        "openhands-ai 1.7.0 requires starlette>=0.49.1, but you have starlette 0.41.3 which is incompatible.\n"
+        "pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files'): Read timed out.\n"
+    )
+    outcome = _gate_outcome(out)
+    fb = failure_feedback(outcome)
+    assert "ReadTimeoutError" in fb  # signature réseau survit au filtre
+    assert is_infra_gate_failure(outcome) is True  # grâce #461 toujours armée
+
+
+def test_failure_feedback_detruncation_then_label_same_line():
+    """#507 / #478 : dans un même feedback, la dé-troncature s'applique AVANT
+    l'étiquetage — une inversion casserait silencieusement le `.endswith("...")`
+    de #478. Le message dé-tronqué ET le label doivent coexister."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    output = (
+        "FAILED tests/test_pkg.py::t - ModuleNotFoundError: requires the httpx pack...\n"
+        "E   ModuleNotFoundError: requires the httpx package installed\n"
+    )
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"),
+        changed=True,
+        diff="",
+        files_changed=("tests/test_pkg.py", "src/pkg.py"),
+        success=True,
+    )
+    report = QualityReport(
+        tests_passed=False,
+        test_exit_code=1,
+        test_output=output,
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "ModuleNotFoundError: requires the httpx package installed" in fb  # dé-troncature #478
+    assert "[tests de la tâche]" in fb  # étiquetage #507 (test dans le diff)
 
 
 async def test_reviewer_error_is_contained_not_propagated(repo):
@@ -673,6 +953,76 @@ def test_is_infra_gate_failure_never_graces_green_tests():
     assert not is_infra_gate_failure(outcome)
 
 
+# --- crash d'import agent pré-LLM (#498) ---------------------------------------------
+
+
+def _agent_error_outcome(logs, *, prompt_tokens=0, completion_tokens=0, reason="agent_error"):
+    from collegue.executor import AgentResult, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome
+    from collegue.executor.runner import ExecutionResult
+
+    return ExecutionOutcome(
+        success=False,
+        stage="run",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(
+                success=False, logs=logs, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+            ),
+            changed=False,
+            diff="",
+            files_changed=(),
+            success=False,
+        ),
+        reason=reason,
+    )
+
+
+_IMPORT_CRASH_LOGS = (
+    "Traceback (most recent call last):\n"
+    '  File "/opt/oh_runner.py", line 31, in main\n'
+    "    from openhands.sdk import LLM, Conversation\n"
+    "ModuleNotFoundError: No module named 'lmnr'\n"
+)
+
+
+def test_is_infra_agent_crash_on_import_traceback():
+    """#498 : crash d'import pré-LLM (agent_error, 0 token, ModuleNotFoundError)
+    = aléa d'infra global (image cassée), pas un échec fonctionnel."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS))
+
+
+def test_is_infra_agent_crash_requires_zero_tokens():
+    """L'agent a appelé le LLM (tokens > 0) puis échoué : échec FONCTIONNEL,
+    jamais classé crash d'infra — même si les logs mentionnent un import."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert not is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS, completion_tokens=50))
+
+
+def test_is_infra_agent_crash_requires_import_signature():
+    """0 token mais pas de traceback d'import (assertion, autre crash) → non classé."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert not is_infra_agent_crash(_agent_error_outcome("AssertionError: x != y\n"))
+
+
+def test_is_infra_agent_crash_handles_importerror():
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert is_infra_agent_crash(_agent_error_outcome("ImportError: cannot import name 'sdk' from 'openhands'\n"))
+
+
+def test_is_infra_agent_crash_only_on_agent_error():
+    """Un no_op ou un gate_failed avec les mêmes logs n'est pas un crash agent."""
+    from collegue.executor.pipeline import is_infra_agent_crash
+
+    assert not is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS, reason="no_op"))
+    assert not is_infra_agent_crash(_agent_error_outcome(_IMPORT_CRASH_LOGS, reason="gate_failed"))
+
+
 # --- remédiation requirements : recapture du diff (#481) -----------------------------
 
 
@@ -793,6 +1143,46 @@ def test_failure_feedback_names_removed_requirements():
     assert len(feedback) <= 700
 
 
+def test_failure_feedback_names_uncovered_criterion():
+    """#499 (revue) : feature présente, tests VERTS, mais un critère chiffrable
+    n'est asserté par aucun test — le feedback de retry doit NOMMER le critère
+    non couvert, sinon l'agent reçoit la sortie verte et boucle sans converger."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    outcome = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(success=True, logs="journal"),
+            changed=True,
+            diff="",
+            files_changed=("tests/test_api.py",),
+            success=True,
+        ),
+        quality_report=QualityReport(
+            tests_passed=True,
+            test_exit_code=0,
+            test_output="12 passed in 1.02s",
+            review_summary="",
+            review_findings=(),
+            review_blocking=False,
+            passed=False,
+            adequacy_implemented=True,
+            adequacy_tests_assert=False,
+            adequacy_tests_justification="aucun test n'asserte le montant TTC",
+        ),
+        reason="gate_failed",
+    )
+    feedback = failure_feedback(outcome)
+    assert "#499" in feedback
+    assert "montant TTC" in feedback
+    assert "12 passed" not in feedback  # la sortie verte ne doit PAS être le feedback
+    assert len(feedback) <= 700
+
+
 async def test_requirements_regeneration_stops_at_gate(repo):
     """#482 bout en bout : l'agent régénère requirements.txt en perdant une ligne
     de la base → gate rouge, aucune PR."""
@@ -819,3 +1209,29 @@ async def test_requirements_regeneration_stops_at_gate(repo):
     assert outcome.reason == "gate_failed"
     assert outcome.quality_report.requirements_removed == ("python-jose[cryptography]",)
     assert clients.prs.created == []
+
+
+def test_agent_crash_signature_is_stable_across_variable_preamble():
+    """#498 (revue) : deux crashs de la MÊME cause avec préambule variable (ANSI,
+    timestamps, chemin workspace randomisé) produisent la MÊME signature — sinon
+    le fail-fast crash-loop ne se déclencherait jamais en conditions réelles."""
+    from collegue.executor.pipeline import agent_crash_signature
+
+    crash_a = (
+        "\x1b[36m2026-06-12 01:00:01 WARNING litellm\x1b[0m\n"
+        "running in /tmp/collegue-exec-aAaAaA/workspace\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/oh_runner.py", line 31, in main\n'
+        "ModuleNotFoundError: No module named 'lmnr'\n"
+    )
+    crash_b = (
+        "\x1b[36m2026-06-12 02:33:47 WARNING litellm\x1b[0m\n"
+        "running in /tmp/collegue-exec-zZzZzZ/workspace\n"
+        "Traceback (most recent call last):\n"
+        '  File "/opt/oh_runner.py", line 31, in main\n'
+        "ModuleNotFoundError: No module named 'lmnr'\n"
+    )
+    assert agent_crash_signature(crash_a) == agent_crash_signature(crash_b)
+    # Un paquet manquant DIFFÉRENT donne une signature différente.
+    crash_c = crash_b.replace("'lmnr'", "'httpx'")
+    assert agent_crash_signature(crash_c) != agent_crash_signature(crash_b)

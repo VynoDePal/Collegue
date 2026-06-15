@@ -15,6 +15,15 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Runner de tests du gate qualité, ÉPINGLÉ (pytest<9). pytest 9.0 a retiré
+# `FixtureDef` du namespace top-level, ce qui casse `from pytest import FixtureDef`
+# de pytest-asyncio<0.24 (que les projets générés pinnent couramment, ex. 0.23.6) :
+# ImportError à la collecte → toute tâche à tests échoue au gate (constaté run v6
+# après un rebuild qui a tiré pytest 9.x). On fige le runner sur 8.x + un
+# pytest-asyncio aligné sur l'écosystème projet. Pré-installé (vs deps du projet)
+# pour que le gate dispose d'un runner même si le projet ne le déclare pas.
+RUN python -m pip install --no-cache-dir "pytest>=8.1,<9" "pytest-asyncio==0.23.6"
+
 # Utilisateur non-root par défaut (le `docker run` peut surcharger --user pour
 # matcher l'UID hôte et garder le workspace écrivable/persisté).
 RUN useradd --create-home --uid 1000 sandbox

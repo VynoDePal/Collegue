@@ -112,6 +112,15 @@ class Settings(BaseSettings):
     # ROUGE (feedback nominatif). Analyse pure du diff, aucun coût d'infra ;
     # off → suppression silencieuse tolérée (comportement historique).
     GATE_REQUIREMENTS_APPEND_ONLY: bool = True
+    # #497 : signal (NON bloquant) des dépendances directes ajoutées sans
+    # contrainte de version dans requirements.txt (cause du register→500 v4).
+    GATE_PIN_GUARD: bool = True
+    # #508 : garde fichiers parasites — un fichier NEUF au chemin interdit
+    # (*.log, *.db, *.sqlite(3), *.pyc, .env, node_modules/, __pycache__/) est
+    # SIGNALÉ dans le rapport de gate. Défaut ON (signal). off → tolérance.
+    GATE_FORBIDDEN_FILES: bool = True
+    # Rendre la garde #508 BLOQUANTE (gate rouge) au lieu d'un simple signal.
+    GATE_FORBIDDEN_FILES_BLOCK: bool = False
     # Adéquation diff↔issue (#437) : contrôle LLM fail-closed « ce diff
     # implémente-t-il l'issue ? » lancé quand le reste du gate est vert — une
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne
@@ -136,6 +145,10 @@ class Settings(BaseSettings):
     # Budget d'attente de réponse (s) — à garder sous le timeout du conteneur
     # sandbox (120 s par défaut, partagé avec pip/pytest/npm).
     GATE_SMOKE_TIMEOUT: float = 30.0
+    # #503 : origine cross-origin des sondes smoke. Une route 2xx sans
+    # Access-Control-Allow-Origin compatible = rouge (l'UI serait bloquée au
+    # premier fetch). Vide = contrôle CORS désactivé (apps sans front).
+    GATE_SMOKE_CORS_ORIGIN: str = "http://localhost:5173"
     # DNS du sandbox (#485) : résolveurs passés en `--dns` aux conteneurs qui
     # ont besoin du réseau (installabilité #439, prélude #414, worker OpenHands).
     # Le résolveur Docker par défaut produisait des « Temporary failure in name
@@ -143,6 +156,17 @@ class Settings(BaseSettings):
     # autant réduire l'occurrence). Adresses IP séparées par des virgules
     # (ex. "1.1.1.1,8.8.8.8") ; vide (défaut) = résolveur Docker.
     SANDBOX_DNS: str = ""
+    # #496 : cache pip persistant du sandbox (partie 2 de #485). Chemin HÔTE
+    # monté sur /tmp/.pip_cache (+ PIP_CACHE_DIR) pour les passes réseau du gate
+    # (#414/#439) : évite de retélécharger PyPI à chaque run. Le runtime crée le
+    # dossier (writable par l'uid hôte). Vide (défaut) = aucun cache. N'enlève
+    # --no-cache-dir QUE si le volume est monté (sinon cache dans le tmpfs /tmp).
+    SANDBOX_PIP_CACHE_DIR: str = ""
+    # Creds d'abonnement OpenHands (Codex via ChatGPT, subscription_login). Chemin
+    # HÔTE (ex. ~/.openhands) monté en LECTURE-ÉCRITURE sur /home/sandbox/.openhands
+    # du worker : permet au coder d'utiliser l'abo (sans coût API) et de persister le
+    # token rafraîchi. Vide (défaut) = aucun montage (mode clé API inchangé).
+    SANDBOX_SUBSCRIPTION_AUTH_DIR: str = ""
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0
@@ -210,6 +234,10 @@ class Settings(BaseSettings):
     # aussi le signal — factuellement exact, le cap $ ne protège pas ce canal.
     LLM_PRICE_PROMPT_PER_1M: float = 0.0
     LLM_PRICE_COMPLETION_PER_1M: float = 0.0
+    # #502 : refuser de DÉMARRER un run réel si aucun prix de secours coder n'est
+    # résolvable (litellm non mappé + LLM_PRICE_* absents → ledger $ aveugle).
+    # Off par défaut : avertissement seulement. Opt-in pour un échec net.
+    REQUIRE_COST_PRICING: bool = False
 
     # ── Auto-merge progressif (Phase 5, H2) ──────────────────────────────────
     # §6 reste le DÉFAUT : approbation humaine avant chaque merge dans main.

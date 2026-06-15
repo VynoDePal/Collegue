@@ -334,6 +334,9 @@ class MetricsCollector:
         self,
         max_cost_usd: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        *,
+        base_cost: float = 0.0,
+        base_tokens: int = 0,
     ) -> Optional[BudgetStatus]:
         """Retourne un :class:`BudgetStatus` si le budget dur est atteint, sinon ``None``.
 
@@ -341,6 +344,11 @@ class MetricsCollector:
         ``MAX_TOKENS_BUDGET``) s'ils ne sont pas fournis. Un plafond ``<= 0``
         (ou non défini) est désactivé. La comparaison est ``>=`` : on bloque
         l'appel suivant dès que la limite est atteinte.
+
+        ``base_cost``/``base_tokens`` (#495) : totaux d'un canal DISJOINT du
+        collector (le canal coder, invisible du MetricsCollector serveur) sommés
+        avant comparaison — sans eux le plafond $ ne mordait jamais sur la
+        dépense coder, pourtant majoritaire. Défaut 0 = comportement inchangé.
 
         Granularité (limitation connue, C4) : le coût cumulé est mis à jour à la
         **fin de chaque exécution d'outil** (``record_execution``), pas par appel
@@ -363,6 +371,8 @@ class MetricsCollector:
             except Exception:
                 pass
         total_cost, total_tokens = self._cumulative_totals()
+        total_cost = total_cost + float(base_cost or 0.0)
+        total_tokens = total_tokens + int(base_tokens or 0)
         # Fail-safe : un coût non fini (NaN/inf — ex. metrics.json corrompu) ne
         # doit pas aveugler le cap (NaN >= x est False), on le traite en dépassement.
         if max_cost_usd and max_cost_usd > 0 and (not math.isfinite(total_cost) or total_cost >= max_cost_usd):

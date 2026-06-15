@@ -46,6 +46,15 @@ USAGE_LOST = "usage_lost"
 # plafond MAX_COST_USD est aveugle en dollars sur ce canal ; on le signale au
 # lieu de laisser un 0 ressembler à un run gratuit.
 COST_UNKNOWN = "cost_unknown"
+# #502 : aucun prix de secours coder configuré — signalé AU DÉMARRAGE du run
+# (avant la boucle), pour que l'opérateur sache que le ledger $ sera aveugle
+# sans attendre le post-mortem.
+COST_PRICING_UNRESOLVED = "cost_pricing_unresolved"
+# #506 : interventions OPÉRATEUR hors-boucle (CLI `python -m collegue.pilot task ...`).
+# Tracées dans `decisions` pour qu'un reset/requeue manuel ne soit plus invisible
+# au post-mortem (run v5 : reset failed→todo par UPDATE SQL direct = trou d'audit).
+OPERATOR_REQUEUE = "operator_requeue"  # tâche re-filée via requeue_task_for_redo (motif → prompt)
+OPERATOR_RESET = "operator_reset"  # reset de statut post-incident (état avant/après tracé)
 
 # Noms des métriques persistées pour le ledger de coût par run.
 METRIC_RUN_COST_USD = "run_cost_usd"
@@ -200,6 +209,45 @@ class RunAuditLog:
                 pass  # l'audit ne doit jamais casser le run
         return event
 
+    def record_once(self, kind: str, *, iteration: Optional[int] = None, **detail: Any) -> Optional[RunEvent]:
+        """Émet ``kind`` au plus UNE fois par PROJET/run, restarts inclus (#504).
+
+        Anti-bruit pour les signaux à portée « run » (ex. ``cost_unknown``) : en
+        mode sériel strict (#434), le pilote est rappelé après chaque merge — un
+        garde-fou en mémoire repartirait à zéro à chaque segment (×N événements
+        au lieu d'un, run v5 : 12 ``cost_unknown``). On déduplique sur l'état
+        DURABLE (décisions persistées, comme le ledger #462) : si un événement de
+        ce ``kind`` existe déjà pour le projet, on n'émet rien. Sans persistance
+        (dry_run/tests mémoire), portée « segment » via :attr:`events`. Renvoie
+        l'événement émis, ou ``None`` si déjà signalé.
+        """
+        if self._already_recorded(kind):
+            return None
+        return self.record(kind, iteration=iteration, **detail)
+
+    def _already_recorded(self, kind: str) -> bool:
+        """Vrai si ``kind`` a déjà été émis pour ce projet (mémoire + décisions persistées)."""
+        if any(e.kind == kind for e in self.events):
+            return True
+        if not self._persist:
+            return False
+        getter = getattr(self._manager, "get_decision_journal", None) or getattr(self._manager, "get_decisions", None)
+        if getter is None:
+            return False
+        # Best-effort : l'audit ne casse jamais le run — une lecture en échec
+        # retombe sur « pas encore signalé » (au pire un doublon, jamais une
+        # exception). Égalité STRICTE du summary (le filtre query n'est qu'une
+        # présélection ilike, à revérifier en Python).
+        summary = f"[run] {kind}"
+        try:
+            try:
+                rows = getter(self.project_id, summary)
+            except TypeError:
+                rows = getter(self.project_id)
+            return any(getattr(d, "summary", "") == summary for d in rows)
+        except Exception:
+            return False
+
     def record_cost(self, *, usd: float = 0.0, tokens: int = 0, iteration: Optional[int] = None) -> None:
         """Ajoute au ledger de coût du run + trace l'événement (et persiste si activé).
 
@@ -250,6 +298,9 @@ class NullAuditLog(RunAuditLog):
     def record(self, kind: str, *, iteration: Optional[int] = None, **detail: Any) -> RunEvent:
         # Ne rien stocker ni horodater : retour symbolique pour respecter la signature.
         return RunEvent(kind=kind, ts="", iteration=iteration, detail=detail)
+
+    def record_once(self, kind: str, *, iteration: Optional[int] = None, **detail: Any) -> Optional[RunEvent]:
+        return None
 
     def record_cost(self, *, usd: float = 0.0, tokens: int = 0, iteration: Optional[int] = None) -> None:
         return None

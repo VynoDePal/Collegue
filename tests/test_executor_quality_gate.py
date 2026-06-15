@@ -428,13 +428,16 @@ def _free_port():
         return sock.getsockname()[1]
 
 
-def _run_probe(command, timeout=10.0, port=None, paths=("/",)):
+def _run_probe(command, timeout=10.0, port=None, paths=("/",), origin=""):
+    # origin="" par défaut : les tests #458/#483 sondent des serveurs sans CORS
+    # et ne doivent PAS rougir sur le contrôle #503 (qui est testé séparément
+    # avec une origine explicite).
     import subprocess
     import sys
 
     from collegue.executor.quality_gate import _smoke_probe_script
 
-    script = _smoke_probe_script(command, paths, timeout, port=port or _free_port())
+    script = _smoke_probe_script(command, paths, timeout, port=port or _free_port(), origin=origin)
     return subprocess.run([sys.executable, "-"], input=script, text=True, capture_output=True, timeout=60)
 
 
@@ -495,6 +498,49 @@ async def test_gate_smoke_run_default_off_and_skipped_without_app(tmp_path):
     await run_quality_gate(str(bare), DIFF, ctx=None, sandbox=sandbox2, reviewer=FakeReviewer(), smoke_run=True)
     _ws, command2 = sandbox2.calls[0]
     assert "smoke" not in command2  # aucune app détectable → passe skippée
+
+
+# --- #503 (suivi v6) : CORS du smoke CONDITIONNEL à la présence d'un frontend -------
+
+
+async def test_gate_smoke_cors_disabled_without_frontend(tmp_path):
+    """#503 v6 : un backend ISOLÉ (sans frontend) ne se voit PAS exiger de CORS —
+    sinon une tâche d'init backend (app pourtant parfaite) rouge à tort."""
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "smoke run" in command  # la passe smoke est bien générée
+    assert "origin = ''" in command  # CORS désactivé (aucun frontend détecté)
+
+
+async def test_gate_smoke_cors_enforced_with_frontend(tmp_path):
+    """#503 v6 : dès qu'un frontend existe, le CORS reste EXIGÉ sur le backend
+    (intention d'origine de #503 préservée)."""
+    _write_fastapi_app(tmp_path)
+    (tmp_path / "package.json").write_text('{"name": "f", "scripts": {"build": "vite build"}}', encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "origin = 'http://localhost:5173'" in command  # CORS exigé (frontend présent)
+
+
+async def test_gate_smoke_cors_explicit_origin_respected_without_frontend(tmp_path):
+    """#503 v6 : un cors_origin EXPLICITE (override opérateur) est respecté même
+    sans frontend détecté — on ne désactive que la valeur PAR DÉFAUT."""
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path),
+        DIFF,
+        ctx=None,
+        sandbox=sandbox,
+        reviewer=FakeReviewer(),
+        smoke_run=True,
+        smoke_cors_origin="http://custom:1234",
+    )
+    _ws, command = sandbox.calls[0]
+    assert "origin = 'http://custom:1234'" in command  # override respecté
 
 
 # --- installabilité du livrable (#439) ---------------------------------------------
@@ -718,6 +764,256 @@ async def test_llm_adequacy_checker_round_trip():
     assert "JSON" in system
 
 
+# --- #526 : le diff soumis au juge retire les fichiers générés + signale la troncature ---
+
+
+def test_strip_generated_from_diff_removes_lockfiles():
+    from collegue.executor.quality_gate import strip_generated_from_diff
+
+    diff = (
+        'diff --git a/package.json b/package.json\n+ "name": "app"\n'
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        + ('+    "dep": "1.0.0",\n' * 2000)
+        + "diff --git a/src/main.tsx b/src/main.tsx\n+console.log(1)\n"
+    )
+    stripped = strip_generated_from_diff(diff)
+    assert "package-lock.json" not in stripped  # bloc généré retiré
+    assert "b/package.json\n" in stripped  # le vrai fichier reste
+    assert "src/main.tsx" in stripped
+    # diff sans format git ou vide : renvoyé tel quel (robustesse)
+    assert strip_generated_from_diff("texte libre") == "texte libre"
+    assert strip_generated_from_diff("") == ""
+
+
+def test_strip_generated_matches_basename_not_substring():
+    """#526 (durcissement revue) : match par BASENAME exact du chemin b/, pas
+    sous-chaîne — un fichier applicatif nommé comme un lock est CONSERVÉ, et un
+    rename d'un lock vers un fichier source aussi."""
+    from collegue.executor.quality_gate import strip_generated_from_diff
+
+    diff = (
+        "diff --git a/src/go.sum.parser.ts b/src/go.sum.parser.ts\n+export const x = 1\n"
+        "diff --git a/docs/Cargo.lock.md b/docs/Cargo.lock.md\n+# notes\n"
+        "diff --git a/package-lock.json b/src/app.ts\n+// renommé vers un fichier source\n"
+    )
+    stripped = strip_generated_from_diff(diff)
+    assert "go.sum.parser.ts" in stripped  # faux match évité (basename ≠ go.sum)
+    assert "Cargo.lock.md" in stripped  # faux match évité
+    assert "b/src/app.ts" in stripped  # rename vers une cible source : conservé
+    # vrai lock : retiré
+    assert strip_generated_from_diff("diff --git a/go.sum b/go.sum\n+x\n") == ""
+
+
+async def test_adequacy_diff_strips_lockfile_so_real_files_reach_judge():
+    """#526 : un gros lock file ne doit plus pousser les vrais fichiers hors de la
+    fenêtre du juge (frontend complet faux-rejeté au run v6)."""
+    from collegue.executor import LLMAdequacyChecker
+
+    seen = {}
+
+    async def fake_sample(prompt, system_prompt):
+        seen["prompt"] = prompt
+        return '{"implemented": true, "justification": "frontend complet"}'
+
+    big_lock = "diff --git a/package-lock.json b/package-lock.json\n" + ('+      "dep": "1.0.0",\n' * 3000)
+    diff = (
+        "diff --git a/index.html b/index.html\n+<div id=root></div>\n"
+        + big_lock  # ~60k chars : sans le strip, pousse les fichiers suivants hors fenêtre
+        + 'diff --git a/package.json b/package.json\n+  "scripts": { "dev": "vite" }\n'
+        + "diff --git a/vite.config.ts b/vite.config.ts\n+export default defineConfig({})\n"
+    )
+    checker = LLMAdequacyChecker(fake_sample, max_diff_chars=2000)
+    outcome = await checker.check(diff, ISSUE, ctx=None)
+    assert outcome.implemented is True
+    assert "package-lock.json" not in seen["prompt"]  # lock retiré
+    assert "b/package.json\n" in seen["prompt"]  # vrai fichier VU par le juge
+    assert "vite.config.ts" in seen["prompt"]  # vrai fichier VU par le juge
+
+
+async def test_adequacy_warns_judge_on_residual_truncation():
+    """#526 : si le diff (lock retiré) dépasse encore la fenêtre, le juge est
+    PRÉVENU (sinon il conclut à tort à l'absence d'un fichier non vu)."""
+    from collegue.executor import LLMAdequacyChecker
+
+    seen = {}
+
+    async def fake_sample(prompt, system_prompt):
+        seen["prompt"] = prompt
+        return '{"implemented": true, "justification": "ok"}'
+
+    big_src = "diff --git a/app/big.py b/app/big.py\n" + ("+x = 1\n" * 2000)
+    checker = LLMAdequacyChecker(fake_sample, max_diff_chars=500)
+    await checker.check(big_src, ISSUE, ctx=None)
+    assert "DIFF TRONQUÉ" in seen["prompt"]
+
+
+async def test_adequacy_diff_only_generated_files_is_distinct_from_empty():
+    """#526 : un diff composé UNIQUEMENT de fichiers générés n'est pas présenté
+    comme « (diff vide) » (sinon faux « livrable absent »), mais distinctement."""
+    from collegue.executor import LLMAdequacyChecker
+
+    seen = {}
+
+    async def fake_sample(prompt, system_prompt):
+        seen["prompt"] = prompt
+        return '{"implemented": false, "justification": "..."}'
+
+    checker = LLMAdequacyChecker(fake_sample)
+    await checker.check("diff --git a/package-lock.json b/package-lock.json\n+x\n", ISSUE, ctx=None)
+    assert "uniquement des fichiers générés" in seen["prompt"]
+    assert "(diff vide)" not in seen["prompt"]
+
+
+# --- adéquation des TESTS : couverture des critères chiffrables (#499) ---------------
+
+
+_ISSUE_TVA = IssueSpec(
+    number=7,
+    title="Calcul des totaux TVA/TTC",
+    acceptance_criteria=("Le total TTC doit être calculé correctement (HT + TVA).",),
+)
+# Diff qui TOUCHE un test (tests_touched True) — le cas du run v5 : un test qui
+# n'asserte que le code HTTP, jamais les montants.
+_DIFF_WITH_TEST = (
+    "diff --git a/app/tax.py b/app/tax.py\n+def compute(...): ...\n"
+    "diff --git a/tests/test_api.py b/tests/test_api.py\n+    assert resp.status_code == 200\n"
+)
+
+
+async def test_test_adequacy_blocks_when_criteria_not_asserted(tmp_path):
+    """#499 (le cas TVA ×100 du run v5) : feature présente, tests verts, MAIS
+    aucun test n'asserte le critère chiffrable → gate ROUGE."""
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(
+        implemented=True, tests_assert_criteria=False, tests_justification="aucun test n'asserte le montant TTC"
+    )
+    report = await run_quality_gate(
+        str(tmp_path),
+        _DIFF_WITH_TEST,
+        ctx=None,
+        sandbox=_green(),
+        reviewer=FakeReviewer(),
+        issue=_ISSUE_TVA,
+        adequacy_checker=checker,
+    )
+    assert report.tests_passed is True
+    assert report.adequacy_implemented is True
+    assert report.adequacy_tests_assert is False
+    assert report.passed is False  # fail-closed
+    markdown = report.to_markdown()
+    assert "#499" in markdown and "montant TTC" in markdown
+
+
+async def test_test_adequacy_pass_keeps_gate_green(tmp_path):
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(
+        implemented=True, tests_assert_criteria=True, tests_justification="le test asserte le TTC à 0.01 près"
+    )
+    report = await run_quality_gate(
+        str(tmp_path),
+        _DIFF_WITH_TEST,
+        ctx=None,
+        sandbox=_green(),
+        reviewer=FakeReviewer(),
+        issue=_ISSUE_TVA,
+        adequacy_checker=checker,
+    )
+    assert report.adequacy_tests_assert is True
+    assert report.passed is True
+
+
+async def test_test_adequacy_none_is_non_blocking(tmp_path):
+    """Rétrocompat #437 : un checker qui n'évalue pas la couverture (None) ne rend
+    jamais le gate rouge sur ce volet, et l'encart #499 est absent du rapport."""
+    from collegue.executor import FakeAdequacyChecker
+
+    checker = FakeAdequacyChecker(implemented=True)  # tests_assert_criteria laissé à None
+    report = await run_quality_gate(
+        str(tmp_path),
+        _DIFF_WITH_TEST,
+        ctx=None,
+        sandbox=_green(),
+        reviewer=FakeReviewer(),
+        issue=_ISSUE_TVA,
+        adequacy_checker=checker,
+    )
+    assert report.adequacy_tests_assert is None
+    assert report.passed is True
+    assert "#499" not in report.to_markdown()
+
+
+async def test_llm_test_adequacy_round_trip():
+    """#499 : LLMAdequacyChecker émet un 2e verdict (couverture) quand l'adéquation
+    est OK ET le diff touche des tests ET l'issue porte des critères."""
+    from collegue.executor import LLMAdequacyChecker
+
+    prompts = []
+
+    async def fake_sample(prompt, system_prompt):
+        prompts.append((prompt, system_prompt))
+        if "COUVERTURE DE TEST" in system_prompt:
+            return '{"tests_assert_criteria": false, "justification": "aucun test n\'asserte le montant TTC"}'
+        return '{"implemented": true, "justification": "service livré"}'
+
+    checker = LLMAdequacyChecker(fake_sample)
+    outcome = await checker.check(_DIFF_WITH_TEST, _ISSUE_TVA, ctx=None)
+    assert outcome.implemented is True
+    assert outcome.tests_assert_criteria is False
+    assert len(prompts) == 2  # adéquation puis couverture
+    assert "COUVERTURE DE TEST" in prompts[1][1]
+    assert _ISSUE_TVA.title in prompts[1][0]
+
+
+async def test_llm_test_adequacy_skipped_without_criteria_or_tests():
+    """Borne du coût : pas de 2e appel si le diff ne touche pas de test, ou si
+    l'issue n'a pas de critères chiffrables."""
+    from collegue.executor import LLMAdequacyChecker
+
+    calls = {"n": 0}
+
+    async def fake_sample(prompt, system_prompt):
+        calls["n"] += 1
+        return '{"implemented": true, "justification": "ok"}'
+
+    # 5a : diff SANS test → un seul appel, tests_assert reste None.
+    checker = LLMAdequacyChecker(fake_sample)
+    out_a = await checker.check("diff --git a/app/tax.py b/app/tax.py\n+x\n", _ISSUE_TVA, ctx=None)
+    assert calls["n"] == 1 and out_a.tests_assert_criteria is None
+
+    # 5b : issue SANS acceptance_criteria → un seul appel.
+    calls["n"] = 0
+    out_b = await checker.check(_DIFF_WITH_TEST, IssueSpec(number=8, title="X"), ctx=None)
+    assert calls["n"] == 1 and out_b.tests_assert_criteria is None
+
+
+def test_parse_test_adequacy_is_fail_closed():
+    from collegue.executor.quality_gate import _parse_test_adequacy
+
+    ok, _ = _parse_test_adequacy('{"tests_assert_criteria": true, "justification": "asserte le TTC"}')
+    assert ok is True
+    fenced, just = _parse_test_adequacy('```json\n{"tests_assert_criteria": false, "justification": "rien"}\n```')
+    assert fenced is False and "rien" in just
+    assert _parse_test_adequacy("blabla")[0] is False  # illisible ⇒ fail-closed
+    assert _parse_test_adequacy("")[0] is False
+
+
+def test_test_adequacy_prompt_tolerates_unmeasurable_runtime_criteria():
+    """#499 (suivi v6) : le prompt de couverture instruit le juge de NE PAS bloquer
+    sur un critère RUNTIME non vérifiable dans un diff statique (couverture %,
+    latence) — il accepte alors des tests réels substantiels (task 13 faux-rejetée
+    au run v6), tout en gardant le verrou anti-tests-vides ET le blocage des
+    critères de VALEUR vérifiables (cas TVA ×100)."""
+    from collegue.executor.quality_gate import _TEST_ADEQUACY_SYSTEM
+
+    prompt = _TEST_ADEQUACY_SYSTEM.lower()
+    assert "runtime" in prompt and "couverture de tests > x%" in prompt
+    assert "ne bloque pas" in prompt  # l'exception est explicite
+    assert "vides" in prompt or "triviaux" in prompt  # anti-rubber-stamp
+    assert "ttc" in prompt  # le verrou VALEUR (#499 origine) est conservé
+
+
 # --- signal « aucun test touché » (#437) --------------------------------------------
 
 
@@ -867,6 +1163,55 @@ async def test_expert_reviewer_maps_tool_response():
     assert request.language == "python"
 
 
+def test_diff_touches_auth_heuristic():
+    """#500 : détection (insensible casse) d'un diff qui touche l'auth."""
+    from collegue.executor.quality_gate import _diff_touches_auth
+
+    assert _diff_touches_auth("diff --git a/api.py b/api.py\n+user = Depends(get_current_user)\n")
+    assert _diff_touches_auth("diff --git a/auth.py b/auth.py\n+@app.post('/auth/login')\n")
+    assert _diff_touches_auth("+OAuth2PasswordBearer(tokenUrl='token')")
+    assert _diff_touches_auth("+import JWT")  # insensible à la casse
+    assert not _diff_touches_auth("diff --git a/calc.py b/calc.py\n+def add(a, b): return a + b\n")
+    assert not _diff_touches_auth("")
+
+
+def test_security_standard_mentions_idor():
+    """#500 : le standard `security` de la revue nomme désormais l'IDOR/ownership."""
+    from collegue.tools.code_review.config import REVIEW_STANDARDS
+
+    assert "IDOR" in REVIEW_STANDARDS["security"]
+    assert "propriétaire" in REVIEW_STANDARDS["security"]
+
+
+async def test_review_injects_ownership_consigne_when_diff_touches_auth():
+    """#500 : un diff auth déclenche l'injection de la consigne ownership dans le
+    contexte de revue — le diff complet (modèle + routes) est déjà envoyé, seul
+    le prompt manquait la consigne (IDOR clients non détecté au run v5)."""
+    auth_diff = (
+        "diff --git a/app/api/clients.py b/app/api/clients.py\n"
+        "+def list_clients(user = Depends(get_current_user)):\n+    return db.query(Client).all()\n"
+    )
+    tool = _FakeTool(_response(0.9))
+    reviewer = ExpertReviewer(tool=tool)
+    await reviewer.review(auth_diff, ctx=None, issue=ISSUE)
+    context = tool.calls[0][0].context
+    assert context.startswith(ISSUE.to_prompt())
+    assert "IDOR" in context and "propriétaire" in context
+
+
+async def test_review_no_ownership_consigne_without_auth():
+    """Pas de bruit : un diff sans auth n'injecte aucune consigne ownership."""
+    neutral = "diff --git a/calc.py b/calc.py\n+def add(a, b):\n+    return a + b\n"
+    tool = _FakeTool(_response(0.9))
+    reviewer = ExpertReviewer(tool=tool)
+    await reviewer.review(neutral, ctx=None, issue=ISSUE)
+    assert tool.calls[0][0].context == ISSUE.to_prompt()
+    # Sans issue ET sans auth → contexte None (inchangé).
+    tool2 = _FakeTool(_response(0.9))
+    await ExpertReviewer(tool=tool2).review(neutral, ctx=None, issue=None)
+    assert tool2.calls[0][0].context is None
+
+
 async def test_review_skipped_for_unsupported_language_diff():
     """#409 : un diff sans fichier de code supporté (SQL seul) → revue IGNORÉE et
     NON bloquante ; l'outil n'est PAS appelé (plus de faux 0.00 sur du non-code).
@@ -945,6 +1290,25 @@ def test_missing_modules_parsed_and_deduplicated():
     assert missing_modules(output) == ["httpx", "email_validator", "multipart", "a"]
     assert missing_modules("") == []
     assert missing_modules("FAILED tests/test_x.py - assert 1 == 2") == []
+
+
+def test_selfdiagnosed_packages_parsed():
+    """#501 : les messages auto-diagnostiqués nomment un PAQUET (pas un module)."""
+    from collegue.executor.quality_gate import selfdiagnosed_packages
+
+    multipart = (
+        'RuntimeError: Form data requires "python-multipart" to be installed. '
+        "You can install it with pip install python-multipart"
+    )
+    assert selfdiagnosed_packages(multipart) == ["python-multipart"]  # dédup guillemets + pip install
+    httpx = "RuntimeError: The starlette.testclient module requires the httpx package to be installed."
+    assert selfdiagnosed_packages(httpx) == ["httpx"]
+    assert selfdiagnosed_packages("RuntimeError: please install email-validator to enable this") == ["email-validator"]
+    assert selfdiagnosed_packages("pip install -r requirements.txt") == []  # flag jamais capturé
+    assert selfdiagnosed_packages("please install the dependency manually") == []  # mot générique (denylist)
+    assert selfdiagnosed_packages("pip install git+https://x/y.git") == []  # « git » en denylist
+    assert selfdiagnosed_packages("E   ModuleNotFoundError: No module named 'httpx'") == []  # autre chemin
+    assert selfdiagnosed_packages("") == []
 
 
 def test_requirement_for_module_table_and_heuristic():
@@ -1314,6 +1678,146 @@ def test_requirements_removed_markdown_neutralizes_injection():
     assert "```" not in markdown.split("Lignes supprimées : ", 1)[1].splitlines()[0]
 
 
+# --- garde fichiers parasites (#508) -------------------------------------------------
+
+# Diff committant plusieurs fichiers NEUFS (marqueur `new file mode`) : 5 parasites,
+# un fichier de code légitime, et un fichier MODIFIÉ (sans `new file mode`).
+_PARASITE_DIFF = (
+    "diff --git a/server.log b/server.log\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+    "diff --git a/.env b/.env\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/.env\n@@ -0,0 +1 @@\n+SECRET=x\n"
+    "diff --git a/data/app.sqlite3 b/data/app.sqlite3\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/data/app.sqlite3\n@@ -0,0 +1 @@\n+blob\n"
+    "diff --git a/frontend/node_modules/x/index.js b/frontend/node_modules/x/index.js\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/frontend/node_modules/x/index.js\n@@ -0,0 +1 @@\n+module\n"
+    "diff --git a/app/__pycache__/m.pyc b/app/__pycache__/m.pyc\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/app/__pycache__/m.pyc\n@@ -0,0 +1 @@\n+bytecode\n"
+    "diff --git a/app/api.py b/app/api.py\n"
+    "new file mode 100644\n"
+    "--- /dev/null\n+++ b/app/api.py\n@@ -0,0 +1 @@\n+def f(): ...\n"
+    "diff --git a/app/db.py b/app/db.py\n"
+    "--- a/app/db.py\n+++ b/app/db.py\n@@ -1 +1 @@\n-old\n+new\n"
+)
+
+
+def test_forbidden_committed_files_flags_new_artifacts():
+    """#508 : ne retient que les fichiers NEUFS au chemin interdit ; ignore le code
+    légitime ET un fichier modifié (sans `new file mode`)."""
+    from collegue.executor import forbidden_committed_files
+
+    assert forbidden_committed_files(_PARASITE_DIFF) == (
+        "server.log",
+        ".env",
+        "data/app.sqlite3",
+        "frontend/node_modules/x/index.js",
+        "app/__pycache__/m.pyc",
+    )
+    assert forbidden_committed_files("") == ()
+
+
+def test_forbidden_committed_files_ignores_modified_tracked_file():
+    """#508 : un parasite déjà SUIVI et seulement modifié (pas de `new file mode`)
+    n'est pas flagué — on ne vise que les AJOUTS."""
+    from collegue.executor import forbidden_committed_files
+
+    modified_log = "diff --git a/config.log b/config.log\n--- a/config.log\n+++ b/config.log\n@@ -1 +1 @@\n-a\n+b\n"
+    assert forbidden_committed_files(modified_log) == ()
+
+
+def test_forbidden_committed_files_keeps_legit_example_env():
+    """#508 : les gabarits `.env.*` versionnés sciemment (example/sample/template/
+    dist) ne sont PAS des secrets — non flagués."""
+    from collegue.executor import forbidden_committed_files
+
+    def _add(path):
+        return f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+SECRET=x\n"
+
+    assert forbidden_committed_files(_add(".env.example")) == ()
+    assert forbidden_committed_files(_add(".env.sample")) == ()
+    assert forbidden_committed_files(_add(".env.template")) == ()
+    assert forbidden_committed_files(_add(".env.dist")) == ()
+
+
+def test_forbidden_committed_files_flags_env_secret_variants_and_keys():
+    """#508 : les variantes `.env` de SECRETS (.env.local/.env.production) et les
+    clés/certs privés (.pem/.key) sont flagués (renforcement post-revue)."""
+    from collegue.executor import forbidden_committed_files
+
+    def _add(path):
+        return f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n"
+
+    assert forbidden_committed_files(_add(".env.local")) == (".env.local",)
+    assert forbidden_committed_files(_add(".env.production")) == (".env.production",)
+    assert forbidden_committed_files(_add("certs/server.pem")) == ("certs/server.pem",)
+    assert forbidden_committed_files(_add("secrets/id_rsa.key")) == ("secrets/id_rsa.key",)
+
+
+async def test_forbidden_files_signals_but_does_not_block_by_default():
+    """#508 : par défaut le gate SIGNALE (rapport) sans rougir — comportement
+    non bloquant conforme à l'issue."""
+    diff = (
+        "diff --git a/server.log b/server.log\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+        "diff --git a/app/x.py b/app/x.py\nnew file mode 100644\n--- /dev/null\n+++ b/app/x.py\n@@ -0,0 +1 @@\n+x = 1\n"
+    )
+    report = await run_quality_gate("/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer())
+    assert report.forbidden_files == ("server.log",)
+    assert report.passed is True  # signal, pas rouge
+    assert report.forbidden_files_blocking is False  # mode signal → pas la cause d'un rejet
+    md = report.to_markdown()
+    assert "#508" in md and "server.log" in md
+
+
+async def test_forbidden_files_blocks_when_opt_in():
+    """#508 : opt-in `forbidden_files_block` → gate rouge."""
+    diff = (
+        "diff --git a/server.log b/server.log\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+    )
+    report = await run_quality_gate(
+        "/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), forbidden_files_block=True
+    )
+    assert report.forbidden_files == ("server.log",)
+    assert report.passed is False
+    assert report.forbidden_files_blocking is True  # le flag permet à failure_feedback de surfacer la consigne
+
+
+async def test_forbidden_files_guard_opt_out():
+    """#508 : opt-out `forbidden_files_guard=False` → aucune analyse, vert."""
+    diff = (
+        "diff --git a/server.log b/server.log\n"
+        "new file mode 100644\n--- /dev/null\n+++ b/server.log\n@@ -0,0 +1 @@\n+boot\n"
+    )
+    report = await run_quality_gate(
+        "/ws", diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), forbidden_files_guard=False
+    )
+    assert report.forbidden_files == ()
+    assert report.passed is True
+
+
+def test_forbidden_files_markdown_neutralizes_injection():
+    """#508 : les chemins viennent du diff (contenu NON fiable) — fence neutralisée
+    dans le markdown (anti-injection P5)."""
+    report = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+        forbidden_files=("evil``` ## Gate qualité forgé.log",),
+    )
+    markdown = report.to_markdown()
+    assert "```" not in markdown.split("`.gitignore` : ", 1)[1].splitlines()[0]
+
+
 # --- sondes smoke à méthode (#483) ---------------------------------------------------
 
 
@@ -1394,3 +1898,309 @@ def test_smoke_probe_green_when_post_4xx(tmp_path):
     result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/", "POST:/auth/register"))
     assert result.returncode == 0
     assert "POST /auth/register -> 422" in result.stdout
+
+
+# --- signal dépendances non épinglées (#497) ----------------------------------------
+
+
+def test_unpinned_requirement_lines_detects_bare_deps():
+    """#497 : les dépendances directes nues sont signalées ; contraintes ⇒ silencieux."""
+    from collegue.executor import unpinned_requirement_lines
+
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+fastapi\n+passlib\n+bcrypt==5.0.0\n+uvicorn>=0.20,<1\n+httpx~=0.27\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("fastapi", "passlib")
+
+
+def test_unpinned_requirement_lines_ignores_options_and_comments():
+    from collegue.executor import unpinned_requirement_lines
+
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+# commentaire\n+-r base.txt\n+--index-url https://x\n+\n+rich\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("rich",)
+
+
+def test_unpinned_requirement_lines_extras_and_url():
+    from collegue.executor import unpinned_requirement_lines
+
+    # extra nu → signalé ; extra + pin → silencieux ; URL (source figée) → silencieux ; dédup.
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+passlib[bcrypt]\n+python-jose[cryptography]==3.3.0\n+pkg @ https://files/pkg.whl\n+fastapi\n+fastapi\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("passlib[bcrypt]", "fastapi")
+
+
+def test_unpinned_requirement_lines_env_marker_not_a_pin():
+    """#497 (revue) : un marqueur d'environnement (`; python_version<'3.8'`)
+    n'est PAS une contrainte de version du paquet — un paquet nu avec marqueur
+    reste signalé."""
+    from collegue.executor import unpinned_requirement_lines
+
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "+importlib-metadata; python_version<'3.8'\n+typing-extensions==4.0; python_version<'3.10'\n"
+    )
+    assert unpinned_requirement_lines(diff) == ("importlib-metadata; python_version<'3.8'",)
+
+
+def test_unpinned_requirement_lines_monorepo_and_noise():
+    from collegue.executor import unpinned_requirement_lines
+
+    nested = (
+        "diff --git a/backend/requirements.txt b/backend/requirements.txt\n"
+        "--- a/backend/requirements.txt\n+++ b/backend/requirements.txt\n+fastapi\n"
+    )
+    assert unpinned_requirement_lines(nested) == ("fastapi",)
+    code = "diff --git a/app/x.py b/app/x.py\n--- a/app/x.py\n+++ b/app/x.py\n+fastapi\n"
+    assert unpinned_requirement_lines(code) == ()
+    assert unpinned_requirement_lines("") == ()
+
+
+async def test_unpinned_signal_is_not_blocking(tmp_path):
+    """#497 : signal NON bloquant par défaut — le gate reste vert, la PR liste."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n+fastapi\n"
+    )
+    report = await run_quality_gate(
+        str(tmp_path), diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE
+    )
+    assert report.passed is True
+    assert report.requirements_unpinned == ("fastapi",)
+    assert "non épinglées" in report.to_markdown()
+
+
+async def test_pin_guard_opt_out(tmp_path):
+    diff = (
+        "diff --git a/requirements.txt b/requirements.txt\n--- a/requirements.txt\n+++ b/requirements.txt\n+fastapi\n"
+    )
+    report = await run_quality_gate(
+        str(tmp_path), diff, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE, pin_guard=False
+    )
+    assert report.requirements_unpinned == ()
+
+
+def test_to_markdown_mentions_unpinned_requirements():
+    report = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+        requirements_unpinned=("fastapi", "passlib"),
+    )
+    markdown = report.to_markdown()
+    assert "non épinglées" in markdown and "`fastapi`" in markdown and "`passlib`" in markdown
+    clean = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="ok",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+    )
+    assert "non épinglées" not in clean.to_markdown()
+
+
+async def test_remediation_fixes_starlette_multipart_form(tmp_path):
+    """#501 (le cas du run v5 T2) : « Form data requires "python-multipart" » —
+    PAS une ModuleNotFoundError — réparé en un cycle, zéro LLM."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    red = SandboxResult(
+        exit_code=1,
+        stdout='E   RuntimeError: Form data requires "python-multipart" to be installed.\nERROR tests/test_auth.py\n',
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="3 passed", stderr="")
+    sandbox = _SeqSandbox([red, green])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.passed is True
+    assert report.requirements_added == ("python-multipart",)
+    assert "python-multipart" in (tmp_path / "requirements.txt").read_text(encoding="utf-8")
+    assert len(sandbox.calls) == 2  # un seul aller-retour, zéro cycle LLM
+
+
+async def test_remediation_fixes_starlette_httpx_package_form(tmp_path):
+    """#501 : forme SANS guillemets « requires the httpx package to be installed »."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    red = SandboxResult(
+        exit_code=1,
+        stdout="E   RuntimeError: The starlette.testclient module requires the httpx package to be installed.\n",
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="2 passed", stderr="")
+    sandbox = _SeqSandbox([red, green])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ("httpx",)
+    assert report.passed is True
+    assert len(sandbox.calls) == 2
+
+
+async def test_remediation_selfdiagnosed_skips_declared_and_local(tmp_path):
+    """#501 : garde-fous — paquet déjà déclaré (dédup) et module local (dependency
+    confusion) ne sont jamais ajoutés."""
+    # déjà déclaré → pas de doublon
+    (tmp_path / "requirements.txt").write_text("fastapi\npython-multipart\n", encoding="utf-8")
+    red = SandboxResult(exit_code=1, stdout='E   RuntimeError: Form data requires "python-multipart"...\n', stderr="")
+    sandbox = _SeqSandbox([red])
+    report = await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    assert report.requirements_added == ()
+
+    # module local du projet → jamais installé depuis PyPI
+    work2 = tmp_path / "w2"
+    work2.mkdir()
+    (work2 / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (work2 / "utils.py").write_text("")
+    red2 = SandboxResult(exit_code=1, stdout="E   RuntimeError: please install utils to continue\n", stderr="")
+    report2 = await run_quality_gate(str(work2), DIFF, ctx=None, sandbox=_SeqSandbox([red2]), reviewer=FakeReviewer())
+    assert report2.requirements_added == ()
+
+
+# --- intégration cross-origin / CORS (#503) -----------------------------------------
+
+
+def test_smoke_probe_script_embeds_origin():
+    """#503 : l'origine cross-origin est bakée par défaut (signature) et le
+    contrôle Access-Control-Allow-Origin est présent dans la sonde."""
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script("python serve.py", ("/",), 5.0)
+    assert "localhost:5173" in script
+    assert "Access-Control-Allow-Origin" in script
+    compile(script, "<smoke>", "exec")
+
+
+def test_smoke_probe_script_origin_disabled_when_empty():
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    script = _smoke_probe_script("python serve.py", ("/",), 5.0, origin="")
+    assert "localhost:5173" not in script
+    compile(script, "<smoke>", "exec")
+
+
+def _cors_server(tmp_path, port, *, get_status=200, acao_header=None):
+    header = f'        self.send_header("Access-Control-Allow-Origin", "{acao_header}")\n' if acao_header else ""
+    body = (
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        f"        self.send_response({get_status})\n"
+        f"{header}"
+        "        self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        f"HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n"
+    )
+    server = tmp_path / "serve.py"
+    server.write_text(body, encoding="utf-8")
+    return server
+
+
+def test_smoke_probe_red_when_cors_absent(tmp_path):
+    """#503 (le cas du run v5) : GET 200 mais aucun Access-Control-Allow-Origin
+    → l'UI serait bloquée → smoke ROUGE."""
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=200, acao_header=None)
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 1
+    assert "CORS ABSENT" in result.stdout
+
+
+def test_smoke_probe_green_when_cors_wildcard(tmp_path):
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=200, acao_header="*")
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 0
+
+
+def test_smoke_probe_green_when_cors_echoes_origin(tmp_path):
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=200, acao_header="http://localhost:5173")
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 0
+
+
+def test_smoke_probe_cors_ignored_on_4xx(tmp_path):
+    """#503 : une route protégée (401) sans CORS n'est PAS un faux rouge CORS —
+    le contrôle ne s'applique qu'aux réponses < 400."""
+    import sys
+
+    port = _free_port()
+    server = _cors_server(tmp_path, port, get_status=401, acao_header=None)
+    result = _run_probe(f"{sys.executable} {server}", port=port, paths=("/",), origin="http://localhost:5173")
+    assert result.returncode == 0  # 401 < 500 et CORS exempté sur >= 400
+
+
+async def test_gate_smoke_threads_cors_origin(tmp_path):
+    """#503 : le défaut de signature traverse run_quality_gate jusqu'à la commande
+    (même sans passer par _gate_options) — DÈS LORS qu'un frontend est présent
+    (#503 suivi v6 : le CORS n'est exigé que si un frontend existe)."""
+    _write_fastapi_app(tmp_path)
+    (tmp_path / "package.json").write_text('{"name": "f", "scripts": {"build": "vite build"}}', encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "localhost:5173" in command
+    assert "Access-Control-Allow-Origin" in command
+
+
+# --- cache pip persistant opt-in (#496) ---------------------------------------------
+
+
+def test_deps_install_prelude_use_cache_drops_no_cache_dir(tmp_path):
+    from collegue.executor.quality_gate import deps_install_prelude
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    default = deps_install_prelude(str(tmp_path))
+    assert "--no-cache-dir" in default
+    cached = deps_install_prelude(str(tmp_path), use_cache=True)
+    assert "--no-cache-dir" not in cached
+    assert "pip install --user" in cached  # l'install ne disparaît pas
+
+
+def test_installability_command_use_cache(tmp_path):
+    from collegue.executor import installability_command
+
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    cmd = installability_command(str(tmp_path), use_cache=True)
+    assert "--no-cache-dir" not in cmd
+    assert cmd.count("--retries 5") == 2 and cmd.count("--timeout 30") == 2  # retries #461 intacts
+
+
+class _CacheSandbox(_FakeSandbox):
+    """FakeSandbox qui annonce un cache pip monté (dérivation run_quality_gate)."""
+
+    def __init__(self, result=None):
+        super().__init__(result or SandboxResult(exit_code=0, stdout="2 passed", stderr=""))
+        self.pip_cache_dir = "/host/cache"
+
+
+async def test_gate_keeps_no_cache_dir_without_sandbox_cache(tmp_path):
+    """Défaut (sandbox sans cache) : --no-cache-dir conservé (comportement #414)."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _green()  # pas d'attribut pip_cache_dir
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "--no-cache-dir" in command
+
+
+async def test_gate_uses_cache_when_sandbox_mounts_it(tmp_path):
+    """#496 : si le sandbox monte un cache, le gate retire --no-cache-dir."""
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    sandbox = _CacheSandbox()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "--no-cache-dir" not in command

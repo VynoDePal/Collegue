@@ -86,6 +86,16 @@ _INFRA_NOISE_SIGNATURES = (
     TIMEOUT_NOTE,
 )
 
+# #498 : un crash du process AGENT (coder OpenHands) AVANT tout appel LLM a une
+# signature nette — traceback d'import dans les logs (image/runner cassé, ex.
+# lmnr 0.7.53 incompatible au faux départ FacNor v5) ET 0 token consommé. C'est
+# un aléa d'INFRASTRUCTURE (cause globale, indépendante de la tâche), pas un
+# échec fonctionnel : il ne doit pas décompter le budget de tentatives.
+_IMPORT_CRASH_SIGNATURES = (
+    "ModuleNotFoundError",
+    "ImportError",
+)
+
 
 def is_infra_noise(feedback: str) -> bool:
     """Vrai si ``feedback`` ressemble à un aléa d'infrastructure (#459).
@@ -143,6 +153,50 @@ def is_infra_gate_failure(outcome: "ExecutionOutcome") -> bool:
     return False
 
 
+def is_infra_agent_crash(outcome: "ExecutionOutcome") -> bool:
+    """Vrai si un ``agent_error`` est un crash d'IMPORT pré-LLM (#498).
+
+    Signature : ``reason == agent_error`` ET 0 token consommé (aucun appel LLM
+    utile) ET un traceback d'import (``ModuleNotFoundError``/``ImportError``)
+    dans les logs de l'agent. C'est un aléa d'infrastructure GLOBAL (image/runner
+    sandbox cassé, ex. faux départ FacNor v5 : lmnr 0.7.53 incompatible) — gracié
+    comme un aléa de gate (#461), borné par ``MAX_INFRA_GATE_GRACE`` côté pilote.
+
+    Un ``agent_error`` FONCTIONNEL (l'agent a appelé le LLM puis échoué) consomme
+    des tokens → jamais classé crash d'infra.
+    """
+    if outcome.reason != REASON_AGENT_ERROR:
+        return False
+    result = getattr(outcome.execution, "agent_result", None)
+    if result is None:
+        return False
+    if int(getattr(result, "total_tokens", 0) or 0) > 0:
+        return False
+    logs = getattr(result, "logs", "") or ""
+    return any(sig in logs for sig in _IMPORT_CRASH_SIGNATURES)
+
+
+def agent_crash_signature(logs: str) -> str:
+    """Identité STABLE d'un crash d'import pour la détection de crash-loop (#498).
+
+    Hacher la queue brute des logs serait fragile : codes ANSI, bannière/version
+    OpenHands, warnings horodatés et chemins de workspace ``/tmp/collegue-exec-…``
+    randomisés font varier les octets à chaque crash → deux crashs de la MÊME
+    cause produiraient des hash différents et le fail-fast ne tirerait jamais. On
+    isole donc la (dernière) ligne d'exception d'import — ``ModuleNotFoundError:
+    No module named 'lmnr'`` — qui ne porte ni PID ni adresse ni chemin variable.
+    À défaut, repli sur les lignes d'import du traceback, sinon la queue bornée.
+    """
+    lines = [ln.strip() for ln in (logs or "").splitlines() if ln.strip()]
+    crash_lines = [ln for ln in lines if ln.startswith(_IMPORT_CRASH_SIGNATURES)]
+    if crash_lines:
+        return crash_lines[-1]
+    import_lines = [ln for ln in lines if any(sig in ln for sig in _IMPORT_CRASH_SIGNATURES)]
+    if import_lines:
+        return import_lines[-1]
+    return log_tail(logs, 1000)
+
+
 # #478 : marqueur de troncature du short summary pytest (ASCII « ... » — distinct
 # du « … » de log_tail, qui est un autre chemin).
 _PYTEST_TRUNCATION = "..."
@@ -174,6 +228,93 @@ def _detruncate_summary_line(line: str, output: str) -> str:
     return line
 
 
+def _summary_line_path(line: str) -> str:
+    """Chemin du fichier de test d'une ligne de short summary pytest (#507).
+
+    Forme : ``FAILED <path>::<test> - <msg>`` ou ``ERROR <path> - <msg>`` — le
+    path est le token qui suit ``FAILED ``/``ERROR ``, borné au premier ``::``
+    (nodeid) puis à l'espace (path nu « ERROR p - m »). Best-effort : chaîne vide
+    si non reconnaissable (le label sera alors omis).
+    """
+    for prefix in ("FAILED ", "ERROR "):
+        if line.startswith(prefix):
+            token = line[len(prefix) :].lstrip()
+            token = token.split("::", 1)[0].split(" ", 1)[0]
+            return token.strip()
+    return ""
+
+
+def _label_failure_line(line: str, changed: frozenset[str]) -> str:
+    """Étiquette une ligne FAILED/ERROR selon la PROVENANCE du test (#507).
+
+    Croise le fichier de test en échec avec le périmètre du diff de la tentative
+    (``files_changed``) : un test que le diff N'A PAS touché et qui casse = une
+    RÉGRESSION sur l'existant (le coder doit corriger SON code, pas le test).
+    Étiquette posée en SUFFIXE — jamais en préfixe : :func:`is_infra_noise` et
+    :func:`is_infra_gate_failure` testent ``startswith("FAILED "/"ERROR ")`` ;
+    un préfixe reclasserait à tort un échec fonctionnel en bruit infra et le
+    gracierait (#461). Best-effort : sans périmètre connu ou path illisible, la
+    ligne est relayée inchangée (pas de label spéculatif).
+    """
+    if not changed:
+        return line
+    path = _summary_line_path(line)
+    if not path:
+        return line
+    # Match tolérant au sous-répertoire : en monorepo, un GATE_TEST_COMMAND du type
+    # « cd backend && pytest » émet des nodeids relatifs au sous-dir (`tests/x.py`)
+    # alors que files_changed (git --name-only) est TOUJOURS racine-relatif
+    # (`backend/tests/x.py`). Le path pytest est donc un suffixe (frontière `/`) du
+    # path git. On n'autorise que ce sens (pytest plus court) : appeler une vraie
+    # régression « test de la tâche » est sans danger (la ligne FAILED reste
+    # relayée), tandis que l'inverse — étiqueter à tort RÉGRESSION un test que
+    # l'agent vient d'ajouter — lui ordonnerait de ne pas le corriger.
+    if path in changed or any(c.endswith("/" + path) for c in changed):
+        return f"{line} [tests de la tâche]"
+    return (
+        f"{line} [RÉGRESSION tests pré-existants — ton diff a cassé l'existant : "
+        "ne modifie pas ces tests, corrige ton code]"
+    )
+
+
+# #507 (suivi v6) : bruit pip NON-fatal (exit 0). Un conflit de version avec une
+# dépendance de l'IMAGE sandbox (openhands & co — hors périmètre du livrable) est
+# signalé par pip SANS bloquer ; ce bruit NOIE le feedback de repli (run v6 : la
+# tâche racine a brûlé 3 tentatives, le coder empilant des pins inutiles au lieu de
+# voir le vrai motif). On le retire du diagnostic RELAYÉ au coder. Sûr vis-à-vis de
+# la grâce #461 : AUCUNE de ces signatures n'est une signature réseau
+# (_INFRA_NOISE_SIGNATURES), et on ne touche JAMAIS ``report.test_output``.
+_PIP_NOISE_SIGNATURES = (
+    "pip's dependency resolver does not currently take into account",
+    "[notice] A new release of pip is available",
+    "[notice] To update, run:",
+    "WARNING: The script ",
+    "Consider adding this directory to PATH",
+    "Defaulting to user installation because normal site-packages is not writeable",
+)
+
+
+def filter_pip_noise(output: str) -> str:
+    """Retire les lignes de bruit pip NON-fatal d'un diagnostic (#507).
+
+    Cible : avertissements du resolver, notices de mise à jour pip, warnings de
+    PATH, et la ligne de conflit ``X requires Y, but you have Z which is
+    incompatible.`` (deps de l'image, hors livrable). Ne retire AUCUNE signature
+    réseau (#461) ni ligne pytest ``FAILED``/``ERROR``.
+    """
+    if not output:
+        return output
+    kept = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if any(sig in stripped for sig in _PIP_NOISE_SIGNATURES):
+            continue
+        if "but you have" in stripped and "incompatible" in stripped:  # conflit de version pip
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def failure_feedback(outcome: "ExecutionOutcome") -> str:
     """Synthèse **courte et actionnable** d'un échec, pour la tentative suivante (#424).
 
@@ -191,6 +332,16 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     Adéquation refusée (#437) : les tests sont VERTS — le motif utile est la
     justification du contrôle (« la feature n'est pas implémentée »), pas la
     sortie des tests.
+
+    Fichiers parasites bloquants (#508) : quand la garde bloquante a fait rougir le
+    gate, le motif utile est la liste des fichiers à RETIRER — la sortie des tests
+    (souvent verte) masquerait cette consigne (run v6 : `server.log` jamais signalé,
+    tâche racine bloquée 3 tentatives).
+
+    Provenance (#507) : chaque ligne FAILED/ERROR est étiquetée selon que le
+    fichier de test appartient ou non au diff de la tentative (``files_changed``)
+    — le coder distingue ainsi une RÉGRESSION qu'il a introduite sur des tests
+    pré-existants d'un défaut de sa propre feature.
     """
     if outcome.error:
         return log_tail(outcome.error, 400)
@@ -198,6 +349,17 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
     if report is not None and getattr(report, "adequacy_implemented", None) is False:
         justification = getattr(report, "adequacy_justification", "") or "le diff n'implémente pas l'issue"
         return ("ADÉQUATION REFUSÉE — le diff ne réalise pas l'issue : " + justification)[:700]
+    if report is not None and getattr(report, "adequacy_tests_assert", None) is False:
+        # #499 : feature présente, tests VERTS, mais un critère chiffrable n'est
+        # asserté par aucun test. La sortie pytest (verte) serait un feedback
+        # trompeur — le motif UTILE est le critère non couvert, pour que l'agent
+        # ajoute l'assertion au lieu de boucler sans converger (cf. #424).
+        justification = getattr(report, "adequacy_tests_justification", "") or "un critère chiffrable n'est pas testé"
+        return (
+            "COUVERTURE DE TEST INSUFFISANTE (#499) — un critère chiffrable de l'issue n'est asserté par "
+            "aucun test : " + justification + ". Ajoute une assertion sur la VALEUR/le CALCUL attendu "
+            "(pas seulement un code HTTP 200)."
+        )[:700]
     removed = tuple(getattr(report, "requirements_removed", ()) or ()) if report is not None else ()
     if removed:
         # #482 : le motif utile est la liste NOMINATIVE des lignes perdues —
@@ -207,6 +369,19 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
             "REQUIREMENTS APPEND-ONLY (#482) — lignes de requirements.txt présentes sur la base et "
             "SUPPRIMÉES par ton diff : " + " ; ".join(removed[:10]) + ". Ré-ajoute-les telles quelles "
             "(n'en supprime aucune) et conserve le reste de ton travail."
+        )[:700]
+    if report is not None and getattr(report, "forbidden_files_blocking", False):
+        # #508 : le gate est rouge PARCE QUE le diff committe des fichiers parasites
+        # (garde bloquante opt-in). Sans cette branche, failure_feedback retombait
+        # sur la sortie des tests — souvent VERTE, terminée par du bruit pip — et
+        # l'agent ne savait JAMAIS qu'il fallait retirer ces fichiers (run v6 : la
+        # tâche racine a brûlé ses 3 tentatives sur un `server.log` jamais signalé).
+        forbidden = tuple(getattr(report, "forbidden_files", ()) or ())
+        return (
+            "FICHIERS PARASITES COMMITTÉS (#508) — ton diff ajoute des fichiers qui n'ont rien à "
+            "faire dans le livrable (artefacts d'exécution / secrets / bases locales / dépendances "
+            "vendorées) et le gate les REFUSE : " + " ; ".join(forbidden[:10]) + ". Retire-les du "
+            "commit (git rm --cached) et ajoute leurs motifs au .gitignore ; conserve le reste de ton travail."
         )[:700]
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
@@ -219,8 +394,22 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
         if fails:
             # #478 : filet — le diagnostic complet est repris du traceback quand
             # le short summary a été tronqué à la largeur du terminal.
-            return " ; ".join(_detruncate_summary_line(line, output) for line in fails[:6])[:700]
-        return log_tail(output, 400)
+            # #507 : ORDRE crucial — dé-troncature D'ABORD (son `.endswith("...")`
+            # doit voir la ligne brute), étiquetage de provenance ENSUITE.
+            changed = frozenset(getattr(outcome.execution, "files_changed", ()) or ())
+            labelled = (_label_failure_line(_detruncate_summary_line(line, output), changed) for line in fails[:6])
+            return " ; ".join(labelled)[:700]
+        # #507 : pas de ligne pytest exploitable → on relaie la queue, MAIS nettoyée
+        # du bruit pip non-fatal (conflit avec les deps de l'image, notices). Si tout
+        # était du bruit, on le DIT au lieu de relayer un diagnostic trompeur. La
+        # signature réseau (#461) survit au filtre → la grâce reste armée.
+        cleaned = filter_pip_noise(output)
+        if not cleaned.strip():
+            return (
+                "Gate rouge sans diagnostic pytest exploitable — la sortie ne contenait que du bruit "
+                "d'installation pip non bloquant (conflit avec des dépendances de l'image, hors livrable)."
+            )
+        return log_tail(cleaned, 400)
     return log_tail(outcome.execution.agent_result.logs, 400)
 
 
