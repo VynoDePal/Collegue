@@ -721,6 +721,106 @@ async def test_llm_adequacy_checker_round_trip():
     assert "JSON" in system
 
 
+# --- #526 : le diff soumis au juge retire les fichiers générés + signale la troncature ---
+
+
+def test_strip_generated_from_diff_removes_lockfiles():
+    from collegue.executor.quality_gate import strip_generated_from_diff
+
+    diff = (
+        'diff --git a/package.json b/package.json\n+ "name": "app"\n'
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        + ('+    "dep": "1.0.0",\n' * 2000)
+        + "diff --git a/src/main.tsx b/src/main.tsx\n+console.log(1)\n"
+    )
+    stripped = strip_generated_from_diff(diff)
+    assert "package-lock.json" not in stripped  # bloc généré retiré
+    assert "b/package.json\n" in stripped  # le vrai fichier reste
+    assert "src/main.tsx" in stripped
+    # diff sans format git ou vide : renvoyé tel quel (robustesse)
+    assert strip_generated_from_diff("texte libre") == "texte libre"
+    assert strip_generated_from_diff("") == ""
+
+
+def test_strip_generated_matches_basename_not_substring():
+    """#526 (durcissement revue) : match par BASENAME exact du chemin b/, pas
+    sous-chaîne — un fichier applicatif nommé comme un lock est CONSERVÉ, et un
+    rename d'un lock vers un fichier source aussi."""
+    from collegue.executor.quality_gate import strip_generated_from_diff
+
+    diff = (
+        "diff --git a/src/go.sum.parser.ts b/src/go.sum.parser.ts\n+export const x = 1\n"
+        "diff --git a/docs/Cargo.lock.md b/docs/Cargo.lock.md\n+# notes\n"
+        "diff --git a/package-lock.json b/src/app.ts\n+// renommé vers un fichier source\n"
+    )
+    stripped = strip_generated_from_diff(diff)
+    assert "go.sum.parser.ts" in stripped  # faux match évité (basename ≠ go.sum)
+    assert "Cargo.lock.md" in stripped  # faux match évité
+    assert "b/src/app.ts" in stripped  # rename vers une cible source : conservé
+    # vrai lock : retiré
+    assert strip_generated_from_diff("diff --git a/go.sum b/go.sum\n+x\n") == ""
+
+
+async def test_adequacy_diff_strips_lockfile_so_real_files_reach_judge():
+    """#526 : un gros lock file ne doit plus pousser les vrais fichiers hors de la
+    fenêtre du juge (frontend complet faux-rejeté au run v6)."""
+    from collegue.executor import LLMAdequacyChecker
+
+    seen = {}
+
+    async def fake_sample(prompt, system_prompt):
+        seen["prompt"] = prompt
+        return '{"implemented": true, "justification": "frontend complet"}'
+
+    big_lock = "diff --git a/package-lock.json b/package-lock.json\n" + ('+      "dep": "1.0.0",\n' * 3000)
+    diff = (
+        "diff --git a/index.html b/index.html\n+<div id=root></div>\n"
+        + big_lock  # ~60k chars : sans le strip, pousse les fichiers suivants hors fenêtre
+        + 'diff --git a/package.json b/package.json\n+  "scripts": { "dev": "vite" }\n'
+        + "diff --git a/vite.config.ts b/vite.config.ts\n+export default defineConfig({})\n"
+    )
+    checker = LLMAdequacyChecker(fake_sample, max_diff_chars=2000)
+    outcome = await checker.check(diff, ISSUE, ctx=None)
+    assert outcome.implemented is True
+    assert "package-lock.json" not in seen["prompt"]  # lock retiré
+    assert "b/package.json\n" in seen["prompt"]  # vrai fichier VU par le juge
+    assert "vite.config.ts" in seen["prompt"]  # vrai fichier VU par le juge
+
+
+async def test_adequacy_warns_judge_on_residual_truncation():
+    """#526 : si le diff (lock retiré) dépasse encore la fenêtre, le juge est
+    PRÉVENU (sinon il conclut à tort à l'absence d'un fichier non vu)."""
+    from collegue.executor import LLMAdequacyChecker
+
+    seen = {}
+
+    async def fake_sample(prompt, system_prompt):
+        seen["prompt"] = prompt
+        return '{"implemented": true, "justification": "ok"}'
+
+    big_src = "diff --git a/app/big.py b/app/big.py\n" + ("+x = 1\n" * 2000)
+    checker = LLMAdequacyChecker(fake_sample, max_diff_chars=500)
+    await checker.check(big_src, ISSUE, ctx=None)
+    assert "DIFF TRONQUÉ" in seen["prompt"]
+
+
+async def test_adequacy_diff_only_generated_files_is_distinct_from_empty():
+    """#526 : un diff composé UNIQUEMENT de fichiers générés n'est pas présenté
+    comme « (diff vide) » (sinon faux « livrable absent »), mais distinctement."""
+    from collegue.executor import LLMAdequacyChecker
+
+    seen = {}
+
+    async def fake_sample(prompt, system_prompt):
+        seen["prompt"] = prompt
+        return '{"implemented": false, "justification": "..."}'
+
+    checker = LLMAdequacyChecker(fake_sample)
+    await checker.check("diff --git a/package-lock.json b/package-lock.json\n+x\n", ISSUE, ctx=None)
+    assert "uniquement des fichiers générés" in seen["prompt"]
+    assert "(diff vide)" not in seen["prompt"]
+
+
 # --- adéquation des TESTS : couverture des critères chiffrables (#499) ---------------
 
 

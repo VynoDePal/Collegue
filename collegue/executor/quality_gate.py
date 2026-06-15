@@ -1153,22 +1153,87 @@ def _parse_test_adequacy(text: str) -> Tuple[bool, str]:
     return False, f"réponse illisible du contrôle de couverture des tests : {raw[:300]}"
 
 
+# #526 : fichiers GÉNÉRÉS (verrous de dépendances) — volumineux, ~aucune info
+# d'adéquation, mais ils SATURENT la fenêtre du juge. Au run v6, un
+# ``package-lock.json`` de ~30k chars poussait ``package.json``/``vite.config``/``src/``
+# HORS de la fenêtre de 20k → le juge concluait « feature absente » sur un frontend
+# pourtant complet (faux rejets en cascade → run bloqué 4/15). On les retire du
+# diff soumis au juge (le diff autoritatif, lui, reste intact).
+_GENERATED_DIFF_FILES = (
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Pipfile.lock",
+    "composer.lock",
+    "Cargo.lock",
+    "go.sum",
+)
+
+
+def strip_generated_from_diff(diff: str) -> str:
+    """Retire les blocs ``diff --git`` des fichiers GÉNÉRÉS (lock files) — #526.
+
+    Découpe le diff sur les frontières ``diff --git`` ; un bloc est retiré si le
+    BASENAME de son chemin de DESTINATION (``b/…``) est un fichier généré.
+    Comparaison par basename EXACT (pas sous-chaîne : ``src/go.sum.parser.ts`` ≠
+    ``go.sum``, conservé) et sur la cible ``b/`` (un rename d'un lock vers un
+    fichier source est conservé). Robuste : un diff sans ce format (ou vide) est
+    renvoyé tel quel.
+    """
+    if not diff:
+        return diff
+    blocks = re.split(r"(?=^diff --git )", diff, flags=re.M)
+    kept = []
+    for block in blocks:
+        header = block.split("\n", 1)[0]
+        is_generated = False
+        if header.startswith("diff --git ") and " b/" in header:
+            dest = header.split(" b/", 1)[1].strip()
+            is_generated = dest.rsplit("/", 1)[-1] in _GENERATED_DIFF_FILES
+        if not is_generated:
+            kept.append(block)
+    return "".join(kept)
+
+
 class LLMAdequacyChecker:
     """:class:`AdequacyChecker` par LLM (#437) — fail-closed.
 
     ``sample_fn`` : ``async (prompt, system_prompt) -> str``, injectable (mocké en
     CI) ; défaut = ``generate_text`` des providers LLM avec la config du serveur.
-    Le diff est borné (``max_diff_chars``) pour rester dans la fenêtre du modèle.
+    Le diff est borné (``max_diff_chars``) pour rester dans la fenêtre du modèle,
+    après retrait des fichiers générés (#526) ; une troncature résiduelle est
+    ANNONCÉE au juge (sinon il conclut à tort à l'absence d'un fichier non vu).
     """
 
-    def __init__(self, sample_fn=None, *, max_diff_chars: int = 20000):
+    def __init__(self, sample_fn=None, *, max_diff_chars: int = 60000):
         self._sample_fn = sample_fn or _default_adequacy_sample_fn()
         self._max_diff_chars = max_diff_chars
 
+    def _diff_for_judge(self, diff: str) -> str:
+        """Diff prêt pour le juge : fichiers générés retirés (#526), borné, et
+        troncature résiduelle EXPLICITEMENT signalée."""
+        cleaned = strip_generated_from_diff(diff or "")
+        if not cleaned:
+            # Distinguer « diff réellement vide » de « tout le diff était des
+            # fichiers générés » : sinon le juge hallucine « livrable absent » sur
+            # une tâche dont le livrable serait justement un fichier généré.
+            return "(diff = uniquement des fichiers générés/verrous)" if (diff or "").strip() else "(diff vide)"
+        if len(cleaned) <= self._max_diff_chars:
+            return cleaned
+        return (
+            cleaned[: self._max_diff_chars]
+            + f"\n\n[... DIFF TRONQUÉ à {self._max_diff_chars} chars sur {len(cleaned)} — "
+            "NE PAS conclure à l'absence d'un fichier qui n'apparaît pas ci-dessus, "
+            "il peut être dans la partie tronquée ...]"
+        )
+
     async def check(self, diff: str, issue: IssueSpec, ctx) -> AdequacyOutcome:
+        bounded = self._diff_for_judge(diff)
         prompt = (
             f"## Issue à fermer\n{issue.to_prompt()}\n\n"
-            f"## Diff livré\n```diff\n{(diff or '(diff vide)')[: self._max_diff_chars]}\n```\n\n"
+            f"## Diff livré\n```diff\n{bounded}\n```\n\n"
             "Ce diff implémente-t-il concrètement l'issue ?"
         )
         text = await self._sample_fn(prompt, _ADEQUACY_SYSTEM)
@@ -1181,7 +1246,7 @@ class LLMAdequacyChecker:
             return outcome
         test_prompt = (
             f"## Issue à fermer\n{issue.to_prompt()}\n\n"
-            f"## Diff livré\n```diff\n{(diff or '(diff vide)')[: self._max_diff_chars]}\n```\n\n"
+            f"## Diff livré\n```diff\n{bounded}\n```\n\n"
             "Les critères chiffrables/observables de l'issue sont-ils assertés par au moins un test du diff ?"
         )
         test_text = await self._sample_fn(test_prompt, _TEST_ADEQUACY_SYSTEM)
