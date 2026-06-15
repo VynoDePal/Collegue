@@ -454,6 +454,59 @@ def test_label_failure_line_monorepo_subdir_match():
     assert "RÉGRESSION" in _label_failure_line("FAILED tests/test_x.py::t - m", frozenset({"backend/test_x.py"}))
 
 
+def test_filter_pip_noise_keeps_network_and_real_content():
+    """#507 : le filtre retire le bruit pip NON-fatal (conflit deps image, notices,
+    PATH) mais PRÉSERVE les signatures réseau (#461) et le contenu légitime."""
+    from collegue.executor.pipeline import filter_pip_noise
+
+    raw = (
+        "Collecting fastapi\n"
+        "ERROR: pip's dependency resolver does not currently take into account all the packages\n"
+        "openhands-ai 1.7.0 requires starlette>=0.49.1, but you have starlette 0.41.3 which is incompatible.\n"
+        "[notice] A new release of pip is available: 25.0.1 -> 26.1.2\n"
+        "WARNING: The script fastapi is installed in '/home/sandbox/.local/bin' which is not on PATH.\n"
+        "pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='x'): Read timed out.\n"
+    )
+    out = filter_pip_noise(raw)
+    assert "incompatible" not in out  # conflit de version retiré
+    assert "dependency resolver" not in out  # warning resolver retiré
+    assert "[notice]" not in out and "is not on PATH" not in out  # notices/PATH retirés
+    assert "ReadTimeoutError" in out  # signature réseau PRÉSERVÉE (#461)
+    assert "Collecting fastapi" in out  # contenu légitime conservé
+
+
+def test_failure_feedback_replaces_pure_pip_noise_with_note():
+    """#507 : une queue UNIQUEMENT composée de bruit pip non-fatal (pas de FAILED)
+    n'est plus relayée telle quelle — le coder reçoit une note explicite (run v6 :
+    3 tentatives brûlées à empiler des pins sur ce bruit)."""
+    from collegue.executor.pipeline import failure_feedback
+
+    noise = (
+        "ERROR: pip's dependency resolver does not currently take into account all the packages\n"
+        "openhands-ai 1.7.0 requires starlette>=0.49.1, but you have starlette 0.41.3 which is incompatible.\n"
+        "[notice] A new release of pip is available: 25.0.1 -> 26.1.2\n"
+    )
+    fb = failure_feedback(_gate_outcome(noise))
+    assert "incompatible" not in fb  # le bruit ne fuit plus
+    assert "bruit d'installation pip" in fb  # note explicite à la place
+
+
+def test_failure_feedback_pip_noise_preserves_infra_grace():
+    """#507 / #461 : bruit pip + un ReadTimeout (sans FAILED) → le feedback garde la
+    signature réseau → is_infra_gate_failure gracie toujours l'aléa."""
+    from collegue.executor.pipeline import failure_feedback, is_infra_gate_failure
+
+    out = (
+        "[notice] A new release of pip is available: 25.0.1 -> 26.1.2\n"
+        "openhands-ai 1.7.0 requires starlette>=0.49.1, but you have starlette 0.41.3 which is incompatible.\n"
+        "pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='files'): Read timed out.\n"
+    )
+    outcome = _gate_outcome(out)
+    fb = failure_feedback(outcome)
+    assert "ReadTimeoutError" in fb  # signature réseau survit au filtre
+    assert is_infra_gate_failure(outcome) is True  # grâce #461 toujours armée
+
+
 def test_failure_feedback_detruncation_then_label_same_line():
     """#507 / #478 : dans un même feedback, la dé-troncature s'applique AVANT
     l'étiquetage — une inversion casserait silencieusement le `.endswith("...")`
