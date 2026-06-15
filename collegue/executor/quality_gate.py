@@ -1132,9 +1132,16 @@ _TEST_ADEQUACY_SYSTEM = (
     "(critères d'acceptation chiffrables/observables) et le diff livré. Tu juges UNIQUEMENT "
     "si CHAQUE critère chiffrable/observable de l'issue est ASSERTÉ par au moins un test du "
     "diff (assertion sur la VALEUR/le CALCUL/le COMPORTEMENT, pas seulement un code HTTP 200). "
+    "EXCEPTION (#499) : un critère qui exige une MESURE RUNTIME non visible dans un diff "
+    "STATIQUE (ex. « couverture de tests > X% », « latence < Y ms », « débit/perf ») ne peut "
+    "PAS être vérifié par lecture du diff — NE bloque PAS dessus : réponds true s'il ajoute des "
+    "tests RÉELS et substantiels couvrant le domaine du critère (assertions véritables, jamais "
+    "des tests vides/triviaux), et NOMME ce critère comme non vérifiable statiquement dans la "
+    "justification. Continue de bloquer (false) sur tout critère de VALEUR vérifiable dans le "
+    "diff qui n'est asserté par aucun test. "
     'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}. '
-    "false si un critère chiffrable n'est couvert par aucune assertion (ex. : aucun test "
-    "n'asserte le montant TTC) — nomme alors le critère non couvert dans la justification."
+    "false si un critère chiffrable VÉRIFIABLE n'est couvert par aucune assertion (ex. : aucun "
+    "test n'asserte le montant TTC) — nomme alors le critère non couvert dans la justification."
 )
 
 

@@ -999,6 +999,21 @@ def test_parse_test_adequacy_is_fail_closed():
     assert _parse_test_adequacy("")[0] is False
 
 
+def test_test_adequacy_prompt_tolerates_unmeasurable_runtime_criteria():
+    """#499 (suivi v6) : le prompt de couverture instruit le juge de NE PAS bloquer
+    sur un critère RUNTIME non vérifiable dans un diff statique (couverture %,
+    latence) — il accepte alors des tests réels substantiels (task 13 faux-rejetée
+    au run v6), tout en gardant le verrou anti-tests-vides ET le blocage des
+    critères de VALEUR vérifiables (cas TVA ×100)."""
+    from collegue.executor.quality_gate import _TEST_ADEQUACY_SYSTEM
+
+    prompt = _TEST_ADEQUACY_SYSTEM.lower()
+    assert "runtime" in prompt and "couverture de tests > x%" in prompt
+    assert "ne bloque pas" in prompt  # l'exception est explicite
+    assert "vides" in prompt or "triviaux" in prompt  # anti-rubber-stamp
+    assert "ttc" in prompt  # le verrou VALEUR (#499 origine) est conservé
+
+
 # --- signal « aucun test touché » (#437) --------------------------------------------
 
 
