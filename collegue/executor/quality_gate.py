@@ -1457,12 +1457,21 @@ async def run_quality_gate(
                     installability = _tolerate_pytest_exit5(installability)
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
         if smoke_run:
+            # #503 (suivi v6) : le contrôle CORS du smoke n'a de sens QUE si un
+            # frontend existe — un backend ISOLÉ n'a légitimement pas de middleware
+            # CORS et était faussement rejeté (run v6, tâche d'init backend). On
+            # n'exige donc le CORS par DÉFAUT que si un frontend est détecté dans le
+            # workspace ; un ``smoke_cors_origin`` EXPLICITE (≠ défaut) reste toujours
+            # respecté (override opérateur), et "" garde le contrôle désactivé.
+            cors = smoke_cors_origin
+            if cors == _SMOKE_DEFAULT_ORIGIN and not _frontend_dirs(workspace):
+                cors = ""
             smoke = smoke_run_command(
                 workspace,
                 command=smoke_command,
                 paths=smoke_paths,
                 timeout=smoke_timeout,
-                cors_origin=smoke_cors_origin,
+                cors_origin=cors,
             )
             if smoke is not None:
                 # Dernière passe (le heredoc doit clore la commande) : l'app est

@@ -500,6 +500,49 @@ async def test_gate_smoke_run_default_off_and_skipped_without_app(tmp_path):
     assert "smoke" not in command2  # aucune app détectable → passe skippée
 
 
+# --- #503 (suivi v6) : CORS du smoke CONDITIONNEL à la présence d'un frontend -------
+
+
+async def test_gate_smoke_cors_disabled_without_frontend(tmp_path):
+    """#503 v6 : un backend ISOLÉ (sans frontend) ne se voit PAS exiger de CORS —
+    sinon une tâche d'init backend (app pourtant parfaite) rouge à tort."""
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "smoke run" in command  # la passe smoke est bien générée
+    assert "origin = ''" in command  # CORS désactivé (aucun frontend détecté)
+
+
+async def test_gate_smoke_cors_enforced_with_frontend(tmp_path):
+    """#503 v6 : dès qu'un frontend existe, le CORS reste EXIGÉ sur le backend
+    (intention d'origine de #503 préservée)."""
+    _write_fastapi_app(tmp_path)
+    (tmp_path / "package.json").write_text('{"name": "f", "scripts": {"build": "vite build"}}', encoding="utf-8")
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
+    _ws, command = sandbox.calls[0]
+    assert "origin = 'http://localhost:5173'" in command  # CORS exigé (frontend présent)
+
+
+async def test_gate_smoke_cors_explicit_origin_respected_without_frontend(tmp_path):
+    """#503 v6 : un cors_origin EXPLICITE (override opérateur) est respecté même
+    sans frontend détecté — on ne désactive que la valeur PAR DÉFAUT."""
+    _write_fastapi_app(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path),
+        DIFF,
+        ctx=None,
+        sandbox=sandbox,
+        reviewer=FakeReviewer(),
+        smoke_run=True,
+        smoke_cors_origin="http://custom:1234",
+    )
+    _ws, command = sandbox.calls[0]
+    assert "origin = 'http://custom:1234'" in command  # override respecté
+
+
 # --- installabilité du livrable (#439) ---------------------------------------------
 
 
@@ -2088,8 +2131,10 @@ def test_smoke_probe_cors_ignored_on_4xx(tmp_path):
 
 async def test_gate_smoke_threads_cors_origin(tmp_path):
     """#503 : le défaut de signature traverse run_quality_gate jusqu'à la commande
-    (même sans passer par _gate_options)."""
+    (même sans passer par _gate_options) — DÈS LORS qu'un frontend est présent
+    (#503 suivi v6 : le CORS n'est exigé que si un frontend existe)."""
     _write_fastapi_app(tmp_path)
+    (tmp_path / "package.json").write_text('{"name": "f", "scripts": {"build": "vite build"}}', encoding="utf-8")
     sandbox = _green()
     await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), smoke_run=True)
     _ws, command = sandbox.calls[0]
