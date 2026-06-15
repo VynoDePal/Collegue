@@ -87,6 +87,10 @@ class AgentResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    # #504 : True si le coût rapporté est AUTORITAIRE même nul (ex. abonnement,
+    # ``billable: false`` → coût réel 0) ; le pilote ne re-tarife alors PAS au prix
+    # de secours #484. Défaut False : un coût 0 = INCONNU (modèle non mappé) → #484.
+    cost_authoritative: bool = False
 
     @property
     def total_tokens(self) -> int:
