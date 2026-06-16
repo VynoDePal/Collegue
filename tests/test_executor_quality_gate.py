@@ -616,10 +616,31 @@ async def test_gate_e2e_appended_before_smoke_heredoc_last(tmp_path):
     assert command.rstrip().endswith("COLLEGUE_SMOKE_458")  # smoke heredoc en dernier
 
 
-async def test_gate_e2e_default_off(tmp_path):
-    """#503 : la passe E2E est opt-in (défaut OFF) — aucun impact si non activée."""
+async def test_gate_e2e_default_on_fullstack(tmp_path):
+    """#503 (suivi) : la passe E2E est désormais ACTIVE PAR DÉFAUT — sur un projet
+    full-stack elle s'insère sans avoir à l'activer explicitement."""
     _write_fastapi_app(tmp_path)
     _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" in command
+
+
+async def test_gate_e2e_explicit_off(tmp_path):
+    """#503 (suivi) : ``e2e_gate=False`` désactive explicitement la passe (opt-out)."""
+    _write_fastapi_app(tmp_path)
+    _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), e2e_gate=False)
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" not in command
+
+
+async def test_gate_e2e_default_inert_non_fullstack(tmp_path):
+    """#503 (suivi) : même par défaut, la passe reste INERTE hors full-stack (backend
+    seul, pas de frontend build+preview) — aucune régression sur les projets non-web."""
+    _write_fastapi_app(tmp_path)  # backend seul, pas de package.json
     sandbox = _green()
     await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
     _ws, command = sandbox.calls[0]

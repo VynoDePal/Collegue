@@ -1528,7 +1528,7 @@ async def run_quality_gate(
     smoke_paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     smoke_timeout: float = 30.0,
     smoke_cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
-    e2e_gate: bool = False,
+    e2e_gate: bool = True,
     e2e_timeout: float = 90.0,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
@@ -1568,6 +1568,15 @@ async def run_quality_gate(
     < 500), préfixe « MÉTHODE: » optionnel (#483, ex. ``POST:/auth/register`` —
     payload JSON générique, 4xx toléré, 5xx rouge). Skippée si aucune app n'est
     détectable et qu'aucune commande n'est fournie.
+    ``e2e_gate`` (#503 suivi, défaut VRAI) : passe E2E navigateur — démarre le
+    backend, build/sert le frontend (base d'URL backend injectée) et pilote
+    chromium (Playwright) sur l'UI RÉELLE pour attraper les ruptures front<->back
+    (contrat/préfixe/CORS/base d'URL) qu'aucune autre passe n'exerce. Insérée
+    AVANT le smoke (sonde écrite en fichier, chaînable). N'a d'effet que sur un
+    projet FULL-STACK (backend ASGI + frontend build+preview) — sinon
+    :func:`e2e_gate_command` renvoie ``None`` et la passe est inerte. EXIGE une
+    image sandbox avec Playwright + chromium (cf. ``docker/sandbox/Dockerfile``) ;
+    passer ``e2e_gate=False`` la désactive explicitement.
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
