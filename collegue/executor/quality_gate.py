@@ -1095,7 +1095,38 @@ def _requirement_key(line: str) -> Optional[str]:
     return name
 
 
-def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
+def requirement_keys_present(workspace: str) -> frozenset:
+    """Clés (#482) des paquets présents dans le(s) ``requirements.txt`` du workspace
+    APRÈS application du diff.
+
+    Sert à distinguer une SUPPRESSION réelle (le paquet disparaît) d'une simple
+    DÉ-DUPLICATION (le paquet RESTE sous une autre ligne — ex. doublon non épinglé
+    retiré alors que la version épinglée demeure ; cas réel FacNor v8, tâche 12 :
+    requirements.txt avait accumulé ``fastapi==X`` + un doublon nu ``fastapi`` via
+    le cycle ré-ajout #482, et le nettoyage du doublon était faussement rejeté).
+    Union sur la racine + les sous-répertoires de 1er niveau (layout monorepo #457).
+    """
+    keys: set = set()
+    roots = [workspace]
+    try:
+        for entry in os.scandir(workspace):
+            if entry.is_dir() and not entry.name.startswith("."):
+                roots.append(entry.path)
+    except OSError:
+        pass
+    for root in roots:
+        try:
+            with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as fh:
+                for line in fh:
+                    key = _requirement_key(line)
+                    if key is not None:
+                        keys.add(key)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return frozenset(keys)
+
+
+def removed_requirement_lines(diff: str, present_keys: frozenset = frozenset()) -> Tuple[str, ...]:
     """Lignes de ``requirements.txt`` de la BASE supprimées par le diff (#482).
 
     Comparaison par NOM : un changement de pin ou un réordonnancement n'est pas
@@ -1103,6 +1134,14 @@ def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
     FacNor v4, tâche 5 : ``python-jose[cryptography]``/``passlib[bcrypt]``
     perdus à la régénération → « No module named 'jose' » en venv nu, alors que
     12 tests étaient verts).
+
+    ``present_keys`` (#482 suivi v8) : clés des paquets ENCORE présents dans le
+    requirements.txt résultant (cf. :func:`requirement_keys_present`). Une ligne
+    retirée dont la clé y figure n'est PAS une suppression mais une DÉ-DUPLICATION
+    (le paquet reste sous une autre ligne) — retirer un doublon nu ``fastapi`` quand
+    ``fastapi==0.137.1`` demeure ne doit pas rougir le gate (cas FacNor v8, tâche
+    12, bloquée 3× sur ce faux positif). Vide ⇒ comportement historique (seuls les
+    ré-ajouts ``+`` du diff justifient une suppression).
     """
     removed: dict = {}  # nom → ligne d'origine
     added: set = set()
@@ -1123,10 +1162,12 @@ def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
             key = _requirement_key(line[1:])
             if key is not None:
                 added.add(key)
-    return tuple(text for key, text in removed.items() if key not in added)
+    return tuple(text for key, text in removed.items() if key not in added and key not in present_keys)
 
 
-def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = None) -> Tuple[str, ...]:
+def unjustified_requirement_removals(
+    diff: str, issue: Optional[IssueSpec] = None, present_keys: frozenset = frozenset()
+) -> Tuple[str, ...]:
     """Suppressions de requirements NON demandées par l'issue (#482).
 
     Fail-closed : une suppression est « demandée » si le nom du paquet (ou le
@@ -1140,7 +1181,7 @@ def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = Non
     autre nom) évade la garde — mais il évade aussi l'install sandbox et la
     passe #439, donc le gate échoue ailleurs.
     """
-    removed = removed_requirement_lines(diff)
+    removed = removed_requirement_lines(diff, present_keys=present_keys)
     if not removed or issue is None:
         return removed
     text = " ".join((issue.title or "", issue.body or "", *issue.acceptance_criteria))
@@ -1599,7 +1640,11 @@ async def run_quality_gate(
     # retry (#436) garde son score, et le feedback nominatif part avec.
     requirements_removed: Tuple[str, ...] = ()
     if requirements_guard:
-        requirements_removed = unjustified_requirement_removals(diff, issue)
+        # #482 suivi v8 : on passe les paquets ENCORE présents dans le requirements.txt
+        # résultant — une ligne retirée dont le paquet demeure (doublon nettoyé) n'est
+        # pas une suppression bloquante (faux positif qui a bloqué la tâche 12 du run v8).
+        present_keys = requirement_keys_present(workspace)
+        requirements_removed = unjustified_requirement_removals(diff, issue, present_keys=present_keys)
     # #497 : signal NON bloquant des dépendances directes non épinglées — analyse
     # PURE du diff de l'agent (les ajouts #481 arrivent après, re-capturés
     # ailleurs). N'entre PAS dans would_pass (signal seulement, par défaut).
