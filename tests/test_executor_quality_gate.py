@@ -1133,6 +1133,21 @@ def test_test_adequacy_prompt_distinguishes_structural_from_value_criteria():
     assert "commence la justification par le critère non couvert" in prompt  # gap-first (feedback actionnable)
 
 
+def test_adequacy_prompt_tolerates_runtime_outcome_criteria():
+    """#437 suivi v8 : le prompt d'ADÉQUATION (implemented?) instruit le juge de NE PAS
+    rejeter un critère de RÉSULTAT-RUNTIME (« la suite retourne 0 échec », « le pipeline CI
+    passe », « l'app démarre ») déjà exercé/vérifié par le gate — il accepte si le diff met
+    en place les ARTEFACTS réels (CI/runner/tests), tout en gardant le verrou anti-livraison-
+    fantôme (run v8 : tâche 12 CI/CD faussement rejetée, livrable pourtant substantiel + gate vert)."""
+    from collegue.executor.quality_gate import _ADEQUACY_SYSTEM
+
+    prompt = _ADEQUACY_SYSTEM.lower()
+    assert "runtime" in prompt  # l'exception runtime est explicite
+    assert "0 échec" in prompt or "pipeline ci" in prompt  # exemples du critère runtime
+    assert "artefacts" in prompt  # accepte dès que les artefacts réels sont là
+    assert "fantôme" in prompt  # verrou anti-livraison-fantôme conservé
+
+
 # --- signal « aucun test touché » (#437) --------------------------------------------
 
 
