@@ -1118,6 +1118,21 @@ def test_test_adequacy_prompt_tolerates_unmeasurable_runtime_criteria():
     assert "ttc" in prompt  # le verrou VALEUR (#499 origine) est conservé
 
 
+def test_test_adequacy_prompt_distinguishes_structural_from_value_criteria():
+    """#499 (suivi v8) : le prompt instruit le juge qu'un critère DÉFINITIONNEL/structurel
+    (« le schéma DÉFINIT les tables avec contraintes ») est satisfait par sa PRÉSENCE +
+    une contrainte REPRÉSENTATIVE testée — sans exiger un test de rejet DÉDIÉ pour CHAQUE
+    contrainte sœur (root task v8 bloquée : schéma complet rejeté car la contrainte TVA
+    n'avait pas son propre test alors que SIREN l'avait). Le verrou VALEUR reste intact."""
+    from collegue.executor.quality_gate import _TEST_ADEQUACY_SYSTEM
+
+    prompt = _TEST_ADEQUACY_SYSTEM.lower()
+    assert "structurel" in prompt  # l'exception structurelle est explicite
+    assert "défini" in prompt and "présent" in prompt  # défini/présent vs testé
+    assert "représentative" in prompt  # une contrainte représentative suffit
+    assert "commence la justification par le critère non couvert" in prompt  # gap-first (feedback actionnable)
+
+
 # --- signal « aucun test touché » (#437) --------------------------------------------
 
 
