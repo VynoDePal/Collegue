@@ -1686,6 +1686,26 @@ async def test_requirements_guard_opt_out():
     assert report.passed is True
 
 
+async def test_requirements_dedup_not_blocked_in_gate(tmp_path):
+    """#482 suivi v8 : dans le gate COMPLET, retirer un doublon nu quand la version
+    épinglée demeure (lue dans le requirements.txt du workspace) ne rougit plus le
+    gate — déblocage du faux positif qui a tué la tâche 12 du run v8."""
+    (tmp_path / "requirements.txt").write_text(
+        "fastapi==0.137.1\nuvicorn==0.49.0\npydantic==2.13.4\n", encoding="utf-8"
+    )
+    dedup = (
+        "diff --git a/requirements.txt b/requirements.txt\n"
+        "--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "-\n-fastapi\n-uvicorn\n-pydantic\n"
+    )
+    issue = IssueSpec(number=12, title="Suite de tests et CI/CD")
+    report = await run_quality_gate(
+        str(tmp_path), dedup, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=issue
+    )
+    assert report.requirements_removed == ()
+    assert report.passed is True
+
+
 async def test_requirements_removal_skips_adequacy_call():
     """Économie LLM : la garde rouge saute l'appel d'adéquation (#437), comme
     tout gate déjà rouge."""
@@ -1747,6 +1767,56 @@ def test_removed_requirement_lines_flags_option_lines():
     assert removed_requirement_lines(option) == ("-r base.txt",)
     issue = IssueSpec(number=7, title="Fusionner base.txt dans requirements.txt")
     assert unjustified_requirement_removals(option, issue) == ()
+
+
+def test_removed_requirement_lines_dedup_not_flagged_when_package_remains():
+    """#482 suivi v8 : retirer un DOUBLON nu (`fastapi`) quand la version épinglée
+    (`fastapi==X`) demeure n'est PAS une suppression — le paquet reste présent.
+    C'est le faux positif qui a bloqué la tâche 12 du run v8 (requirements.txt
+    avait accumulé pinned + doublons nus via le cycle ré-ajout #482)."""
+    from collegue.executor import removed_requirement_lines
+
+    dedup = (
+        "diff --git a/requirements.txt b/requirements.txt\n"
+        "--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "-\n-fastapi\n-uvicorn\n-pydantic\n"
+    )
+    # Sans contexte de présence : comportement historique (tout doublon retiré compte).
+    assert removed_requirement_lines(dedup) == ("fastapi", "uvicorn", "pydantic")
+    # Avec les paquets ENCORE présents (versions épinglées conservées) : dé-duplication,
+    # aucune suppression réelle.
+    present = frozenset({"fastapi", "uvicorn", "pydantic"})
+    assert removed_requirement_lines(dedup, present_keys=present) == ()
+
+
+def test_removed_requirement_lines_real_drop_still_flagged_with_present_keys():
+    """#482 suivi v8 : un paquet réellement DISPARU (absent du résultat) reste
+    bloqué même avec ``present_keys`` — la protection v4 (jose/passlib perdus) tient."""
+    from collegue.executor import removed_requirement_lines
+
+    drop = (
+        "diff --git a/requirements.txt b/requirements.txt\n"
+        "--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "-passlib[bcrypt]\n-python-jose[cryptography]\n+fastapi\n"
+    )
+    present = frozenset({"fastapi"})  # passlib/jose NE sont plus présents
+    assert removed_requirement_lines(drop, present_keys=present) == (
+        "passlib[bcrypt]",
+        "python-jose[cryptography]",
+    )
+
+
+def test_requirement_keys_present_reads_workspace(tmp_path):
+    """#482 suivi v8 : lit les clés des paquets présents dans le requirements.txt
+    résultant (racine + sous-répertoires), pour distinguer dé-dup et suppression."""
+    from collegue.executor import requirement_keys_present
+
+    (tmp_path / "requirements.txt").write_text(
+        "fastapi==0.137.1\nuvicorn==0.49.0\npydantic==2.13.4\n", encoding="utf-8"
+    )
+    keys = requirement_keys_present(str(tmp_path))
+    assert {"fastapi", "uvicorn", "pydantic"} <= keys
+    assert requirement_keys_present(str(tmp_path / "inexistant")) == frozenset()
 
 
 async def test_requirements_removal_not_justified_by_machine_context():
