@@ -24,7 +24,7 @@ RUN apt-get update \
 # pour que le gate dispose d'un runner même si le projet ne le déclare pas.
 RUN python -m pip install --no-cache-dir "pytest>=8.1,<9" "pytest-asyncio==0.23.6"
 
-# Navigateur headless pour le gate E2E opt-in (#503 suivi) : Playwright + chromium
+# Navigateur headless pour le gate E2E (actif par défaut, #503 suivi) : Playwright + chromium
 # + ses libs système (libnss3, libatk… via --with-deps, root). Le gate démarre le
 # backend, sert le frontend buildé (base d'URL backend injectée) et pilote l'UI
 # RÉELLE dans chromium pour attraper les ruptures front<->back (contrat/préfixe/
