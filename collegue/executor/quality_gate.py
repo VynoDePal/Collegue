@@ -1309,9 +1309,19 @@ _ADEQUACY_SYSTEM = (
     "Tu es un relecteur d'ADÉQUATION (rôle REVIEWER). On te donne une issue (titre, "
     "critères d'acceptation) et le diff livré pour la fermer. Tu ne juges PAS le style : "
     "uniquement si le diff RÉALISE concrètement ce que l'issue demande. "
+    "EXCEPTION RÉSULTAT-RUNTIME (#437 suivi v8) : un critère qui exige un RÉSULTAT "
+    "D'EXÉCUTION non vérifiable par lecture d'un diff STATIQUE (ex. « la suite de tests "
+    "retourne 0 échec sur l'ensemble du code », « le pipeline CI passe », « l'application "
+    "démarre et répond ») est DÉJÀ exécuté et vérifié par le gate AVANT toi (tests + smoke + "
+    "e2e RÉELS, déjà verts à ce stade) — NE le juge donc PAS sur une preuve statique "
+    "impossible : réponds implemented=true dès que le diff MET EN PLACE de façon RÉELLE et "
+    "substantielle les ARTEFACTS de la feature (config CI, runner + suite de tests, "
+    "intégration), et NOMME ce critère comme vérifié à l'exécution (non statiquement) dans la "
+    "justification. "
     'Réponds STRICTEMENT en JSON : {"implemented": true|false, "justification": "..."}. '
-    "implemented=false si la feature est absente ou hors-spec (ex. : une seule ligne de "
-    "dépendance pour un service entier, un schéma sans la logique demandée)."
+    "implemented=false si la feature est ABSENTE ou hors-spec — verrou anti-livraison-fantôme "
+    "(ex. : une seule ligne de dépendance pour un service entier, un schéma sans la logique "
+    "demandée, des artefacts vides/triviaux)."
 )
 
 
