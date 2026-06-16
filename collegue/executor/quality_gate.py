@@ -1298,19 +1298,27 @@ def _parse_adequacy(text: str) -> AdequacyOutcome:
 # test n'assertait les totaux (status 200 suffisait).
 _TEST_ADEQUACY_SYSTEM = (
     "Tu es un relecteur de COUVERTURE DE TEST (rôle REVIEWER). On te donne une issue "
-    "(critères d'acceptation chiffrables/observables) et le diff livré. Tu juges UNIQUEMENT "
-    "si CHAQUE critère chiffrable/observable de l'issue est ASSERTÉ par au moins un test du "
-    "diff (assertion sur la VALEUR/le CALCUL/le COMPORTEMENT, pas seulement un code HTTP 200). "
-    "EXCEPTION (#499) : un critère qui exige une MESURE RUNTIME non visible dans un diff "
-    "STATIQUE (ex. « couverture de tests > X% », « latence < Y ms », « débit/perf ») ne peut "
-    "PAS être vérifié par lecture du diff — NE bloque PAS dessus : réponds true s'il ajoute des "
-    "tests RÉELS et substantiels couvrant le domaine du critère (assertions véritables, jamais "
-    "des tests vides/triviaux), et NOMME ce critère comme non vérifiable statiquement dans la "
-    "justification. Continue de bloquer (false) sur tout critère de VALEUR vérifiable dans le "
-    "diff qui n'est asserté par aucun test. "
-    'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}. '
-    "false si un critère chiffrable VÉRIFIABLE n'est couvert par aucune assertion (ex. : aucun "
-    "test n'asserte le montant TTC) — nomme alors le critère non couvert dans la justification."
+    "(critères d'acceptation) et le diff livré. Tu juges si les critères de VALEUR/CALCUL/"
+    "COMPORTEMENT de l'issue sont ASSERTÉS par au moins un test du diff (assertion sur la "
+    "VALEUR/le CALCUL/le COMPORTEMENT attendu — montant, total, compteur, numéro séquentiel, "
+    "unicité/déduplication EFFECTIVE, rejet d'une entrée invalide —, pas seulement un code HTTP 200). "
+    "EXCEPTION RUNTIME (#499) : un critère qui exige une MESURE RUNTIME non visible dans un diff "
+    "STATIQUE (ex. « couverture de tests > X% », « latence < Y ms », « débit/perf ») ne peut PAS "
+    "être vérifié par lecture du diff — NE bloque PAS dessus : réponds true s'il ajoute des tests "
+    "RÉELS et substantiels couvrant le domaine du critère (assertions véritables, jamais des tests "
+    "vides/triviaux), et NOMME ce critère comme non vérifiable statiquement dans la justification. "
+    "EXCEPTION STRUCTURELLE (#499 suivi v8) : un critère qui exige seulement qu'un élément soit "
+    "DÉFINI/PRÉSENT (ex. « le schéma DÉFINIT les tables X/Y avec leurs contraintes d'intégrité », "
+    "« le modèle/endpoint EXISTE ») est satisfait par sa PRÉSENCE dans le diff (visible statiquement) "
+    "DÈS LORS que des tests RÉELS couvrent le comportement central du critère (au moins une "
+    "contrainte/relation REPRÉSENTATIVE assertée). N'EXIGE PAS un test de rejet DÉDIÉ pour CHAQUE "
+    "contrainte/colonne sœur : si une contrainte représentative est testée et les autres sont "
+    "définies dans le diff, réponds true (« défini » n'est pas « testé »). "
+    "Continue de bloquer (false) UNIQUEMENT sur un critère de VALEUR/CALCUL/COMPORTEMENT vérifiable "
+    "dans le diff qu'AUCUN test n'asserte (ex. : aucun test n'asserte le montant TTC = somme des "
+    "lignes). Si false, COMMENCE la justification par le critère non couvert (concis, actionnable) "
+    "AVANT tout commentaire sur ce qui est déjà testé. "
+    'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}.'
 )
 
 
