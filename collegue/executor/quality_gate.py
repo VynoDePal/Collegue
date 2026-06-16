@@ -314,6 +314,175 @@ def smoke_run_command(
     return f"python - <<'{_SMOKE_HEREDOC}'\n{script}{_SMOKE_HEREDOC}"
 
 
+# ── Passe E2E navigateur (#503 suivi) : l'UI RÉELLE contre l'API ────────────────
+_E2E_BANNER = "[gate] e2e navigateur : l'UI rend et appelle le backend (#503)"
+# On SERT le front sur 5173 (et pas le 4173 par défaut de `vite preview`) : c'est
+# l'origine conventionnelle que les backends générés autorisent en CORS (cf.
+# _SMOKE_DEFAULT_ORIGIN) — sinon le navigateur serait bloqué par CORS sur un app
+# pourtant bien intégrée (faux échec, observé au 1er essai de la sonde réelle).
+_E2E_FRONT_PORT = 5173
+_E2E_HEREDOC = "COLLEGUE_E2E_503"
+# Noms d'env usuels par lesquels un frontend lit la base d'URL de l'API — on les
+# injecte TOUS au build (Vite/CRA/Next inlinent au build) pour pointer le front
+# vers le backend du gate, sans hypothèse de framework.
+_E2E_API_ENV_VARS = (
+    "VITE_API_BASE_URL",
+    "VITE_API_URL",
+    "REACT_APP_API_URL",
+    "NEXT_PUBLIC_API_URL",
+    "API_BASE_URL",
+)
+
+# Sonde E2E exécutée DANS le conteneur du gate (Playwright python + chromium bakés).
+# Attend le serveur front, charge l'UI dans chromium headless, et vérifie : la page
+# REND (pas de page blanche) ET aucun appel vers le backend n'échoue (un contrat
+# divergent / préfixe fantôme / CORS absent / mauvaise base d'URL se manifeste en
+# requestfailed vers l'origine backend). %%-formaté (le code garde ses accolades).
+_E2E_BROWSER_TEMPLATE = """\
+import sys, time, urllib.error, urllib.request
+
+FRONT = %(front_url)r
+BACKEND = %(backend_origin)r  # "host:port" — un requestfailed vers là = intégration rompue
+TIMEOUT_MS = %(timeout_ms)d
+
+# 1. Attendre que le serveur de preview réponde (goto échouerait sur connexion refusée).
+deadline = time.time() + 40
+up = False
+while time.time() < deadline:
+    try:
+        urllib.request.urlopen(FRONT, timeout=2)
+        up = True
+        break
+    except urllib.error.HTTPError:
+        up = True  # a répondu (même 4xx) = serveur vivant
+        break
+    except Exception:
+        time.sleep(0.5)
+if not up:
+    print("[gate] e2e ÉCHEC : le serveur frontend n'a pas démarré sur", FRONT)
+    sys.exit(1)
+
+from playwright.sync_api import sync_playwright
+
+console_errors = []
+failed = []
+status = None
+body = ""
+html = ""
+with sync_playwright() as pw:
+    browser = pw.chromium.launch()
+    page = browser.new_page()
+    page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+    page.on("requestfailed", lambda r: failed.append(r.url + " :: " + (r.failure or "")))
+    try:
+        resp = page.goto(FRONT, wait_until="networkidle", timeout=TIMEOUT_MS)
+        status = resp.status if resp else None
+    except Exception as exc:
+        print("[gate] e2e ÉCHEC : la page n'a pas chargé —", str(exc)[:200])
+        browser.close()
+        sys.exit(1)
+    page.wait_for_timeout(2500)  # laisse les fetch d'amorçage (ex. /health) partir
+    try:
+        body = page.inner_text("body")
+    except Exception:
+        body = ""
+    html = page.content()
+    browser.close()
+
+rendered = len(body.strip()) > 0 or any(
+    tag in html.lower() for tag in ("<div", "<main", "<button", "<form", "<header", "<nav", "<section")
+)
+backend_failures = [u for u in failed if BACKEND in u]
+problems = []
+if status is None or status >= 400:
+    problems.append("la page racine répond " + str(status))
+if not rendered:
+    problems.append("page blanche : aucun contenu rendu (l'app ne monte pas dans le navigateur)")
+if backend_failures:
+    problems.append(
+        "appel(s) au backend en ÉCHEC depuis l'UI (intégration front<->back rompue : "
+        "contrat/préfixe/CORS/base d'URL) : " + " ; ".join(backend_failures[:5])
+    )
+
+print("[gate] e2e :", "OK — l'UI rend et joint le backend" if not problems else "ÉCHEC")
+for p in problems:
+    print("[gate] e2e -", p)
+if console_errors:
+    print("[gate] e2e (info) erreurs console :", " | ".join(console_errors[:5]))
+sys.exit(0 if not problems else 1)
+"""
+
+
+def _e2e_browser_script(front_url: str, backend_origin: str, timeout: float) -> str:
+    """Source de la sonde E2E (pure → testable par ``compile``)."""
+    return _E2E_BROWSER_TEMPLATE % {
+        "front_url": front_url,
+        "backend_origin": backend_origin,
+        "timeout_ms": int(max(5.0, timeout) * 1000),
+    }
+
+
+def e2e_gate_command(
+    workspace: str,
+    *,
+    backend_command: Optional[str] = None,
+    front_subdir: Optional[str] = None,
+    timeout: float = 90.0,
+) -> Optional[str]:
+    """Passe E2E navigateur (#503 suivi) : charge l'UI RÉELLE dans chromium headless
+    et vérifie qu'elle REND et que ses appels au backend ABOUTISSENT. Fail-closed.
+
+    Comble le trou de fond de #503 : le smoke sonde le backend en HTTP DIRECT et le
+    gate frontend BUILDE le front, mais RIEN n'exerce l'UI CONTRE l'API — un contrat
+    d'API divergent, un préfixe ``/api`` fantôme, un CORS absent ou une mauvaise base
+    d'URL passent tous les gates. Cette passe démarre le backend + sert le front (avec
+    la base d'URL backend injectée au build) + pilote un vrai navigateur.
+
+    Ne s'active que pour un projet **full-stack** : backend ASGI détecté (ou
+    ``backend_command``) ET frontend avec scripts ``build`` + ``preview`` (Vite & co).
+    ``None`` sinon (skip — pas de faux rouge sur un projet non concerné). S'exécute
+    dans le conteneur du gate (Playwright + chromium bakés dans l'image).
+    """
+    target = backend_command or _detect_asgi_app(workspace)
+    if target is None:
+        return None
+    candidates = [front_subdir] if front_subdir is not None else _frontend_dirs(workspace)
+    front = None
+    for sub in candidates:
+        base = workspace if sub == "." else os.path.join(workspace, sub)
+        pkg = os.path.join(base, "package.json")
+        if not os.path.isfile(pkg):
+            continue
+        try:
+            with open(pkg, encoding="utf-8") as handle:
+                scripts = dict((json.load(handle) or {}).get("scripts") or {})
+        except (OSError, ValueError):
+            continue
+        # besoin de servir le BUILD : build + preview (convention Vite des fronts générés).
+        if "build" in scripts and "preview" in scripts:
+            front = sub
+            break
+    if front is None:
+        return None
+
+    be_url = f"http://127.0.0.1:{_SMOKE_PORT}"
+    backend = backend_command or f"python -m uvicorn {target} --host 127.0.0.1 --port {_SMOKE_PORT}"
+    env_inject = " ".join(f"{name}={shlex.quote(be_url)}" for name in _E2E_API_ENV_VARS)
+    install = "(npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --silent)"
+    cd = "" if front == "." else f"cd {shlex.quote(front)} && "
+    script = _e2e_browser_script(f"http://127.0.0.1:{_E2E_FRONT_PORT}", f"127.0.0.1:{_SMOKE_PORT}", timeout)
+    # La sonde est écrite dans un FICHIER (puis exécutée) plutôt qu'en ``python -
+    # <<HD`` : la commande NE se termine donc PAS par un heredoc nu, et peut être
+    # chaînée AVANT la passe smoke (qui, elle, DOIT rester le heredoc final).
+    return (
+        f"({backend} > /tmp/.e2e_backend.log 2>&1 &) "
+        f"&& {cd}{install} > /tmp/.e2e_npm.log 2>&1 "
+        f"&& {env_inject} npm run build > /tmp/.e2e_build.log 2>&1 "
+        f"&& (npm run preview -- --host 127.0.0.1 --port {_E2E_FRONT_PORT} > /tmp/.e2e_front.log 2>&1 &) "
+        f"&& cat > /tmp/.collegue_e2e.py <<'{_E2E_HEREDOC}'\n{script}\n{_E2E_HEREDOC}\npython /tmp/.collegue_e2e.py"
+    )
+
+
 def installability_command(workspace: str, *, use_cache: bool = False) -> Optional[str]:
     """Passe d'installabilité en environnement NU (#439). Fail-closed.
 
@@ -1359,6 +1528,8 @@ async def run_quality_gate(
     smoke_paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     smoke_timeout: float = 30.0,
     smoke_cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
+    e2e_gate: bool = False,
+    e2e_timeout: float = 90.0,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
     pin_guard: bool = True,
@@ -1463,6 +1634,14 @@ async def run_quality_gate(
                     # AUSSI exit 5 sans test pytest — même tolérance (#463).
                     installability = _tolerate_pytest_exit5(installability)
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
+        if e2e_gate:
+            # #503 (suivi) : passe E2E navigateur — l'UI RÉELLE contre l'API. Insérée
+            # AVANT le smoke car sa sonde est écrite dans un fichier (pas un heredoc
+            # nu) → chaînable ; le smoke reste le heredoc FINAL. Full-stack uniquement
+            # (None sinon). Échec front<->back (contrat/préfixe/CORS/base d'URL) = rouge.
+            e2e = e2e_gate_command(workspace, timeout=e2e_timeout)
+            if e2e is not None:
+                command = f"({command}) && echo {shlex.quote(_E2E_BANNER)} && ({e2e})"
         if smoke_run:
             # #503 (suivi v6) : le contrôle CORS du smoke n'a de sens QUE si un
             # frontend existe — un backend ISOLÉ n'a légitimement pas de middleware

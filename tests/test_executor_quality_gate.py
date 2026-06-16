@@ -543,6 +543,89 @@ async def test_gate_smoke_cors_explicit_origin_respected_without_frontend(tmp_pa
     assert "origin = 'http://custom:1234'" in command  # override respecté
 
 
+# --- #503 (suivi) : gate E2E navigateur (l'UI réelle contre l'API) -----------------
+
+
+def _write_vite_front(tmp_path, subdir="."):
+    base = tmp_path if subdir == "." else (tmp_path / subdir)
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "package.json").write_text(
+        '{"name":"f","scripts":{"build":"tsc && vite build","preview":"vite preview"}}', encoding="utf-8"
+    )
+
+
+def test_e2e_gate_command_none_unless_fullstack(tmp_path):
+    """#503 : la passe E2E ne s'active QUE si backend ASGI ET frontend (build+preview)
+    sont présents — sinon None (skip, pas de faux rouge)."""
+    from collegue.executor import e2e_gate_command
+
+    # backend seul → None
+    _write_fastapi_app(tmp_path)
+    assert e2e_gate_command(str(tmp_path)) is None
+    # frontend seul (autre dossier) → None
+    front_only = tmp_path / "front_only"
+    _write_vite_front(front_only)
+    assert e2e_gate_command(str(front_only)) is None
+    # frontend SANS script preview → None (on ne sait pas servir le build)
+    nopreview = tmp_path / "np"
+    nopreview.mkdir()
+    _write_fastapi_app(nopreview)
+    (nopreview / "package.json").write_text('{"scripts":{"build":"vite build"}}', encoding="utf-8")
+    assert e2e_gate_command(str(nopreview)) is None
+
+
+def test_e2e_gate_command_fullstack_structure(tmp_path):
+    """#503 : full-stack → commande qui démarre le backend, build le front avec la
+    base d'URL backend injectée, sert le preview, et pilote chromium (sonde fichier)."""
+    from collegue.executor import e2e_gate_command
+
+    _write_fastapi_app(tmp_path)  # main:app
+    _write_vite_front(tmp_path)  # package.json build+preview à la racine
+    cmd = e2e_gate_command(str(tmp_path))
+    assert cmd is not None
+    assert "uvicorn main:app" in cmd  # backend démarré
+    assert "npm run build" in cmd and "npm run preview" in cmd  # build + serve
+    assert "--port 5173" in cmd  # servi sur l'origine que le CORS backend autorise (≠ 4173 défaut)
+    assert "VITE_API_BASE_URL=http://127.0.0.1:8765" in cmd  # base d'URL backend injectée
+    assert "sync_playwright" in cmd and "chromium" in cmd  # navigateur piloté
+    # sonde écrite dans un FICHIER puis exécutée (≠ heredoc nu) → chaînable avant smoke
+    assert "cat > /tmp/.collegue_e2e.py" in cmd and cmd.rstrip().endswith("python /tmp/.collegue_e2e.py")
+
+
+def test_e2e_browser_script_is_valid_python():
+    """#503 : la sonde Playwright générée est du python valide (compile)."""
+    from collegue.executor.quality_gate import _e2e_browser_script
+
+    script = _e2e_browser_script("http://127.0.0.1:5173", "127.0.0.1:8765", 90.0)
+    compile(script, "<e2e>", "exec")
+    assert "sync_playwright" in script and "requestfailed" in script  # capture les ruptures back
+
+
+async def test_gate_e2e_appended_before_smoke_heredoc_last(tmp_path):
+    """#503 : E2E + smoke ensemble — l'E2E (sonde fichier) précède, le smoke (heredoc)
+    reste FINAL ; les deux passes sont présentes."""
+    _write_fastapi_app(tmp_path)
+    _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), e2e_gate=True, smoke_run=True
+    )
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" in command and "smoke run" in command
+    assert command.index("collegue_e2e") < command.index("COLLEGUE_SMOKE_458")  # e2e avant smoke
+    assert command.rstrip().endswith("COLLEGUE_SMOKE_458")  # smoke heredoc en dernier
+
+
+async def test_gate_e2e_default_off(tmp_path):
+    """#503 : la passe E2E est opt-in (défaut OFF) — aucun impact si non activée."""
+    _write_fastapi_app(tmp_path)
+    _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" not in command
+
+
 # --- installabilité du livrable (#439) ---------------------------------------------
 
 

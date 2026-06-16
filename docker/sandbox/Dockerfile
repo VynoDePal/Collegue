@@ -24,6 +24,19 @@ RUN apt-get update \
 # pour que le gate dispose d'un runner même si le projet ne le déclare pas.
 RUN python -m pip install --no-cache-dir "pytest>=8.1,<9" "pytest-asyncio==0.23.6"
 
+# Navigateur headless pour le gate E2E opt-in (#503 suivi) : Playwright + chromium
+# + ses libs système (libnss3, libatk… via --with-deps, root). Le gate démarre le
+# backend, sert le frontend buildé (base d'URL backend injectée) et pilote l'UI
+# RÉELLE dans chromium pour attraper les ruptures front<->back (contrat/préfixe/
+# CORS/base d'URL) qu'aucune autre passe n'exerce. PLAYWRIGHT_BROWSERS_PATH partagé
+# et lisible pour que l'utilisateur `sandbox` (non-root) trouve le binaire au run.
+# N.B. NON construit par la CI (elle build docker/collegue/Dockerfile) — image
+# d'exécution réelle uniquement.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN python -m pip install --no-cache-dir playwright \
+    && python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright
+
 # Utilisateur non-root par défaut (le `docker run` peut surcharger --user pour
 # matcher l'UID hôte et garder le workspace écrivable/persisté).
 RUN useradd --create-home --uid 1000 sandbox
