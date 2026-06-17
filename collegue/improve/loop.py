@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.improve.gate import DEFAULT_MIN_GAIN, evaluate
-from collegue.improve.metrics import DEFAULT_WEIGHTS, CompositeWeights, measure, persist
+from collegue.improve.metrics import DEFAULT_WEIGHTS, CompositeWeights, autofix_lint, measure, persist
 from collegue.improve.proposer import AttemptRecord, build_improvement_task, next_dimension
 
 # Raisons d'arrêt.
@@ -164,7 +164,7 @@ async def run_improvement(
     # est aussi lazy car importer le sous-module déclenche ``pilot/__init__`` (→ driver
     # → exécuteur) — on ne veut pas tirer tout ça au simple import du package improve.
     from collegue.executor.agent import IssueSpec
-    from collegue.executor.runner import run_issue
+    from collegue.executor.runner import capture_diff, run_issue
     from collegue.executor.workspace import prepare_workspace
     from collegue.pilot.budget import ACTION_PAUSED_BUDGET, BudgetTimeController
 
@@ -229,8 +229,16 @@ async def run_improvement(
                 break
             continue
 
+        # Auto-fix lint déterministe (#549) : nettoie le lint auto-corrigible des
+        # fichiers touchés AVANT la mesure (le gate est tolérance-0 sur le lint, donc
+        # le code de test/refactor du coder ne doit pas être recalé pour un import
+        # inutilisé ou un espacement). On re-capture le diff : mesure, PR et compounding
+        # utilisent la version corrigée. Un fix cassant un test ⇒ rejeté par le gate.
+        autofix_lint(workspace.path, execution.files_changed)
+        final_diff, final_files = capture_diff(workspace)
+
         after = await measure_fn(
-            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=execution.diff, weights=weights
+            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=final_diff, weights=weights
         )
         result.final_score = after.composite
         gate = evaluate(before, after, min_gain=min_gain)
@@ -246,7 +254,7 @@ async def run_improvement(
                 improvement,
                 owner,
                 repo,
-                files_changed=execution.files_changed,
+                files_changed=final_files,
                 base=base,
                 clients=clients,
                 dry_run=dry_run,
@@ -257,9 +265,9 @@ async def run_improvement(
             )
             if not dry_run:
                 persist(manager, project_id, after)
-            # Compounding (#545) : mémorise le diff promu pour le réappliquer aux
-            # rounds suivants (baseline cumulative) — y compris en dry_run.
-            promoted_diffs.append(execution.diff)
+            # Compounding (#545) : mémorise le diff promu (corrigé) pour le réappliquer
+            # aux rounds suivants (baseline cumulative) — y compris en dry_run.
+            promoted_diffs.append(final_diff)
             result.promoted.append(PromotedImprovement(dimension.value, gate.delta, pr.number))
             plateau = 0
         else:
