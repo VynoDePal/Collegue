@@ -40,6 +40,51 @@ DEFAULT_COVERAGE_COMMAND = "pytest -q --cov --cov-report=term-missing"
 # le plus ; le composite et le gate (tolérance 0) raisonnent sur ce total pondéré.
 SECURITY_SEVERITY_WEIGHTS = {"critical": 10.0, "high": 5.0, "medium": 2.0, "low": 1.0}
 
+# Fichiers/dossiers EXCLUS du scan sécu de la BOUCLE (#547). Les lockfiles générés et
+# les emplacements de test/fixtures/exemples contiennent légitimement des chaînes qui
+# ressemblent à des secrets (URLs de registre npm, faux tokens, sqlite:/// de fixtures)
+# qu'on ne « corrige » jamais — sans exclusion ils noient le signal (sur un MVP réel,
+# ~99 % du poids sécu venait de package-lock.json). Conventions GÉNÉRIQUES, multi-
+# langage, sans hypothèse produit. Lockfiles alignés sur ``_GENERATED_DIFF_FILES``
+# (#526). C'est propre à la **fonction objectif de la boucle** (pas un audit de
+# sécurité exhaustif) : un secret en fixture/test n'atteint pas le runtime produit.
+# Extensions de test explicites (pas ``*.test.*`` / ``*.spec.*``) pour ne pas exclure
+# un contrat produit type ``openapi.spec.yaml`` / ``manifest.test.json``.
+SECURITY_SCAN_EXCLUDES = (
+    # lockfiles générés
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Pipfile.lock",
+    "composer.lock",
+    "Cargo.lock",
+    "go.sum",
+    # dossiers de test / fixtures (conventions multi-langage)
+    "tests",
+    "test",
+    "__tests__",
+    "fixtures",
+    # fichiers de test (conventions par langage, extensions explicites)
+    "test_*.py",
+    "*_test.py",
+    "*_test.go",
+    "conftest.py",
+    "*.test.ts",
+    "*.test.tsx",
+    "*.test.js",
+    "*.test.jsx",
+    "*.spec.ts",
+    "*.spec.tsx",
+    "*.spec.js",
+    "*.spec.jsx",
+    # gabarits/exemples de config (placeholders, jamais des secrets réels)
+    "*.example",
+    "*.sample",
+    "*.template",
+)
+
 # Règles ruff comptées comme « violations de lint » (erreurs pyflakes/pycodestyle).
 DEFAULT_LINT_SELECT = ("E", "F", "W")
 # Seuil de complexité cyclomatique (mccabe / ruff C901) : au-delà = « bloc complexe ».
@@ -138,7 +183,9 @@ def _default_security_scan(workspace: str) -> Tuple[int, float]:
     tool = SecretScanTool()
     tool.rate_limit_enabled = False
     tool.quota_enabled = False
-    resp = tool.execute({"target": workspace, "scan_type": "directory"})
+    resp = tool.execute(
+        {"target": workspace, "scan_type": "directory", "exclude_patterns": list(SECURITY_SCAN_EXCLUDES)}
+    )
     weighted = (
         SECURITY_SEVERITY_WEIGHTS["critical"] * resp.critical
         + SECURITY_SEVERITY_WEIGHTS["high"] * resp.high
