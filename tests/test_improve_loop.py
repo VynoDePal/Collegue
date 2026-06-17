@@ -301,6 +301,49 @@ async def test_compounding_reapplies_promoted_diff_on_next_round(git_repo, manag
     assert baseline_has_feature[1] is True  # round 2 : diff promu réappliqué (cumulatif)
 
 
+async def test_autofix_lint_cleans_promoted_diff_end_to_end(git_repo, manager):
+    # Le coder écrit un .py avec un import inutilisé ; l'auto-fix (#549) le retire AVANT
+    # la mesure → le diff promu (passé à la mesure « after ») est propre. Couvre aussi
+    # le chemin « diff vidé » (round 2 : l'auto-fix ramène le diff au HEAD cumulé →
+    # gain nul → rejet « gain insuffisant », sans promotion ni crash).
+    from collegue.improve.metrics import _find_ruff
+
+    if _find_ruff() is None:
+        pytest.skip("ruff indisponible dans cet environnement")
+
+    after_diffs = []
+
+    class _Probe:
+        def __init__(self):
+            self.i = 0
+
+        async def __call__(self, workspace, ctx, *, sandbox=None, reviewer=None, diff="", weights=None):
+            if diff:  # mesure « after »
+                after_diffs.append(diff)
+            m = _metrics([0.5, 0.7][min(self.i, 1)])
+            self.i += 1
+            return m
+
+    result = await run_improvement(
+        manager.create_project(name="autofix"),
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(files={"feat.py": "import os\nVALUE = 1\n"}),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        dry_run=True,
+        plateau_rounds=1,
+        measure_fn=_Probe(),
+    )
+    assert len(result.promoted) == 1
+    assert after_diffs  # une mesure « after » a bien eu lieu
+    assert "import os" not in after_diffs[0]  # F401 retiré par l'auto-fix avant mesure
+    assert "feat.py" in after_diffs[0]  # le diff promu reste celui du round
+
+
 async def test_unreliable_baseline_skips_agent_round(git_repo, manager):
     # Baseline non fiable (composite non fini, ex. scan sécu KO → inf) → round à vide
     # SANS appel agent ; fail-closed : aucune promotion, pas de score fantôme inf (#541).

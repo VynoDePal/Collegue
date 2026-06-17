@@ -273,6 +273,40 @@ def _scan_quality(workspace: str, *, scan_fn=None) -> Tuple[int, int, bool]:
         return 0, 0, False
 
 
+def autofix_lint(workspace: str, files, *, lint_select=DEFAULT_LINT_SELECT) -> int:
+    """Auto-corrige le lint des fichiers Python touchés (ruff --fix + format), in-place (#549).
+
+    Appelé par la boucle APRÈS le diff du coder et AVANT la mesure : le coder se
+    concentre sur le fond, le lint auto-corrigible (imports inutilisés, espaces, mise
+    en forme) est nettoyé → une amélioration de couverture/refactor n'est pas bloquée
+    par du lint résiduel (le gate étant tolérance-0 sur le lint).
+
+    Déterministe et générique : ``--isolated`` (ignore la config du projet généré) ;
+    scopé aux ``.py`` réellement présents parmi ``files`` ; ruff absent ou projet
+    non-Python ⇒ **no-op** (renvoie 0). Best-effort (toute panne ruff ignorée). Sûr :
+    un fix qui casserait un test est rattrapé par la mesure ``after`` (tests rouges ⇒
+    le gate rejette) — on ne promeut jamais un fix cassant. Renvoie le nb de fichiers
+    Python traités.
+    """
+    ruff = _find_ruff()
+    if not ruff:
+        return 0
+    py = [os.path.join(workspace, f) for f in files if f.endswith(".py") and os.path.isfile(os.path.join(workspace, f))]
+    if not py:
+        return 0
+    try:
+        subprocess.run(
+            [ruff, "check", *py, "--isolated", "--select", ",".join(lint_select), "--fix", "--no-cache"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        subprocess.run([ruff, "format", *py, "--isolated"], capture_output=True, text=True, timeout=120)
+    except Exception:  # noqa: BLE001 — auto-fix best-effort, jamais bloquant
+        pass
+    return len(py)
+
+
 async def measure(
     workspace: str,
     ctx,

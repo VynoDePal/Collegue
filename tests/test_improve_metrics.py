@@ -242,6 +242,30 @@ def test_default_security_scan_detects_planted_secret(tmp_path):
     assert total1 >= 1 and weighted1 > 0.0
 
 
+def test_autofix_lint_cleans_fixable_violations(tmp_path):
+    # ruff --fix + format nettoie le lint auto-corrigible des fichiers Python touchés.
+    from collegue.improve.metrics import _find_ruff, autofix_lint
+
+    if _find_ruff() is None:
+        pytest.skip("ruff indisponible dans cet environnement")
+
+    f = tmp_path / "dirty.py"
+    f.write_text("import os\nimport sys\nx=1\n")  # os/sys inutilisés (F401) + espacement (E225)
+    n = autofix_lint(str(tmp_path), ["dirty.py"])
+    assert n == 1
+    cleaned = f.read_text()
+    assert "import os" not in cleaned and "import sys" not in cleaned  # F401 retirés (--fix)
+    assert "x = 1" in cleaned  # espacement corrigé (format)
+
+
+def test_autofix_lint_noop_without_python(tmp_path):
+    from collegue.improve.metrics import autofix_lint
+
+    (tmp_path / "data.txt").write_text("import os\n")
+    assert autofix_lint(str(tmp_path), ["data.txt"]) == 0  # aucun .py → no-op
+    assert autofix_lint(str(tmp_path), ["missing.py"]) == 0  # fichier absent → no-op
+
+
 def test_default_security_scan_excludes_generated_and_tests(tmp_path):
     # Le scan sécu de la boucle (#547) ignore lockfiles + emplacements de test : un
     # secret qui y est planté n'est PAS compté ; le même dans du code produit l'est.
