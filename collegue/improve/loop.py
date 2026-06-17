@@ -73,7 +73,9 @@ def _improvement_quality_report(dimension, before, after, delta):
         f"Couverture {before.coverage_pct:.0f}% → {after.coverage_pct:.0f}% ; "
         f"sécu pondérée {before.security_weighted:.1f} → {after.security_weighted:.1f} ; "
         f"lint {before.lint_violations} → {after.lint_violations} ; "
-        f"complexité {before.complexity_bad_blocks} → {after.complexity_bad_blocks}."
+        f"complexité {before.complexity_bad_blocks} → {after.complexity_bad_blocks} ; "
+        f"vulns deps {before.dep_vulns} → {after.dep_vulns} ; "
+        f"docstrings {before.doc_coverage:.0%} → {after.doc_coverage:.0%}."
     )
     return QualityReport(
         tests_passed=after.tests_passed,

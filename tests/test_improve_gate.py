@@ -12,6 +12,7 @@ def _m(
     security=0,
     lint=0,
     complexity=0,
+    dep_vulns=0,
     tests=True,
     measured=True,
     quality_measured=True,
@@ -21,11 +22,14 @@ def _m(
         security_findings=security,
         security_weighted=security_weighted,
         tests_passed=tests,
-        composite=composite_score(coverage, security_weighted, lint_violations=lint, complexity_bad_blocks=complexity),
+        composite=composite_score(
+            coverage, security_weighted, lint_violations=lint, complexity_bad_blocks=complexity, dep_vulns=dep_vulns
+        ),
         coverage_measured=measured,
         lint_violations=lint,
         complexity_bad_blocks=complexity,
         quality_measured=quality_measured,
+        dep_vulns=dep_vulns,
     )
 
 
@@ -85,6 +89,21 @@ def test_reject_on_complexity_regression():
     d = evaluate(_m(coverage=70.0, complexity=1), _m(coverage=90.0, complexity=3))
     assert d.accepted is False
     assert "complexité" in d.reason
+
+
+def test_reject_on_dep_vulns_regression():
+    # Signal opt-in (#551) : plus de vulns de dépendances = rejet dur (tolérance 0),
+    # même avec un gain de couverture.
+    d = evaluate(_m(coverage=70.0, dep_vulns=1), _m(coverage=90.0, dep_vulns=3))
+    assert d.accepted is False
+    assert "vulns deps" in d.reason
+
+
+def test_dep_vulns_no_op_when_disabled():
+    # Par défaut dep_vulns=0 des deux côtés → la règle ne bloque pas (boucle validée
+    # préservée à l'identique).
+    d = evaluate(_m(coverage=70.0), _m(coverage=90.0))
+    assert d.accepted is True
 
 
 def test_lint_slack_allows_tolerated_regression():

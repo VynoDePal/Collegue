@@ -107,6 +107,13 @@ def test_composite_weights_tunable():
     assert composite_score(100.0, 5.0, lint_violations=9, complexity_bad_blocks=9, weights=w) == pytest.approx(2.0)
 
 
+def test_composite_dep_vulns_penalty():
+    # dep_vulns pénalise le composite ; 0 (défaut, flag off) = aucun effet.
+    base = composite_score(80.0, 0.0)
+    assert composite_score(80.0, 0.0, dep_vulns=0) == base  # off → inchangé
+    assert composite_score(80.0, 0.0, dep_vulns=2) < base  # 2 vulns → ↓
+
+
 # --- measure --------------------------------------------------------------------
 
 
@@ -166,6 +173,60 @@ async def test_measure_without_reviewer_is_deterministic():
     )
     assert m.review_score == 0.0
     assert m.composite == pytest.approx(0.9)
+
+
+async def test_measure_doc_coverage_informative(tmp_path):
+    # doc_coverage est calculée (informative) mais N'ENTRE PAS dans le composite.
+    base = await measure(
+        "/ws", ctx=None, sandbox=_Sandbox(), security_scan_fn=_scan(0, 0.0), quality_scan_fn=_quality(0, 0)
+    )
+    m = await measure(
+        "/ws",
+        ctx=None,
+        sandbox=_Sandbox(),
+        security_scan_fn=_scan(0, 0.0),
+        quality_scan_fn=_quality(0, 0),
+        doc_coverage_fn=lambda ws: 0.42,
+    )
+    assert m.doc_coverage == 0.42
+    assert m.composite == base.composite  # doc_coverage hors-composite
+
+
+async def test_measure_dep_vulns_opt_in():
+    # OFF par défaut → dep_vulns=0, composite inchangé. ON (fn injectée) → compté + gaté.
+    off = await measure(
+        "/ws", ctx=None, sandbox=_Sandbox(), security_scan_fn=_scan(0, 0.0), quality_scan_fn=_quality(0, 0)
+    )
+    assert off.dep_vulns == 0
+    on = await measure(
+        "/ws",
+        ctx=None,
+        sandbox=_Sandbox(),
+        security_scan_fn=_scan(0, 0.0),
+        quality_scan_fn=_quality(0, 0),
+        dep_vulns_enabled=True,
+        dep_vulns_fn=lambda ws: 3,
+    )
+    assert on.dep_vulns == 3
+    assert on.composite < off.composite  # 3 vulns pénalisent le composite
+
+
+def test_default_doc_coverage_ast(tmp_path):
+    # ast réel : 1 module + 1 fonction publique sur 2 documentés → 0.5 ; tests exclus.
+    (tmp_path / "mod.py").write_text('"""Module documenté."""\n\n\ndef public():\n    return 1\n')
+    (tmp_path / "test_mod.py").write_text("def helper():\n    return 1\n")  # exclu
+    from collegue.improve.metrics import _default_doc_coverage
+
+    cov = _default_doc_coverage(str(tmp_path))
+    # symboles comptés : module (doc=oui) + public() (doc=non) → 1/2 = 0.5
+    assert cov == pytest.approx(0.5)
+
+
+def test_default_dep_audit_noop_without_pip_audit(tmp_path):
+    # pip-audit absent (ou pas de requirements) → 0 (no-op), jamais d'exception.
+    from collegue.improve.metrics import _default_dep_audit
+
+    assert _default_dep_audit(str(tmp_path)) == 0  # pas de requirements.txt
 
 
 async def test_measure_tests_red_and_no_coverage():
@@ -325,6 +386,8 @@ def test_persist_writes_metrics(tmp_path):
         lint_violations=3,
         complexity_bad_blocks=2,
         quality_measured=True,
+        doc_coverage=0.75,
+        dep_vulns=1,
     )
     persist(manager, pid, m)
     names = {metric.name for metric in manager.get_metrics(pid)}
@@ -338,6 +401,8 @@ def test_persist_writes_metrics(tmp_path):
         "lint_violations",
         "complexity_bad_blocks",
         "quality_measured",
+        "doc_coverage",
+        "dep_vulns",
         "composite",
     }
     assert manager.get_metrics(pid, "composite")[0].value == pytest.approx(0.4)
