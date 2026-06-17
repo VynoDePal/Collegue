@@ -1117,10 +1117,15 @@ def requirement_keys_present(workspace: str) -> frozenset:
     for root in roots:
         try:
             with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as fh:
-                for line in fh:
-                    key = _requirement_key(line)
-                    if key is not None:
-                        keys.add(key)
+                # Lecture BORNÉE (#482 suivi v8, revue) : requirements.txt est écrit par
+                # l'agent (non fiable, comme dans :func:`_detect_asgi_app`) — un fichier
+                # adverse de plusieurs Mo ne doit pas charger le gate. 256 Ko couvre très
+                # largement tout requirements.txt légitime.
+                blob = fh.read(262144)
+            for line in blob.splitlines():
+                key = _requirement_key(line)
+                if key is not None:
+                    keys.add(key)
         except (OSError, UnicodeDecodeError):
             continue
     return frozenset(keys)

@@ -1834,6 +1834,19 @@ def test_requirement_keys_present_reads_workspace(tmp_path):
     assert requirement_keys_present(str(tmp_path / "inexistant")) == frozenset()
 
 
+def test_requirement_keys_present_reads_are_bounded(tmp_path):
+    """#482 suivi v8 (revue) : requirements.txt est écrit par l'agent (non fiable) —
+    la lecture est BORNÉE (256 Ko) pour qu'un fichier adverse de plusieurs Mo ne
+    charge pas le gate. Un paquet placé AU-DELÀ de la borne n'est pas lu."""
+    from collegue.executor import requirement_keys_present
+
+    padding = "# pad\n" * 50000  # ~300 Ko, > borne de 256 Ko
+    (tmp_path / "requirements.txt").write_text("fastapi==0.137.1\n" + padding + "tarpit==9.9.9\n", encoding="utf-8")
+    keys = requirement_keys_present(str(tmp_path))
+    assert "fastapi" in keys  # début du fichier, lu
+    assert "tarpit" not in keys  # au-delà de la borne, non lu
+
+
 async def test_requirements_removal_not_justified_by_machine_context():
     """Revue #482 (boomerang) : le feedback nominatif de la tentative 1 revient
     dans issue.context à la tentative 2 — il ne doit JAMAIS « justifier » la
