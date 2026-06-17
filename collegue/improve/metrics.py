@@ -23,6 +23,7 @@ Module **isolé** : non câblé au runtime (la boucle G4 l'orchestre).
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import os
@@ -107,6 +108,7 @@ class CompositeWeights:
     security: float = 0.1  # pénalité par unité de score sécu pondéré
     lint: float = 0.02  # pénalité par violation de lint
     complexity: float = 0.05  # pénalité par bloc trop complexe
+    dep_vulns: float = 0.5  # pénalité par vuln. de dépendance (signal opt-in, #551)
 
 
 DEFAULT_WEIGHTS = CompositeWeights()
@@ -135,6 +137,12 @@ class ProjectQualityMetrics:
     # False si ruff n'a pas pu tourner (absent / panne). Le gate rejette une bascule
     # avant≠après (sinon un échec de scan après gonflerait le composite — #543).
     quality_measured: bool = True
+    # INFORMATIF (hors-gate, #551) : couverture de docstrings des symboles publics
+    # [0–1], proxy de maintenabilité/documentation. N'entre PAS dans le composite.
+    doc_coverage: float = 1.0
+    # Vulnérabilités de dépendances (pip-audit). Signal OPT-IN : 0 par défaut (flag
+    # off) → terme composite nul + règle gate no-op. Gaté (tolérance 0) quand activé.
+    dep_vulns: int = 0
 
 
 def parse_coverage(output: str) -> Optional[float]:
@@ -155,19 +163,22 @@ def composite_score(
     *,
     lint_violations: int = 0,
     complexity_bad_blocks: int = 0,
+    dep_vulns: int = 0,
     weights: CompositeWeights = DEFAULT_WEIGHTS,
 ) -> float:
     """Score composite pondéré (déterministe).
 
-    Monotone : ↑couverture → ↑ ; ↑sécu pondérée / ↑lint / ↑complexité → ↓. La
-    couverture (0–100) est normalisée en 0–1 ; sécu/lint/complexité sont des
-    pénalités. La revue LLM n'y figure pas (informative, hors-gate).
+    Monotone : ↑couverture → ↑ ; ↑sécu pondérée / ↑lint / ↑complexité / ↑vulns deps
+    → ↓. La couverture (0–100) est normalisée en 0–1 ; les autres sont des pénalités.
+    ``dep_vulns`` vaut 0 quand le flag est off (terme nul). La revue LLM et la
+    couverture de docstrings n'y figurent pas (informatives, hors-gate).
     """
     return (
         weights.coverage * (coverage_pct / 100.0)
         - weights.security * security_weighted
         - weights.lint * lint_violations
         - weights.complexity * complexity_bad_blocks
+        - weights.dep_vulns * dep_vulns
     )
 
 
@@ -307,6 +318,98 @@ def autofix_lint(workspace: str, files, *, lint_select=DEFAULT_LINT_SELECT) -> i
     return len(py)
 
 
+# Dossiers élagués du calcul de couverture de docstrings (générés / tests).
+_DOC_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "env",
+        "dist",
+        "build",
+        "tests",
+        "test",
+        "__tests__",
+        "fixtures",
+    }
+)
+
+
+def _is_doc_test_file(filename: str) -> bool:
+    """Vrai pour un fichier de test (exclu de la couverture de docstrings)."""
+    return filename == "conftest.py" or filename.startswith("test_") or filename.endswith("_test.py")
+
+
+def _default_doc_coverage(workspace: str) -> float:
+    """Fraction de symboles publics munis d'une docstring [0–1] (ast, stdlib).
+
+    Proxy de **maintenabilité/documentation** déterministe : compte la docstring de
+    module + celles des classes/fonctions publiques (nom ne commençant pas par ``_``)
+    sur les ``.py`` du workspace, hors emplacements de test. ``1.0`` si aucun symbole
+    public (vacuité). **Informatif** (hors-gate) ; générique Python, sans dépendance.
+    """
+    documented = total = 0
+    for root, dirs, fnames in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in _DOC_SKIP_DIRS]
+        for fname in fnames:
+            if not fname.endswith(".py") or _is_doc_test_file(fname):
+                continue
+            try:
+                with open(os.path.join(root, fname), encoding="utf-8") as handle:
+                    tree = ast.parse(handle.read())
+            except (OSError, SyntaxError, ValueError):
+                continue
+            total += 1  # le module lui-même
+            if ast.get_docstring(tree):
+                documented += 1
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and not node.name.startswith(
+                    "_"
+                ):
+                    total += 1
+                    if ast.get_docstring(node):
+                        documented += 1
+    return 1.0 if total == 0 else documented / total
+
+
+def _find_pip_audit() -> Optional[str]:
+    """Localise pip-audit : PATH puis à côté de l'interpréteur (venv). ``None`` si absent."""
+    found = shutil.which("pip-audit")
+    if found:
+        return found
+    candidate = os.path.join(os.path.dirname(sys.executable), "pip-audit")
+    return candidate if os.path.exists(candidate) else None
+
+
+def _default_dep_audit(workspace: str) -> int:
+    """Compte les vulnérabilités connues des dépendances via pip-audit (#551).
+
+    Opt-in (appelé seulement si ``dep_vulns_enabled``). Audite ``requirements.txt`` du
+    workspace (réseau, base OSV). pip-audit absent / pas de requirements / panne ⇒
+    **0** (no-op, comme ``_find_ruff``) — pip-audit n'est PAS imposé en dépendance.
+    """
+    audit = _find_pip_audit()
+    if not audit:
+        return 0
+    req = os.path.join(workspace, "requirements.txt")
+    if not os.path.isfile(req):
+        return 0
+    try:
+        proc = subprocess.run(
+            [audit, "-r", req, "-f", "json", "--progress-spinner", "off"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        data = json.loads(proc.stdout or "{}")
+        deps = data.get("dependencies", []) if isinstance(data, dict) else (data or [])
+        return sum(len(d.get("vulns", [])) for d in deps if isinstance(d, dict))
+    except Exception:  # noqa: BLE001 — audit best-effort, jamais bloquant
+        return 0
+
+
 async def measure(
     workspace: str,
     ctx,
@@ -319,14 +422,19 @@ async def measure(
     weights: CompositeWeights = DEFAULT_WEIGHTS,
     security_scan_fn=None,
     quality_scan_fn=None,
+    doc_coverage_fn=None,
+    dep_vulns_enabled: bool = False,
+    dep_vulns_fn=None,
 ) -> ProjectQualityMetrics:
     """Mesure couverture + sécu + lint/complexité (déterministes) → composite.
 
     ``sandbox`` est injectable (mocké en CI) ; la couverture vient du parsing de la
     sortie pytest-cov et ``tests_passed`` = exit 0. Sécu (``security_scan_fn``) et
     lint/complexité (``quality_scan_fn``) viennent de scans **statiques déterministes**
-    du **workspace** (injectables en tests). La revue LLM (``reviewer``/``diff``) est
-    **optionnelle et informative** (corps de PR) : elle n'entre pas dans le composite.
+    du **workspace** (injectables en tests). La couverture de docstrings
+    (``doc_coverage_fn``) est **informative** (hors composite). Les vulns de dépendances
+    (``dep_vulns_fn``) ne sont mesurées que si ``dep_vulns_enabled`` (opt-in, gaté).
+    La revue LLM (``reviewer``/``diff``) est **optionnelle et informative**.
     """
     test_res = sandbox.run_tests(workspace, coverage_command)
     tests_passed = bool(test_res.ok)
@@ -336,6 +444,21 @@ async def measure(
 
     security_findings, security_weighted = _scan_security(workspace, scan_fn=security_scan_fn)
     lint_violations, complexity_bad_blocks, quality_measured = _scan_quality(workspace, scan_fn=quality_scan_fn)
+
+    # Maintenabilité informative (hors-gate) : couverture de docstrings, jamais bloquante.
+    try:
+        doc_coverage = float((doc_coverage_fn or _default_doc_coverage)(workspace))
+    except Exception:  # noqa: BLE001 — informatif, jamais bloquant
+        doc_coverage = 1.0
+
+    # Vulns de dépendances : OPT-IN (flag). Off ⇒ 0 (terme composite nul, gate no-op).
+    # Symétrique à doc_coverage : une fn injectée qui lève ne fait pas planter la mesure.
+    dep_vulns = 0
+    if dep_vulns_enabled:
+        try:
+            dep_vulns = int((dep_vulns_fn or _default_dep_audit)(workspace))
+        except Exception:  # noqa: BLE001 — audit best-effort, jamais bloquant
+            dep_vulns = 0
 
     # Revue LLM : INFORMATIVE uniquement (hors composite). Calculée seulement s'il y
     # a un reviewer ET un diff à examiner ; toute panne reste sans effet sur le gate.
@@ -357,6 +480,7 @@ async def measure(
             security_weighted,
             lint_violations=lint_violations,
             complexity_bad_blocks=complexity_bad_blocks,
+            dep_vulns=dep_vulns,
             weights=weights,
         ),
         coverage_measured=coverage_measured,
@@ -364,6 +488,8 @@ async def measure(
         lint_violations=lint_violations,
         complexity_bad_blocks=complexity_bad_blocks,
         quality_measured=quality_measured,
+        doc_coverage=doc_coverage,
+        dep_vulns=dep_vulns,
     )
 
 
@@ -378,4 +504,6 @@ def persist(manager, project_id: int, metrics: ProjectQualityMetrics) -> None:
     manager.add_metric(project_id, "lint_violations", float(metrics.lint_violations))
     manager.add_metric(project_id, "complexity_bad_blocks", float(metrics.complexity_bad_blocks))
     manager.add_metric(project_id, "quality_measured", 1.0 if metrics.quality_measured else 0.0)
+    manager.add_metric(project_id, "doc_coverage", metrics.doc_coverage)
+    manager.add_metric(project_id, "dep_vulns", float(metrics.dep_vulns))
     manager.add_metric(project_id, "composite", metrics.composite)

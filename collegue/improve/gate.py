@@ -65,7 +65,9 @@ def evaluate(
          dure ; un scan sécu en échec ⇒ composite non fini ⇒ rejet à la règle 2) ;
        - lint : ``after.lint_violations <= before.lint_violations + lint_slack`` ;
        - complexité : ``after.complexity_bad_blocks <= before.complexity_bad_blocks
-         + complexity_slack``.
+         + complexity_slack`` ;
+       - vulns deps : ``after.dep_vulns <= before.dep_vulns`` (tolérance 0 dure ;
+         signal opt-in #551 — ``dep_vulns`` vaut 0 quand le flag est off ⇒ no-op).
     5. **Gain réel** : ``after.composite >= before.composite + min_gain``.
 
     ``min_gain`` négatif inverserait la garde « pas de régression » → borné à 0 ; les
@@ -96,6 +98,8 @@ def evaluate(
             f"régression complexité : {after.complexity_bad_blocks} > "
             f"{before.complexity_bad_blocks} (slack {complexity_slack})"
         )
+    if after.dep_vulns > before.dep_vulns:
+        return reject(f"régression vulns deps : {after.dep_vulns} > {before.dep_vulns} (tolérance 0)")
     if delta < min_gain:
         return reject(f"gain insuffisant : Δ={delta:.4f} < min_gain={min_gain:.4f}")
 
