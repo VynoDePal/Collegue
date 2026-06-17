@@ -242,6 +242,24 @@ def test_default_security_scan_detects_planted_secret(tmp_path):
     assert total1 >= 1 and weighted1 > 0.0
 
 
+def test_default_security_scan_excludes_generated_and_tests(tmp_path):
+    # Le scan sécu de la boucle (#547) ignore lockfiles + emplacements de test : un
+    # secret qui y est planté n'est PAS compté ; le même dans du code produit l'est.
+    from collegue.improve.metrics import _default_security_scan
+
+    rsa = '"-----BEGIN RSA PRIVATE KEY-----"'
+    (tmp_path / "package-lock.json").write_text("{" + f'"k": {rsa}' + "}\n")
+    (tmp_path / "test_thing.py").write_text(f"KEY = {rsa}\n")
+    (tmp_path / "fixtures").mkdir()
+    (tmp_path / "fixtures" / "data.py").write_text(f"KEY = {rsa}\n")
+    total0, weighted0 = _default_security_scan(str(tmp_path))
+    assert total0 == 0 and weighted0 == 0.0  # tout est dans des emplacements exclus
+
+    (tmp_path / "app.py").write_text(f"KEY = {rsa}\n")  # code produit → compté
+    total1, weighted1 = _default_security_scan(str(tmp_path))
+    assert total1 >= 1 and weighted1 > 0.0
+
+
 def test_default_quality_scan_counts_lint_and_complexity(tmp_path):
     # Valide le CÂBLAGE réel de ruff (pas un stub) : fichier propre → (0, 0) ;
     # imports inutilisés + fonction très imbriquée → lint > 0 ET complexité > 0.
