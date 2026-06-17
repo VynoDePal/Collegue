@@ -1,6 +1,7 @@
 """Tests G4 (#386) : boucle d'amélioration continue (mesures scriptées, fixture git)."""
 
 import math
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -198,6 +199,106 @@ async def test_no_diff_round_counts_as_no_gain(git_repo, manager):
     assert result.promoted == []
     assert result.rejected[0][1] == "aucun diff produit"
     assert result.stop_reason == "plateau"
+
+
+# --- compounding (#545) ---------------------------------------------------------
+
+
+def test_seed_promoted_diffs_reapplies_and_commits(git_repo):
+    # Un diff promu réappliqué sur un clone neuf → fichier présent ET committé.
+    from collegue.executor.agent import IssueSpec
+    from collegue.executor.runner import capture_diff
+    from collegue.executor.workspace import prepare_workspace
+    from collegue.improve.loop import _seed_promoted_diffs
+
+    ws = prepare_workspace(git_repo, IssueSpec(number=1, title="t"))
+    with open(os.path.join(ws.path, "feature.py"), "w") as fh:
+        fh.write("VALUE = 1\n")
+    diff, _ = capture_diff(ws)
+    # remet le clone à l'état vierge (simule le clone neuf d'un round)
+    _git(ws.path, "reset", "--hard")
+    _git(ws.path, "clean", "-fdq")
+    assert not os.path.exists(os.path.join(ws.path, "feature.py"))
+
+    applied = _seed_promoted_diffs(ws, [diff])
+    assert applied == 1
+    assert os.path.exists(os.path.join(ws.path, "feature.py"))
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=ws.path, capture_output=True, text=True)
+    assert status.stdout.strip() == ""  # tout est committé (HEAD = état cumulé)
+
+
+def test_seed_promoted_diffs_applies_two_in_cascade(git_repo):
+    # Deux diffs promus successifs (diff2 capturé SUR base+diff1) réappliqués en
+    # cascade sur un clone neuf → les deux fichiers présents (3-way en série).
+    from collegue.executor.agent import IssueSpec
+    from collegue.executor.runner import capture_diff
+    from collegue.executor.workspace import prepare_workspace
+    from collegue.improve.loop import _seed_promoted_diffs
+
+    ws = prepare_workspace(git_repo, IssueSpec(number=3, title="t"))
+    with open(os.path.join(ws.path, "a.py"), "w") as fh:
+        fh.write("A = 1\n")
+    diff1, _ = capture_diff(ws)
+    _git(ws.path, "-c", "user.email=t@e.x", "-c", "user.name=t", "commit", "-q", "-m", "a")
+    with open(os.path.join(ws.path, "b.py"), "w") as fh:
+        fh.write("B = 2\n")
+    diff2, _ = capture_diff(ws)  # capturé contre base+diff1 (b.py seul)
+    # remet à l'état vierge (clone neuf) : ni a.py ni b.py
+    _git(ws.path, "reset", "--hard", "HEAD~1")
+    _git(ws.path, "clean", "-fdq")
+    assert not os.path.exists(os.path.join(ws.path, "a.py"))
+    assert not os.path.exists(os.path.join(ws.path, "b.py"))
+
+    applied = _seed_promoted_diffs(ws, [diff1, diff2])
+    assert applied == 2
+    assert os.path.exists(os.path.join(ws.path, "a.py"))
+    assert os.path.exists(os.path.join(ws.path, "b.py"))
+
+
+def test_seed_promoted_diffs_skips_inapplicable(git_repo):
+    # Un diff corrompu/inapplicable est sauté (best-effort), sans casser le run.
+    from collegue.executor.agent import IssueSpec
+    from collegue.executor.workspace import prepare_workspace
+    from collegue.improve.loop import _seed_promoted_diffs
+
+    ws = prepare_workspace(git_repo, IssueSpec(number=2, title="t"))
+    assert _seed_promoted_diffs(ws, ["pas un diff valide\n"]) == 0
+
+
+async def test_compounding_reapplies_promoted_diff_on_next_round(git_repo, manager):
+    # Round 1 promeut (feature.py) ; round 2 doit RÉAPPLIQUER ce diff sur le clone neuf
+    # → feature.py présent à la mesure baseline du round 2 (score cumulatif).
+    baseline_has_feature = []
+
+    class _ProbeMeasure:
+        def __init__(self):
+            self.i = 0
+
+        async def __call__(self, workspace, ctx, *, sandbox=None, reviewer=None, diff="", weights=None):
+            if not diff:  # mesure baseline (« avant »)
+                baseline_has_feature.append(os.path.exists(os.path.join(workspace, "feature.py")))
+            scores = [0.5, 0.7, 0.7, 0.7]  # r1.before, r1.after (promu), r2.before, …
+            m = _metrics(scores[min(self.i, len(scores) - 1)])
+            self.i += 1
+            return m
+
+    result = await run_improvement(
+        manager.create_project(name="compound"),
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(files={"feature.py": "VALUE = 1\n"}),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        dry_run=True,
+        plateau_rounds=1,
+        measure_fn=_ProbeMeasure(),
+    )
+    assert len(result.promoted) == 1
+    assert baseline_has_feature[0] is False  # round 1 : clone neuf, pas de feature.py
+    assert baseline_has_feature[1] is True  # round 2 : diff promu réappliqué (cumulatif)
 
 
 async def test_unreliable_baseline_skips_agent_round(git_repo, manager):
