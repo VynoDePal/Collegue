@@ -383,6 +383,23 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
             "vendorées) et le gate les REFUSE : " + " ; ".join(forbidden[:10]) + ". Retire-les du "
             "commit (git rm --cached) et ajoute leurs motifs au .gitignore ; conserve le reste de ton travail."
         )[:700]
+    if report is not None and getattr(report, "review_blocking", False):
+        # #503 suivi v8 : le gate est rouge PARCE QUE la revue experte a HARD-BLOQUÉ
+        # (findings CRITIQUES de sécurité — ex. IDOR, jetons falsifiables). Sans cette
+        # branche, failure_feedback retombait sur la sortie des tests — souvent VERTE —
+        # et le coder ne savait JAMAIS pourquoi le gate échouait (run v8, tâche 1 : 1
+        # tentative perdue, le verdict critical-security du reviewer étant invisible).
+        # On NOMME les failles pour que la tentative suivante les corrige (cf. #508/#482).
+        findings = tuple(getattr(report, "review_findings", ()) or ())
+        blockers = [
+            f for f in findings if getattr(f, "severity", "") == "critical" and getattr(f, "category", "") == "security"
+        ] or list(findings)[:6]
+        named = " ; ".join(f"[{f.severity}/{f.category}] {f.title}" for f in blockers[:6])
+        return (
+            "REVUE EXPERTE BLOQUANTE — la revue a trouvé des failles que le gate REFUSE "
+            "(les tests sont VERTS mais ne les couvrent pas) : " + named + ". Corrige ces "
+            "failles dans le code livré (n'ignore pas la sécurité) ; conserve le reste de ton travail."
+        )[:700]
     if outcome.quality_report is not None and outcome.quality_report.test_output:
         output = outcome.quality_report.test_output
         # « FAILED  » / « ERROR  » avec espace : les formes du short summary

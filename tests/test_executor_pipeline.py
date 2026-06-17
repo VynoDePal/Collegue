@@ -363,6 +363,50 @@ def test_failure_feedback_surfaces_forbidden_files_when_blocking():
     assert "incompatible" not in fb  # le bruit pip ne doit PAS être le diagnostic
 
 
+def test_failure_feedback_surfaces_blocking_review_findings():
+    """#503 suivi v8 : quand la revue experte HARD-BLOQUE (findings critical+security),
+    le feedback DOIT nommer les failles — sinon le coder reçoit la sortie de tests VERTE
+    et ne peut pas converger (run v8, tâche 1 : 1 tentative perdue sur un verdict
+    critical-security invisible). Le verdict bloquant prime sur la sortie de tests verte."""
+    from collegue.executor import AgentResult, QualityReport, ReviewFindingLite, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    execution = ExecutionResult(
+        agent_result=AgentResult(success=True, logs="j"), changed=True, diff="", files_changed=(), success=True
+    )
+    report = QualityReport(
+        tests_passed=True,  # tests VERTS
+        test_exit_code=0,
+        test_output="6 passed in 0.4s",
+        review_summary="",
+        review_findings=(
+            ReviewFindingLite(
+                category="security",
+                severity="critical",
+                title="Absence d'isolation par propriétaire (IDOR) sur /clients",
+            ),
+            ReviewFindingLite(category="dry", severity="warning", title="Code dupliqué"),
+        ),
+        review_blocking=True,  # rouge à cause de la revue bloquante
+        passed=False,
+    )
+    fb = failure_feedback(
+        ExecutionOutcome(
+            success=False,
+            stage="gate",
+            workspace=Workspace(path="/w", branch="b", base_commit="c"),
+            execution=execution,
+            quality_report=report,
+            reason="gate_failed",
+        )
+    )
+    assert "REVUE EXPERTE BLOQUANTE" in fb
+    assert "IDOR" in fb  # la faille critique de sécurité est nommée
+    assert "Code dupliqué" not in fb  # seuls les findings critical+security sont surfacés
+    assert "6 passed" not in fb  # la sortie de tests verte ne doit PAS être le diagnostic
+
+
 def test_failure_feedback_ignores_forbidden_files_when_signal_only():
     """#508 (suite v6) : en mode SIGNAL (non bloquant), forbidden_files ne doit PAS
     masquer la vraie cause d'échec — le feedback reste le diagnostic des tests."""
