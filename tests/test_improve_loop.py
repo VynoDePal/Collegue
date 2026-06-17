@@ -1,5 +1,6 @@
 """Tests G4 (#386) : boucle d'amélioration continue (mesures scriptées, fixture git)."""
 
+import math
 import subprocess
 from types import SimpleNamespace
 
@@ -15,14 +16,15 @@ CONT = ContinueDecision(action=ACTION_CONTINUE, reason="ok")
 PAUSE = ContinueDecision(action=ACTION_PAUSED_BUDGET, reason="budget")
 
 
-def _metrics(composite, *, tests=True, security=0, measured=True, coverage=80.0, review=0.7):
+def _metrics(composite, *, tests=True, security=0, security_weighted=0.0, measured=True, coverage=80.0, review=0.7):
     return ProjectQualityMetrics(
         coverage_pct=coverage,
-        review_score=review,
         security_findings=security,
+        security_weighted=security_weighted,
         tests_passed=tests,
         composite=composite,
         coverage_measured=measured,
+        review_score=review,
     )
 
 
@@ -196,6 +198,16 @@ async def test_no_diff_round_counts_as_no_gain(git_repo, manager):
     assert result.promoted == []
     assert result.rejected[0][1] == "aucun diff produit"
     assert result.stop_reason == "plateau"
+
+
+async def test_unreliable_baseline_skips_agent_round(git_repo, manager):
+    # Baseline non fiable (composite non fini, ex. scan sécu KO → inf) → round à vide
+    # SANS appel agent ; fail-closed : aucune promotion, pas de score fantôme inf (#541).
+    result = await _run(git_repo, manager, measure_seq=[_metrics(math.inf)], plateau_rounds=1)
+    assert result.promoted == []
+    assert result.stop_reason == "plateau"
+    assert result.rejected[0] == ("baseline", "mesure baseline non fiable (composite non fini)")
+    assert result.initial_score is None  # pas de score fantôme inf enregistré
 
 
 # --- arrêts ---------------------------------------------------------------------
