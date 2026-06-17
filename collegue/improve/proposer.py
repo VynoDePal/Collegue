@@ -99,6 +99,12 @@ def next_dimension(metrics: ProjectQualityMetrics, *, history: Sequence[AttemptR
     # (NaN < cible est False) — on ne cible alors pas la couverture (fail-silent évité).
     if metrics.coverage_measured and math.isfinite(metrics.coverage_pct) and metrics.coverage_pct < COVERAGE_TARGET:
         candidates.append(Dimension.COVERAGE)
+    # Dimensions qualité MÉTRIQUE-DRIVEN (#543) : priorité quand leur signal
+    # déterministe est non nul (avant le round-robin de polissage).
+    if metrics.complexity_bad_blocks > 0:
+        candidates.append(Dimension.REFACTORING)
+    if metrics.lint_violations > 0:
+        candidates.append(Dimension.CONSISTENCY)
     candidates.extend(_rotate_quality(history))
 
     for dimension in candidates:
@@ -121,9 +127,10 @@ _TEMPLATES = {
         ("Le nombre de findings de sécurité diminue", "Aucun nouveau finding", "Tous les tests passent"),
     ),
     Dimension.REFACTORING: (
-        "Refactoring pour la qualité",
-        "Améliorer lisibilité et structure sans changer le comportement observable.",
-        ("Le score de revue augmente", "Tous les tests passent", "Aucun changement de comportement"),
+        "Refactoring pour réduire la complexité",
+        "Réduire la complexité cyclomatique : {complexity} bloc(s) dépassent le seuil. "
+        "Simplifier (extraire des fonctions, aplatir les branches) sans changer le comportement observable.",
+        ("Le nombre de blocs trop complexes diminue", "Tous les tests passent", "Aucun changement de comportement"),
     ),
     Dimension.DOCUMENTATION: (
         "Améliorer la documentation",
@@ -131,9 +138,10 @@ _TEMPLATES = {
         ("La documentation des éléments publics s'améliore", "Tous les tests passent"),
     ),
     Dimension.CONSISTENCY: (
-        "Améliorer la cohérence du code",
-        "Uniformiser nommage, conventions et patterns pour réduire la charge cognitive.",
-        ("Le score de revue augmente", "Tous les tests passent"),
+        "Corriger les violations de lint",
+        "Corriger les {lint} violation(s) de lint (ruff) et uniformiser nommage/conventions "
+        "pour réduire la charge cognitive.",
+        ("Le nombre de violations de lint diminue", "Tous les tests passent"),
     ),
 }
 
@@ -151,6 +159,8 @@ def build_improvement_task(dimension: Dimension, metrics: ProjectQualityMetrics,
     body = body_template.format(
         coverage=max(0.0, metrics.coverage_pct) if math.isfinite(metrics.coverage_pct) else 0.0,
         security=max(0, metrics.security_findings),
+        lint=max(0, metrics.lint_violations),
+        complexity=max(0, metrics.complexity_bad_blocks),
     )
     return IssueSpec(
         number=int(number),

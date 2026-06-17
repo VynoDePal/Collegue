@@ -23,8 +23,13 @@ Module **isolé** : non câblé au runtime (la boucle G4 l'orchestre).
 
 from __future__ import annotations
 
+import json
 import math
+import os
 import re
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -35,6 +40,11 @@ DEFAULT_COVERAGE_COMMAND = "pytest -q --cov --cov-report=term-missing"
 # le plus ; le composite et le gate (tolérance 0) raisonnent sur ce total pondéré.
 SECURITY_SEVERITY_WEIGHTS = {"critical": 10.0, "high": 5.0, "medium": 2.0, "low": 1.0}
 
+# Règles ruff comptées comme « violations de lint » (erreurs pyflakes/pycodestyle).
+DEFAULT_LINT_SELECT = ("E", "F", "W")
+# Seuil de complexité cyclomatique (mccabe / ruff C901) : au-delà = « bloc complexe ».
+DEFAULT_COMPLEXITY_MAX = 10
+
 # Regex de la ligne récapitulative TOTAL de pytest-cov : « TOTAL  120  6  95% ».
 # On exige un espace juste après TOTAL (rejette un fichier nommé « TOTAL.py »).
 _TOTAL_RE = re.compile(r"^\s*TOTAL\s+.*?(\d+(?:\.\d+)?)%", re.MULTILINE)
@@ -42,10 +52,16 @@ _TOTAL_RE = re.compile(r"^\s*TOTAL\s+.*?(\d+(?:\.\d+)?)%", re.MULTILINE)
 
 @dataclass(frozen=True)
 class CompositeWeights:
-    """Pondérations du score composite (extensibles)."""
+    """Pondérations du score composite (extensibles).
+
+    La couverture domine ; lint/complexité sont des pénalités faibles (un gain de
+    couverture ne doit pas être annulé par une violation de lint marginale).
+    """
 
     coverage: float = 1.0  # par point de couverture normalisé (0–1)
     security: float = 0.1  # pénalité par unité de score sécu pondéré
+    lint: float = 0.02  # pénalité par violation de lint
+    complexity: float = 0.05  # pénalité par bloc trop complexe
 
 
 DEFAULT_WEIGHTS = CompositeWeights()
@@ -67,6 +83,13 @@ class ProjectQualityMetrics:
     # INFORMATIF (hors-gate) : score de revue LLM pour le corps de PR. N'entre PAS
     # dans ``composite`` (un signal LLM diff-scopé est non déterministe — #541).
     review_score: float = 0.0
+    # Signaux qualité déterministes (ruff/mccabe, #543). 0 = neutre (projet non-Python
+    # où ruff tourne sans erreur) ; un signal qualité non mesurable ne bloque pas (≠ sécu).
+    lint_violations: int = 0
+    complexity_bad_blocks: int = 0
+    # False si ruff n'a pas pu tourner (absent / panne). Le gate rejette une bascule
+    # avant≠après (sinon un échec de scan après gonflerait le composite — #543).
+    quality_measured: bool = True
 
 
 def parse_coverage(output: str) -> Optional[float]:
@@ -85,15 +108,22 @@ def composite_score(
     coverage_pct: float,
     security_weighted: float,
     *,
+    lint_violations: int = 0,
+    complexity_bad_blocks: int = 0,
     weights: CompositeWeights = DEFAULT_WEIGHTS,
 ) -> float:
-    """Score composite pondéré (monotone : ↑couverture → ↑ ; ↑sécu pondérée → ↓).
+    """Score composite pondéré (déterministe).
 
-    La couverture (0–100) est normalisée en 0–1 ; le score sécu pondéré est retiré
-    proportionnellement à ``weights.security``. La revue LLM n'y figure pas
-    (informative, hors-gate).
+    Monotone : ↑couverture → ↑ ; ↑sécu pondérée / ↑lint / ↑complexité → ↓. La
+    couverture (0–100) est normalisée en 0–1 ; sécu/lint/complexité sont des
+    pénalités. La revue LLM n'y figure pas (informative, hors-gate).
     """
-    return weights.coverage * (coverage_pct / 100.0) - weights.security * security_weighted
+    return (
+        weights.coverage * (coverage_pct / 100.0)
+        - weights.security * security_weighted
+        - weights.lint * lint_violations
+        - weights.complexity * complexity_bad_blocks
+    )
 
 
 def _default_security_scan(workspace: str) -> Tuple[int, float]:
@@ -132,6 +162,70 @@ def _scan_security(workspace: str, *, scan_fn=None) -> Tuple[int, float]:
         return -1, math.inf
 
 
+def _find_ruff() -> Optional[str]:
+    """Localise l'exécutable ruff : PATH, puis à côté de l'interpréteur (venv)."""
+    found = shutil.which("ruff")
+    if found:
+        return found
+    candidate = os.path.join(os.path.dirname(sys.executable), "ruff")
+    return candidate if os.path.exists(candidate) else None
+
+
+def _ruff_count(ruff: str, workspace: str, select_args) -> int:
+    """Compte les diagnostics ruff (JSON) pour une sélection de règles, sur le workspace.
+
+    ``--isolated`` ignore la config ruff du PROJET GÉNÉRÉ → mesure reproductible et
+    indépendante du projet ; ``--no-cache`` évite toute pollution inter-runs ;
+    ``timeout`` borne le temps. Toute panne (timeout, JSON illisible) **se propage**
+    → traitée comme « non mesuré » par :func:`_scan_quality` (et non comme un faux 0).
+    """
+    proc = subprocess.run(
+        [ruff, "check", workspace, "--isolated", *select_args, "--output-format=json", "--no-cache"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return len(json.loads(proc.stdout or "[]"))
+
+
+def _default_quality_scan(
+    workspace: str,
+    *,
+    lint_select=DEFAULT_LINT_SELECT,
+    complexity_max: int = DEFAULT_COMPLEXITY_MAX,
+) -> Tuple[int, int, bool]:
+    """Lint + complexité déterministes via ruff (mccabe), sur le workspace.
+
+    Retourne ``(lint_violations, complexity_bad_blocks, measured)``. ruff absent ⇒
+    ``(0, 0, False)`` (non mesuré). Un projet non-Python où ruff tourne sans erreur
+    ⇒ ``(0, 0, True)`` (mesuré, neutre). Une panne de scan se propage (→ non mesuré).
+    """
+    ruff = _find_ruff()
+    if not ruff:
+        return 0, 0, False
+    lint = _ruff_count(ruff, workspace, ["--select", ",".join(lint_select)])
+    complexity = _ruff_count(
+        ruff, workspace, ["--select", "C901", "--config", f"lint.mccabe.max-complexity={complexity_max}"]
+    )
+    return lint, complexity, True
+
+
+def _scan_quality(workspace: str, *, scan_fn=None) -> Tuple[int, int, bool]:
+    """Mesure lint/complexité déterministe (injectable). Échec ⇒ ``(0, 0, False)``.
+
+    ``measured`` distingue « ruff a tourné » de « non mesuré » (ruff absent / panne) :
+    le gate (G2) rejette une **bascule de mesurabilité** (avant≠après) — sinon un échec
+    de scan APRÈS (lint→0) gonflerait le composite et promouvrait à tort (#543). Hors
+    bascule, un signal qualité non mesurable reste neutre (≠ sécu, fail-closed dur).
+    """
+    fn = scan_fn or _default_quality_scan
+    try:
+        lint, complexity, measured = fn(workspace)
+        return int(lint), int(complexity), bool(measured)
+    except Exception:  # noqa: BLE001 — panne de scan ⇒ non mesuré (le gate gère la bascule)
+        return 0, 0, False
+
+
 async def measure(
     workspace: str,
     ctx,
@@ -143,14 +237,15 @@ async def measure(
     coverage_command: str = DEFAULT_COVERAGE_COMMAND,
     weights: CompositeWeights = DEFAULT_WEIGHTS,
     security_scan_fn=None,
+    quality_scan_fn=None,
 ) -> ProjectQualityMetrics:
-    """Mesure couverture (sandbox) + sécu (scan statique) → métriques composites.
+    """Mesure couverture + sécu + lint/complexité (déterministes) → composite.
 
     ``sandbox`` est injectable (mocké en CI) ; la couverture vient du parsing de la
-    sortie pytest-cov et ``tests_passed`` = exit 0. La sécu vient d'un scan statique
-    déterministe du **workspace** (``security_scan_fn`` injectable). La revue LLM
-    (``reviewer``/``diff``) est **optionnelle et informative** (corps de PR) : elle
-    n'entre pas dans le composite.
+    sortie pytest-cov et ``tests_passed`` = exit 0. Sécu (``security_scan_fn``) et
+    lint/complexité (``quality_scan_fn``) viennent de scans **statiques déterministes**
+    du **workspace** (injectables en tests). La revue LLM (``reviewer``/``diff``) est
+    **optionnelle et informative** (corps de PR) : elle n'entre pas dans le composite.
     """
     test_res = sandbox.run_tests(workspace, coverage_command)
     tests_passed = bool(test_res.ok)
@@ -159,6 +254,7 @@ async def measure(
     coverage_pct = raw_coverage if coverage_measured else 0.0  # composite conservateur
 
     security_findings, security_weighted = _scan_security(workspace, scan_fn=security_scan_fn)
+    lint_violations, complexity_bad_blocks, quality_measured = _scan_quality(workspace, scan_fn=quality_scan_fn)
 
     # Revue LLM : INFORMATIVE uniquement (hors composite). Calculée seulement s'il y
     # a un reviewer ET un diff à examiner ; toute panne reste sans effet sur le gate.
@@ -175,9 +271,18 @@ async def measure(
         security_findings=security_findings,
         security_weighted=security_weighted,
         tests_passed=tests_passed,
-        composite=composite_score(coverage_pct, security_weighted, weights=weights),
+        composite=composite_score(
+            coverage_pct,
+            security_weighted,
+            lint_violations=lint_violations,
+            complexity_bad_blocks=complexity_bad_blocks,
+            weights=weights,
+        ),
         coverage_measured=coverage_measured,
         review_score=review_score,
+        lint_violations=lint_violations,
+        complexity_bad_blocks=complexity_bad_blocks,
+        quality_measured=quality_measured,
     )
 
 
@@ -189,4 +294,7 @@ def persist(manager, project_id: int, metrics: ProjectQualityMetrics) -> None:
     manager.add_metric(project_id, "tests_passed", 1.0 if metrics.tests_passed else 0.0)
     manager.add_metric(project_id, "coverage_measured", 1.0 if metrics.coverage_measured else 0.0)
     manager.add_metric(project_id, "review_score", metrics.review_score)
+    manager.add_metric(project_id, "lint_violations", float(metrics.lint_violations))
+    manager.add_metric(project_id, "complexity_bad_blocks", float(metrics.complexity_bad_blocks))
+    manager.add_metric(project_id, "quality_measured", 1.0 if metrics.quality_measured else 0.0)
     manager.add_metric(project_id, "composite", metrics.composite)
