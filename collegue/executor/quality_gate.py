@@ -314,6 +314,175 @@ def smoke_run_command(
     return f"python - <<'{_SMOKE_HEREDOC}'\n{script}{_SMOKE_HEREDOC}"
 
 
+# ── Passe E2E navigateur (#503 suivi) : l'UI RÉELLE contre l'API ────────────────
+_E2E_BANNER = "[gate] e2e navigateur : l'UI rend et appelle le backend (#503)"
+# On SERT le front sur 5173 (et pas le 4173 par défaut de `vite preview`) : c'est
+# l'origine conventionnelle que les backends générés autorisent en CORS (cf.
+# _SMOKE_DEFAULT_ORIGIN) — sinon le navigateur serait bloqué par CORS sur un app
+# pourtant bien intégrée (faux échec, observé au 1er essai de la sonde réelle).
+_E2E_FRONT_PORT = 5173
+_E2E_HEREDOC = "COLLEGUE_E2E_503"
+# Noms d'env usuels par lesquels un frontend lit la base d'URL de l'API — on les
+# injecte TOUS au build (Vite/CRA/Next inlinent au build) pour pointer le front
+# vers le backend du gate, sans hypothèse de framework.
+_E2E_API_ENV_VARS = (
+    "VITE_API_BASE_URL",
+    "VITE_API_URL",
+    "REACT_APP_API_URL",
+    "NEXT_PUBLIC_API_URL",
+    "API_BASE_URL",
+)
+
+# Sonde E2E exécutée DANS le conteneur du gate (Playwright python + chromium bakés).
+# Attend le serveur front, charge l'UI dans chromium headless, et vérifie : la page
+# REND (pas de page blanche) ET aucun appel vers le backend n'échoue (un contrat
+# divergent / préfixe fantôme / CORS absent / mauvaise base d'URL se manifeste en
+# requestfailed vers l'origine backend). %%-formaté (le code garde ses accolades).
+_E2E_BROWSER_TEMPLATE = """\
+import sys, time, urllib.error, urllib.request
+
+FRONT = %(front_url)r
+BACKEND = %(backend_origin)r  # "host:port" — un requestfailed vers là = intégration rompue
+TIMEOUT_MS = %(timeout_ms)d
+
+# 1. Attendre que le serveur de preview réponde (goto échouerait sur connexion refusée).
+deadline = time.time() + 40
+up = False
+while time.time() < deadline:
+    try:
+        urllib.request.urlopen(FRONT, timeout=2)
+        up = True
+        break
+    except urllib.error.HTTPError:
+        up = True  # a répondu (même 4xx) = serveur vivant
+        break
+    except Exception:
+        time.sleep(0.5)
+if not up:
+    print("[gate] e2e ÉCHEC : le serveur frontend n'a pas démarré sur", FRONT)
+    sys.exit(1)
+
+from playwright.sync_api import sync_playwright
+
+console_errors = []
+failed = []
+status = None
+body = ""
+html = ""
+with sync_playwright() as pw:
+    browser = pw.chromium.launch()
+    page = browser.new_page()
+    page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+    page.on("requestfailed", lambda r: failed.append(r.url + " :: " + (r.failure or "")))
+    try:
+        resp = page.goto(FRONT, wait_until="networkidle", timeout=TIMEOUT_MS)
+        status = resp.status if resp else None
+    except Exception as exc:
+        print("[gate] e2e ÉCHEC : la page n'a pas chargé —", str(exc)[:200])
+        browser.close()
+        sys.exit(1)
+    page.wait_for_timeout(2500)  # laisse les fetch d'amorçage (ex. /health) partir
+    try:
+        body = page.inner_text("body")
+    except Exception:
+        body = ""
+    html = page.content()
+    browser.close()
+
+rendered = len(body.strip()) > 0 or any(
+    tag in html.lower() for tag in ("<div", "<main", "<button", "<form", "<header", "<nav", "<section")
+)
+backend_failures = [u for u in failed if BACKEND in u]
+problems = []
+if status is None or status >= 400:
+    problems.append("la page racine répond " + str(status))
+if not rendered:
+    problems.append("page blanche : aucun contenu rendu (l'app ne monte pas dans le navigateur)")
+if backend_failures:
+    problems.append(
+        "appel(s) au backend en ÉCHEC depuis l'UI (intégration front<->back rompue : "
+        "contrat/préfixe/CORS/base d'URL) : " + " ; ".join(backend_failures[:5])
+    )
+
+print("[gate] e2e :", "OK — l'UI rend et joint le backend" if not problems else "ÉCHEC")
+for p in problems:
+    print("[gate] e2e -", p)
+if console_errors:
+    print("[gate] e2e (info) erreurs console :", " | ".join(console_errors[:5]))
+sys.exit(0 if not problems else 1)
+"""
+
+
+def _e2e_browser_script(front_url: str, backend_origin: str, timeout: float) -> str:
+    """Source de la sonde E2E (pure → testable par ``compile``)."""
+    return _E2E_BROWSER_TEMPLATE % {
+        "front_url": front_url,
+        "backend_origin": backend_origin,
+        "timeout_ms": int(max(5.0, timeout) * 1000),
+    }
+
+
+def e2e_gate_command(
+    workspace: str,
+    *,
+    backend_command: Optional[str] = None,
+    front_subdir: Optional[str] = None,
+    timeout: float = 90.0,
+) -> Optional[str]:
+    """Passe E2E navigateur (#503 suivi) : charge l'UI RÉELLE dans chromium headless
+    et vérifie qu'elle REND et que ses appels au backend ABOUTISSENT. Fail-closed.
+
+    Comble le trou de fond de #503 : le smoke sonde le backend en HTTP DIRECT et le
+    gate frontend BUILDE le front, mais RIEN n'exerce l'UI CONTRE l'API — un contrat
+    d'API divergent, un préfixe ``/api`` fantôme, un CORS absent ou une mauvaise base
+    d'URL passent tous les gates. Cette passe démarre le backend + sert le front (avec
+    la base d'URL backend injectée au build) + pilote un vrai navigateur.
+
+    Ne s'active que pour un projet **full-stack** : backend ASGI détecté (ou
+    ``backend_command``) ET frontend avec scripts ``build`` + ``preview`` (Vite & co).
+    ``None`` sinon (skip — pas de faux rouge sur un projet non concerné). S'exécute
+    dans le conteneur du gate (Playwright + chromium bakés dans l'image).
+    """
+    target = backend_command or _detect_asgi_app(workspace)
+    if target is None:
+        return None
+    candidates = [front_subdir] if front_subdir is not None else _frontend_dirs(workspace)
+    front = None
+    for sub in candidates:
+        base = workspace if sub == "." else os.path.join(workspace, sub)
+        pkg = os.path.join(base, "package.json")
+        if not os.path.isfile(pkg):
+            continue
+        try:
+            with open(pkg, encoding="utf-8") as handle:
+                scripts = dict((json.load(handle) or {}).get("scripts") or {})
+        except (OSError, ValueError):
+            continue
+        # besoin de servir le BUILD : build + preview (convention Vite des fronts générés).
+        if "build" in scripts and "preview" in scripts:
+            front = sub
+            break
+    if front is None:
+        return None
+
+    be_url = f"http://127.0.0.1:{_SMOKE_PORT}"
+    backend = backend_command or f"python -m uvicorn {target} --host 127.0.0.1 --port {_SMOKE_PORT}"
+    env_inject = " ".join(f"{name}={shlex.quote(be_url)}" for name in _E2E_API_ENV_VARS)
+    install = "(npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --silent)"
+    cd = "" if front == "." else f"cd {shlex.quote(front)} && "
+    script = _e2e_browser_script(f"http://127.0.0.1:{_E2E_FRONT_PORT}", f"127.0.0.1:{_SMOKE_PORT}", timeout)
+    # La sonde est écrite dans un FICHIER (puis exécutée) plutôt qu'en ``python -
+    # <<HD`` : la commande NE se termine donc PAS par un heredoc nu, et peut être
+    # chaînée AVANT la passe smoke (qui, elle, DOIT rester le heredoc final).
+    return (
+        f"({backend} > /tmp/.e2e_backend.log 2>&1 &) "
+        f"&& {cd}{install} > /tmp/.e2e_npm.log 2>&1 "
+        f"&& {env_inject} npm run build > /tmp/.e2e_build.log 2>&1 "
+        f"&& (npm run preview -- --host 127.0.0.1 --port {_E2E_FRONT_PORT} > /tmp/.e2e_front.log 2>&1 &) "
+        f"&& cat > /tmp/.collegue_e2e.py <<'{_E2E_HEREDOC}'\n{script}\n{_E2E_HEREDOC}\npython /tmp/.collegue_e2e.py"
+    )
+
+
 def installability_command(workspace: str, *, use_cache: bool = False) -> Optional[str]:
     """Passe d'installabilité en environnement NU (#439). Fail-closed.
 
@@ -926,7 +1095,38 @@ def _requirement_key(line: str) -> Optional[str]:
     return name
 
 
-def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
+def requirement_keys_present(workspace: str) -> frozenset:
+    """Clés (#482) des paquets présents dans le(s) ``requirements.txt`` du workspace
+    APRÈS application du diff.
+
+    Sert à distinguer une SUPPRESSION réelle (le paquet disparaît) d'une simple
+    DÉ-DUPLICATION (le paquet RESTE sous une autre ligne — ex. doublon non épinglé
+    retiré alors que la version épinglée demeure ; cas réel FacNor v8, tâche 12 :
+    requirements.txt avait accumulé ``fastapi==X`` + un doublon nu ``fastapi`` via
+    le cycle ré-ajout #482, et le nettoyage du doublon était faussement rejeté).
+    Union sur la racine + les sous-répertoires de 1er niveau (layout monorepo #457).
+    """
+    keys: set = set()
+    roots = [workspace]
+    try:
+        for entry in os.scandir(workspace):
+            if entry.is_dir() and not entry.name.startswith("."):
+                roots.append(entry.path)
+    except OSError:
+        pass
+    for root in roots:
+        try:
+            with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as fh:
+                for line in fh:
+                    key = _requirement_key(line)
+                    if key is not None:
+                        keys.add(key)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return frozenset(keys)
+
+
+def removed_requirement_lines(diff: str, present_keys: frozenset = frozenset()) -> Tuple[str, ...]:
     """Lignes de ``requirements.txt`` de la BASE supprimées par le diff (#482).
 
     Comparaison par NOM : un changement de pin ou un réordonnancement n'est pas
@@ -934,6 +1134,14 @@ def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
     FacNor v4, tâche 5 : ``python-jose[cryptography]``/``passlib[bcrypt]``
     perdus à la régénération → « No module named 'jose' » en venv nu, alors que
     12 tests étaient verts).
+
+    ``present_keys`` (#482 suivi v8) : clés des paquets ENCORE présents dans le
+    requirements.txt résultant (cf. :func:`requirement_keys_present`). Une ligne
+    retirée dont la clé y figure n'est PAS une suppression mais une DÉ-DUPLICATION
+    (le paquet reste sous une autre ligne) — retirer un doublon nu ``fastapi`` quand
+    ``fastapi==0.137.1`` demeure ne doit pas rougir le gate (cas FacNor v8, tâche
+    12, bloquée 3× sur ce faux positif). Vide ⇒ comportement historique (seuls les
+    ré-ajouts ``+`` du diff justifient une suppression).
     """
     removed: dict = {}  # nom → ligne d'origine
     added: set = set()
@@ -954,10 +1162,12 @@ def removed_requirement_lines(diff: str) -> Tuple[str, ...]:
             key = _requirement_key(line[1:])
             if key is not None:
                 added.add(key)
-    return tuple(text for key, text in removed.items() if key not in added)
+    return tuple(text for key, text in removed.items() if key not in added and key not in present_keys)
 
 
-def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = None) -> Tuple[str, ...]:
+def unjustified_requirement_removals(
+    diff: str, issue: Optional[IssueSpec] = None, present_keys: frozenset = frozenset()
+) -> Tuple[str, ...]:
     """Suppressions de requirements NON demandées par l'issue (#482).
 
     Fail-closed : une suppression est « demandée » si le nom du paquet (ou le
@@ -971,7 +1181,7 @@ def unjustified_requirement_removals(diff: str, issue: Optional[IssueSpec] = Non
     autre nom) évade la garde — mais il évade aussi l'install sandbox et la
     passe #439, donc le gate échoue ailleurs.
     """
-    removed = removed_requirement_lines(diff)
+    removed = removed_requirement_lines(diff, present_keys=present_keys)
     if not removed or issue is None:
         return removed
     text = " ".join((issue.title or "", issue.body or "", *issue.acceptance_criteria))
@@ -1099,9 +1309,19 @@ _ADEQUACY_SYSTEM = (
     "Tu es un relecteur d'ADÉQUATION (rôle REVIEWER). On te donne une issue (titre, "
     "critères d'acceptation) et le diff livré pour la fermer. Tu ne juges PAS le style : "
     "uniquement si le diff RÉALISE concrètement ce que l'issue demande. "
+    "EXCEPTION RÉSULTAT-RUNTIME (#437 suivi v8) : un critère qui exige un RÉSULTAT "
+    "D'EXÉCUTION non vérifiable par lecture d'un diff STATIQUE (ex. « la suite de tests "
+    "retourne 0 échec sur l'ensemble du code », « le pipeline CI passe », « l'application "
+    "démarre et répond ») est DÉJÀ exécuté et vérifié par le gate AVANT toi (tests + smoke + "
+    "e2e RÉELS, déjà verts à ce stade) — NE le juge donc PAS sur une preuve statique "
+    "impossible : réponds implemented=true dès que le diff MET EN PLACE de façon RÉELLE et "
+    "substantielle les ARTEFACTS de la feature (config CI, runner + suite de tests, "
+    "intégration), et NOMME ce critère comme vérifié à l'exécution (non statiquement) dans la "
+    "justification. "
     'Réponds STRICTEMENT en JSON : {"implemented": true|false, "justification": "..."}. '
-    "implemented=false si la feature est absente ou hors-spec (ex. : une seule ligne de "
-    "dépendance pour un service entier, un schéma sans la logique demandée)."
+    "implemented=false si la feature est ABSENTE ou hors-spec — verrou anti-livraison-fantôme "
+    "(ex. : une seule ligne de dépendance pour un service entier, un schéma sans la logique "
+    "demandée, des artefacts vides/triviaux)."
 )
 
 
@@ -1129,19 +1349,27 @@ def _parse_adequacy(text: str) -> AdequacyOutcome:
 # test n'assertait les totaux (status 200 suffisait).
 _TEST_ADEQUACY_SYSTEM = (
     "Tu es un relecteur de COUVERTURE DE TEST (rôle REVIEWER). On te donne une issue "
-    "(critères d'acceptation chiffrables/observables) et le diff livré. Tu juges UNIQUEMENT "
-    "si CHAQUE critère chiffrable/observable de l'issue est ASSERTÉ par au moins un test du "
-    "diff (assertion sur la VALEUR/le CALCUL/le COMPORTEMENT, pas seulement un code HTTP 200). "
-    "EXCEPTION (#499) : un critère qui exige une MESURE RUNTIME non visible dans un diff "
-    "STATIQUE (ex. « couverture de tests > X% », « latence < Y ms », « débit/perf ») ne peut "
-    "PAS être vérifié par lecture du diff — NE bloque PAS dessus : réponds true s'il ajoute des "
-    "tests RÉELS et substantiels couvrant le domaine du critère (assertions véritables, jamais "
-    "des tests vides/triviaux), et NOMME ce critère comme non vérifiable statiquement dans la "
-    "justification. Continue de bloquer (false) sur tout critère de VALEUR vérifiable dans le "
-    "diff qui n'est asserté par aucun test. "
-    'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}. '
-    "false si un critère chiffrable VÉRIFIABLE n'est couvert par aucune assertion (ex. : aucun "
-    "test n'asserte le montant TTC) — nomme alors le critère non couvert dans la justification."
+    "(critères d'acceptation) et le diff livré. Tu juges si les critères de VALEUR/CALCUL/"
+    "COMPORTEMENT de l'issue sont ASSERTÉS par au moins un test du diff (assertion sur la "
+    "VALEUR/le CALCUL/le COMPORTEMENT attendu — montant, total, compteur, numéro séquentiel, "
+    "unicité/déduplication EFFECTIVE, rejet d'une entrée invalide —, pas seulement un code HTTP 200). "
+    "EXCEPTION RUNTIME (#499) : un critère qui exige une MESURE RUNTIME non visible dans un diff "
+    "STATIQUE (ex. « couverture de tests > X% », « latence < Y ms », « débit/perf ») ne peut PAS "
+    "être vérifié par lecture du diff — NE bloque PAS dessus : réponds true s'il ajoute des tests "
+    "RÉELS et substantiels couvrant le domaine du critère (assertions véritables, jamais des tests "
+    "vides/triviaux), et NOMME ce critère comme non vérifiable statiquement dans la justification. "
+    "EXCEPTION STRUCTURELLE (#499 suivi v8) : un critère qui exige seulement qu'un élément soit "
+    "DÉFINI/PRÉSENT (ex. « le schéma DÉFINIT les tables X/Y avec leurs contraintes d'intégrité », "
+    "« le modèle/endpoint EXISTE ») est satisfait par sa PRÉSENCE dans le diff (visible statiquement) "
+    "DÈS LORS que des tests RÉELS couvrent le comportement central du critère (au moins une "
+    "contrainte/relation REPRÉSENTATIVE assertée). N'EXIGE PAS un test de rejet DÉDIÉ pour CHAQUE "
+    "contrainte/colonne sœur : si une contrainte représentative est testée et les autres sont "
+    "définies dans le diff, réponds true (« défini » n'est pas « testé »). "
+    "Continue de bloquer (false) UNIQUEMENT sur un critère de VALEUR/CALCUL/COMPORTEMENT vérifiable "
+    "dans le diff qu'AUCUN test n'asserte (ex. : aucun test n'asserte le montant TTC = somme des "
+    "lignes). Si false, COMMENCE la justification par le critère non couvert (concis, actionnable) "
+    "AVANT tout commentaire sur ce qui est déjà testé. "
+    'Réponds STRICTEMENT en JSON : {"tests_assert_criteria": true|false, "justification": "..."}.'
 )
 
 
@@ -1359,6 +1587,8 @@ async def run_quality_gate(
     smoke_paths: Tuple[str, ...] = DEFAULT_SMOKE_PATHS,
     smoke_timeout: float = 30.0,
     smoke_cors_origin: str = _SMOKE_DEFAULT_ORIGIN,
+    e2e_gate: bool = True,
+    e2e_timeout: float = 90.0,
     fix_missing_requirements: bool = True,
     requirements_guard: bool = True,
     pin_guard: bool = True,
@@ -1397,6 +1627,15 @@ async def run_quality_gate(
     < 500), préfixe « MÉTHODE: » optionnel (#483, ex. ``POST:/auth/register`` —
     payload JSON générique, 4xx toléré, 5xx rouge). Skippée si aucune app n'est
     détectable et qu'aucune commande n'est fournie.
+    ``e2e_gate`` (#503 suivi, défaut VRAI) : passe E2E navigateur — démarre le
+    backend, build/sert le frontend (base d'URL backend injectée) et pilote
+    chromium (Playwright) sur l'UI RÉELLE pour attraper les ruptures front<->back
+    (contrat/préfixe/CORS/base d'URL) qu'aucune autre passe n'exerce. Insérée
+    AVANT le smoke (sonde écrite en fichier, chaînable). N'a d'effet que sur un
+    projet FULL-STACK (backend ASGI + frontend build+preview) — sinon
+    :func:`e2e_gate_command` renvoie ``None`` et la passe est inerte. EXIGE une
+    image sandbox avec Playwright + chromium (cf. ``docker/sandbox/Dockerfile``) ;
+    passer ``e2e_gate=False`` la désactive explicitement.
     """
     sandbox = sandbox or DockerSandbox()
     reviewer = reviewer or _default_reviewer()
@@ -1411,7 +1650,11 @@ async def run_quality_gate(
     # retry (#436) garde son score, et le feedback nominatif part avec.
     requirements_removed: Tuple[str, ...] = ()
     if requirements_guard:
-        requirements_removed = unjustified_requirement_removals(diff, issue)
+        # #482 suivi v8 : on passe les paquets ENCORE présents dans le requirements.txt
+        # résultant — une ligne retirée dont le paquet demeure (doublon nettoyé) n'est
+        # pas une suppression bloquante (faux positif qui a bloqué la tâche 12 du run v8).
+        present_keys = requirement_keys_present(workspace)
+        requirements_removed = unjustified_requirement_removals(diff, issue, present_keys=present_keys)
     # #497 : signal NON bloquant des dépendances directes non épinglées — analyse
     # PURE du diff de l'agent (les ajouts #481 arrivent après, re-capturés
     # ailleurs). N'entre PAS dans would_pass (signal seulement, par défaut).
@@ -1463,6 +1706,14 @@ async def run_quality_gate(
                     # AUSSI exit 5 sans test pytest — même tolérance (#463).
                     installability = _tolerate_pytest_exit5(installability)
                 command = f"({command}) && echo '{_INSTALLABILITY_BANNER}' && ({installability})"
+        if e2e_gate:
+            # #503 (suivi) : passe E2E navigateur — l'UI RÉELLE contre l'API. Insérée
+            # AVANT le smoke car sa sonde est écrite dans un fichier (pas un heredoc
+            # nu) → chaînable ; le smoke reste le heredoc FINAL. Full-stack uniquement
+            # (None sinon). Échec front<->back (contrat/préfixe/CORS/base d'URL) = rouge.
+            e2e = e2e_gate_command(workspace, timeout=e2e_timeout)
+            if e2e is not None:
+                command = f"({command}) && echo {shlex.quote(_E2E_BANNER)} && ({e2e})"
         if smoke_run:
             # #503 (suivi v6) : le contrôle CORS du smoke n'a de sens QUE si un
             # frontend existe — un backend ISOLÉ n'a légitimement pas de middleware

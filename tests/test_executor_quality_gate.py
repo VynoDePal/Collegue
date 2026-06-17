@@ -543,6 +543,110 @@ async def test_gate_smoke_cors_explicit_origin_respected_without_frontend(tmp_pa
     assert "origin = 'http://custom:1234'" in command  # override respecté
 
 
+# --- #503 (suivi) : gate E2E navigateur (l'UI réelle contre l'API) -----------------
+
+
+def _write_vite_front(tmp_path, subdir="."):
+    base = tmp_path if subdir == "." else (tmp_path / subdir)
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "package.json").write_text(
+        '{"name":"f","scripts":{"build":"tsc && vite build","preview":"vite preview"}}', encoding="utf-8"
+    )
+
+
+def test_e2e_gate_command_none_unless_fullstack(tmp_path):
+    """#503 : la passe E2E ne s'active QUE si backend ASGI ET frontend (build+preview)
+    sont présents — sinon None (skip, pas de faux rouge)."""
+    from collegue.executor import e2e_gate_command
+
+    # backend seul → None
+    _write_fastapi_app(tmp_path)
+    assert e2e_gate_command(str(tmp_path)) is None
+    # frontend seul (autre dossier) → None
+    front_only = tmp_path / "front_only"
+    _write_vite_front(front_only)
+    assert e2e_gate_command(str(front_only)) is None
+    # frontend SANS script preview → None (on ne sait pas servir le build)
+    nopreview = tmp_path / "np"
+    nopreview.mkdir()
+    _write_fastapi_app(nopreview)
+    (nopreview / "package.json").write_text('{"scripts":{"build":"vite build"}}', encoding="utf-8")
+    assert e2e_gate_command(str(nopreview)) is None
+
+
+def test_e2e_gate_command_fullstack_structure(tmp_path):
+    """#503 : full-stack → commande qui démarre le backend, build le front avec la
+    base d'URL backend injectée, sert le preview, et pilote chromium (sonde fichier)."""
+    from collegue.executor import e2e_gate_command
+
+    _write_fastapi_app(tmp_path)  # main:app
+    _write_vite_front(tmp_path)  # package.json build+preview à la racine
+    cmd = e2e_gate_command(str(tmp_path))
+    assert cmd is not None
+    assert "uvicorn main:app" in cmd  # backend démarré
+    assert "npm run build" in cmd and "npm run preview" in cmd  # build + serve
+    assert "--port 5173" in cmd  # servi sur l'origine que le CORS backend autorise (≠ 4173 défaut)
+    assert "VITE_API_BASE_URL=http://127.0.0.1:8765" in cmd  # base d'URL backend injectée
+    assert "sync_playwright" in cmd and "chromium" in cmd  # navigateur piloté
+    # sonde écrite dans un FICHIER puis exécutée (≠ heredoc nu) → chaînable avant smoke
+    assert "cat > /tmp/.collegue_e2e.py" in cmd and cmd.rstrip().endswith("python /tmp/.collegue_e2e.py")
+
+
+def test_e2e_browser_script_is_valid_python():
+    """#503 : la sonde Playwright générée est du python valide (compile)."""
+    from collegue.executor.quality_gate import _e2e_browser_script
+
+    script = _e2e_browser_script("http://127.0.0.1:5173", "127.0.0.1:8765", 90.0)
+    compile(script, "<e2e>", "exec")
+    assert "sync_playwright" in script and "requestfailed" in script  # capture les ruptures back
+
+
+async def test_gate_e2e_appended_before_smoke_heredoc_last(tmp_path):
+    """#503 : E2E + smoke ensemble — l'E2E (sonde fichier) précède, le smoke (heredoc)
+    reste FINAL ; les deux passes sont présentes."""
+    _write_fastapi_app(tmp_path)
+    _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(
+        str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), e2e_gate=True, smoke_run=True
+    )
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" in command and "smoke run" in command
+    assert command.index("collegue_e2e") < command.index("COLLEGUE_SMOKE_458")  # e2e avant smoke
+    assert command.rstrip().endswith("COLLEGUE_SMOKE_458")  # smoke heredoc en dernier
+
+
+async def test_gate_e2e_default_on_fullstack(tmp_path):
+    """#503 (suivi) : la passe E2E est désormais ACTIVE PAR DÉFAUT — sur un projet
+    full-stack elle s'insère sans avoir à l'activer explicitement."""
+    _write_fastapi_app(tmp_path)
+    _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" in command
+
+
+async def test_gate_e2e_explicit_off(tmp_path):
+    """#503 (suivi) : ``e2e_gate=False`` désactive explicitement la passe (opt-out)."""
+    _write_fastapi_app(tmp_path)
+    _write_vite_front(tmp_path)
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer(), e2e_gate=False)
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" not in command
+
+
+async def test_gate_e2e_default_inert_non_fullstack(tmp_path):
+    """#503 (suivi) : même par défaut, la passe reste INERTE hors full-stack (backend
+    seul, pas de frontend build+preview) — aucune régression sur les projets non-web."""
+    _write_fastapi_app(tmp_path)  # backend seul, pas de package.json
+    sandbox = _green()
+    await run_quality_gate(str(tmp_path), DIFF, ctx=None, sandbox=sandbox, reviewer=FakeReviewer())
+    _ws, command = sandbox.calls[0]
+    assert "e2e navigateur" not in command
+
+
 # --- installabilité du livrable (#439) ---------------------------------------------
 
 
@@ -1012,6 +1116,36 @@ def test_test_adequacy_prompt_tolerates_unmeasurable_runtime_criteria():
     assert "ne bloque pas" in prompt  # l'exception est explicite
     assert "vides" in prompt or "triviaux" in prompt  # anti-rubber-stamp
     assert "ttc" in prompt  # le verrou VALEUR (#499 origine) est conservé
+
+
+def test_test_adequacy_prompt_distinguishes_structural_from_value_criteria():
+    """#499 (suivi v8) : le prompt instruit le juge qu'un critère DÉFINITIONNEL/structurel
+    (« le schéma DÉFINIT les tables avec contraintes ») est satisfait par sa PRÉSENCE +
+    une contrainte REPRÉSENTATIVE testée — sans exiger un test de rejet DÉDIÉ pour CHAQUE
+    contrainte sœur (root task v8 bloquée : schéma complet rejeté car la contrainte TVA
+    n'avait pas son propre test alors que SIREN l'avait). Le verrou VALEUR reste intact."""
+    from collegue.executor.quality_gate import _TEST_ADEQUACY_SYSTEM
+
+    prompt = _TEST_ADEQUACY_SYSTEM.lower()
+    assert "structurel" in prompt  # l'exception structurelle est explicite
+    assert "défini" in prompt and "présent" in prompt  # défini/présent vs testé
+    assert "représentative" in prompt  # une contrainte représentative suffit
+    assert "commence la justification par le critère non couvert" in prompt  # gap-first (feedback actionnable)
+
+
+def test_adequacy_prompt_tolerates_runtime_outcome_criteria():
+    """#437 suivi v8 : le prompt d'ADÉQUATION (implemented?) instruit le juge de NE PAS
+    rejeter un critère de RÉSULTAT-RUNTIME (« la suite retourne 0 échec », « le pipeline CI
+    passe », « l'app démarre ») déjà exercé/vérifié par le gate — il accepte si le diff met
+    en place les ARTEFACTS réels (CI/runner/tests), tout en gardant le verrou anti-livraison-
+    fantôme (run v8 : tâche 12 CI/CD faussement rejetée, livrable pourtant substantiel + gate vert)."""
+    from collegue.executor.quality_gate import _ADEQUACY_SYSTEM
+
+    prompt = _ADEQUACY_SYSTEM.lower()
+    assert "runtime" in prompt  # l'exception runtime est explicite
+    assert "0 échec" in prompt or "pipeline ci" in prompt  # exemples du critère runtime
+    assert "artefacts" in prompt  # accepte dès que les artefacts réels sont là
+    assert "fantôme" in prompt  # verrou anti-livraison-fantôme conservé
 
 
 # --- signal « aucun test touché » (#437) --------------------------------------------
@@ -1567,6 +1701,26 @@ async def test_requirements_guard_opt_out():
     assert report.passed is True
 
 
+async def test_requirements_dedup_not_blocked_in_gate(tmp_path):
+    """#482 suivi v8 : dans le gate COMPLET, retirer un doublon nu quand la version
+    épinglée demeure (lue dans le requirements.txt du workspace) ne rougit plus le
+    gate — déblocage du faux positif qui a tué la tâche 12 du run v8."""
+    (tmp_path / "requirements.txt").write_text(
+        "fastapi==0.137.1\nuvicorn==0.49.0\npydantic==2.13.4\n", encoding="utf-8"
+    )
+    dedup = (
+        "diff --git a/requirements.txt b/requirements.txt\n"
+        "--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "-\n-fastapi\n-uvicorn\n-pydantic\n"
+    )
+    issue = IssueSpec(number=12, title="Suite de tests et CI/CD")
+    report = await run_quality_gate(
+        str(tmp_path), dedup, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=issue
+    )
+    assert report.requirements_removed == ()
+    assert report.passed is True
+
+
 async def test_requirements_removal_skips_adequacy_call():
     """Économie LLM : la garde rouge saute l'appel d'adéquation (#437), comme
     tout gate déjà rouge."""
@@ -1628,6 +1782,56 @@ def test_removed_requirement_lines_flags_option_lines():
     assert removed_requirement_lines(option) == ("-r base.txt",)
     issue = IssueSpec(number=7, title="Fusionner base.txt dans requirements.txt")
     assert unjustified_requirement_removals(option, issue) == ()
+
+
+def test_removed_requirement_lines_dedup_not_flagged_when_package_remains():
+    """#482 suivi v8 : retirer un DOUBLON nu (`fastapi`) quand la version épinglée
+    (`fastapi==X`) demeure n'est PAS une suppression — le paquet reste présent.
+    C'est le faux positif qui a bloqué la tâche 12 du run v8 (requirements.txt
+    avait accumulé pinned + doublons nus via le cycle ré-ajout #482)."""
+    from collegue.executor import removed_requirement_lines
+
+    dedup = (
+        "diff --git a/requirements.txt b/requirements.txt\n"
+        "--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "-\n-fastapi\n-uvicorn\n-pydantic\n"
+    )
+    # Sans contexte de présence : comportement historique (tout doublon retiré compte).
+    assert removed_requirement_lines(dedup) == ("fastapi", "uvicorn", "pydantic")
+    # Avec les paquets ENCORE présents (versions épinglées conservées) : dé-duplication,
+    # aucune suppression réelle.
+    present = frozenset({"fastapi", "uvicorn", "pydantic"})
+    assert removed_requirement_lines(dedup, present_keys=present) == ()
+
+
+def test_removed_requirement_lines_real_drop_still_flagged_with_present_keys():
+    """#482 suivi v8 : un paquet réellement DISPARU (absent du résultat) reste
+    bloqué même avec ``present_keys`` — la protection v4 (jose/passlib perdus) tient."""
+    from collegue.executor import removed_requirement_lines
+
+    drop = (
+        "diff --git a/requirements.txt b/requirements.txt\n"
+        "--- a/requirements.txt\n+++ b/requirements.txt\n"
+        "-passlib[bcrypt]\n-python-jose[cryptography]\n+fastapi\n"
+    )
+    present = frozenset({"fastapi"})  # passlib/jose NE sont plus présents
+    assert removed_requirement_lines(drop, present_keys=present) == (
+        "passlib[bcrypt]",
+        "python-jose[cryptography]",
+    )
+
+
+def test_requirement_keys_present_reads_workspace(tmp_path):
+    """#482 suivi v8 : lit les clés des paquets présents dans le requirements.txt
+    résultant (racine + sous-répertoires), pour distinguer dé-dup et suppression."""
+    from collegue.executor import requirement_keys_present
+
+    (tmp_path / "requirements.txt").write_text(
+        "fastapi==0.137.1\nuvicorn==0.49.0\npydantic==2.13.4\n", encoding="utf-8"
+    )
+    keys = requirement_keys_present(str(tmp_path))
+    assert {"fastapi", "uvicorn", "pydantic"} <= keys
+    assert requirement_keys_present(str(tmp_path / "inexistant")) == frozenset()
 
 
 async def test_requirements_removal_not_justified_by_machine_context():
