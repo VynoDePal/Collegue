@@ -19,11 +19,12 @@ Module **isolé** : non câblé au runtime.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.improve.gate import DEFAULT_MIN_GAIN, evaluate
-from collegue.improve.metrics import DEFAULT_WEIGHTS, CompositeWeights, measure, persist
+from collegue.improve.metrics import DEFAULT_WEIGHTS, CompositeWeights, autofix_lint, measure, persist
 from collegue.improve.proposer import AttemptRecord, build_improvement_task, next_dimension
 
 # Raisons d'arrêt.
@@ -70,7 +71,11 @@ def _improvement_quality_report(dimension, before, after, delta):
         f"Amélioration « {dimension} » : score composite {before.composite:.3f} → "
         f"{after.composite:.3f} (Δ{delta:+.3f}). "
         f"Couverture {before.coverage_pct:.0f}% → {after.coverage_pct:.0f}% ; "
-        f"findings sécu {before.security_findings} → {after.security_findings}."
+        f"sécu pondérée {before.security_weighted:.1f} → {after.security_weighted:.1f} ; "
+        f"lint {before.lint_violations} → {after.lint_violations} ; "
+        f"complexité {before.complexity_bad_blocks} → {after.complexity_bad_blocks} ; "
+        f"vulns deps {before.dep_vulns} → {after.dep_vulns} ; "
+        f"docstrings {before.doc_coverage:.0%} → {after.doc_coverage:.0%}."
     )
     return QualityReport(
         tests_passed=after.tests_passed,
@@ -81,6 +86,51 @@ def _improvement_quality_report(dimension, before, after, delta):
         review_blocking=False,
         passed=True,
     )
+
+
+def _seed_promoted_diffs(workspace, diffs, *, git_bin: str = "git") -> int:
+    """Réapplique ET COMMITE les diffs déjà promus sur le clone neuf (#545, Étape 2).
+
+    Levier 2 du redesign : ``apply_seed_diff`` (git apply -3) réapplique chaque diff
+    promu ; ici on le **commite** pour que ``HEAD`` reflète l'état cumulé. Sans commit,
+    le diff capturé du round courant (``git diff`` vs HEAD, cf. ``capture_diff``)
+    ré-embarquerait les changements déjà promus → double-comptage au round suivant.
+    Après commit, la mesure baseline porte sur le projet **cumulé amélioré** : le score
+    monte round après round et le proposeur (métrique-driven) passe à la dimension
+    suivante car la métrique d'une dimension réglée redevient bonne sur l'état cumulé.
+    ``execution.diff`` ne contient alors que les nouveaux changements du round.
+
+    Best-effort : un diff inapplicable (conflit, base déplacée) est **sauté** —
+    ``apply_seed_diff`` restaure alors un arbre propre — plutôt que d'échouer le run.
+    Renvoie le nombre de diffs effectivement intégrés (commités).
+    """
+    from collegue.executor.command import LocalCommandRunner
+    from collegue.executor.workspace import apply_seed_diff
+
+    runner = LocalCommandRunner()
+    applied = 0
+    for index, diff in enumerate(diffs):
+        if not apply_seed_diff(workspace, diff, git_bin=git_bin):
+            continue
+        if not runner.run_command([git_bin, "add", "-A"], workspace.path).ok:
+            continue
+        commit = runner.run_command(
+            [
+                git_bin,
+                "-c",
+                "user.email=improve@collegue.local",
+                "-c",
+                "user.name=collegue-improve",
+                "commit",
+                "-q",
+                "-m",
+                f"compounding: amélioration promue #{index + 1}",
+            ],
+            workspace.path,
+        )
+        if commit.ok:
+            applied += 1
+    return applied
 
 
 async def run_improvement(
@@ -116,12 +166,15 @@ async def run_improvement(
     # est aussi lazy car importer le sous-module déclenche ``pilot/__init__`` (→ driver
     # → exécuteur) — on ne veut pas tirer tout ça au simple import du package improve.
     from collegue.executor.agent import IssueSpec
-    from collegue.executor.runner import run_issue
+    from collegue.executor.runner import capture_diff, run_issue
     from collegue.executor.workspace import prepare_workspace
     from collegue.pilot.budget import ACTION_PAUSED_BUDGET, BudgetTimeController
 
     budget = budget or BudgetTimeController()
     history: List[AttemptRecord] = []
+    # Compounding (#545) : diffs déjà promus, réappliqués sur le clone neuf de chaque
+    # round pour une baseline cumulative (le score monte ; le proposeur avance).
+    promoted_diffs: List[str] = []
     result = ImprovementResult(stop_reason=STOP_PLATEAU, rounds=0)
     plateau = 0
     round_num = 0
@@ -139,7 +192,27 @@ async def run_improvement(
         task = IssueSpec(number=round_num, title=f"Amélioration continue (round {round_num})")
         workspace = prepare_workspace(repo_source, task)
 
-        before = await measure_fn(workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff="", weights=weights)
+        # Compounding (#545) : réapplique les diffs promus sur le clone neuf AVANT la
+        # mesure baseline → l'objectif porte sur l'état cumulé (le score monte ; une
+        # dimension réglée n'est plus proposée car sa métrique redevient bonne).
+        if promoted_diffs:
+            _seed_promoted_diffs(workspace, promoted_diffs)
+
+        # Levier 1 (#541) : la mesure baseline porte sur le WORKSPACE sur disque, pas
+        # sur un diff (il n'y en a pas encore) — objectif symétrique avant/après.
+        before = await measure_fn(workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights)
+
+        # Baseline non fiable (composite non fini, ex. scan sécu en échec → inf) :
+        # round à vide. On NE lance PAS l'agent (coûteux) pour rien et on n'enregistre
+        # pas de score fantôme (inf) ; fail-closed — rien ne sera promu (#541).
+        if not math.isfinite(before.composite):
+            result.rejected.append(("baseline", "mesure baseline non fiable (composite non fini)"))
+            plateau += 1
+            if plateau >= plateau_rounds:
+                result.stop_reason = STOP_PLATEAU
+                break
+            continue
+
         if result.initial_score is None:
             result.initial_score = before.composite
         result.final_score = before.composite
@@ -158,8 +231,16 @@ async def run_improvement(
                 break
             continue
 
+        # Auto-fix lint déterministe (#549) : nettoie le lint auto-corrigible des
+        # fichiers touchés AVANT la mesure (le gate est tolérance-0 sur le lint, donc
+        # le code de test/refactor du coder ne doit pas être recalé pour un import
+        # inutilisé ou un espacement). On re-capture le diff : mesure, PR et compounding
+        # utilisent la version corrigée. Un fix cassant un test ⇒ rejeté par le gate.
+        autofix_lint(workspace.path, execution.files_changed)
+        final_diff, final_files = capture_diff(workspace)
+
         after = await measure_fn(
-            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=execution.diff, weights=weights
+            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=final_diff, weights=weights
         )
         result.final_score = after.composite
         gate = evaluate(before, after, min_gain=min_gain)
@@ -175,7 +256,7 @@ async def run_improvement(
                 improvement,
                 owner,
                 repo,
-                files_changed=execution.files_changed,
+                files_changed=final_files,
                 base=base,
                 clients=clients,
                 dry_run=dry_run,
@@ -186,6 +267,9 @@ async def run_improvement(
             )
             if not dry_run:
                 persist(manager, project_id, after)
+            # Compounding (#545) : mémorise le diff promu (corrigé) pour le réappliquer
+            # aux rounds suivants (baseline cumulative) — y compris en dry_run.
+            promoted_diffs.append(final_diff)
             result.promoted.append(PromotedImprovement(dimension.value, gate.delta, pr.number))
             plateau = 0
         else:

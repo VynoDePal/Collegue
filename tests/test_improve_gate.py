@@ -1,18 +1,35 @@
-"""Tests G2 (#384) : gate par métrique avant PR (gain sans régression, fail-closed)."""
+"""Tests G2 (#384, #541) : gate par métrique avant PR (gain sans régression, fail-closed)."""
 
 import math
 
 from collegue.improve import ProjectQualityMetrics, composite_score, evaluate
 
 
-def _m(*, coverage=80.0, review=0.7, security=0, tests=True, measured=True):
+def _m(
+    *,
+    coverage=80.0,
+    security_weighted=0.0,
+    security=0,
+    lint=0,
+    complexity=0,
+    dep_vulns=0,
+    tests=True,
+    measured=True,
+    quality_measured=True,
+):
     return ProjectQualityMetrics(
         coverage_pct=coverage,
-        review_score=review,
         security_findings=security,
+        security_weighted=security_weighted,
         tests_passed=tests,
-        composite=composite_score(coverage, review, security),
+        composite=composite_score(
+            coverage, security_weighted, lint_violations=lint, complexity_bad_blocks=complexity, dep_vulns=dep_vulns
+        ),
         coverage_measured=measured,
+        lint_violations=lint,
+        complexity_bad_blocks=complexity,
+        quality_measured=quality_measured,
+        dep_vulns=dep_vulns,
     )
 
 
@@ -27,10 +44,10 @@ def test_accept_on_real_gain_without_regression():
     assert d.delta > 0
 
 
-def test_accept_gain_from_review_when_coverage_unmeasurable_both_sides():
-    # Projet sans couverture mesurable (both False) : le gain vient de la revue.
-    before = _m(coverage=0.0, review=0.5, measured=False)
-    after = _m(coverage=0.0, review=0.8, measured=False)
+def test_accept_gain_from_security_when_coverage_unmeasurable_both_sides():
+    # Projet sans couverture mesurable (both False) : le gain vient de la baisse sécu.
+    before = _m(coverage=0.0, security_weighted=5.0, measured=False)
+    after = _m(coverage=0.0, security_weighted=2.0, measured=False)
     d = evaluate(before, after)
     assert d.accepted is True
 
@@ -45,9 +62,71 @@ def test_reject_when_tests_red():
 
 
 def test_reject_on_security_regression():
-    d = evaluate(_m(security=1, coverage=70.0), _m(security=2, coverage=90.0))
+    # Même avec un gain de couverture, une sécu pondérée qui empire = rejet dur.
+    d = evaluate(_m(security_weighted=1.0, coverage=70.0), _m(security_weighted=2.0, coverage=90.0))
     assert d.accepted is False
     assert "sécu" in d.reason
+
+
+def test_reject_on_quality_measurability_flip():
+    # Scan qualité mesuré avant mais en échec après (lint→0 artificiel) → faux gain
+    # composite ⇒ rejet (sinon promotion à tort, #543).
+    before = _m(coverage=70.0, lint=5, quality_measured=True)
+    after = _m(coverage=90.0, lint=0, quality_measured=False)
+    d = evaluate(before, after)
+    assert d.accepted is False
+    assert "mesurabilité qualité" in d.reason
+
+
+def test_reject_on_lint_regression():
+    # Même avec un gain de couverture, plus de violations de lint = rejet (slack 0).
+    d = evaluate(_m(coverage=70.0, lint=2), _m(coverage=90.0, lint=5))
+    assert d.accepted is False
+    assert "lint" in d.reason
+
+
+def test_reject_on_complexity_regression():
+    d = evaluate(_m(coverage=70.0, complexity=1), _m(coverage=90.0, complexity=3))
+    assert d.accepted is False
+    assert "complexité" in d.reason
+
+
+def test_reject_on_dep_vulns_regression():
+    # Signal opt-in (#551) : plus de vulns de dépendances = rejet dur (tolérance 0),
+    # même avec un gain de couverture.
+    d = evaluate(_m(coverage=70.0, dep_vulns=1), _m(coverage=90.0, dep_vulns=3))
+    assert d.accepted is False
+    assert "vulns deps" in d.reason
+
+
+def test_dep_vulns_no_op_when_disabled():
+    # Par défaut dep_vulns=0 des deux côtés → la règle ne bloque pas (boucle validée
+    # préservée à l'identique).
+    d = evaluate(_m(coverage=70.0), _m(coverage=90.0))
+    assert d.accepted is True
+
+
+def test_lint_slack_allows_tolerated_regression():
+    before = _m(coverage=70.0, lint=2)
+    after = _m(coverage=90.0, lint=3)  # +1 lint, mais gros gain couverture
+    assert evaluate(before, after, lint_slack=0).accepted is False  # 3 > 2
+    assert evaluate(before, after, lint_slack=1).accepted is True  # 3 <= 2+1
+
+
+def test_accept_when_lint_and_complexity_reduced():
+    # Réduire lint + complexité à couverture constante → composite ↑ → accepté.
+    before = _m(coverage=80.0, lint=8, complexity=4)
+    after = _m(coverage=80.0, lint=2, complexity=1)
+    d = evaluate(before, after)
+    assert d.accepted is True
+    assert d.delta > 0
+
+
+def test_negative_lint_slack_is_clamped():
+    # slack négatif rejetterait une amélioration → borné à 0 (pas de régression = OK).
+    before = _m(coverage=80.0, lint=2)
+    after = _m(coverage=90.0, lint=2)  # lint stable, gain couverture
+    assert evaluate(before, after, lint_slack=-5).accepted is True
 
 
 def test_reject_on_insufficient_gain():
@@ -79,13 +158,14 @@ def test_min_gain_threshold_filters_noise():
 
 
 def test_reject_non_finite_composite():
-    # Score NaN/inf : la garde de gain (NaN < x = False) laisserait passer → fail-closed.
+    # Score NaN/inf (ex. scan sécu en échec → inf) : la garde de gain (NaN < x =
+    # False) laisserait passer → fail-closed.
     before = _m(coverage=70.0)
     for bad in (math.nan, math.inf):
         after = ProjectQualityMetrics(
             coverage_pct=90.0,
-            review_score=0.8,
             security_findings=0,
+            security_weighted=0.0,
             tests_passed=True,
             composite=bad,
             coverage_measured=True,

@@ -11,14 +11,17 @@ from collegue.improve import (
 )
 
 
-def _m(*, coverage=95.0, security=0, measured=True):
+def _m(*, coverage=95.0, security=0, lint=0, complexity=0, measured=True):
     return ProjectQualityMetrics(
         coverage_pct=coverage,
-        review_score=0.7,
         security_findings=security,
+        security_weighted=0.0,
         tests_passed=True,
         composite=0.0,
         coverage_measured=measured,
+        review_score=0.7,
+        lint_violations=lint,
+        complexity_bad_blocks=complexity,
     )
 
 
@@ -40,8 +43,24 @@ def test_coverage_skipped_when_unmeasured():
 
 
 def test_quality_cycle_when_metrics_healthy():
-    # Couverture haute + 0 sécu → polissage qualité (refactoring en tête).
+    # Couverture haute + 0 sécu + 0 lint/complexité → polissage qualité (refactoring en tête).
     assert next_dimension(_m(security=0, coverage=95.0)) is Dimension.REFACTORING
+
+
+def test_refactoring_prioritized_by_complexity_over_rotation():
+    # complexity_bad_blocks > 0 → REFACTORING (métrique-driven) même si la rotation
+    # qualité partirait sur DOCUMENTATION (dernière qualité essayée = REFACTORING).
+    metrics = _m(security=0, coverage=95.0, complexity=3)
+    history = [AttemptRecord(Dimension.REFACTORING, improved=True)]
+    assert next_dimension(metrics, history=history) is Dimension.REFACTORING
+
+
+def test_consistency_prioritized_by_lint_over_rotation():
+    # lint_violations > 0 (complexité 0) → CONSISTENCY (métrique-driven) même si la
+    # rotation partirait sur REFACTORING (dernière qualité essayée = CONSISTENCY).
+    metrics = _m(security=0, coverage=95.0, lint=5)
+    history = [AttemptRecord(Dimension.CONSISTENCY, improved=True)]
+    assert next_dimension(metrics, history=history) is Dimension.CONSISTENCY
 
 
 # --- rotation -------------------------------------------------------------------
@@ -111,6 +130,18 @@ def test_build_task_security_counts_findings():
     task = build_improvement_task(Dimension.SECURITY, _m(security=3), number=1)
     assert "sécurité" in task.title.lower()
     assert "3" in task.body
+
+
+def test_build_task_refactoring_counts_complexity():
+    task = build_improvement_task(Dimension.REFACTORING, _m(complexity=4), number=1)
+    assert "complexité" in task.title.lower()
+    assert "4" in task.body
+
+
+def test_build_task_consistency_counts_lint():
+    task = build_improvement_task(Dimension.CONSISTENCY, _m(lint=7), number=1)
+    assert "lint" in task.title.lower()
+    assert "7" in task.body
 
 
 def test_build_task_each_dimension_has_template():
