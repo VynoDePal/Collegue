@@ -86,6 +86,51 @@ def _improvement_quality_report(dimension, before, after, delta):
     )
 
 
+def _seed_promoted_diffs(workspace, diffs, *, git_bin: str = "git") -> int:
+    """Réapplique ET COMMITE les diffs déjà promus sur le clone neuf (#545, Étape 2).
+
+    Levier 2 du redesign : ``apply_seed_diff`` (git apply -3) réapplique chaque diff
+    promu ; ici on le **commite** pour que ``HEAD`` reflète l'état cumulé. Sans commit,
+    le diff capturé du round courant (``git diff`` vs HEAD, cf. ``capture_diff``)
+    ré-embarquerait les changements déjà promus → double-comptage au round suivant.
+    Après commit, la mesure baseline porte sur le projet **cumulé amélioré** : le score
+    monte round après round et le proposeur (métrique-driven) passe à la dimension
+    suivante car la métrique d'une dimension réglée redevient bonne sur l'état cumulé.
+    ``execution.diff`` ne contient alors que les nouveaux changements du round.
+
+    Best-effort : un diff inapplicable (conflit, base déplacée) est **sauté** —
+    ``apply_seed_diff`` restaure alors un arbre propre — plutôt que d'échouer le run.
+    Renvoie le nombre de diffs effectivement intégrés (commités).
+    """
+    from collegue.executor.command import LocalCommandRunner
+    from collegue.executor.workspace import apply_seed_diff
+
+    runner = LocalCommandRunner()
+    applied = 0
+    for index, diff in enumerate(diffs):
+        if not apply_seed_diff(workspace, diff, git_bin=git_bin):
+            continue
+        if not runner.run_command([git_bin, "add", "-A"], workspace.path).ok:
+            continue
+        commit = runner.run_command(
+            [
+                git_bin,
+                "-c",
+                "user.email=improve@collegue.local",
+                "-c",
+                "user.name=collegue-improve",
+                "commit",
+                "-q",
+                "-m",
+                f"compounding: amélioration promue #{index + 1}",
+            ],
+            workspace.path,
+        )
+        if commit.ok:
+            applied += 1
+    return applied
+
+
 async def run_improvement(
     project_id: int,
     repo_source: str,
@@ -125,6 +170,9 @@ async def run_improvement(
 
     budget = budget or BudgetTimeController()
     history: List[AttemptRecord] = []
+    # Compounding (#545) : diffs déjà promus, réappliqués sur le clone neuf de chaque
+    # round pour une baseline cumulative (le score monte ; le proposeur avance).
+    promoted_diffs: List[str] = []
     result = ImprovementResult(stop_reason=STOP_PLATEAU, rounds=0)
     plateau = 0
     round_num = 0
@@ -141,6 +189,12 @@ async def run_improvement(
         round_num += 1
         task = IssueSpec(number=round_num, title=f"Amélioration continue (round {round_num})")
         workspace = prepare_workspace(repo_source, task)
+
+        # Compounding (#545) : réapplique les diffs promus sur le clone neuf AVANT la
+        # mesure baseline → l'objectif porte sur l'état cumulé (le score monte ; une
+        # dimension réglée n'est plus proposée car sa métrique redevient bonne).
+        if promoted_diffs:
+            _seed_promoted_diffs(workspace, promoted_diffs)
 
         # Levier 1 (#541) : la mesure baseline porte sur le WORKSPACE sur disque, pas
         # sur un diff (il n'y en a pas encore) — objectif symétrique avant/après.
@@ -203,6 +257,9 @@ async def run_improvement(
             )
             if not dry_run:
                 persist(manager, project_id, after)
+            # Compounding (#545) : mémorise le diff promu pour le réappliquer aux
+            # rounds suivants (baseline cumulative) — y compris en dry_run.
+            promoted_diffs.append(execution.diff)
             result.promoted.append(PromotedImprovement(dimension.value, gate.delta, pr.number))
             plateau = 0
         else:
