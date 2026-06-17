@@ -1,17 +1,17 @@
-"""Tests G2 (#384) : gate par métrique avant PR (gain sans régression, fail-closed)."""
+"""Tests G2 (#384, #541) : gate par métrique avant PR (gain sans régression, fail-closed)."""
 
 import math
 
 from collegue.improve import ProjectQualityMetrics, composite_score, evaluate
 
 
-def _m(*, coverage=80.0, review=0.7, security=0, tests=True, measured=True):
+def _m(*, coverage=80.0, security_weighted=0.0, security=0, tests=True, measured=True):
     return ProjectQualityMetrics(
         coverage_pct=coverage,
-        review_score=review,
         security_findings=security,
+        security_weighted=security_weighted,
         tests_passed=tests,
-        composite=composite_score(coverage, review, security),
+        composite=composite_score(coverage, security_weighted),
         coverage_measured=measured,
     )
 
@@ -27,10 +27,10 @@ def test_accept_on_real_gain_without_regression():
     assert d.delta > 0
 
 
-def test_accept_gain_from_review_when_coverage_unmeasurable_both_sides():
-    # Projet sans couverture mesurable (both False) : le gain vient de la revue.
-    before = _m(coverage=0.0, review=0.5, measured=False)
-    after = _m(coverage=0.0, review=0.8, measured=False)
+def test_accept_gain_from_security_when_coverage_unmeasurable_both_sides():
+    # Projet sans couverture mesurable (both False) : le gain vient de la baisse sécu.
+    before = _m(coverage=0.0, security_weighted=5.0, measured=False)
+    after = _m(coverage=0.0, security_weighted=2.0, measured=False)
     d = evaluate(before, after)
     assert d.accepted is True
 
@@ -45,7 +45,8 @@ def test_reject_when_tests_red():
 
 
 def test_reject_on_security_regression():
-    d = evaluate(_m(security=1, coverage=70.0), _m(security=2, coverage=90.0))
+    # Même avec un gain de couverture, une sécu pondérée qui empire = rejet dur.
+    d = evaluate(_m(security_weighted=1.0, coverage=70.0), _m(security_weighted=2.0, coverage=90.0))
     assert d.accepted is False
     assert "sécu" in d.reason
 
@@ -79,13 +80,14 @@ def test_min_gain_threshold_filters_noise():
 
 
 def test_reject_non_finite_composite():
-    # Score NaN/inf : la garde de gain (NaN < x = False) laisserait passer → fail-closed.
+    # Score NaN/inf (ex. scan sécu en échec → inf) : la garde de gain (NaN < x =
+    # False) laisserait passer → fail-closed.
     before = _m(coverage=70.0)
     for bad in (math.nan, math.inf):
         after = ProjectQualityMetrics(
             coverage_pct=90.0,
-            review_score=0.8,
             security_findings=0,
+            security_weighted=0.0,
             tests_passed=True,
             composite=bad,
             coverage_measured=True,

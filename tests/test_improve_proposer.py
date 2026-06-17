@@ -14,11 +14,12 @@ from collegue.improve import (
 def _m(*, coverage=95.0, security=0, measured=True):
     return ProjectQualityMetrics(
         coverage_pct=coverage,
-        review_score=0.7,
         security_findings=security,
+        security_weighted=0.0,
         tests_passed=True,
         composite=0.0,
         coverage_measured=measured,
+        review_score=0.7,
     )
 
 

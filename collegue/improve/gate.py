@@ -51,7 +51,10 @@ def evaluate(
     3. **Mesurabilité stable** : ``before.coverage_measured == after.coverage_measured``
        — un changement qui casse/active la mesure de couverture rend le delta de
        couverture non fiable (cf. G1) ⇒ rejet.
-    4. **Pas de régression sécu** : ``after.security_findings <= before.security_findings``.
+    4. **Pas de régression sécu** : ``after.security_weighted <= before.security_weighted``
+       (tolérance 0 — toute aggravation sécu pondérée est un rejet dur). Un échec de
+       scan sécu produit un ``security_weighted`` non fini ⇒ composite non fini ⇒
+       rejet à la règle 2 (fail-closed).
     5. **Gain réel** : ``after.composite >= before.composite + min_gain``.
 
     ``min_gain`` négatif inverserait la garde « pas de régression » → borné à 0.
@@ -68,8 +71,8 @@ def evaluate(
         return reject("score composite non fini (NaN/inf) — mesure non fiable")
     if before.coverage_measured != after.coverage_measured:
         return reject("mesurabilité de la couverture instable (avant≠après) — delta non fiable")
-    if after.security_findings > before.security_findings:
-        return reject(f"régression sécu : {after.security_findings} > {before.security_findings} findings")
+    if after.security_weighted > before.security_weighted:
+        return reject(f"régression sécu : {after.security_weighted:.1f} > {before.security_weighted:.1f} (pondéré)")
     if delta < min_gain:
         return reject(f"gain insuffisant : Δ={delta:.4f} < min_gain={min_gain:.4f}")
 

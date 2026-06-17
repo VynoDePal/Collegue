@@ -19,6 +19,7 @@ Module **isolé** : non câblé au runtime.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -70,7 +71,7 @@ def _improvement_quality_report(dimension, before, after, delta):
         f"Amélioration « {dimension} » : score composite {before.composite:.3f} → "
         f"{after.composite:.3f} (Δ{delta:+.3f}). "
         f"Couverture {before.coverage_pct:.0f}% → {after.coverage_pct:.0f}% ; "
-        f"findings sécu {before.security_findings} → {after.security_findings}."
+        f"sécu pondérée {before.security_weighted:.1f} → {after.security_weighted:.1f}."
     )
     return QualityReport(
         tests_passed=after.tests_passed,
@@ -139,7 +140,21 @@ async def run_improvement(
         task = IssueSpec(number=round_num, title=f"Amélioration continue (round {round_num})")
         workspace = prepare_workspace(repo_source, task)
 
-        before = await measure_fn(workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff="", weights=weights)
+        # Levier 1 (#541) : la mesure baseline porte sur le WORKSPACE sur disque, pas
+        # sur un diff (il n'y en a pas encore) — objectif symétrique avant/après.
+        before = await measure_fn(workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights)
+
+        # Baseline non fiable (composite non fini, ex. scan sécu en échec → inf) :
+        # round à vide. On NE lance PAS l'agent (coûteux) pour rien et on n'enregistre
+        # pas de score fantôme (inf) ; fail-closed — rien ne sera promu (#541).
+        if not math.isfinite(before.composite):
+            result.rejected.append(("baseline", "mesure baseline non fiable (composite non fini)"))
+            plateau += 1
+            if plateau >= plateau_rounds:
+                result.stop_reason = STOP_PLATEAU
+                break
+            continue
+
         if result.initial_score is None:
             result.initial_score = before.composite
         result.final_score = before.composite
