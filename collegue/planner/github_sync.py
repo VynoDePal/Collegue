@@ -29,12 +29,14 @@ Module **isolé** : non câblé au runtime tant que le pilote (Phase 3) ne l'enc
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from collegue.planner.plan_review import require_approved
 from collegue.tools.github_commands import (
+    FileCommands,
     IssueCommands,
     LabelCommands,
     MilestoneCommands,
@@ -42,6 +44,9 @@ from collegue.tools.github_commands import (
 )
 
 DEFAULT_LABELS = ["autonome"]
+DEFAULT_SPEC_FILENAME = "SPEC.md"
+
+logger = logging.getLogger(__name__)
 
 
 class SyncError(Exception):
@@ -79,12 +84,17 @@ def _topo_sort_tasks(tasks: List[Any]) -> List[Any]:
 
 @dataclass
 class SyncClients:
-    """Clients GitHub injectables (mockés en test)."""
+    """Clients GitHub injectables (mockés en test).
+
+    ``files`` (A3) est **optionnel** (défaut ``None``) : sans lui, le commit du
+    fichier ``SPEC.md`` est un no-op (rétro-compat des appelants à 4 clients).
+    """
 
     issues: Any
     labels: Any
     milestones: Any
     projects: Any
+    files: Any = None
 
 
 @dataclass
@@ -93,6 +103,8 @@ class SyncResult:
     issues: List[Dict[str, Any]]
     milestone: Optional[str] = None
     board: Optional[str] = None
+    # A3 : chemin du SPEC committé dans le repo cible (None si non committé).
+    spec_committed: Optional[str] = None
 
 
 def _default_clients(token: Optional[str]) -> SyncClients:
@@ -101,7 +113,38 @@ def _default_clients(token: Optional[str]) -> SyncClients:
         labels=LabelCommands(token=token),
         milestones=MilestoneCommands(token=token),
         projects=ProjectCommands(token=token),
+        files=FileCommands(token=token),
     )
+
+
+def _commit_spec(clients: SyncClients, manager: Any, project_id: int, owner: str, repo: str, spec_filename: str):
+    """Committe le SPEC (``Project.spec``) comme fichier versionné du repo cible (§4.2).
+
+    Le SPEC vit en DB ; le brief en exige une matérialisation **committée** = le
+    contrat du projet, lisible et versionné dans le repo. **Best-effort** : un échec
+    (droits, repo absent) n'échoue PAS la synchro des issues (on journalise un
+    avertissement et on renvoie ``None``). ``FileCommands.update_file`` joint le SHA
+    courant (anti-conflit) ; un contenu identique ne crée pas de commit vide côté
+    GitHub (arbre inchangé), donc re-synchroniser est sûr. No-op si pas de client
+    ``files`` ou pas de spec.
+    """
+    files = getattr(clients, "files", None)
+    project = manager.get_project(project_id)
+    spec = getattr(project, "spec", None) if project is not None else None
+    if files is None or not spec:
+        return None
+    try:
+        files.update_file(
+            owner,
+            repo,
+            spec_filename,
+            message=f"docs: SPEC du projet (planification, project_id={project_id})",
+            content=spec,
+        )
+        return spec_filename
+    except Exception as exc:  # noqa: BLE001 - commit best-effort, ne bloque pas la synchro
+        logger.warning("Commit de %s échoué (synchro des issues poursuivie) : %s", spec_filename, exc)
+        return None
 
 
 def _issue_body(task: Any, dep_numbers: List[int]) -> str:
@@ -151,12 +194,14 @@ def sync_plan(
     board_title: Optional[str] = None,
     token: Optional[str] = None,
     clients: Optional[SyncClients] = None,
+    spec_filename: str = DEFAULT_SPEC_FILENAME,
 ) -> SyncResult:
     """Synchronise le plan d'un projet vers GitHub (issues + labels + milestone + board).
 
     ``dry_run=True`` (défaut) ne touche pas GitHub. ``dry_run=False`` exige un plan
-    **approuvé** (lève :class:`~collegue.planner.plan_review.PlanNotApproved` sinon)
-    et crée les issues liées de façon idempotente.
+    **approuvé** (lève :class:`~collegue.planner.plan_review.PlanNotApproved` sinon),
+    **committe ``SPEC.md``** (le contrat, §4.2) dans le repo cible, puis crée les
+    issues liées de façon idempotente.
     """
     labels = labels or DEFAULT_LABELS
     if dry_run:
@@ -168,6 +213,11 @@ def sync_plan(
     require_approved(manager, project_id)
 
     clients = clients or _default_clients(token)
+
+    # §4.2 : matérialiser le SPEC (DB) en fichier committé du repo cible. AVANT les
+    # issues pour que le contrat atterrisse en premier ; best-effort (n'échoue pas la synchro).
+    spec_committed = _commit_spec(clients, manager, project_id, owner, repo, spec_filename)
+
     tasks = manager.get_tasks(project_id)
     order = _topo_sort_tasks(tasks)  # dépendances d'abord ; raise sur cycle/dep pendante
 
@@ -177,7 +227,9 @@ def sync_plan(
     # Rien de neuf à créer → ne pas brûler d'appels API (ensure_*). Idempotent.
     if all(t.id in task_to_issue for t in tasks):
         return SyncResult(
-            dry_run=False, issues=[{"task_id": t.id, "issue_number": t.issue_number, "skipped": True} for t in order]
+            dry_run=False,
+            issues=[{"task_id": t.id, "issue_number": t.issue_number, "skipped": True} for t in order],
+            spec_committed=spec_committed,
         )
 
     # Pré-garantir labels / milestone / board (idempotent).
@@ -217,11 +269,15 @@ def sync_plan(
     manager.record_decision(
         project_id,
         summary=f"Plan synchronisé sur GitHub : {len(created)} issue(s)",
-        rationale=f"repo={owner}/{repo}; milestone={milestone_title}; board={board_title}",
+        rationale=(
+            f"repo={owner}/{repo}; milestone={milestone_title}; board={board_title}; "
+            f"spec={spec_committed or 'non committé'}"
+        ),
     )
     return SyncResult(
         dry_run=False,
         issues=created,
         milestone=(milestone.title if milestone else None),
         board=(board.title if board else None),
+        spec_committed=spec_committed,
     )

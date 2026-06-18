@@ -65,8 +65,24 @@ class _FakeProjects:
         return "ITEM"
 
 
+class _FakeFiles:
+    def __init__(self, fail=False):
+        self.calls = []
+        self._fail = fail
+
+    def update_file(self, owner, repo, path, message, content, branch=None):
+        if self._fail:
+            raise RuntimeError("commit refusé")
+        self.calls.append({"owner": owner, "repo": repo, "path": path, "message": message, "content": content})
+        return {"commit": {"sha": "abc"}}
+
+
 def _clients():
     return SyncClients(_FakeIssues(), _FakeLabels(), _FakeMilestones(), _FakeProjects())
+
+
+def _clients_with_files(files=None):
+    return SyncClients(_FakeIssues(), _FakeLabels(), _FakeMilestones(), _FakeProjects(), files=files or _FakeFiles())
 
 
 def _planned(manager, *, approve=False):
@@ -244,3 +260,57 @@ def test_partial_failure_then_retry_no_duplicate(manager):
 def test_default_clients_smoke():
     clients = _default_clients(token="x")
     assert clients.issues and clients.labels and clients.milestones and clients.projects
+
+
+# --- A3 : commit du SPEC.md dans le repo cible ----------------------------------
+
+
+def test_real_sync_commits_spec_md(manager):
+    pid = _planned(manager, approve=True)
+    files = _FakeFiles()
+    result = sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients_with_files(files))
+    assert result.spec_committed == "SPEC.md"
+    assert len(files.calls) == 1
+    call = files.calls[0]
+    assert call["path"] == "SPEC.md" and call["owner"] == "o" and call["repo"] == "r"
+    assert "Demo" in call["content"]  # le SPEC markdown persisté en DB est committé
+
+
+def test_spec_filename_configurable(manager):
+    pid = _planned(manager, approve=True)
+    files = _FakeFiles()
+    result = sync_plan(
+        manager, pid, "o", "r", dry_run=False, clients=_clients_with_files(files), spec_filename="docs/SPEC.md"
+    )
+    assert result.spec_committed == "docs/SPEC.md"
+    assert files.calls[0]["path"] == "docs/SPEC.md"
+
+
+def test_spec_commit_is_best_effort(manager):
+    # Un échec de commit du SPEC ne casse PAS la synchro des issues (best-effort).
+    pid = _planned(manager, approve=True)
+    result = sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients_with_files(_FakeFiles(fail=True)))
+    assert result.spec_committed is None  # échec signalé
+    assert all(t.issue_number for t in manager.get_tasks(pid))  # issues créées quand même
+
+
+def test_no_files_client_skips_spec_commit(manager):
+    # SyncClients 4-clients (rétro-compat) → pas de client files → no-op, pas d'erreur.
+    pid = _planned(manager, approve=True)
+    result = sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients())
+    assert result.spec_committed is None
+    assert all(t.issue_number for t in manager.get_tasks(pid))
+
+
+def test_dry_run_does_not_commit_spec(manager):
+    pid = _planned(manager)  # non approuvé, dry-run
+    files = _FakeFiles()
+    result = sync_plan(manager, pid, "o", "r", dry_run=True, clients=_clients_with_files(files))
+    assert result.spec_committed is None
+    assert files.calls == []  # aucune écriture en dry-run
+
+
+def test_default_clients_includes_files():
+    from collegue.tools.github_commands import FileCommands
+
+    assert isinstance(_default_clients(token=None).files, FileCommands)
