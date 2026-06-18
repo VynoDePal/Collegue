@@ -137,19 +137,25 @@ Chaque expert utilise un LLM, itère via une **boucle agentique**, et peut **dé
 
 ### Variables d'environnement (.env)
 
-| Variable | Description | Requis |
-|----------|-------------|--------|
-| `LLM_API_KEY` | Clé API Google Gemini | ✓ |
-| `POSTGRES_URL` | URI PostgreSQL | |
-| `GITHUB_TOKEN` | Token GitHub (repo, read:org) | |
-| `SENTRY_AUTH_TOKEN` | Token Sentry | |
-| `SENTRY_ORG` | Organisation Sentry | |
-| `KUBECONFIG` | Chemin kubeconfig | |
-| `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |
-| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` | Budget dur (auto-pause) | |
-| `AUTO_MERGE_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes (opt-in, **off** par défaut) | |
+Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
+**[.env.example](.env.example)**) :
 
-> Réglages complets du moteur autonome (budget, auto-merge/revert, outil MCP du pilote) :
+| Variable(s) | Description | Requis |
+|-------------|-------------|--------|
+| `LLM_API_KEY` | Clé API du provider LLM (Gemini par défaut) | ✓ |
+| `LLM_PROVIDER` / `LLM_MODEL` | Provider et modèle LLM par défaut | |
+| `LLM_MODEL_*` / `LLM_PROVIDER_*` | Modèle/provider par **rôle** (CODER, QA, PLANNER, REVIEWER) | |
+| `LLM_RATE_LIMIT_*` | Limites d'appels LLM par client (minute / jour) | |
+| `CACHE_ENABLED` / `CACHE_TTL` | Cache des réponses d'outils | |
+| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | Authentification OAuth (**off** par défaut) | |
+| `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | Intégration GitHub (watchdog, PR) | |
+| `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Observabilité Sentry | |
+| `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |
+| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Budget dur du run (auto-pause) | |
+| `COLLEGUE_HOME` | Racine de persistance (budget, métriques, checkpoints) | |
+| `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes (opt-in, **off** par défaut) | |
+
+> Réglages détaillés du moteur autonome (budget, auto-merge/revert, outil MCP du pilote) :
 > [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env).
 
 ---

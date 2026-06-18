@@ -137,19 +137,25 @@ Each expert uses an LLM, iterates through an **agentic loop**, and can **delegat
 
 ### Environment variables (.env)
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `LLM_API_KEY` | Google Gemini API key | ✓ |
-| `POSTGRES_URL` | PostgreSQL URI | |
-| `GITHUB_TOKEN` | GitHub token (repo, read:org) | |
-| `SENTRY_AUTH_TOKEN` | Sentry auth token | |
-| `SENTRY_ORG` | Sentry organization slug | |
-| `KUBECONFIG` | Path to kubeconfig | |
-| `STATE_DATABASE_URL` | Autonomous engine durable state (Postgres/SQLite) | |
-| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` | Hard budget (auto-pause) | |
-| `AUTO_MERGE_ENABLED` / `PILOT_TOOL_ENABLED` | Autonomous capabilities (opt-in, **off** by default) | |
+Overview **by theme** (full list and default values in
+**[.env.example](.env.example)**):
 
-> Full autonomous-engine settings (budget, auto-merge/revert, pilot MCP tool):
+| Variable(s) | Description | Required |
+|-------------|-------------|----------|
+| `LLM_API_KEY` | LLM provider API key (Gemini by default) | ✓ |
+| `LLM_PROVIDER` / `LLM_MODEL` | Default LLM provider and model | |
+| `LLM_MODEL_*` / `LLM_PROVIDER_*` | Per-**role** model/provider (CODER, QA, PLANNER, REVIEWER) | |
+| `LLM_RATE_LIMIT_*` | Per-client LLM call limits (per minute / day) | |
+| `CACHE_ENABLED` / `CACHE_TTL` | Tool response cache | |
+| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | OAuth authentication (**off** by default) | |
+| `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | GitHub integration (watchdog, PRs) | |
+| `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Sentry observability | |
+| `STATE_DATABASE_URL` | Autonomous engine durable state (Postgres/SQLite) | |
+| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Hard run budget (auto-pause) | |
+| `COLLEGUE_HOME` | Persistence root (budget, metrics, checkpoints) | |
+| `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Autonomous capabilities (opt-in, **off** by default) | |
+
+> Detailed autonomous-engine settings (budget, auto-merge/revert, pilot MCP tool):
 > [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env) (FR).
 
 ---
