@@ -351,19 +351,14 @@ async def core_lifespan(server):
 sampling_handler = None
 if settings.LLM_API_KEY or settings.is_local_provider:
     try:
-        from collegue.core.llm.sampling_handler import build_sampling_handler
+        from collegue.core.llm.sampling_handler import build_sampling_handler, resolve_openai_endpoint
 
         provider = settings.LLM_PROVIDER.lower()
-        # Gemini par défaut ; sinon l'endpoint OpenAI-compatible du provider.
-        if provider in ("gemini", ""):
-            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-        else:
-            base_url = settings.llm_base_url  # None pour OpenAI cloud → défaut SDK
-        # Clé factice pour les locaux qui l'ignorent (le SDK OpenAI en exige une).
-        api_key = settings.LLM_API_KEY or ("local" if settings.is_local_provider else None)
+        # Résolution provider→endpoint partagée avec le ctx offline (source unique).
+        default_model, api_key, base_url = resolve_openai_endpoint(settings)
 
         sampling_handler = build_sampling_handler(
-            default_model=settings.LLM_MODEL,
+            default_model=default_model,
             api_key=api_key,
             base_url=base_url,
         )
