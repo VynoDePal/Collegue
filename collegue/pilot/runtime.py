@@ -11,18 +11,22 @@ l'entrypoint ``python -m collegue.pilot`` (voir ``__main__``). ``dry_run`` est l
 défaut. L'exécution réelle de bout en bout (Docker + OpenHands + LLM + écriture
 GitHub) est derrière le marqueur ``integration`` ; en CI on injecte des doubles.
 
-Note ``ctx`` : le reviewer expert (``code_review``) a besoin d'un contexte de
-sampling LLM. En usage réel hors serveur MCP, fournir un ``ctx`` adéquat (ou un
-shim) — différé à l'intégration. Un outil MCP exposant le pilote est volontairement
-**reporté à la Phase 5** (durcissement/auth) : l'auto-découverte des outils
-l'activerait au démarrage, et le serveur tourne ``OAUTH_ENABLED=false`` par défaut.
+Note ``ctx`` : le reviewer expert (``code_review``) et le planner ont besoin d'un
+contexte de sampling LLM. Hors serveur MCP, ``run_project_from_settings`` et
+``plan_project_from_settings`` en assemblent un automatiquement (``_build_ctx`` →
+``LocalSamplingContext`` offline, OpenAI-compatible) quand aucun n'est fourni.
+L'outil MCP exposant le pilote est volontairement **reporté à la Phase 5**
+(durcissement/auth) : l'auto-découverte des outils l'activerait au démarrage, et
+le serveur tourne ``OAUTH_ENABLED=false`` par défaut.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 from collegue.pilot.audit import RunAuditLog, default_process_cost_source
 from collegue.pilot.budget import BudgetTimeController
@@ -358,6 +362,131 @@ async def run_project_from_settings(
                     logger.warning("Fermeture du ctx de sampling échouée: %s", exc)
 
 
+# ── planification (Phase 1) assemblée ──────────────────────────────────────────
+
+
+@dataclass
+class PlanResult:
+    """Bilan d'une planification (Phase 1) assemblée depuis la config."""
+
+    project_id: int
+    spec_title: str
+    objectives: int
+    acceptance_criteria: int
+    task_count: int
+    preview_markdown: str
+    dry_run: bool
+    issues: List[dict] = field(default_factory=list)
+
+
+async def plan_project_from_settings(
+    name: str,
+    problem: str,
+    *,
+    owner: str,
+    repo: str,
+    ctx=None,
+    settings_obj: Optional[object] = None,
+    github_token: Optional[str] = None,
+    manager=None,
+    deadline: Any = None,
+    context: Optional[str] = None,
+    approve: bool = False,
+    execute_sync: bool = False,
+    labels: Optional[List[str]] = None,
+    milestone_title: Optional[str] = None,
+    board_title: Optional[str] = None,
+    decompose_max_tokens: int = 16384,
+    decompose_attempts: int = 3,
+    retry_sleep_seconds: float = 3.0,
+) -> PlanResult:
+    """Phase 1 **par le produit** : problème → SPEC → DAG → (gate humain) → issues GitHub.
+
+    Assemble les dépendances depuis la config (ctx de sampling offline via ``_build_ctx``,
+    état durable) et enchaîne ``generate_spec`` → ``persist_spec`` → ``decompose`` →
+    ``build_plan_preview`` → (``approve_plan`` si ``approve``/``execute_sync``) →
+    ``sync_plan``. **dry-run par défaut** (``execute_sync=False`` : aucune écriture GitHub).
+    ``approve`` satisfait le gate humain P5 (anti-TOCTOU). Le commit du fichier ``SPEC.md``
+    dans le repo cible est porté par ``sync_plan`` (A3).
+
+    ``decompose`` est re-tenté sur ``ValueError`` (décomposition vide — aléa d'un modèle
+    « thinking » coupé trop tôt, d'où ``max_tokens`` élargi).
+    """
+    settings_obj = settings_obj or _settings()
+    manager = manager or _build_manager(settings_obj)
+    owns_ctx = ctx is None
+    if ctx is None:
+        ctx = _build_ctx(settings_obj)
+
+    try:
+        from collegue.planner.decomposer import decompose
+        from collegue.planner.github_sync import sync_plan
+        from collegue.planner.plan_review import approve_plan, build_plan_preview
+        from collegue.planner.spec_generator import generate_spec, persist_spec
+
+        spec = await generate_spec(problem, ctx, context=context, settings_obj=settings_obj)
+        project_id = persist_spec(manager, name, spec, deadline=deadline)
+
+        last_err: Optional[Exception] = None
+        tasks: list = []
+        attempts = max(1, decompose_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                tasks = await decompose(
+                    spec,
+                    ctx,
+                    manager=manager,
+                    project_id=project_id,
+                    settings_obj=settings_obj,
+                    max_tokens=decompose_max_tokens,
+                )
+                break
+            except ValueError as exc:  # décomposition vide → aléa du modèle, on retente
+                last_err = exc
+                logger.warning("decompose tentative %d/%d : %s", attempt, attempts, exc)
+                if attempt < attempts and retry_sleep_seconds > 0:
+                    await asyncio.sleep(retry_sleep_seconds)
+        else:
+            raise last_err if last_err is not None else ValueError("Décomposition impossible.")
+
+        preview = build_plan_preview(manager, project_id)
+        preview_md = preview.to_markdown() if preview is not None else ""
+
+        if approve or execute_sync:
+            approve_plan(manager, project_id, actor="operator:collegue-cli")
+
+        token = github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV)
+        sync = sync_plan(
+            manager,
+            project_id,
+            owner,
+            repo,
+            dry_run=not execute_sync,
+            token=token,
+            labels=labels if labels is not None else ["autonome"],
+            milestone_title=milestone_title if milestone_title is not None else f"{name} MVP",
+            board_title=board_title,
+        )
+        return PlanResult(
+            project_id=project_id,
+            spec_title=getattr(spec, "title", ""),
+            objectives=len(getattr(spec, "objectives", []) or []),
+            acceptance_criteria=len(getattr(spec, "acceptance_criteria", []) or []),
+            task_count=len(tasks),
+            preview_markdown=preview_md,
+            dry_run=not execute_sync,
+            issues=list(getattr(sync, "issues", []) or []),
+        )
+    finally:
+        if owns_ctx:
+            aclose = getattr(ctx, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception as exc:  # noqa: BLE001 - fermeture best-effort
+                    logger.warning("Fermeture du ctx de sampling échouée: %s", exc)
+
+
 # ── reporting lisible ──────────────────────────────────────────────────────────
 
 
@@ -387,4 +516,26 @@ def format_run_report(result: ProjectRunResult, *, project_id: Optional[int] = N
         lines.append(f"⚠ Reviews en attente de merge (drain requis) : tâches {pending}")
     lines.append(f"Statut projet : {result.project_status or '(inchangé)'}")
     lines.append(f"Budget-temps restant : {_remaining_label(budget)}")
+    return "\n".join(lines)
+
+
+def format_plan_report(result: PlanResult) -> str:
+    """Rendu lisible d'une planification (Phase 1) pour le CLI.
+
+    Affiche l'**aperçu complet du plan** (SPEC + tâches/dépendances) : c'est ce que
+    l'opérateur doit voir avant d'approuver/exécuter (gate humain P5).
+    """
+    mode = "dry-run (aperçu, aucune écriture)" if result.dry_run else "EXECUTE (issues créées)"
+    lines = [
+        f"Plan projet #{result.project_id} — « {result.spec_title} »",
+        f"  SPEC : {result.objectives} objectif(s), {result.acceptance_criteria} critère(s) d'acceptation",
+        f"  Tâches : {result.task_count}",
+        f"  Sync GitHub : {mode}",
+    ]
+    for it in result.issues:
+        num = it.get("issue_number")
+        tag = "skip" if it.get("skipped") else (f"#{num}" if num else "(dry-run)")
+        lines.append(f"    [{tag}] task {it.get('task_id')}: {it.get('title', '')}")
+    if result.preview_markdown:
+        lines += ["", "── Aperçu du plan ──", result.preview_markdown]
     return "\n".join(lines)
