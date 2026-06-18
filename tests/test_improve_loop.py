@@ -344,6 +344,55 @@ async def test_autofix_lint_cleans_promoted_diff_end_to_end(git_repo, manager):
     assert "feat.py" in after_diffs[0]  # le diff promu reste celui du round
 
 
+async def test_execute_mode_stacks_prs_on_previous_branch(git_repo, manager):
+    # En --execute (#554), la PR du round N se base sur la branche de la promotion N-1
+    # (la 1ʳᵉ sur `main`) → diffs incrémentaux, mergeables dans l'ordre, pas de conflit.
+    from collegue.executor import PrClients
+    from collegue.executor.agent import AgentResult
+
+    class _CounterAgent:
+        def __init__(self):
+            self.n = 0
+
+        def implement_issue(self, workspace, issue):
+            self.n += 1
+            rel = f"feat_{self.n}.py"
+            with open(os.path.join(workspace, rel), "w") as fh:
+                fh.write(f"VALUE_{self.n} = {self.n}\n")  # fichier unique → diff à chaque round
+            return AgentResult(success=True, files_changed=(rel,), summary="feat", logs="ok")
+
+    created = []
+
+    class _PRsRec:
+        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+            return None
+
+        def create_pr(self, owner, repo, title, head, base, body):
+            created.append({"head": head, "base": base})
+            return SimpleNamespace(number=100 + len(created), html_url="https://gh", head_branch=head)
+
+    clients = PrClients(branches=_Branches(), files=_Files(), prs=_PRsRec())
+    seq = [_metrics(0.5), _metrics(0.7), _metrics(0.7), _metrics(0.9), _metrics(0.9), _metrics(0.9)]
+    result = await run_improvement(
+        manager.create_project(name="stack"),
+        git_repo,
+        ctx=None,
+        agent=_CounterAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=clients,
+        dry_run=False,
+        plateau_rounds=1,
+        measure_fn=_ScriptedMeasure(seq),
+    )
+    assert len(result.promoted) >= 2
+    assert len(created) >= 2
+    assert created[0]["base"] == "main"  # 1ʳᵉ PR : base = main
+    assert created[1]["base"] == created[0]["head"]  # 2ᵉ PR : stackée sur la 1ʳᵉ
+
+
 async def test_unreliable_baseline_skips_agent_round(git_repo, manager):
     # Baseline non fiable (composite non fini, ex. scan sécu KO → inf) → round à vide
     # SANS appel agent ; fail-closed : aucune promotion, pas de score fantôme inf (#541).
