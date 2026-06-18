@@ -65,6 +65,27 @@ def _make_handler_class():
     return UsageTrackingSamplingHandler
 
 
+def resolve_openai_endpoint(settings_obj: Any) -> tuple[str, Optional[str], Optional[str]]:
+    """``(default_model, api_key, base_url)`` pour un client OpenAI-compatible, depuis la config.
+
+    Source unique de vérité du routage provider→endpoint (utilisée par ``app.py`` pour
+    le handler serveur ET par le ``ctx`` offline ``LocalSamplingContext``) :
+
+    - ``gemini`` (défaut) → endpoint **OpenAI-compatible** de Google ;
+    - provider **local** (lmstudio/ollama/unsloth) → ``settings.llm_base_url`` + clé factice ;
+    - ``openai`` cloud → ``base_url=None`` (défaut du SDK).
+    """
+    provider = (getattr(settings_obj, "LLM_PROVIDER", "gemini") or "gemini").lower()
+    if provider in ("gemini", ""):
+        base_url: Optional[str] = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    else:
+        base_url = getattr(settings_obj, "llm_base_url", None)
+    is_local = bool(getattr(settings_obj, "is_local_provider", False))
+    api_key = getattr(settings_obj, "LLM_API_KEY", None) or ("local" if is_local else None)
+    default_model = getattr(settings_obj, "LLM_MODEL", "") or ""
+    return default_model, api_key, base_url
+
+
 def build_sampling_handler(default_model: str, api_key: Optional[str], base_url: Optional[str]) -> Optional[Any]:
     """Instancie le handler de sampling, ou ``None`` si les dépendances manquent."""
     try:

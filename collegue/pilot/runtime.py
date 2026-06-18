@@ -143,6 +143,13 @@ def _build_clients(github_token):  # pragma: no cover - infra réelle (integrati
     return _default_clients(token=github_token)
 
 
+def _build_ctx(settings_obj):  # pragma: no cover - infra réelle (integration)
+    """ctx de sampling offline (OpenAI-compatible, multi-provider) pour le CLI/hors-MCP."""
+    from collegue.core.llm.sampling_ctx import LocalSamplingContext
+
+    return LocalSamplingContext.from_settings(settings_obj)
+
+
 def _gate_options(settings_obj) -> dict:
     """Options du gate qualité depuis la config (#437/#438/#439) — vers ``execute_issue``.
 
@@ -270,66 +277,85 @@ async def run_project_from_settings(
         started_at = load_run_start(manager, project_id)
         budget = BudgetTimeController(settings_obj=settings_obj, started_at=started_at)
 
-    result = await run_project(
-        project_id,
-        repo_source,
-        ctx,
-        agent=agent,
-        owner=owner,
-        repo=repo,
-        manager=manager,
-        base=base,
-        budget=budget,
-        sandbox=sandbox,
-        reviewer=reviewer,
-        clients=clients,
-        dry_run=dry_run,
-        max_iterations=max_iterations,
-        improve=improve,
-        run_improvement_fn=run_improvement_fn,
-        # Retry au niveau tâche (#420) : le chemin assemblé est résilient par défaut
-        # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
-        max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),
-        retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
-        # Cohérence inter-tâches (#411) : opt-in pour exiger le merge des deps.
-        require_merged_deps=bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False)),
-        # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
-        max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
-        # Gate configurable par projet (#438) : commande de tests + passe frontend.
-        gate_options=_gate_options(settings_obj),
-        # Gouvernance de coût (#441) : ledger + source process branchés en réel.
-        audit=audit,
-        cost_source=cost_source,
-        # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
-        require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
-    )
+    # ctx de sampling : hors serveur MCP (CLI), aucun ``ctx`` n'est fourni → le
+    # reviewer/planner/boucle agentique échoueraient. On en assemble un offline
+    # (OpenAI-compatible, multi-provider) et on le ferme en fin de run si on l'a créé.
+    owns_ctx = ctx is None
+    if ctx is None:
+        ctx = _build_ctx(settings_obj)
 
-    # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
-    if not dry_run:
-        prs = ", ".join(str(n) for n in result.opened_prs) or "aucune"
-        # #440 : un arrêt deadline laisse du travail VALIDÉ en attente de merge —
-        # le signaler dans le journal pour que le drain ne dépende pas d'un
-        # post-mortem (la PR FacNor #72 est restée ouverte, mergée à la main).
-        drain = ""
-        if result.pending_reviews:
-            drain = f" ; {len(result.pending_reviews)} tâche(s) in_review À DRAINER (merge requis)"
-        # #441 : bilan de coût du run dans le journal (ledger enfin vivant).
-        cost_note = ""
-        if audit is not None:
-            ledger = audit.cost_summary()
-            cost_note = f" ; coût≈{ledger.get('usd', 0.0)}$ / {ledger.get('tokens', 0)} tokens"
-            # #502 : un coût à 0 sans prix coder configuré est suspect — le dire.
-            from collegue.executor.openhands_agent import coder_pricing_resolvable
-
-            if not coder_pricing_resolvable(settings_obj):
-                cost_note += " [PRIX CODER NON CONFIGURÉS — coût $ possiblement INCONNU]"
-        manager.record_decision(
+    try:
+        result = await run_project(
             project_id,
-            f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}{cost_note}",
-            rationale=f"statut projet={result.project_status or 'inchangé'}",
+            repo_source,
+            ctx,
+            agent=agent,
+            owner=owner,
+            repo=repo,
+            manager=manager,
+            base=base,
+            budget=budget,
+            sandbox=sandbox,
+            reviewer=reviewer,
+            clients=clients,
+            dry_run=dry_run,
+            max_iterations=max_iterations,
+            improve=improve,
+            run_improvement_fn=run_improvement_fn,
+            # Retry au niveau tâche (#420) : le chemin assemblé est résilient par défaut
+            # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
+            max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),
+            retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
+            # Cohérence inter-tâches (#411) : opt-in pour exiger le merge des deps.
+            require_merged_deps=bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False)),
+            # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
+            max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
+            # Gate configurable par projet (#438) : commande de tests + passe frontend.
+            gate_options=_gate_options(settings_obj),
+            # Gouvernance de coût (#441) : ledger + source process branchés en réel.
+            audit=audit,
+            cost_source=cost_source,
+            # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
+            require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
         )
 
-    return result
+        # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
+        if not dry_run:
+            prs = ", ".join(str(n) for n in result.opened_prs) or "aucune"
+            # #440 : un arrêt deadline laisse du travail VALIDÉ en attente de merge —
+            # le signaler dans le journal pour que le drain ne dépende pas d'un
+            # post-mortem (la PR FacNor #72 est restée ouverte, mergée à la main).
+            drain = ""
+            if result.pending_reviews:
+                drain = f" ; {len(result.pending_reviews)} tâche(s) in_review À DRAINER (merge requis)"
+            # #441 : bilan de coût du run dans le journal (ledger enfin vivant).
+            cost_note = ""
+            if audit is not None:
+                ledger = audit.cost_summary()
+                cost_note = f" ; coût≈{ledger.get('usd', 0.0)}$ / {ledger.get('tokens', 0)} tokens"
+                # #502 : un coût à 0 sans prix coder configuré est suspect — le dire.
+                from collegue.executor.openhands_agent import coder_pricing_resolvable
+
+                if not coder_pricing_resolvable(settings_obj):
+                    cost_note += " [PRIX CODER NON CONFIGURÉS — coût $ possiblement INCONNU]"
+            manager.record_decision(
+                project_id,
+                f"Run pilote: {result.stop_reason} — {result.iterations} tâche(s), PR {prs}{drain}{cost_note}",
+                rationale=f"statut projet={result.project_status or 'inchangé'}",
+            )
+
+        return result
+    finally:
+        # Ne fermer que le ctx qu'on a créé (un ctx injecté appartient à l'appelant).
+        # Une erreur de fermeture ne doit JAMAIS masquer l'exception en cours (ex.
+        # ``BudgetExceeded`` de ``run_project`` = auto-pause volontaire) : on l'avale.
+        if owns_ctx:
+            aclose = getattr(ctx, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception as exc:  # noqa: BLE001 - fermeture best-effort
+                    logger.warning("Fermeture du ctx de sampling échouée: %s", exc)
 
 
 # ── reporting lisible ──────────────────────────────────────────────────────────
