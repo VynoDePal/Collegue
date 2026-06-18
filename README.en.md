@@ -172,8 +172,13 @@ python -m collegue.pilot ... --execute            # real writes (PRs + state)
 python -m collegue.pilot ... --execute --improve  # + improvement cycle
 ```
 
-Architecture, guardrails, observability/audit, crash resume and settings:
-**[docs/moteur_autonome.md](docs/moteur_autonome.md)** (FR).
+Once the MVP is built, `--improve` chains the **continuous-improvement loop** (Phase 4):
+a **deterministic quality objective** (coverage − security − lint − complexity, no LLM
+judgment) opens PRs only when a diff **improves without regression** (fail-closed gate);
+PRs are **stacked** and stop at a plateau.
+
+Architecture, improvement loop, guardrails, observability/audit, crash resume and
+settings: **[docs/moteur_autonome.md](docs/moteur_autonome.md)** (FR).
 
 ---
 
@@ -197,7 +202,7 @@ See [docs/watchdog_deployment.md](docs/watchdog_deployment.md) for deployment.
 | [Integration Guide](docs/guide_integration.md) | Claude Desktop, Cursor, Windsurf, CI/CD integration |
 | [Expert Reference](docs/reference_experts.md) | Parameters, outputs and use cases for each expert |
 | [Multi-Agent System](docs/multi_agent_expert_system.md) | Technical architecture, delegation, memory |
-| [Autonomous Development Engine](docs/moteur_autonome.md) | Autonomous pilot: architecture, guardrails, audit, resume, settings (FR) |
+| [Autonomous Development Engine](docs/moteur_autonome.md) | Autonomous pilot: architecture, **continuous improvement (Phase 4)**, guardrails, audit, resume, settings (FR) |
 | [LLM Evaluations](docs/llm_evals.md) | Output quality benchmarks |
 | [Rate Limiting](docs/rate_limiting_and_quotas.md) | Quotas and limits |
 

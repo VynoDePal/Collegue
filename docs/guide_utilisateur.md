@@ -25,6 +25,14 @@ Collègue MCP est un **collectif d'experts IA spécialisés** qui fonctionne com
 
 Chaque expert utilise un LLM en backend et peut **déléguer automatiquement** à d'autres experts quand il détecte des problèmes hors de son domaine.
 
+> **Deux modes d'usage.** Ce guide couvre le mode **réactif** : les experts appelés
+> depuis votre IDE. Collègue embarque aussi un mode **autonome** de bout en bout
+> (planifier → coder → tester → ouvrir des PR sous budget, puis **amélioration
+> continue** gatée par un objectif de qualité déterministe). Ce mode s'invoque
+> explicitement (`python -m collegue.pilot … --execute --improve`), n'est **jamais**
+> auto-démarré par le serveur MCP, et garde le merge humain par défaut. Voir
+> **[Moteur de développement autonome](moteur_autonome.md)**.
+
 ---
 
 ## Installation

@@ -172,8 +172,13 @@ python -m collegue.pilot ... --execute            # écritures réelles (PR + é
 python -m collegue.pilot ... --execute --improve  # + cycle d'amélioration
 ```
 
-Architecture, garde-fous, observabilité/audit, reprise après crash et réglages :
-**[docs/moteur_autonome.md](docs/moteur_autonome.md)**.
+`--improve` enchaîne, une fois le MVP construit, la **boucle d'amélioration continue**
+(Phase 4) : un **objectif de qualité déterministe** (couverture − sécu − lint −
+complexité, sans avis de LLM) ouvre des PR seulement quand le diff **progresse sans
+régression** (gate fail-closed) ; les PR sont **stackées** et s'arrêtent au plateau.
+
+Architecture, boucle d'amélioration, garde-fous, observabilité/audit, reprise après
+crash et réglages : **[docs/moteur_autonome.md](docs/moteur_autonome.md)**.
 
 ---
 
@@ -197,7 +202,7 @@ Voir [docs/watchdog_deployment.md](docs/watchdog_deployment.md) pour le déploie
 | [Guide d'Intégration](docs/guide_integration.md) | Intégration Claude Desktop, Cursor, Windsurf, CI/CD |
 | [Référence des Experts](docs/reference_experts.md) | Paramètres, sorties et cas d'usage de chaque expert |
 | [Système Multi-Agents](docs/multi_agent_expert_system.md) | Architecture technique, délégation, mémoire |
-| [Moteur de développement autonome](docs/moteur_autonome.md) | Pilote autonome : architecture, garde-fous, audit, reprise, réglages |
+| [Moteur de développement autonome](docs/moteur_autonome.md) | Pilote autonome : architecture, **amélioration continue (Phase 4)**, garde-fous, audit, reprise, réglages |
 | [Évaluations LLM](docs/llm_evals.md) | Benchmarks qualité des sorties LLM |
 | [Rate Limiting](docs/rate_limiting_and_quotas.md) | Quotas et limites |
 
