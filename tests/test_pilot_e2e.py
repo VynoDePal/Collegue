@@ -22,7 +22,6 @@ from collegue.planner.spec_generator import Spec
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
 
-
 # --- doubles infra (alignés sur test_pilot_runtime) ----------------------------
 
 
