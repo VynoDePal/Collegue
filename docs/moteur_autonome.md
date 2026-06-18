@@ -42,7 +42,7 @@ problématique + budget
 | **Planner** | `collegue/planner/` | Problématique → `SPEC.md` → graphe de tâches (DAG) → labels/milestones/board GitHub. Gate de **validation humaine** du plan (anti-TOCTOU par empreinte SHA-256). |
 | **Pilote** | `collegue/pilot/` | Ordonnance les tâches prêtes (DFS anti-cycle) sous un **contrôleur budget-temps**, chaîne l'exécuteur, checkpoint, et bascule en mode amélioration quand le MVP est construit. |
 | **Executor** | `collegue/executor/` | Exécute **une** issue de bout en bout : workspace git → agent codeur (OpenHands, en sandbox) → tests + revue experte (gate fail-closed) → ouverture de PR. |
-| **Improve** | `collegue/improve/` | Après le MVP, fait cycler les experts pour élever un **score de qualité** ; ne promeut un changement que s'il progresse **sans régression** (gating par métrique), s'arrête sur rendements décroissants. |
+| **Improve** | `collegue/improve/` | Après le MVP, fait cycler les experts pour élever un **objectif de qualité déterministe** (couverture − sécu − lint − complexité) ; ne promeut un diff que s'il progresse **sans régression** (gate fail-closed), s'arrête sur rendements décroissants. Détail : [Amélioration continue (Phase 4)](#amélioration-continue-phase-4). |
 
 Socle commun :
 
@@ -70,6 +70,96 @@ ou on refuse) :
 | **Auto-merge opt-in** | `AUTO_MERGE_ENABLED=false` par défaut. Activé, il ne fusionne **que** du faible risque (allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes). Tout code/exécutable/secret/CI est bloqué par une garde dure insensible à la casse. |
 | **Auto-revert** | Filet de l'auto-merge : après un auto-merge, si `main` devient rouge (tests en sandbox), un revert est préparé. Fail-closed : santé non concluante = traitée comme rouge. Un revert qui échoue **escalade** vers un humain (ne passe jamais pour un succès). |
 | **Outil MCP du pilote** | Exposé en MCP **uniquement** si `PILOT_TOOL_ENABLED=true` **et** `OAUTH_ENABLED=true` (sinon **refus de démarrer**). Allowlist d'appelants (sujets OAuth vérifiés, jamais un en-tête client). Jamais auto-découvert. `dry_run` par défaut. |
+
+---
+
+## Amélioration continue (Phase 4)
+
+Une fois le MVP construit (`--improve`), le moteur ne s'arrête pas : il **fait
+progresser la qualité du projet généré** en ouvrant des PR d'amélioration, sous le
+budget restant. Le cœur est une **fonction objectif déterministe** — pas un avis de
+LLM — pour qu'une promotion soit reproductible et **sans faux-rejet** :
+
+```
+composite = w_cov·(couverture/100)
+          − w_séc·sécu_pondérée
+          − w_lint·violations_lint
+          − w_cx·blocs_complexes
+          − w_dep·vulns_deps
+```
+
+| Poids | Valeur | Note |
+|-------|--------|------|
+| `w_cov` (couverture) | `1.0` | Domine : la couverture (0–100) normalisée en 0–1. |
+| `w_séc` (sécurité) | `0.1` | Pénalité par unité de score sécu **pondéré par sévérité**. |
+| `w_lint` | `0.02` | Pénalité faible par violation (un gain de couverture ne doit pas sauter sur un lint marginal). |
+| `w_cx` (complexité) | `0.05` | Pénalité par bloc trop complexe (mccabe). |
+| `w_dep` (vulns deps) | `0.5` | **Signal opt-in**, off par défaut (terme nul) ; voir plus bas. |
+
+**Mesuré sur le workspace sur disque** (pas sur le diff d'un round) : l'objectif est
+donc **symétrique avant/après**, ce qui permet de promouvoir un vrai gain sans le
+faux-rejet d'un signal diff-scopé non déterministe (cause racine corrigée en Phase 4).
+
+### Ce qui entre dans l'objectif (déterministe)
+
+| Signal | Source | Détail |
+|--------|--------|--------|
+| **Couverture de tests** | `pytest --cov` (ligne `TOTAL`) | `tests_passed` (exit 0) sert de **garde dure** au gate. |
+| **Sécurité (pondérée)** | `secret_scan` statique (regex, **zéro LLM**) | Sévérités pondérées (critical 10 / high 5 / medium 2 / low 1). Lockfiles générés + dossiers/fichiers de test/fixtures exclus du scan (sinon ~99 % du poids vient de `package-lock.json`). |
+| **Lint** | `ruff` (`E,F,W`) | `--isolated --no-cache` : reproductible, indépendant de la config du projet généré. |
+| **Complexité** | `ruff` mccabe (`C901`, seuil 10) | Compte de blocs au-delà du seuil. |
+
+Signaux **informatifs** (corps de PR / relecteur humain, **hors composite gaté**) :
+la **revue LLM** (`review_score`) et la **couverture de docstrings** (`doc_coverage`,
+proxy de maintenabilité). Un signal LLM diff-scopé est non déterministe → jamais dans
+la décision de promotion.
+
+Signal **opt-in** : les **vulnérabilités de dépendances** (`pip-audit` sur
+`requirements.txt`). Off par défaut (terme composite nul, règle de gate no-op) ;
+activé, il est **gaté en tolérance 0**. `pip-audit` n'est pas imposé en dépendance —
+absent ⇒ no-op.
+
+### Le gate (fail-closed) — `collegue/improve/gate.py`
+
+Avant **chaque** PR, deux instantanés (avant/après le diff) sont comparés. Toutes ces
+règles doivent passer, sinon le diff est **jeté** (rollback avant promotion — aucune
+régression n'atteint la branche de base) :
+
+1. **Tests verts** après le diff (garde dure).
+2. **Scores composites finis** (un `NaN`/`inf` = mesure corrompue ⇒ rejet).
+3. **Mesurabilité stable** : couverture ET lint/complexité mesurés des deux côtés
+   (une bascule « mesuré → non mesuré » gonflerait le composite ⇒ rejet).
+4. **Anti-régression par signal** : sécu (tolérance 0), lint (slack 0), complexité
+   (slack 0), vulns deps (tolérance 0).
+5. **Gain réel** : `Δcomposite ≥ min_gain` (défaut `0.01`) — pas de promotion de bruit.
+
+### La boucle — `collegue/improve/loop.py`
+
+Chaque round, sur un **clone neuf** :
+
+1. **Compounding** — réapplique **et commite** les diffs déjà promus, pour que `HEAD`
+   reflète l'état cumulé amélioré. Le diff capturé du round ne contient alors que ses
+   **nouveaux** changements (pas de double-comptage), et la baseline monte round après round.
+2. **Mesure baseline** → **propose une dimension** (piloté par la métrique) parmi
+   `coverage`, `security`, `refactoring`, `documentation`, `consistency` (les trois
+   dernières en round-robin de polissage).
+3. L'**agent code un diff** pour cette dimension.
+4. **Auto-fix lint** — `ruff --fix` + `ruff format` sur les `.py` touchés, **avant** la
+   mesure : le coder se concentre sur le fond, le lint auto-corrigible est nettoyé (le
+   gate étant tolérance 0 sur le lint). Best-effort ; un fix qui casserait un test est
+   rattrapé par la mesure `after` (tests rouges ⇒ rejet).
+5. **Mesure après** → **gate**. Accepté ⇒ **PR** + métrique persistée. Rejeté ⇒ diff jeté.
+
+**PR stackées** (mode `--execute`) : chaque PR d'amélioration est basée sur la branche
+de la **promotion précédente** → des diffs incrémentaux **mergeables dans l'ordre**,
+sans conflit cumulatif. Le merge des PR d'amélioration reste **humain** (§6).
+
+**Arrêt** : `plateau` (deux rounds consécutifs sans promotion — rendements décroissants),
+`paused_budget` / `deadline_reached` (budget-temps), ou `safety_cap` (garde-fou
+anti-boucle, 50 itérations).
+
+> En `dry_run` (défaut), la boucle va jusqu'aux **aperçus** de PR sans aucune écriture
+> (utile pour valider l'objectif et les promotions avant de lancer en réel).
 
 ---
 
