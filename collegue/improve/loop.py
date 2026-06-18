@@ -161,6 +161,11 @@ async def run_improvement(
     exécute l'agent (diff) → mesure après → gate (G2). Si accepté : PR (E4) + métrique
     persistée. Sinon : diff jeté. Stop quand ``plateau_rounds`` rounds consécutifs
     n'apportent pas de gain (≥ ``min_gain``), ou au budget/deadline.
+
+    En mode réel (``dry_run=False``), les PR d'amélioration sont **stackées** (#554) :
+    chaque PR a pour base la branche de la promotion précédente (la 1ʳᵉ sur ``base``),
+    pour des diffs incrémentaux mergeables dans l'ordre sans conflit (le compounding
+    rendrait sinon les PR cumulatives).
     """
     # Imports paresseux : garder l'import de ``collegue.improve`` léger. ``pilot.budget``
     # est aussi lazy car importer le sous-module déclenche ``pilot/__init__`` (→ driver
@@ -175,6 +180,12 @@ async def run_improvement(
     # Compounding (#545) : diffs déjà promus, réappliqués sur le clone neuf de chaque
     # round pour une baseline cumulative (le score monte ; le proposeur avance).
     promoted_diffs: List[str] = []
+    # Stacking des PR (#554) : en mode --execute, chaque PR d'amélioration prend pour
+    # base la branche de la promotion PRÉCÉDENTE (au lieu de `base`/main), pour que son
+    # diff ne contienne QUE les changements de son round (sinon le compounding rend les
+    # PR cumulatives → conflits une fois les premières mergées, vécu au run V10). En
+    # dry_run, reste None → base inchangée (aucune PR créée de toute façon).
+    last_promoted_branch: Optional[str] = None
     result = ImprovementResult(stop_reason=STOP_PLATEAU, rounds=0)
     plateau = 0
     round_num = 0
@@ -257,7 +268,9 @@ async def run_improvement(
                 owner,
                 repo,
                 files_changed=final_files,
-                base=base,
+                # Stacking (#554) : base = branche de la promotion précédente si elle
+                # existe (mode --execute), sinon la base d'origine. → diff de PR propre.
+                base=(last_promoted_branch or base),
                 clients=clients,
                 dry_run=dry_run,
                 manager=manager,
@@ -267,6 +280,10 @@ async def run_improvement(
             )
             if not dry_run:
                 persist(manager, project_id, after)
+                # Stacking (#554) : la PROCHAINE PR se basera sur celle-ci (chaîne de PR
+                # mergeables dans l'ordre). Uniquement en réel (en dry_run aucune branche
+                # n'existe → on garde la base d'origine).
+                last_promoted_branch = pr.head
             # Compounding (#545) : mémorise le diff promu (corrigé) pour le réappliquer
             # aux rounds suivants (baseline cumulative) — y compris en dry_run.
             promoted_diffs.append(final_diff)
