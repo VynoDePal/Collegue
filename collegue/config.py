@@ -126,6 +126,11 @@ class Settings(BaseSettings):
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne
     # passe plus. Opt-in : un appel LLM par PR candidate.
     GATE_ADEQUACY: bool = False
+    # §4.7 (Phase B) : tests d'acceptation EXÉCUTABLES dérivés des critères du SPEC,
+    # écrits par un rôle INDÉPENDANT du coder (REVIEWER) et lancés en sandbox →
+    # vérification OBJECTIVE (exit code pytest), non circulaire. Opt-in (un appel LLM
+    # + une exécution pytest par PR candidate) ; activable une fois validé en réel.
+    GATE_ACCEPTANCE_TESTS: bool = False
     # Exiger qu'un diff touche au moins un fichier de test (sinon : simple
     # signal ⚠️ dans le rapport de gate / corps de PR).
     GATE_REQUIRE_TEST_CHANGES: bool = False

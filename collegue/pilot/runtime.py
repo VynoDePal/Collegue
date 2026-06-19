@@ -186,6 +186,10 @@ def _gate_options(settings_obj) -> dict:
         options["test_command"] = str(test_command)
     if bool(getattr(settings_obj, "GATE_ADEQUACY", False)):
         options["adequacy_checker"] = _build_adequacy_checker(settings_obj)
+    # §4.7 (Phase B, opt-in) : tests d'acceptation EXÉCUTABLES dérivés du SPEC, écrits
+    # par un rôle indépendant du coder et lancés en sandbox (verdict objectif).
+    if bool(getattr(settings_obj, "GATE_ACCEPTANCE_TESTS", False)):
+        options["acceptance_checker"] = _build_acceptance_checker(settings_obj)
     # Smoke run (#458, opt-in) : démarrer l'app livrée et vérifier qu'elle répond.
     if bool(getattr(settings_obj, "GATE_SMOKE_RUN", False)):
         options["smoke_run"] = True
@@ -213,6 +217,12 @@ def _build_adequacy_checker(settings_obj):  # pragma: no cover - infra réelle (
     from collegue.executor.quality_gate import LLMAdequacyChecker
 
     return LLMAdequacyChecker()
+
+
+def _build_acceptance_checker(settings_obj):  # pragma: no cover - infra réelle (integration)
+    from collegue.executor.quality_gate import LLMAcceptanceChecker
+
+    return LLMAcceptanceChecker()
 
 
 # ── point d'entrée assemblé ────────────────────────────────────────────────────
