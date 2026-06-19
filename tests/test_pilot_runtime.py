@@ -160,6 +160,79 @@ async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
     assert any("coût≈" in d.summary for d in manager.get_decisions(pid))
 
 
+# --- ctx de sampling offline (A1) ----------------------------------------------
+
+
+async def test_builds_offline_ctx_when_none_and_closes(monkeypatch, manager, git_repo):
+    """Hors serveur MCP, ``ctx=None`` → un ctx offline est assemblé puis fermé."""
+    import collegue.pilot.runtime as runtime
+
+    closed = {"v": False}
+    captured = {}
+
+    class _Ctx:
+        async def aclose(self):
+            closed["v"] = True
+
+    async def _fake_run_project(pid, src, ctx, **kw):
+        captured["ctx"] = ctx
+        return ProjectRunResult(stop_reason="completed", iterations=0, processed=[])
+
+    monkeypatch.setattr(runtime, "_build_ctx", lambda _s: _Ctx())
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+
+    pid = _linear(manager, 1)
+    await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=True,
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+    )
+    assert isinstance(captured["ctx"], _Ctx)  # ctx assemblé et transmis
+    assert closed["v"] is True  # fermé en fin de run (on l'a créé)
+
+
+async def test_injected_ctx_is_not_closed(monkeypatch, manager, git_repo):
+    """Un ctx fourni par l'appelant lui appartient : ``run_project_from_settings`` ne le ferme pas."""
+    import collegue.pilot.runtime as runtime
+
+    closed = {"v": False}
+
+    class _Ctx:
+        async def aclose(self):
+            closed["v"] = True
+
+    async def _fake_run_project(pid, src, ctx, **kw):
+        return ProjectRunResult(stop_reason="completed", iterations=0, processed=[])
+
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+
+    pid = _linear(manager, 1)
+    mine = _Ctx()
+    await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        ctx=mine,
+        dry_run=True,
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+    )
+    assert closed["v"] is False  # ctx injecté → non fermé par le runtime
+
+
 # --- reporting ------------------------------------------------------------------
 
 

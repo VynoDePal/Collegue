@@ -59,7 +59,13 @@ from collegue.pilot.mcp_tool import (
     run_pilot_tool,
 )
 from collegue.pilot.resume import load_run_start, persist_run_start
-from collegue.pilot.runtime import format_run_report, run_project_from_settings
+from collegue.pilot.runtime import (
+    PlanResult,
+    format_plan_report,
+    format_run_report,
+    plan_project_from_settings,
+    run_project_from_settings,
+)
 from collegue.pilot.scheduler import (
     SchedulerError,
     is_blocked,
@@ -92,6 +98,10 @@ __all__ = [
     # F4 — câblage runtime
     "run_project_from_settings",
     "format_run_report",
+    # A2 — planification par le produit (sous-commande plan)
+    "plan_project_from_settings",
+    "PlanResult",
+    "format_plan_report",
     # H4 (Phase 5) — observabilité du run autonome
     "RunAuditLog",
     "NullAuditLog",

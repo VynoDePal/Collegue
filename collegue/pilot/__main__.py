@@ -51,6 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("task_id", type=int, help="Id de la tâche à réinitialiser.")
     rs.add_argument("--status", default="todo", help="Statut cible (défaut: todo).")
     rs.add_argument("--message", required=True, help="Motif du reset (tracé dans decisions).")
+    # Phase 1 (A2) : planification — problème → SPEC → DAG → issues GitHub. dry-run par défaut.
+    plan_p = sub.add_parser("plan", help="Planifie un projet (SPEC → graphe de tâches → issues GitHub).")
+    plan_p.add_argument("--name", default="projet", help="Nom du projet (état durable).")
+    plan_p.add_argument("--problem", required=True, help="Problématique en langage naturel (1+ phrases).")
+    plan_p.add_argument("--owner", required=True, help="Owner GitHub cible des issues.")
+    plan_p.add_argument("--repo", required=True, help="Repo GitHub cible des issues.")
+    plan_p.add_argument("--deadline-hours", type=float, default=None, help="Deadline du run, en heures (optionnel).")
+    plan_p.add_argument(
+        "--approve", action="store_true", help="Approuve le plan (gate humain P5) — requis pour --execute-sync."
+    )
+    plan_p.add_argument(
+        "--execute-sync", action="store_true", help="Crée RÉELLEMENT les issues GitHub (sinon dry-run/aperçu)."
+    )
+    plan_p.add_argument("--labels", default=None, help="Labels d'issue (CSV ; défaut: autonome).")
+    plan_p.add_argument("--milestone", default=None, help="Titre du milestone (défaut: '<name> MVP').")
     # --- args du RUN par défaut (required=False : validés dans main si pas de sous-commande) ---
     parser.add_argument("--project-id", type=int, default=None, help="Id du projet (état durable).")
     parser.add_argument("--repo-source", default=None, help="Dépôt git source (repo-agnostique).")
@@ -86,6 +101,30 @@ async def _run(args: argparse.Namespace) -> int:
     return 0 if result.stop_reason in _OK_STOPS else 1
 
 
+async def _plan(args: argparse.Namespace) -> int:
+    from datetime import datetime, timedelta, timezone
+
+    from collegue.pilot.runtime import format_plan_report, plan_project_from_settings
+
+    deadline = None
+    if args.deadline_hours:
+        deadline = datetime.now(timezone.utc) + timedelta(hours=args.deadline_hours)
+    labels = [s.strip() for s in args.labels.split(",") if s.strip()] if args.labels else None
+    result = await plan_project_from_settings(
+        args.name,
+        args.problem,
+        owner=args.owner,
+        repo=args.repo,
+        deadline=deadline,
+        approve=args.approve,
+        execute_sync=args.execute_sync,
+        labels=labels,
+        milestone_title=args.milestone,
+    )
+    print(format_plan_report(result))
+    return 0
+
+
 def _run_task_command(args: argparse.Namespace) -> int:
     """Glue CLI des interventions opérateur (#506) : manager réel + audit persistant.
 
@@ -117,6 +156,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "task":
         return _run_task_command(args)
+    if args.command == "plan":
+        return asyncio.run(_plan(args))
     # Run par défaut : valider les args requis ici (argparse ne peut pas les
     # conditionner sur l'absence de sous-commande). parser.error lève SystemExit.
     missing = [name for name in _RUN_REQUIRED if getattr(args, name) is None]

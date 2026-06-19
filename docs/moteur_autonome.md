@@ -67,8 +67,8 @@ ou on refuse) :
 | **`dry_run` par défaut** | Sans `--execute`, le pipeline va jusqu'aux **aperçus** de PR sans **aucune** écriture (ni GitHub ni état). |
 | **Budget dur** | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` atteints → **auto-pause** (les appels LLM sont stoppés). `COLLEGUE_RUN_DEADLINE_SECONDS` borne la durée mur. |
 | **Gate qualité** | Un diff dont les tests sont rouges, ou qui n'améliore pas le score, **n'ouvre pas de PR** (il est jeté). |
-| **Auto-merge opt-in** | `AUTO_MERGE_ENABLED=false` par défaut. Activé, il ne fusionne **que** du faible risque (allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes). Tout code/exécutable/secret/CI est bloqué par une garde dure insensible à la casse. |
-| **Auto-revert** | Filet de l'auto-merge : après un auto-merge, si `main` devient rouge (tests en sandbox), un revert est préparé. Fail-closed : santé non concluante = traitée comme rouge. Un revert qui échoue **escalade** vers un humain (ne passe jamais pour un succès). |
+| **Auto-merge (politique, opt-in)** | Moteur de **politique** implémenté et testé (`AUTO_MERGE_ENABLED=false` par défaut ; activé, n'autoriserait **que** du faible risque : allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes ; garde dure code/exécutable/secret/CI insensible à la casse). ⚠️ **Pas encore câblé dans la boucle du pilote** — le **merge humain (§6) reste le mode opérant** ; le câblage exige une passe CI-aware (suivi). |
+| **Auto-revert (politique)** | Filet prévu de l'auto-merge : si `main` devenait rouge après un auto-merge (santé en sandbox), un revert serait préparé (fail-closed : santé non concluante = rouge ; un revert en échec **escalade**). Inactif tant que l'auto-merge n'est pas câblé. |
 | **Outil MCP du pilote** | Exposé en MCP **uniquement** si `PILOT_TOOL_ENABLED=true` **et** `OAUTH_ENABLED=true` (sinon **refus de démarrer**). Allowlist d'appelants (sujets OAuth vérifiés, jamais un en-tête client). Jamais auto-découvert. `dry_run` par défaut. |
 
 ---
@@ -245,7 +245,7 @@ lit :
 |----------|-------------|--------|
 | `STATE_DATABASE_URL` | État durable (Postgres ou SQLite). Requis pour un run réel. | — |
 | `LLM_MODEL_CODER` / `_QA` / `_PLANNER` / `_REVIEWER` | Modèle par **rôle** (codeur fort, QA économique, planificateur, revue). Retombe sur `LLM_MODEL` si absent. | `LLM_MODEL` |
-| `MAX_COST_USD` | Plafond dur de dépense cumulée (`0` = désactivé). NB : son enforcement lit le MetricsCollector serveur et ne voit PAS le canal coder (gap structurel) ; les prix `LLM_PRICE_*` ne corrigent que le ledger/reporting du run — sans eux, un modèle non mappé litellm laisse `run_cost_usd=0` (événement d'audit `cost_unknown`, #484). | `0` |
+| `MAX_COST_USD` | Plafond dur de dépense cumulée (`0` = désactivé) → auto-pause. Le canal **coder** est bien pris en compte dans l'enforcement (#495 : l'accumulateur coder-seul est sommé avant comparaison). Résidu : il faut des prix `LLM_PRICE_*` pour **valoriser** les tokens coder en `$` — sans eux, un modèle non mappé litellm laisse `cost_usd=0` (seul le plafond *tokens* mord ; événement d'audit `cost_unknown`, #484/#504). | `0` |
 | `LLM_PRICE_PROMPT_PER_1M` | Prix de secours du canal coder, $/1M tokens prompt — utilisé quand le runner émet `cost_usd=0` malgré des tokens (#484). | `0` |
 | `LLM_PRICE_COMPLETION_PER_1M` | Idem, $/1M tokens completion. `0` = désactivé. | `0` |
 | `MAX_TOKENS_BUDGET` | Plafond dur de tokens cumulés (`0` = désactivé). | `0` |
