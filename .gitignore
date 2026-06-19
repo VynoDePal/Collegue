@@ -275,6 +275,8 @@ tests/evals/reports/
 # Échafaudage du run de test autonome FacNor (drivers + état + venv) — hors repo.
 # Les correctifs moteur qu'il a révélés sont portés proprement via les issues #409-#414.
 scripts/facnor_run/
-docker/sandbox/Dockerfile.openhands
 .facnor_run/
 .venv-facnor/
+# NB : docker/sandbox/Dockerfile.openhands est désormais COMMITTÉ (#404) — image
+# produit constructible depuis les sources committées (n'embarque oh_runner.py du
+# harnais que s'il est présent dans le contexte de build).

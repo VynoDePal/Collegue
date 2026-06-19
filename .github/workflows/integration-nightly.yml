@@ -151,3 +151,21 @@ jobs:
                 body,
               });
             }
+
+  build-sandbox-openhands:
+    name: Build image sandbox OpenHands (#404)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      # Construit l'image #404 depuis les SOURCES COMMITTÉES SEULES (le harnais
+      # gitignoré scripts/facnor_run/ n'est pas présent en CI) — prouve que le
+      # blocage « image non constructible » est levé. Build-only : aucun run réel
+      # (LLM/GitHub) ici ; le smoke e2e réel (plan→execute→PR sur fixture) reste
+      # un suivi secret-gated.
+      - name: Build OpenHands sandbox image (committed sources only)
+        run: docker build -f docker/sandbox/Dockerfile.openhands -t collegue-sandbox-openhands:ci .
+      - name: Vérifier l'entrypoint produit (openhands.core.main) importable
+        run: |
+          docker run --rm collegue-sandbox-openhands:ci \
+            python -c "import openhands.core.main; print('openhands.core.main OK')"
