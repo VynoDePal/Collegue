@@ -32,6 +32,10 @@ n'échantillonnent pas restent inertes).
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import re
+import subprocess
 import threading
 import time
 from collections import deque
@@ -39,6 +43,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 DEFAULT_MAX_TOKENS = 8192
+
+# Sortie du sampler d'abonnement (oh_sampler.py) — texte entre marqueurs.
+_SAMPLE_RE = re.compile(r"<<<SAMPLE_BEGIN>>>(.*)<<<SAMPLE_END>>>", re.S)
 
 
 @dataclass
@@ -164,6 +171,12 @@ class LocalSamplingContext:
         default_max_tokens: int = DEFAULT_MAX_TOKENS,
         max_retries: int = 4,
         client: Any = None,
+        subscription_enabled: bool = False,
+        subscription_auth_dir: Optional[str] = None,
+        sampler_image: str = "collegue-sandbox:latest",
+        sampler_script: Optional[str] = None,
+        sampler_timeout: float = 240.0,
+        runner: Any = None,
     ):
         self._default_model = default_model or ""
         self._api_key = api_key
@@ -172,6 +185,14 @@ class LocalSamplingContext:
         self._default_max_tokens = int(default_max_tokens)
         self._max_retries = int(max_retries)
         self._client = client
+        # Abonnement (Codex/ChatGPT) : un modèle NON-Gemini (ex. gpt-5.4) est échantillonné
+        # via le sandbox (le SDK subscription_login n'est PAS dans le process principal).
+        self._subscription_enabled = bool(subscription_enabled and subscription_auth_dir and sampler_script)
+        self._subscription_auth_dir = subscription_auth_dir
+        self._sampler_image = sampler_image
+        self._sampler_script = sampler_script
+        self._sampler_timeout = float(sampler_timeout)
+        self._runner = runner  # injection de test : callable(argv, input) -> (rc, stdout, stderr)
         # Stubs ctx attendus par les outils (no-op async).
         self.info = self._noop
         self.debug = self._noop
@@ -193,7 +214,27 @@ class LocalSamplingContext:
         from collegue.core.llm.sampling_handler import resolve_openai_endpoint
 
         default_model, api_key, base_url = resolve_openai_endpoint(settings_obj)
-        return cls(default_model=default_model, api_key=api_key, base_url=base_url)
+        # Abonnement : un rôle dont le modèle est NON-Gemini (ex. reviewer=gpt-5.4) est
+        # routé vers le sampler d'abonnement (sandbox), comme le coder. Gaté par
+        # ``CODER_SUBSCRIPTION`` + creds montées (``SANDBOX_SUBSCRIPTION_AUTH_DIR``).
+        sub = bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False))
+        auth = ""
+        if sub:
+            auth = os.path.expanduser(str(getattr(settings_obj, "SANDBOX_SUBSCRIPTION_AUTH_DIR", "") or "").strip())
+        # oh_sampler.py committé : collegue/executor/oh_sampler.py (ce fichier = collegue/core/llm/).
+        sampler_script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "executor",
+            "oh_sampler.py",
+        )
+        return cls(
+            default_model=default_model,
+            api_key=api_key,
+            base_url=base_url,
+            subscription_enabled=sub,
+            subscription_auth_dir=auth or None,
+            sampler_script=sampler_script,
+        )
 
     async def _noop(self, *args: Any, **kwargs: Any) -> None:  # ctx.info/debug/...
         return None
@@ -218,18 +259,95 @@ class LocalSamplingContext:
     ) -> SampleResult:
         model = _pick_model(model_preferences, self._default_model)
         oai_messages = to_openai_messages(messages, system_prompt)
-        # On RESPECTE le ``max_tokens`` explicite de l'appelant (parité avec le handler
-        # serveur — sinon on inflerait ×4 les caps voulus, ex. 2000) ; seul un appel SANS
-        # cap retombe sur ``_default_max_tokens`` (généreux : un modèle « raisonnant »
-        # type gemma coupé trop tôt rend un contenu vide).
-        eff_max = int(max_tokens) if max_tokens else self._default_max_tokens
-        if self._limiter is not None:
-            await self._limiter.acquire(model)
-        text = await self._create(model, oai_messages, temperature, eff_max)
+        if self._is_subscription_model(model):
+            # Modèle d'abonnement (ex. gpt-5.4) → sampler dans le sandbox (subscription_login).
+            text = await self._sample_subscription(model, oai_messages)
+        else:
+            # On RESPECTE le ``max_tokens`` explicite de l'appelant (parité avec le handler
+            # serveur — sinon on inflerait ×4 les caps voulus, ex. 2000) ; seul un appel SANS
+            # cap retombe sur ``_default_max_tokens`` (généreux : un modèle « raisonnant »
+            # type gemma coupé trop tôt rend un contenu vide).
+            eff_max = int(max_tokens) if max_tokens else self._default_max_tokens
+            if self._limiter is not None:
+                await self._limiter.acquire(model)
+            text = await self._create(model, oai_messages, temperature, eff_max)
         res = SampleResult(text=text)
         if result_type is not None:
             res.result = _coerce(text, result_type)
         return res
+
+    def _is_subscription_model(self, model: str) -> bool:
+        """Vrai si ``model`` doit passer par l'abonnement (sandbox) plutôt que l'endpoint Gemini.
+
+        Heuristique générique : abonnement activé + creds + le modèle n'est PAS un modèle
+        Gemini (``gemma*``/``gemini*``). Les modèles ChatGPT (``gpt-*``) y matchent.
+        """
+        if not self._subscription_enabled:
+            return False
+        m = (model or "").strip().lower()
+        return bool(m) and not (m.startswith("gemma") or m.startswith("gemini"))
+
+    async def _sample_subscription(self, model: str, oai_messages: List[Dict[str, str]]) -> str:
+        """Échantillonne ``model`` via l'abonnement (Codex/ChatGPT) en lançant ``oh_sampler.py``
+        dans le sandbox (le ``subscription_login`` du SDK n'est pas dans le process principal).
+
+        Mêmes invariants que le coder : creds ``~/.openhands`` montées, ``LLM_SUBSCRIPTION=1`` ;
+        coût 0 (abonnement). Le runner est injectable en test.
+
+        Durcissement : ``--cap-drop ALL`` + ``--security-opt no-new-privileges`` (le conteneur
+        ne lance que le SDK LLM, aucun code projet) ; il tourne sous l'utilisateur ``sandbox``
+        (uid 1000) de l'image, le script est monté en lecture seule. ``--network host`` est
+        requis (le bridge Docker stalle les transferts LLM — chemin réseau prouvé du harnais) ;
+        le montage des creds est RW (rafraîchissement éventuel du jeton d'abonnement).
+        """
+        system_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] == "system")
+        user_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] != "system")
+        payload = json.dumps({"system": system_text, "prompt": user_text})
+        argv = [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--network",
+            "host",
+            "-e",
+            "HOME=/home/sandbox",
+            "-e",
+            f"LLM_MODEL={model}",
+            "-e",
+            "LLM_SUBSCRIPTION=1",
+            "-e",
+            "OPENHANDS_SUPPRESS_BANNER=1",
+            "-v",
+            f"{self._subscription_auth_dir}:/home/sandbox/.openhands",
+            "-v",
+            f"{self._sampler_script}:/oh_sampler.py:ro",
+            self._sampler_image,
+            "python",
+            "/oh_sampler.py",
+        ]
+        rc, out, err = await self._run_sampler(argv, payload)
+        match = _SAMPLE_RE.search(out or "")
+        if rc != 0 or not match:
+            raise RuntimeError(f"sampler abonnement {model} en échec (rc={rc}) : {((err or out) or '')[:300]}")
+        text = match.group(1)
+        # Un verdict VIDE (stream + LLMResponse final tous deux vides, rc=0) serait mal
+        # interprété en aval (reviewer/juge) → fail-closed plutôt que rendre "".
+        if not text.strip():
+            raise RuntimeError(f"sampler abonnement {model} : réponse vide")
+        return text
+
+    async def _run_sampler(self, argv: List[str], payload: str):
+        if self._runner is not None:
+            return self._runner(argv, payload)
+        proc = await asyncio.to_thread(
+            subprocess.run, argv, input=payload, capture_output=True, text=True, timeout=self._sampler_timeout
+        )
+        return proc.returncode, proc.stdout, proc.stderr
 
     async def _create(self, model: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
         # Garde budget dur (C4) + capture d'usage AU MÊME chokepoint que le handler

@@ -114,25 +114,60 @@ def _sandbox_subscription_auth(settings_obj):
     return os.path.expanduser(raw)
 
 
+def _coder_sandbox_env(settings_obj) -> dict:
+    """Env du sandbox pour le coder OpenHands SDK (``oh_runner``) — parité harnais↔produit.
+
+    Politique retries du canal coder (#422), puis selon ``CODER_SUBSCRIPTION`` : soit le
+    modèle d'**abonnement** nu (gpt-5.5 + ``LLM_SUBSCRIPTION=1`` + fallback gpt-5.4 ;
+    le runner appelle ``subscription_login`` avec les creds montées), soit le modèle
+    **CODER** au format LiteLLM (``gemini/<modèle>``) avec clé API. ``HOME`` hors /tmp est
+    requis par le montage des creds d'abonnement.
+    """
+    from collegue.executor.openhands_sdk_agent import OHSdkAgent
+
+    env = {
+        "HOME": "/home/sandbox",
+        "OPENHANDS_SUPPRESS_BANNER": "1",
+        "OH_NUM_RETRIES": str(getattr(settings_obj, "CODER_LLM_NUM_RETRIES", 8)),
+        "OH_RETRY_MIN": str(getattr(settings_obj, "CODER_LLM_RETRY_MIN_WAIT", 8)),
+        "OH_RETRY_MAX": str(getattr(settings_obj, "CODER_LLM_RETRY_MAX_WAIT", 90)),
+    }
+    if bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False)):
+        env["LLM_MODEL"] = str(getattr(settings_obj, "CODER_SUBSCRIPTION_MODEL", "gpt-5.5") or "gpt-5.5")
+        env["LLM_SUBSCRIPTION"] = "1"
+        env["OH_FALLBACK_MODELS"] = str(getattr(settings_obj, "CODER_SUBSCRIPTION_FALLBACK", "gpt-5.4") or "gpt-5.4")
+    else:
+        env["LLM_MODEL"] = OHSdkAgent(object(), settings_obj=settings_obj).litellm_model()
+    return env
+
+
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.sandbox import DockerSandbox
 
     # OpenHands appelle un LLM → le sandbox a besoin du réseau pour ce run précis
-    # (le défaut durci est ``network="none"``). #485 : résolveurs DNS explicites
-    # opt-in (SANDBOX_DNS) — le résolveur Docker par défaut était instable en
-    # run réel (gate ET coder, le sandbox est partagé).
+    # (défaut durci ``network="none"``). ``SANDBOX_NETWORK`` ("host" éprouvé contre la
+    # flakiness pip du bridge, #485) ; ressources remontées (les défauts 512m/1cpu/120s
+    # sont trop bas pour OpenHands). Le coder (oh_runner SDK) lit ``env`` + l'abonnement
+    # via ``subscription_auth_dir`` ; la clé API passe par ``env_passthrough`` (jamais l'argv).
     return DockerSandbox(
-        network="bridge",
+        network=str(getattr(settings_obj, "SANDBOX_NETWORK", "bridge") or "bridge"),
         dns=_sandbox_dns(settings_obj),
         pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
         subscription_auth_dir=_sandbox_subscription_auth(settings_obj),  # creds abo Codex/ChatGPT
+        env=_coder_sandbox_env(settings_obj),
+        env_passthrough=("LLM_API_KEY", "GEMINI_API_KEY"),
+        memory=str(getattr(settings_obj, "SANDBOX_MEMORY", "6g") or "6g"),
+        cpus=str(getattr(settings_obj, "SANDBOX_CPUS", "2.0") or "2.0"),
+        timeout=float(getattr(settings_obj, "SANDBOX_TIMEOUT", 2400.0) or 2400.0),
     )
 
 
 def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (integration)
-    from collegue.executor import OpenHandsAgent
+    # OpenHands 1.7 est SDK-first : ``openhands.core.main`` n'existe plus → on utilise
+    # l'agent SDK (``oh_runner`` baké dans l'image), qui gère aussi l'abonnement gpt-5.5.
+    from collegue.executor import OHSdkAgent
 
-    return OpenHandsAgent(sandbox, settings_obj=settings_obj)
+    return OHSdkAgent(sandbox, settings_obj=settings_obj)
 
 
 def _build_reviewer(settings_obj):  # pragma: no cover - infra réelle (integration)
@@ -228,6 +263,98 @@ def _build_acceptance_checker(settings_obj):  # pragma: no cover - infra réelle
 # ── point d'entrée assemblé ────────────────────────────────────────────────────
 
 
+# ── merge-bot de la phase BUILD (#411/#434) ────────────────────────────────────
+# Garde-fou anti-boucle de la boucle d'orchestration (driver ↔ merge), au-delà du
+# nombre de tâches (chaque passe traite ~1 PR en mode strict 1-en-vol).
+_MERGE_BOT_OUTER_CAP = 500
+
+
+async def _try_merge_pr(prs, owner, repo, number, *, attempts: int = 5, sleep_fn=None):
+    """Merge (squash) avec relances courtes — GitHub calcule la mergeabilité en différé.
+
+    Retourne ``(True, result)`` au premier succès (ou PR déjà mergée), sinon
+    ``(False, dernière_raison)``. Une non-mergeabilité / erreur HTTP est journalisée
+    par l'appelant (le moteur réconciliera au prochain démarrage, #442)."""
+    sleep_fn = sleep_fn or asyncio.sleep
+    last = None
+    for i in range(attempts):
+        try:
+            res = prs.merge_pr(owner, repo, number, method="squash")
+            if getattr(res, "merged", False) or getattr(res, "already_merged", False):
+                return True, res
+            last = getattr(res, "message", None) or getattr(res, "reason", None) or "non mergée"
+        except Exception as exc:  # noqa: BLE001 - non-mergeable/HTTP : journalisé, réconcilié plus tard
+            last = str(exc)
+        await sleep_fn(min(5 * (i + 1), 20))
+    return False, last
+
+
+def _resync_repo_source(repo_source: str, base: str, *, git_runner=None) -> bool:
+    """Resynchronise le clone LOCAL sur ``origin/<base>`` (plomberie git locale).
+
+    Après un merge sur GitHub, le ``repo_source`` local est PÉRIMÉ ; la tâche
+    suivante (qui le clone) ne contiendrait pas le code mergé → conflits. On
+    ``fetch`` + ``reset --hard`` pour que la base reparte du MVP en cours."""
+    from collegue.executor.command import LocalCommandRunner
+
+    runner = git_runner or LocalCommandRunner()
+    fetched = runner.run_command(["git", "fetch", "origin", base], repo_source)
+    reset = runner.run_command(["git", "reset", "--hard", f"origin/{base}"], repo_source)
+    return bool(getattr(fetched, "ok", False) and getattr(reset, "ok", False))
+
+
+async def _merge_in_review_prs(
+    manager,
+    clients,
+    *,
+    project_id: int,
+    owner: str,
+    repo: str,
+    repo_source: str,
+    base: str,
+    git_runner=None,
+    sleep_fn=None,
+) -> int:
+    """Merge-bot du BUILD : merge les PR des tâches ``in_review`` puis resync le clone.
+
+    Simule le merge HUMAIN pendant la construction autonome du MVP — sans lui, avec
+    1 PR en vol (#434) + deps strictes (#411), le driver s'arrête ``awaiting_merge``
+    et le build n'avance pas. **N'est appelé que par la phase build** : la phase
+    d'amélioration laisse ses PR ouvertes pour merge humain (§6). Retourne le nombre
+    de PR mergées sur cette passe."""
+    from collegue.executor.workspace import branch_for_issue
+    from collegue.pilot.driver import TASK_STATUS_IN_REVIEW, TASK_STATUS_MERGED
+
+    prs = clients.prs
+    merged = 0
+    for task in manager.get_tasks(project_id):
+        if getattr(task, "status", None) != TASK_STATUS_IN_REVIEW:
+            continue
+        branch = branch_for_issue(getattr(task, "issue_number", None) or task.id)
+        number = getattr(task, "pr_number", None)
+        if not number:
+            found = prs.find_pr_by_head(owner, repo, branch, base=base)
+            number = getattr(found, "number", None)
+        if not number:
+            logger.warning("merge-bot: aucune PR trouvée pour la tâche %s (%s)", task.id, branch)
+            continue
+        ok, info = await _try_merge_pr(prs, owner, repo, number, sleep_fn=sleep_fn)
+        if ok:
+            manager.update_task_status(task.id, TASK_STATUS_MERGED)
+            merged += 1
+            if not _resync_repo_source(repo_source, base, git_runner=git_runner):
+                logger.warning(
+                    "merge-bot: resync git du clone (%s) sur origin/%s a ÉCHOUÉ — la tâche "
+                    "suivante pourrait partir d'une base périmée (conflit possible).",
+                    repo_source,
+                    base,
+                )
+            logger.info("merge-bot: PR #%s mergée (tâche %s) → clone resync sur %s", number, task.id, base)
+        else:
+            logger.warning("merge-bot: merge PR #%s (tâche %s) échoué: %s", number, task.id, str(info)[:200])
+    return merged
+
+
 async def run_project_from_settings(
     project_id: int,
     repo_source: str,
@@ -298,40 +425,100 @@ async def run_project_from_settings(
     if ctx is None:
         ctx = _build_ctx(settings_obj)
 
+    # Merge-bot de la phase BUILD (§6 : auto-merge build, merge humain en amélioration).
+    # En dry_run, jamais d'auto-merge (aucune écriture). Off → 1 seule passe (comportement
+    # historique : arrêt `awaiting_merge`, le merge humain reprend au prochain run).
+    auto_merge = bool(getattr(settings_obj, "BUILD_AUTO_MERGE", True)) and not dry_run
+    # En auto-merge, on EXIGE le merge des deps (le merge-bot le fournit) — un dépendant
+    # ne doit pas partir d'une base sans le code mergé de sa dépendance (#411).
+    require_merged = True if auto_merge else bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False))
+
+    run_kwargs = dict(
+        agent=agent,
+        owner=owner,
+        repo=repo,
+        manager=manager,
+        base=base,
+        budget=budget,
+        sandbox=sandbox,
+        reviewer=reviewer,
+        clients=clients,
+        dry_run=dry_run,
+        max_iterations=max_iterations,
+        # improve ne se déclenche qu'à la COMPLÉTION du build (jamais sur un arrêt
+        # `awaiting_merge`) → on peut le passer à chaque passe : il ne s'amorce qu'au
+        # dernier tour, une fois tout mergé. La phase improve n'auto-merge pas ses PR.
+        improve=improve,
+        run_improvement_fn=run_improvement_fn,
+        # Retry au niveau tâche (#420) : le chemin assemblé est résilient par défaut
+        # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
+        max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),
+        retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
+        # Cohérence inter-tâches (#411) : forcé en auto-merge, sinon opt-in config.
+        require_merged_deps=require_merged,
+        # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
+        max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
+        # Gate configurable par projet (#438) : commande de tests + passe frontend.
+        gate_options=_gate_options(settings_obj),
+        # Gouvernance de coût (#441) : ledger + source process branchés en réel.
+        audit=audit,
+        cost_source=cost_source,
+        # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
+        require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
+    )
+
     try:
-        result = await run_project(
-            project_id,
-            repo_source,
-            ctx,
-            agent=agent,
-            owner=owner,
-            repo=repo,
-            manager=manager,
-            base=base,
-            budget=budget,
-            sandbox=sandbox,
-            reviewer=reviewer,
-            clients=clients,
-            dry_run=dry_run,
-            max_iterations=max_iterations,
-            improve=improve,
-            run_improvement_fn=run_improvement_fn,
-            # Retry au niveau tâche (#420) : le chemin assemblé est résilient par défaut
-            # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
-            max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),
-            retry_backoff_seconds=getattr(settings_obj, "TASK_RETRY_BACKOFF_SECONDS", 15.0),
-            # Cohérence inter-tâches (#411) : opt-in pour exiger le merge des deps.
-            require_merged_deps=bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False)),
-            # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
-            max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
-            # Gate configurable par projet (#438) : commande de tests + passe frontend.
-            gate_options=_gate_options(settings_obj),
-            # Gouvernance de coût (#441) : ledger + source process branchés en réel.
-            audit=audit,
-            cost_source=cost_source,
-            # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
-            require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
-        )
+        from collegue.pilot.driver import STOP_AWAITING_MERGE
+
+        all_processed: List[Any] = []
+        no_merge_streak = 0
+        outer = 0
+        while True:
+            outer += 1
+            result = await run_project(project_id, repo_source, ctx, **run_kwargs)
+            all_processed.extend(result.processed)
+            # Fin : pas d'auto-merge, ou arrêt pour une autre raison que « merges manquants ».
+            if not auto_merge or result.stop_reason != STOP_AWAITING_MERGE:
+                break
+            merged = await _merge_in_review_prs(
+                manager,
+                clients,
+                project_id=project_id,
+                owner=owner,
+                repo=repo,
+                repo_source=repo_source,
+                base=base,
+            )
+            if merged == 0:
+                # Aucune PR mergeable sur 2 passes consécutives → on n'insiste pas
+                # (PR réellement non mergeable : laissée au merge humain / réconciliation).
+                no_merge_streak += 1
+                if no_merge_streak >= 2:
+                    logger.warning("merge-bot: aucun merge sur 2 passes — arrêt en awaiting_merge.")
+                    break
+            else:
+                no_merge_streak = 0
+            if outer >= _MERGE_BOT_OUTER_CAP:
+                logger.warning("merge-bot: plafond d'itérations (%d) atteint — arrêt.", _MERGE_BOT_OUTER_CAP)
+                break
+        if auto_merge:
+            # Drain final : à la COMPLÉTION, la DERNIÈRE tâche reste `in_review` — le build
+            # complète dès que sa PR est ouverte (plus aucune tâche prête), SANS repasser par
+            # `awaiting_merge` → la boucle ci-dessus ne l'aurait pas mergée. On draine les PR
+            # in_review résiduelles (travail validé) pour finir le MVP à 100%. Idempotent.
+            await _merge_in_review_prs(
+                manager,
+                clients,
+                project_id=project_id,
+                owner=owner,
+                repo=repo,
+                repo_source=repo_source,
+                base=base,
+            )
+            # Le reporting reflète TOUTES les tâches traitées sur l'ensemble des passes
+            # (sinon `processed`/`iterations` ne refléteraient que la dernière passe).
+            result.processed = all_processed
+            result.iterations = len(all_processed)
 
         # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
         if not dry_run:

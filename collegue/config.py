@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     # sœurs ne sont plus construites depuis la même base → plus de PRs sœurs en
     # conflit (merge 405 irrécupérable). Ignoré si DEPS_REQUIRE_MERGED est faux.
     STRICT_MAX_INFLIGHT_PRS: int = 1
+    # Merge-bot de la phase BUILD : si vrai (défaut), une tâche dont la PR est
+    # ouverte est AUTO-MERGÉE (squash) puis le clone local est resynchronisé sur
+    # `origin/<base>` AVANT de passer à la tâche suivante — sinon, avec 1 PR en vol
+    # + deps strictes, le build s'arrête `awaiting_merge` et n'avance pas (et des
+    # tâches reconstruites sur une base périmée entrent en conflit). C'est le rôle
+    # du merge humain SIMULÉ pendant la construction autonome du MVP. La phase
+    # d'AMÉLIORATION (Phase 4), elle, n'auto-merge jamais : ses PR restent ouvertes
+    # pour relecture/merge HUMAIN (§6). Mettre à faux pour un build à merge humain.
+    BUILD_AUTO_MERGE: bool = True
     # Gate qualité multi-écosystème (#438) : si le workspace a un package.json,
     # enchaîner npm install + build/type-check + tests front dans le même
     # conteneur, fail-closed comme pytest (l'image sandbox doit fournir npm).
@@ -172,6 +181,16 @@ class Settings(BaseSettings):
     # du worker : permet au coder d'utiliser l'abo (sans coût API) et de persister le
     # token rafraîchi. Vide (défaut) = aucun montage (mode clé API inchangé).
     SANDBOX_SUBSCRIPTION_AUTH_DIR: str = ""
+    # Réseau du sandbox réel (coder OpenHands + passes réseau du gate). Le coder a
+    # besoin du réseau (le défaut DURCI de DockerSandbox est "none"). "host" est
+    # éprouvé contre la flakiness des transferts pip via le bridge Docker (NAT/MTU,
+    # run v6) ; "bridge" reste possible. Avec "host", ne pas définir SANDBOX_DNS.
+    SANDBOX_NETWORK: str = "bridge"
+    # Ressources du conteneur sandbox (coder + gate). Les défauts de DockerSandbox
+    # (512m/1cpu/120s) sont trop bas pour un run réel OpenHands → on remonte ici.
+    SANDBOX_MEMORY: str = "6g"
+    SANDBOX_CPUS: str = "2.0"
+    SANDBOX_TIMEOUT: float = 2400.0
 
     ENGINE_INIT_TIMEOUT: float = 10.0
     ENGINE_WAIT_TIMEOUT: float = 30.0
@@ -200,6 +219,16 @@ class Settings(BaseSettings):
     CODER_LLM_RETRY_MIN_WAIT: int = 8
     CODER_LLM_RETRY_MAX_WAIT: int = 90
     CODER_MIN_INTERVAL_SECONDS: float = 0.0
+
+    # --- Coder par ABONNEMENT (Codex via ChatGPT Plus/Pro, sans coût API) ---
+    # Opt-in : le coder OpenHands SDK (oh_runner) s'authentifie via subscription_login
+    # (creds montées depuis SANDBOX_SUBSCRIPTION_AUTH_DIR, ex. ~/.openhands) au lieu
+    # d'une clé API. Le backend ChatGPT sert les modèles GÉNÉRAUX (gpt-5.5/gpt-5.4),
+    # pas les SKU *-codex → modèle NU (pas de préfixe gemini/). En abonnement, le run
+    # n'est PAS facturé au token (coût $ autoritaire = 0, #504).
+    CODER_SUBSCRIPTION: bool = False
+    CODER_SUBSCRIPTION_MODEL: str = "gpt-5.5"
+    CODER_SUBSCRIPTION_FALLBACK: str = "gpt-5.4"
 
     # --- Budget DUR global (coût $ / tokens) + auto-pause (garde-fou brief §6) ---
     # Plafond DUR sur la dépense cumulée, distinct du rate limiter (fréquence) et
