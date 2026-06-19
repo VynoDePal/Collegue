@@ -160,6 +160,39 @@ async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
     assert any("coût≈" in d.summary for d in manager.get_decisions(pid))
 
 
+# --- coder OpenHands SDK + abonnement (env du sandbox) --------------------------
+
+
+def test_coder_sandbox_env_subscription_mode():
+    import collegue.pilot.runtime as runtime
+
+    settings = SimpleNamespace(
+        CODER_SUBSCRIPTION=True, CODER_SUBSCRIPTION_MODEL="gpt-5.5", CODER_SUBSCRIPTION_FALLBACK="gpt-5.4"
+    )
+    env = runtime._coder_sandbox_env(settings)
+    assert env["LLM_MODEL"] == "gpt-5.5"  # modèle d'abonnement NU (pas de préfixe gemini/)
+    assert env["LLM_SUBSCRIPTION"] == "1"
+    assert env["OH_FALLBACK_MODELS"] == "gpt-5.4"
+    assert env["HOME"] == "/home/sandbox"  # hors /tmp (requis par le montage des creds)
+
+
+def test_coder_sandbox_env_api_key_mode():
+    import collegue.pilot.runtime as runtime
+
+    settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_MODEL="gemma-x")  # CODER_SUBSCRIPTION absent → False
+    env = runtime._coder_sandbox_env(settings)
+    assert env["LLM_MODEL"] == "gemini/gemma-x"  # format LiteLLM
+    assert "LLM_SUBSCRIPTION" not in env
+
+
+def test_build_agent_uses_sdk_coder():
+    import collegue.pilot.runtime as runtime
+    from collegue.executor import OHSdkAgent
+
+    agent = runtime._build_agent(sandbox=object(), settings_obj=SimpleNamespace(LLM_PROVIDER="gemini", LLM_MODEL="m"))
+    assert isinstance(agent, OHSdkAgent)
+
+
 # --- ctx de sampling offline (A1) ----------------------------------------------
 
 
@@ -231,6 +264,170 @@ async def test_injected_ctx_is_not_closed(monkeypatch, manager, git_repo):
         budget=_Budget(),
     )
     assert closed["v"] is False  # ctx injecté → non fermé par le runtime
+
+
+# --- merge-bot de la phase BUILD (#411/#434) ------------------------------------
+
+
+async def _noop_sleep(_s):
+    return None
+
+
+async def test_merge_in_review_prs_merges_sets_status_and_resyncs(manager, git_repo):
+    """Le merge-bot du build merge la PR d'une tâche in_review, la passe `merged`, resync le clone."""
+    import collegue.pilot.runtime as runtime
+
+    pid = manager.create_project(name="demo")
+    tid = manager.add_task(pid, title="T1")
+    manager.update_task_status(tid, "in_review")
+
+    calls = {"merge": [], "git": []}
+
+    class _PRs2:
+        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+            return SimpleNamespace(number=77)
+
+        def merge_pr(self, owner, repo, number, method="squash", expected_head_sha=None):
+            calls["merge"].append((number, method))
+            return SimpleNamespace(merged=True, already_merged=False)
+
+    class _Runner:
+        def run_command(self, cmd, ws):
+            calls["git"].append(" ".join(cmd) if isinstance(cmd, list) else cmd)
+            return SandboxResult(exit_code=0, stdout="", stderr="")
+
+    clients = PrClients(branches=_Branches(), files=_Files(), prs=_PRs2())
+    merged = await runtime._merge_in_review_prs(
+        manager,
+        clients,
+        project_id=pid,
+        owner="o",
+        repo="r",
+        repo_source=git_repo,
+        base="main",
+        git_runner=_Runner(),
+        sleep_fn=_noop_sleep,
+    )
+    assert merged == 1
+    assert calls["merge"] == [(77, "squash")]  # squash
+    assert manager.get_task(tid).status == "merged"  # statut avancé
+    assert any("fetch origin main" in g for g in calls["git"])  # resync
+    assert any("reset --hard origin/main" in g for g in calls["git"])
+
+
+async def test_build_auto_merge_loops_until_complete(monkeypatch, manager, git_repo):
+    """auto-merge ON : driver ↔ merge-bot bouclent jusqu'à `completed` (1 PR mergée par passe)."""
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 2)
+    calls = {"run": 0, "merge": 0, "require_merged": []}
+
+    async def _fake_run_project(p, src, ctx, **kw):
+        calls["run"] += 1
+        calls["require_merged"].append(kw.get("require_merged_deps"))
+        if calls["run"] < 3:
+            return ProjectRunResult(stop_reason="awaiting_merge", iterations=1, processed=[])
+        return ProjectRunResult(stop_reason="completed", iterations=0, processed=[])
+
+    async def _fake_merge(mgr, cli, **kw):
+        calls["merge"] += 1
+        return 1
+
+    class _Ctx:
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+    monkeypatch.setattr(runtime, "_merge_in_review_prs", _fake_merge)
+    monkeypatch.setattr("collegue.executor.openhands_agent.coder_pricing_resolvable", lambda s: True)
+
+    await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,  # active l'auto-merge
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=True),
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+        ctx=_Ctx(),
+        audit=SimpleNamespace(cost_summary=lambda: {"usd": 0.0, "tokens": 0}),
+        cost_source=lambda: (0.0, 0),
+    )
+    assert calls["run"] == 3  # 2 passes awaiting_merge + 1 completed
+    assert calls["merge"] == 3  # 2 merges entre passes + 1 drain final (dernière tâche)
+    assert all(calls["require_merged"])  # deps strictes forcées en auto-merge
+
+
+async def test_build_auto_merge_drains_last_pr_on_complete(monkeypatch, manager, git_repo):
+    """Drain final : build qui COMPLÈTE direct (sans awaiting_merge) → la dernière PR in_review est mergée."""
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 1)
+    calls = {"run": 0, "merge": 0}
+
+    async def _fake_run_project(p, src, ctx, **kw):
+        calls["run"] += 1
+        return ProjectRunResult(stop_reason="completed", iterations=1, processed=[])
+
+    async def _fake_merge(mgr, cli, **kw):
+        calls["merge"] += 1
+        return 1
+
+    class _Ctx:
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+    monkeypatch.setattr(runtime, "_merge_in_review_prs", _fake_merge)
+    monkeypatch.setattr("collegue.executor.openhands_agent.coder_pricing_resolvable", lambda s: True)
+
+    await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=True),
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+        ctx=_Ctx(),
+        audit=SimpleNamespace(cost_summary=lambda: {"usd": 0.0, "tokens": 0}),
+        cost_source=lambda: (0.0, 0),
+    )
+    assert calls["run"] == 1  # pas d'awaiting_merge → 1 passe
+    assert calls["merge"] == 1  # drain final exécuté quand même (dernière PR)
+
+
+async def test_build_auto_merge_off_single_pass(monkeypatch, manager, git_repo):
+    """auto-merge OFF (dry_run) : 1 seule passe, pas de merge-bot (merge humain au prochain run)."""
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 2)
+    calls = {"run": 0, "merge": 0}
+
+    async def _fake_run_project(p, src, ctx, **kw):
+        calls["run"] += 1
+        return ProjectRunResult(stop_reason="awaiting_merge", iterations=1, processed=[])
+
+    async def _fake_merge(mgr, cli, **kw):
+        calls["merge"] += 1
+        return 1
+
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+    monkeypatch.setattr(runtime, "_merge_in_review_prs", _fake_merge)
+
+    await _run(manager, git_repo, pid, dry_run=True)
+    assert calls["run"] == 1  # pas de boucle en dry_run
+    assert calls["merge"] == 0  # aucun auto-merge
 
 
 # --- reporting ------------------------------------------------------------------

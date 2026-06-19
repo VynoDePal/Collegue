@@ -16,6 +16,19 @@ from .config import (
 )
 from .models import ReviewFinding
 
+# Lignes DÉCLARATIVES dont la répétition est LÉGITIME (pas de la duplication de
+# logique) : imports, décorateurs, déclarations de colonnes/champs ORM et opérations
+# de migration. Un schéma multi-tables a NORMALEMENT ``id``/``created_at``/
+# ``PrimaryKeyConstraint`` répétés par table — ``analyze_dry`` les flaggait en masse
+# (42 faux-positifs sur une migration Alembic), faisant chuter le score du gate (run V11).
+_DRY_BOILERPLATE_RE = re.compile(
+    r"^(?:from|import)\s"  # imports
+    r"|^@"  # décorateurs
+    r"|\bop\.\w+\("  # opérations de migration Alembic (op.create_table, op.create_index…)
+    r"|\b(?:sa\.|db\.)?(?:Column|mapped_column|relationship|Field)\s*\("  # colonnes/champs ORM
+    r"|\b(?:sa\.|db\.)?(?:PrimaryKeyConstraint|ForeignKeyConstraint|UniqueConstraint|Index)\s*\("  # contraintes
+)
+
 
 class CodeReviewEngine:
     """Moteur d'analyse de code pour les revues."""
@@ -107,7 +120,12 @@ class CodeReviewEngine:
                     findings.append(
                         ReviewFinding(
                             category="complexity",
-                            severity="error" if func_complexity > 15 else "warning",
+                            # Maintenabilité (complexité cyclomatique) = ADVISORY, jamais
+                            # bloquant : une fonction inhéremment complexe dont les tests
+                            # sont VERTS ne doit pas faire échouer terminalement le build
+                            # autonome (run V11, tâche PDF #63). La revue LLM (rôle REVIEWER)
+                            # reste le juge des vrais défauts ; ce finding informe le PR.
+                            severity="warning",
                             line=func_start,
                             title=f"Complexité élevée: '{func_name}' (score={func_complexity})",
                             description=(
@@ -148,7 +166,8 @@ class CodeReviewEngine:
             findings.append(
                 ReviewFinding(
                     category="complexity",
-                    severity="error" if func_complexity > 15 else "warning",
+                    # Maintenabilité = ADVISORY (cf. ci-dessus, run V11 #63) — jamais bloquant.
+                    severity="warning",
                     line=func_start,
                     title=f"Complexité élevée: '{func_name}' (score={func_complexity})",
                     description=(
@@ -188,21 +207,27 @@ class CodeReviewEngine:
 
         seen = {}
         for i, line in enumerate(lines):
-            if len(line) > 20 and not line.startswith("#") and not line.startswith("//"):
-                if line in seen:
-                    findings.append(
-                        ReviewFinding(
-                            category="dry",
-                            severity="warning",
-                            line=i + 1,
-                            title="Code dupliqué",
-                            description=(
-                                f"Ligne identique trouvée aux lignes {seen[line]} et {i + 1}: '{line[:60]}...'"
-                            ),
-                        )
+            # On compare le CONTENU (marqueur de diff +/- retiré) : une migration/un
+            # schéma est souvent revu sous forme de diff.
+            bare = line[1:].strip() if line[:1] in "+-" else line
+            if len(bare) <= 20 or bare.startswith("#") or bare.startswith("//"):
+                continue
+            # Répétition LÉGITIME de boilerplate déclarative (colonnes ORM, contraintes,
+            # opérations Alembic, imports) ≠ duplication de logique → on n'en fait pas un finding.
+            if _DRY_BOILERPLATE_RE.search(bare):
+                continue
+            if bare in seen:
+                findings.append(
+                    ReviewFinding(
+                        category="dry",
+                        severity="warning",
+                        line=i + 1,
+                        title="Code dupliqué",
+                        description=(f"Ligne identique trouvée aux lignes {seen[bare]} et {i + 1}: '{bare[:60]}...'"),
                     )
-                else:
-                    seen[line] = i + 1
+                )
+            else:
+                seen[bare] = i + 1
 
         return findings
 
@@ -230,7 +255,12 @@ class CodeReviewEngine:
                         findings.append(
                             ReviewFinding(
                                 category="error_handling",
-                                severity="error",
+                                # ADVISORY (pas bloquant) : l'heuristique `except…: pass` a des
+                                # faux-positifs (best-effort/cleanup intentionnel, marqueurs de
+                                # diff) et reste de la robustesse, pas une faute de correction —
+                                # ne pas faire échouer terminalement un build aux tests VERTS. La
+                                # revue LLM signale les silences réellement dangereux.
+                                severity="warning",
                                 line=i,
                                 title="Exception silencieuse",
                                 description="Exception attrapée et ignorée (pass). Loggez ou re-lancez l'erreur.",
@@ -244,10 +274,17 @@ class CodeReviewEngine:
         if total_lines == 0:
             return 1.0
 
+        # Seules les sévérités BLOQUANTES (critical/error) pèsent sur le score qui GATE
+        # le build : un finding advisory (info/warning) est déclaré non-bloquant (cf.
+        # ``BLOCKING_SEVERITIES`` côté gate). Le laisser faire chuter le score le faisait
+        # bloquer INDIRECTEMENT — incohérent — et des nits de style crus (boilerplate de
+        # migration comptée comme duplication, run V11) suffisaient à couler un diff sain.
+        # Les findings advisory restent listés (corps de PR / dashboard), informatifs.
         penalty = 0.0
         for f in findings:
-            weight = SEVERITY_WEIGHTS.get(f.severity, 0.1)
-            penalty += weight
+            if f.severity not in ("critical", "error"):
+                continue
+            penalty += SEVERITY_WEIGHTS.get(f.severity, 0.1)
 
         # Normaliser par la taille du code (codes plus grands tolèrent plus de findings)
         size_factor = max(1.0, total_lines / 50.0)

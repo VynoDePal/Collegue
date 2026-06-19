@@ -61,13 +61,18 @@ NAMING_CONVENTIONS = {
     },
 }
 
+# NB : ``(?<!hashed_)`` sur ``password`` — un mot de passe **HACHÉ**
+# (``hashed_password="..."``) est le stockage SÉCURISÉ d'un HASH, pas un secret en
+# clair : il était flaggé CRITICAL à tort et bloquait le gate sur des fixtures de test
+# (run V11). Les vrais secrets préfixés (``db_password=``, ``AWS_SECRET=``) restent
+# flaggés ; les vrais secrets sont aussi couverts par ``secret_scan`` et la revue LLM.
 SECURITY_PATTERNS = {
     "python": [
         r"eval\s*\(",
         r"exec\s*\(",
         r"os\.system\s*\(",
         r"subprocess\.call\s*\(.*shell\s*=\s*True",
-        r"(?i)password\s*=\s*['\"]",
+        r"(?i)(?<!hashed_)password\s*=\s*['\"]",
         r"(?i)api_key\s*=\s*['\"]",
         r"(?i)secret\s*=\s*['\"]",
     ],
@@ -75,7 +80,7 @@ SECURITY_PATTERNS = {
         r"eval\s*\(",
         r"innerHTML\s*=",
         r"document\.write\s*\(",
-        r"(?i)password\s*[=:]\s*['\"]",
+        r"(?i)(?<!hashed_)password\s*[=:]\s*['\"]",
         r"(?i)apiKey\s*[=:]\s*['\"]",
     ],
 }
