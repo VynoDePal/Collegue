@@ -73,17 +73,16 @@ ENV RUNTIME=process \
     OPENHANDS_DISABLE_BROWSER=1 \
     OPENHANDS_SUPPRESS_BANNER=1
 
-# Runner SDK du HARNAIS (scripts/facnor_run/oh_runner.py, gitignoré) baké SI présent
-# dans le contexte de build — utilisé par l'OHSdkAgent du harnais. Le PRODUIT
-# (collegue/executor/openhands_agent.py → openhands.core.main) n'en a PAS besoin :
-# l'image se construit donc depuis les **sources committées seules** (CI / #404).
-# `scripts/` est committé (le COPY ne casse jamais) ; oh_runner.py n'y apparaît que
-# dans l'arbre du harnais (pas de .dockerignore → inclus au contexte quand présent).
-COPY scripts/ /tmp/_collegue_scripts/
-RUN if [ -f /tmp/_collegue_scripts/facnor_run/oh_runner.py ]; then \
-        cp /tmp/_collegue_scripts/facnor_run/oh_runner.py /opt/oh_runner.py; \
-    fi; \
-    rm -rf /tmp/_collegue_scripts
+# Runner headless OpenHands SDK, baké depuis la source COMMITTÉE du produit
+# (collegue/executor/oh_runner.py) → lancé par OHSdkAgent (collegue.executor.
+# openhands_sdk_agent). OpenHands 1.7 étant SDK-first (plus de openhands.core.main),
+# c'est le coder réel du produit ET du harnais ; l'image se construit depuis les
+# sources committées seules (CI / #404).
+COPY collegue/executor/oh_runner.py /opt/oh_runner.py
+# Échantillonneur one-shot par abonnement (reviewer/juge gpt-5.4) — lancé par le ctx
+# offline (SubscriptionSampler) via ``docker run``. Le ctx le monte par défaut depuis la
+# source committée ; baké ici pour les images self-contained.
+COPY collegue/executor/oh_sampler.py /opt/oh_sampler.py
 
 # Utilisateur non-root (le `docker run` surcharge --user pour matcher l'UID hôte).
 RUN useradd --create-home --uid 1000 sandbox

@@ -68,6 +68,13 @@ class TestComplexityAnalysis:
         findings = engine.analyze_complexity(code, "python")
         assert any("complexité" in f.title.lower() or "imbrication" in f.title.lower() for f in findings)
 
+    def test_high_complexity_is_advisory_not_blocking(self, engine):
+        # Complexité élevée = maintenabilité ADVISORY (warning), jamais `error` bloquant —
+        # une fonction complexe aux tests verts ne doit pas échouer terminalement le build (V11 #63).
+        code = "def f(x):\n" + "".join(f"    if x=={i}:\n        return {i}\n" for i in range(20))
+        complexity = [f for f in engine.analyze_complexity(code, "python") if f.category == "complexity"]
+        assert complexity and all(f.severity == "warning" for f in complexity)
+
     def test_simple_function(self, engine):
         code = "def hello():\n    print('hello')"
         findings = engine.analyze_complexity(code, "python")
@@ -95,6 +102,17 @@ class TestSecurityAnalysis:
         code = "x = 1 + 2\nprint(x)"
         findings = engine.analyze_security(code, "python")
         assert len(findings) == 0
+
+    def test_hashed_password_not_flagged(self, engine):
+        # Un mot de passe HACHÉ (stockage sécurisé) ne doit PAS être flaggé CRITICAL —
+        # faux-positif qui bloquait le gate sur des fixtures de test (run V11).
+        code = 'user = User(email="a@b.c", hashed_password="hashed")'
+        assert engine.analyze_security(code, "python") == []
+
+    def test_real_prefixed_secret_still_flagged(self, engine):
+        # Un VRAI secret préfixé (db_password en clair) reste flaggé — on n'exclut QUE le hash.
+        findings = engine.analyze_security('db_password = "S3cr3t!"', "python")
+        assert any(f.category == "security" and f.severity == "critical" for f in findings)
 
     def test_uppercase_password_detected(self, engine):
         findings = engine.analyze_security('PASSWORD = "admin123"', "python")
@@ -135,6 +153,29 @@ class TestDryAnalysis:
         findings = engine.analyze_dry(code, "python")
         assert len(findings) == 0
 
+    def test_orm_and_migration_boilerplate_not_flagged(self, engine):
+        # Une migration/un schéma multi-tables répète LÉGITIMEMENT colonnes, contraintes
+        # et opérations (id/created_at par table) — ce n'est pas de la duplication de
+        # logique. Flaggé en masse, ça coulait le score du gate (run V11).
+        diff = (
+            '+    op.create_table("users",\n'
+            '+        sa.Column("id", sa.Integer(), nullable=False),\n'
+            '+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),\n'
+            '+        sa.PrimaryKeyConstraint("id"),\n'
+            '+    op.create_table("clients",\n'
+            '+        sa.Column("id", sa.Integer(), nullable=False),\n'
+            '+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),\n'
+            '+        sa.PrimaryKeyConstraint("id"),\n'
+            "+from sqlalchemy import Column, Integer\n"
+            "+from sqlalchemy import Column, Integer\n"
+        )
+        assert engine.analyze_dry(diff, "python") == []
+
+    def test_real_logic_duplication_still_flagged_in_diff(self, engine):
+        # Une vraie duplication de LOGIQUE (même sous forme de diff) reste détectée.
+        diff = "+    total = compute_total(x) + tax_amount(x)\n+    total = compute_total(x) + tax_amount(x)\n"
+        assert any(f.category == "dry" for f in engine.analyze_dry(diff, "python"))
+
 
 # --- Engine: Error Handling ---
 
@@ -149,6 +190,13 @@ class TestErrorHandlingAnalysis:
         code = "try:\n    do_something()\nexcept Exception:\n    pass"
         findings = engine.analyze_error_handling(code, "python")
         assert any("silencieuse" in f.title.lower() or "except" in f.title.lower() for f in findings)
+
+    def test_error_handling_findings_are_advisory(self, engine):
+        # `except: pass` reste signalé mais ADVISORY (warning) — heuristique crue à
+        # faux-positifs (best-effort intentionnel) : ne bloque pas un build aux tests verts.
+        code = "try:\n    x()\nexcept:\n    pass"
+        findings = engine.analyze_error_handling(code, "python")
+        assert findings and all(f.severity != "error" for f in findings)
 
 
 # --- Engine: Scores ---
@@ -167,6 +215,20 @@ class TestScores:
         score = engine.calculate_quality_score(findings, 50)
         assert 0.0 <= score <= 1.0
         assert score < 1.0
+
+    def test_quality_score_ignores_advisory_findings(self, engine):
+        # Des findings advisory (info/warning) seuls ne font PAS chuter le score qui gate
+        # le build — cohérence avec BLOCKING_SEVERITIES (sinon des nits de style bloquent).
+        findings = [
+            ReviewFinding(category="dry", severity="warning", title=f"w{i}", description="d") for i in range(20)
+        ]
+        findings.append(ReviewFinding(category="naming", severity="info", title="i", description="d"))
+        assert engine.calculate_quality_score(findings, 50) == 1.0
+
+    def test_quality_score_driven_by_blocking_severities(self, engine):
+        # À l'inverse, un finding critical/error (vrai défaut, ex. de la revue LLM) coule le score.
+        err = [ReviewFinding(category="bug", severity="error", title="e", description="d")]
+        assert engine.calculate_quality_score(err, 50) < 1.0
 
     def test_category_scores(self, engine):
         findings = [

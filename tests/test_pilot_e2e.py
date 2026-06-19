@@ -133,12 +133,15 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
     assert all(t.status == "todo" for t in manager.get_tasks(plan.project_id))
 
     # 2) RUN (doubles infra) sur le MÊME project_id : les tâches passent in_review.
+    # On ISOLE le handoff du merge-bot (BUILD_AUTO_MERGE=False) — le merge-bot a ses
+    # tests dédiés (test_pilot_runtime) et les doubles ici ne gèrent pas le merge.
     result = await run_project_from_settings(
         plan.project_id,
         git_repo,
         owner="o",
         repo="r",
         dry_run=False,
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=False),
         manager=manager,
         sandbox=_Sandbox(),
         agent=FakeCodeAgent(),

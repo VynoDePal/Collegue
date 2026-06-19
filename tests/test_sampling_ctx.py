@@ -207,3 +207,85 @@ def test_rate_limiter_wait_needed_when_minute_full():
     rl._day["m"] = deque([now])
     assert rl._wait_needed("m", now + 1) > 0  # créneau pris → attente
     assert rl._wait_needed("m", now + 61) == 0  # après 60 s → libre
+
+
+# --- routage abonnement (modèle non-Gemini → sampler sandbox) -------------------
+
+
+def _sub_ctx(runner):
+    return LocalSamplingContext(
+        default_model="d",
+        subscription_enabled=True,
+        subscription_auth_dir="/home/u/.openhands",
+        sampler_script="/repo/collegue/executor/oh_sampler.py",
+        runner=runner,
+    )
+
+
+def test_is_subscription_model_routes_non_gemini_only():
+    ctx = _sub_ctx(runner=lambda a, p: (0, "", ""))
+    assert ctx._is_subscription_model("gpt-5.4") is True
+    assert ctx._is_subscription_model("gemma-4-26b-a4b-it") is False
+    assert ctx._is_subscription_model("gemini-2.5-pro") is False
+
+
+def test_subscription_disabled_never_routes():
+    ctx = LocalSamplingContext(default_model="d")  # subscription_enabled=False
+    assert ctx._is_subscription_model("gpt-5.4") is False
+
+
+async def test_sample_gpt_model_goes_through_subscription_sampler(monkeypatch):
+    captured = {}
+
+    def _runner(argv, payload):
+        captured["argv"] = argv
+        captured["payload"] = payload
+        return (0, "bannière...\n<<<SAMPLE_BEGIN>>>verdict du juge<<<SAMPLE_END>>>", "")
+
+    ctx = _sub_ctx(_runner)
+    res = await ctx.sample("revois ce diff", system_prompt="Tu es QA", model_preferences=["gpt-5.4"])
+    assert res.text == "verdict du juge"  # texte extrait des marqueurs
+    # docker run avec abonnement + creds + sampler montés
+    argv = captured["argv"]
+    assert argv[:3] == ["docker", "run", "--rm"] or argv[0] == "docker"
+    assert "LLM_MODEL=gpt-5.4" in argv and "LLM_SUBSCRIPTION=1" in argv
+    assert any("/home/u/.openhands:" in a for a in argv)
+    assert any("oh_sampler.py:ro" in a for a in argv)
+    # Durcissement du conteneur sampler (M1 revue) : caps droppées + no-new-privileges.
+    assert "ALL" in argv and "no-new-privileges" in argv
+    payload = __import__("json").loads(captured["payload"])
+    assert payload["system"] == "Tu es QA" and "revois ce diff" in payload["prompt"]
+
+
+async def test_sample_subscription_failure_raises(monkeypatch):
+    ctx = _sub_ctx(runner=lambda a, p: (1, "", "auth expirée"))
+    import pytest as _pytest
+
+    with _pytest.raises(RuntimeError) as exc:
+        await ctx.sample("x", model_preferences=["gpt-5.4"])
+    assert "auth expirée" in str(exc.value)
+
+
+async def test_sample_subscription_empty_verdict_raises():
+    # rc=0 mais verdict VIDE entre marqueurs → fail-closed (ne pas rendre "" au reviewer).
+    import pytest as _pytest
+
+    ctx = _sub_ctx(runner=lambda a, p: (0, "<<<SAMPLE_BEGIN>>>   <<<SAMPLE_END>>>", ""))
+    with _pytest.raises(RuntimeError) as exc:
+        await ctx.sample("x", model_preferences=["gpt-5.4"])
+    assert "vide" in str(exc.value)
+
+
+async def test_sample_gemini_model_does_not_use_subscription():
+    # Même avec l'abonnement activé, un modèle Gemini reste sur l'endpoint OpenAI-compat.
+    client = _FakeClient(_resp("réponse gemma"))
+    ctx = LocalSamplingContext(
+        default_model="d",
+        subscription_enabled=True,
+        subscription_auth_dir="/a",
+        sampler_script="/s",
+        client=client,
+        runner=lambda a, p: (_ for _ in ()).throw(AssertionError("ne doit pas sampler")),
+    )
+    res = await ctx.sample("hi", model_preferences=["gemma-4-26b-a4b-it"])
+    assert res.text == "réponse gemma"  # passé par le client OpenAI-compat, pas le sampler
