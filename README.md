@@ -153,7 +153,10 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |
 | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Budget dur du run (auto-pause) | |
 | `COLLEGUE_HOME` | Racine de persistance (budget, métriques, checkpoints) | |
-| `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes (opt-in, **off** par défaut) | |
+| `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Codage par **abonnement** ChatGPT/Codex (coût API `$0`) au lieu d'une clé | |
+| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **on** par défaut). L'amélioration reste à merge humain | |
+| `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Réseau et ressources du conteneur coder | |
+| `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes risk-gated (opt-in, **off** par défaut) | |
 
 > Réglages détaillés du moteur autonome (budget, auto-merge/revert, outil MCP du pilote) :
 > [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env).
@@ -168,8 +171,11 @@ substrat. Étages : `planner` → `pilote` → `executor` → `improve`, sur un 
 durable (Postgres/SQLite) et de sandbox Docker.
 
 **Sûr par défaut** : `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
-**aucun merge dans `main` sans humain** (§6) ; budget dur auto-pausé ; auto-merge,
-auto-revert et outil MCP du pilote **désactivés par défaut** et fail-closed.
+budget dur auto-pausé. En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
+construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
+laisse ses PR **ouvertes pour merge humain** (§6). L'auto-merge risk-gated,
+l'auto-revert et l'outil MCP du pilote restent **désactivés par défaut** et fail-closed.
+Le codeur peut tourner via **abonnement** ChatGPT/Codex (coût API `$0`).
 
 ```bash
 # Aperçu (dry_run) puis exécution réelle

@@ -153,7 +153,10 @@ Overview **by theme** (full list and default values in
 | `STATE_DATABASE_URL` | Autonomous engine durable state (Postgres/SQLite) | |
 | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Hard run budget (auto-pause) | |
 | `COLLEGUE_HOME` | Persistence root (budget, metrics, checkpoints) | |
-| `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Autonomous capabilities (opt-in, **off** by default) | |
+| `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Code via a ChatGPT/Codex **subscription** (`$0` API cost) instead of an API key | |
+| `BUILD_AUTO_MERGE` | **Build-phase merge-bot** (auto-merges task PRs; **on** by default). Improvement stays human-merge | |
+| `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Coder container network and resources | |
+| `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Risk-gated autonomous capabilities (opt-in, **off** by default) | |
 
 > Detailed autonomous-engine settings (budget, auto-merge/revert, pilot MCP tool):
 > [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env) (FR).
@@ -167,9 +170,12 @@ Beyond the **reactive** experts, Collègue can drive end-to-end development:
 Stages: `planner` → `pilote` → `executor` → `improve`, on a durable-state
 (Postgres/SQLite) + Docker-sandbox foundation.
 
-**Safe by default**: `dry_run` (no writes) until you pass `--execute`; **no merge to
-`main` without a human** (§6); hard auto-paused budget; auto-merge, auto-revert and the
-pilot MCP tool are **off by default** and fail-closed.
+**Safe by default**: `dry_run` (no writes) until you pass `--execute`; hard
+auto-paused budget. In a real BUILD, a **merge-bot** auto-merges each task to
+construct the MVP (`BUILD_AUTO_MERGE`, on by default); the **improvement** phase
+leaves its PRs **open for human merge** (§6). Risk-gated auto-merge, auto-revert and
+the pilot MCP tool stay **off by default** and fail-closed. The coder can run via a
+ChatGPT/Codex **subscription** (`$0` API cost).
 
 ```bash
 # Preview (dry_run), then real execution
