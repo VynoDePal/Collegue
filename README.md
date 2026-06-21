@@ -14,10 +14,14 @@ Un **collectif d'experts IA spécialisés** sous forme de serveur MCP (Model Con
 git clone https://github.com/VynoDePal/Collegue.git
 cd Collegue
 cp .env.example .env   # renseigner LLM_API_KEY (Gemini)
-docker compose up -d
+docker compose --profile local up -d
 ```
 
-Endpoints :
+Le profil `local` démarre un sidecar qui publie `4121:4121` pour les IDE. Sans ce
+profil, `docker-compose.yml` ne publie pas directement le port MCP sur l'hôte : en
+production, exposez-le uniquement derrière votre reverse proxy/authentification.
+
+Endpoints locaux :
 
 | URL | Rôle |
 |-----|------|
@@ -147,7 +151,7 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `LLM_MODEL_*` / `LLM_PROVIDER_*` | Modèle/provider par **rôle** (CODER, QA, PLANNER, REVIEWER) | |
 | `LLM_RATE_LIMIT_*` | Limites d'appels LLM par client (minute / jour) | |
 | `CACHE_ENABLED` / `CACHE_TTL` | Cache des réponses d'outils | |
-| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | Authentification OAuth (**off** par défaut) | |
+| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | Authentification OAuth (`false` uniquement en local/dev ; `true` en production) | |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | Intégration GitHub (watchdog, PR) | |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Observabilité Sentry | |
 | `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |
@@ -160,6 +164,31 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 
 > Réglages détaillés du moteur autonome (budget, auto-merge/revert, outil MCP du pilote) :
 > [docs/moteur_autonome.md](docs/moteur_autonome.md#réglages-env).
+
+### Sécurité Docker Compose en production
+
+`OAUTH_ENABLED=false` est réservé aux essais locaux sur une machine de développement.
+N'utilisez jamais ce réglage pour un serveur MCP accessible depuis un réseau partagé
+ou Internet. Le mapping direct `4121:4121` est isolé dans le profil Compose
+`local`/`dev` via le service `collegue-mcp-local-port` ; ne lancez pas ce profil en
+production.
+
+Exemple de démarrage production :
+
+```bash
+cp .env.production.example .env.production
+# renseigner LLM_API_KEY et les valeurs OAuth réelles
+docker compose --env-file .env.production up -d
+```
+
+Variables OAuth minimales en production :
+
+```dotenv
+OAUTH_ENABLED=true
+OAUTH_JWKS_URI=https://auth.example.com/realms/collegue/protocol/openid-connect/certs
+OAUTH_ISSUER=https://auth.example.com/realms/collegue
+OAUTH_AUDIENCE=collegue-mcp
+```
 
 ---
 

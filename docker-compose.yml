@@ -5,9 +5,12 @@ services:
       dockerfile: docker/collegue/Dockerfile
     image: collegue-app:latest
     restart: always
-    # Exposer directement le port MCP pour contourner Traefik (version incompatible)
+    # Production : ne pas publier directement le port MCP (4121).
+    # Utiliser nginx / un reverse proxy authentifié ; le mapping local 4121:4121
+    # est isolé dans le service `collegue-mcp-local-port` sous profil `local`.
+    expose:
+      - "4121"
     ports:
-      - "4121:4121"
       - "4122:4122"
     environment:
       PYTHONUNBUFFERED: 1
@@ -39,6 +42,21 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Profil local/dev uniquement : publie le port MCP sur l'hôte pour les IDE.
+  # Ne pas activer ce profil en production ; garder OAUTH_ENABLED=true et passer
+  # par un reverse proxy/authentification OAuth.
+  collegue-mcp-local-port:
+    image: alpine/socat:1.8.0.3
+    profiles:
+      - local
+      - dev
+    command: ["tcp-listen:4121,fork,reuseaddr", "tcp-connect:collegue-app:4121"]
+    ports:
+      - "4121:4121"
+    depends_on:
+      collegue-app:
+        condition: service_healthy
 
   collegue-dashboard:
     build:
