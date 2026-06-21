@@ -74,7 +74,6 @@ class TestFileSecurity:
             with pytest.raises(FileSecurityError, match="Not a regular file"):
                 safe_read_file(tmpdir, max_size=1024)
 
-
     def test_safe_read_file_preserves_exception_after_fdopen(self):
         """Test qu'une erreur après fdopen n'est pas masquée par os.close."""
 
