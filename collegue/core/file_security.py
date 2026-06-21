@@ -57,6 +57,7 @@ def safe_read_file(filepath: str, max_size: int, base_dir: Optional[str] = None)
             raise FileSecurityError(f"Symlink detected and blocked: {filepath}") from e
         raise
 
+    fd_owned = True
     try:
         # Vérifier les stats via le file descriptor (pas de race condition)
         stat_info = os.fstat(fd)
@@ -78,7 +79,9 @@ def safe_read_file(filepath: str, max_size: int, base_dir: Optional[str] = None)
             pass  # Si le fichier a été supprimé entre-temps, on continuera avec le fd
 
         # Lire le contenu avec verrouillage partagé
-        with os.fdopen(fd, "r", encoding="utf-8", errors="ignore") as f:
+        f = os.fdopen(fd, "r", encoding="utf-8", errors="ignore")
+        fd_owned = False
+        with f:
             # Verrouiller le fichier pendant la lecture (optionnel, mais plus sûr)
             try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_SH)
@@ -93,7 +96,11 @@ def safe_read_file(filepath: str, max_size: int, base_dir: Optional[str] = None)
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except:
-        os.close(fd)
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         raise
 
 

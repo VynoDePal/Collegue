@@ -74,6 +74,40 @@ class TestFileSecurity:
             with pytest.raises(FileSecurityError, match="Not a regular file"):
                 safe_read_file(tmpdir, max_size=1024)
 
+
+    def test_safe_read_file_preserves_exception_after_fdopen(self):
+        """Test qu'une erreur après fdopen n'est pas masquée par os.close."""
+
+        class FailingFile:
+            def __init__(self, fd):
+                self.fd = fd
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                os.close(self.fd)
+
+            def fileno(self):
+                return self.fd
+
+            def read(self, size):
+                raise ValueError("initial read failure")
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+            f.write("content")
+            temp_path = f.name
+
+        def failing_fdopen(fd, *args, **kwargs):
+            return FailingFile(fd)
+
+        try:
+            with patch("os.fdopen", side_effect=failing_fdopen):
+                with pytest.raises(ValueError, match="initial read failure"):
+                    safe_read_file(temp_path, max_size=1024)
+        finally:
+            os.unlink(temp_path)
+
     def test_safe_getsize_success(self):
         """Test l'obtention de la taille d'un fichier."""
         with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
