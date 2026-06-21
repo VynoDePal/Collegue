@@ -90,12 +90,11 @@ class TestDockerComposeConfig:
             condition = depends_on.get("collegue-app", {}).get("condition", "")
             assert condition == "service_healthy", f"nginx should wait for collegue-app to be healthy, got: {condition}"
 
-    def test_collegue_app_ports_exposed(self, compose_file):
-        """Test que les ports MCP sont exposés directement (contournement Traefik)."""
+    def test_collegue_app_does_not_publish_mcp_port_by_default(self, compose_file):
+        """Test que le port MCP n'est pas publié directement par le service de production."""
         collegue_app = compose_file["services"]["collegue-app"]
         ports = collegue_app.get("ports", [])
 
-        # Vérifier que les ports sont exposés
         port_mappings = []
         for port in ports:
             if isinstance(port, str):
@@ -103,10 +102,19 @@ class TestDockerComposeConfig:
             elif isinstance(port, dict):
                 port_mappings.append(f"{port.get('published')}:{port.get('target')}")
 
-        # Port 4121 (MCP) doit être exposé
-        assert any("4121" in p for p in port_mappings), "MCP port 4121 should be exposed"
-        # Port 4122 (health) doit être exposé
-        assert any("4122" in p for p in port_mappings), "Health port 4122 should be exposed"
+        assert not any("4121" in p for p in port_mappings), "MCP port 4121 must not be published by default"
+        assert any("4122" in p for p in port_mappings), "Health port 4122 should remain exposed"
+        assert "4121" in [str(port) for port in collegue_app.get("expose", [])], "MCP port should be exposed internally"
+
+    def test_mcp_port_publication_is_isolated_in_local_profile(self, compose_file):
+        """Test que l'exposition directe du port MCP est isolée dans un profil local/dev documenté."""
+        services = compose_file.get("services", {})
+        local_proxy = services.get("collegue-mcp-local-port")
+
+        assert local_proxy is not None, "A local/dev profile service should document direct MCP publication"
+        assert set(local_proxy.get("profiles", [])) >= {"local", "dev"}, "MCP port publication should require local/dev profile"
+        assert "4121:4121" in local_proxy.get("ports", []), "Local/dev profile should publish MCP port for IDEs"
+        assert "collegue-app" in local_proxy.get("depends_on", {}), "Local/dev port proxy should depend on collegue-app"
 
     def test_collegue_app_environment_variables(self, compose_file):
         """Test que les variables d'environnement essentielles sont présentes."""

@@ -24,12 +24,37 @@ Toutes les intégrations ci-dessous supposent que le serveur Collègue tourne en
 git clone https://github.com/VynoDePal/Collegue.git
 cd Collegue
 cp .env.example .env   # renseigner LLM_API_KEY (Gemini)
-docker compose up -d
+docker compose --profile local up -d
 ```
 
-Le serveur est accessible sur `http://localhost:4121/mcp/`.
+Le serveur est accessible sur `http://localhost:4121/mcp/` uniquement quand le profil
+`local` ou `dev` est activé. Ce profil publie le port MCP directement sur l'hôte pour
+les IDE locaux ; il ne doit pas être utilisé en production.
 
 > **Mode stdio** (alternative) : vous pouvez aussi laisser votre IDE spawner un container à la volée, voir le README pour la config `docker run`.
+
+### Note de sécurité production
+
+`OAUTH_ENABLED=false` est uniquement acceptable pour un environnement local/dev non
+exposé. En production, gardez le port MCP `4121` non publié directement par Docker
+Compose et passez par un reverse proxy ou une couche d'authentification. Utilisez un
+fichier d'environnement de production (voir `.env.production.example`) avec au
+minimum :
+
+```dotenv
+OAUTH_ENABLED=true
+OAUTH_JWKS_URI=https://auth.example.com/realms/collegue/protocol/openid-connect/certs
+OAUTH_ISSUER=https://auth.example.com/realms/collegue
+OAUTH_AUDIENCE=collegue-mcp
+```
+
+Démarrage production type :
+
+```bash
+docker compose --env-file .env.production up -d
+```
+
+N'ajoutez `--profile local` ou `--profile dev` que sur votre poste de développement.
 
 ---
 
