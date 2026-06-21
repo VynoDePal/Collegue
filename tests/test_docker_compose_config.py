@@ -112,7 +112,9 @@ class TestDockerComposeConfig:
         local_proxy = services.get("collegue-mcp-local-port")
 
         assert local_proxy is not None, "A local/dev profile service should document direct MCP publication"
-        assert set(local_proxy.get("profiles", [])) >= {"local", "dev"}, "MCP port publication should require local/dev profile"
+        assert set(local_proxy.get("profiles", [])) >= {"local", "dev"}, (
+            "MCP port publication should require local/dev profile"
+        )
         assert "4121:4121" in local_proxy.get("ports", []), "Local/dev profile should publish MCP port for IDEs"
         assert "collegue-app" in local_proxy.get("depends_on", {}), "Local/dev port proxy should depend on collegue-app"
 
