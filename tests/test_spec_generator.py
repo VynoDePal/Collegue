@@ -77,6 +77,25 @@ def test_to_markdown_empty_assumptions_still_has_section():
     assert "Aucune hypothèse" in md
 
 
+def test_spec_coerces_structured_llm_fields():
+    # Robustesse : sur une spec riche, le planner LLM renvoie parfois `scope` en dict
+    # {inclus, exclus} et des listes mixtes/str au lieu du type attendu → on aplatit
+    # au lieu de lever ValidationError (bug réel découvert sur TopoAudit-Benin).
+    spec = Spec.model_validate(
+        {
+            "title": "TopoAudit",
+            "objectives": "Construire le MVP",  # str -> [str]
+            "scope": {"inclus": "Backend + frontend", "exclus": "Stockage public"},  # dict -> str
+            "constraints": [{"perf": "rapide"}, "pas de scraping"],  # liste mixte
+            "acceptance_criteria": ["pytest vert"],
+        }
+    )
+    assert isinstance(spec.scope, str) and "inclus:" in spec.scope and "exclus:" in spec.scope
+    assert spec.objectives == ["Construire le MVP"]
+    assert spec.constraints == ["perf: rapide", "pas de scraping"]
+    assert spec.to_markdown()  # rendu sans erreur
+
+
 def test_to_markdown_sanitizes_heading_injection():
     # F1 : un titre malveillant ne doit pas injecter de section ni de case cochée.
     spec = Spec(

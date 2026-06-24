@@ -1297,6 +1297,29 @@ async def test_expert_reviewer_maps_tool_response():
     assert request.language == "python"
 
 
+async def test_expert_reviewer_calibration_context_and_ownership_optout():
+    # Calibration au projet : GATE_REVIEW_CONTEXT injecté dans le prompt + consigne IDOR
+    # désactivable (auth différée / prototype) — sinon le reviewer bloque sur de l'auth
+    # explicitement reportée par la spec (cas réel TopoAudit).
+    auth_diff = "diff --git a/api.py b/api.py\n+user = Depends(get_current_user)\n+def f():\n+    return 1\n"
+    proto_ctx = "Projet PROTOTYPE : authentification differee (P2), isolation par projet suffit."
+    consigne_marker = "ISOLATION PAR PROPRIÉTAIRE"  # phrase distinctive de _OWNERSHIP_REVIEW_CONSIGNE
+
+    # 1) Par défaut : la consigne ownership/IDOR auto est présente sur un diff auth.
+    tool_default = _FakeTool(_response(0.9))
+    await ExpertReviewer(tool=tool_default).review(auth_diff, ctx=None, issue=ISSUE)
+    assert consigne_marker in (tool_default.calls[0][0].context or "")
+
+    # 2) ownership_review=False + review_context : pas de consigne ownership, contexte projet injecté.
+    tool_cal = _FakeTool(_response(0.9))
+    await ExpertReviewer(tool=tool_cal, ownership_review=False, review_context=proto_ctx).review(
+        auth_diff, ctx=None, issue=ISSUE
+    )
+    ctx_sent = tool_cal.calls[0][0].context or ""
+    assert consigne_marker not in ctx_sent  # consigne ownership coupée
+    assert proto_ctx in ctx_sent  # contexte prototype injecté
+
+
 def test_diff_touches_auth_heuristic():
     """#500 : détection (insensible casse) d'un diff qui touche l'auth."""
     from collegue.executor.quality_gate import _diff_touches_auth

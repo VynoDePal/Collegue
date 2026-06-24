@@ -280,3 +280,9 @@ scripts/facnor_run/
 # NB : docker/sandbox/Dockerfile.openhands est désormais COMMITTÉ (#404) — image
 # produit constructible depuis les sources committées (n'embarque oh_runner.py du
 # harnais que s'il est présent dans le contexte de build).
+.gstack/
+# Secrets et données réelles — NE JAMAIS committer (clés API/token GitHub ;
+# scans/levées foncières réelles ; workspace de run TopoAudit dérivé).
+.env.test
+Levees/
+.topoaudit_run/

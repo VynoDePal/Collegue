@@ -63,12 +63,13 @@ ou on refuse) :
 
 | Garde-fou | Comportement |
 |-----------|--------------|
-| **Merge humain (§6)** | C'est le **défaut**. Une tâche réussie passe `in_review` (PR ouverte), **jamais** `done`/`merged` automatiquement. Un humain merge. |
-| **`dry_run` par défaut** | Sans `--execute`, le pipeline va jusqu'aux **aperçus** de PR sans **aucune** écriture (ni GitHub ni état). |
+| **Merge-bot (phase BUILD)** | Pendant la **construction du MVP**, une tâche réussie est **auto-mergée** (squash) puis le clone local est resynchronisé sur `origin/<base>` avant la tâche suivante (`BUILD_AUTO_MERGE=true` par défaut). Sans lui, avec 1 PR en vol + dépendances strictes, le build se figerait `awaiting_merge` (et des bases périmées créeraient des conflits). C'est le merge humain **simulé** pendant la construction autonome. Mettre `BUILD_AUTO_MERGE=false` ramène tout au merge humain. |
+| **Merge humain (phase AMÉLIORATION, §6)** | Les PR d'**amélioration** (Phase 4) restent **ouvertes** : elles ne sont **jamais** auto-mergées — relecture/merge par un **humain**. C'est le défaut sûr pour faire évoluer un produit déjà construit. |
+| **`dry_run` par défaut** | Sans `--execute`, le pipeline va jusqu'aux **aperçus** de PR sans **aucune** écriture (ni GitHub ni état) — et **aucun** auto-merge. |
 | **Budget dur** | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` atteints → **auto-pause** (les appels LLM sont stoppés). `COLLEGUE_RUN_DEADLINE_SECONDS` borne la durée mur. |
-| **Gate qualité** | Un diff dont les tests sont rouges, ou qui n'améliore pas le score, **n'ouvre pas de PR** (il est jeté). |
-| **Auto-merge (politique, opt-in)** | Moteur de **politique** implémenté et testé (`AUTO_MERGE_ENABLED=false` par défaut ; activé, n'autoriserait **que** du faible risque : allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes ; garde dure code/exécutable/secret/CI insensible à la casse). ⚠️ **Pas encore câblé dans la boucle du pilote** — le **merge humain (§6) reste le mode opérant** ; le câblage exige une passe CI-aware (suivi). |
-| **Auto-revert (politique)** | Filet prévu de l'auto-merge : si `main` devenait rouge après un auto-merge (santé en sandbox), un revert serait préparé (fail-closed : santé non concluante = rouge ; un revert en échec **escalade**). Inactif tant que l'auto-merge n'est pas câblé. |
+| **Gate qualité** | Un diff dont les tests sont rouges, qui retire une exigence, ou qui porte un finding **critical/error** de la revue (sécurité réelle, défaut signalé par le reviewer LLM) **n'ouvre pas / ne merge pas** de PR. Les findings d'heuristiques crues de style/maintenabilité (complexité, duplication, nommage, exception silencieuse) sont **advisory** (informent la PR, ne bloquent pas un code aux tests verts). |
+| **Auto-merge RISK-GATED (politique, opt-in, distinct)** | Politique séparée du merge-bot ci-dessus : merge **fin** par risque (`AUTO_MERGE_ENABLED=false` par défaut ; activée, n'autoriserait **que** du faible risque : allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes ; garde dure code/exécutable/secret/CI insensible à la casse). ⚠️ **Pas encore câblée dans la boucle du pilote** (le câblage exige une passe CI-aware — suivi). |
+| **Auto-revert (politique)** | Filet prévu de l'auto-merge risk-gated : si `main` devenait rouge après un auto-merge (santé en sandbox), un revert serait préparé (fail-closed : santé non concluante = rouge ; un revert en échec **escalade**). Inactif tant que cette politique n'est pas câblée. |
 | **Outil MCP du pilote** | Exposé en MCP **uniquement** si `PILOT_TOOL_ENABLED=true` **et** `OAUTH_ENABLED=true` (sinon **refus de démarrer**). Allowlist d'appelants (sujets OAuth vérifiés, jamais un en-tête client). Jamais auto-découvert. `dry_run` par défaut. |
 
 ---
@@ -234,6 +235,15 @@ L'exécution réelle de bout en bout (Docker + OpenHands + LLM + écritures GitH
 nécessite `STATE_DATABASE_URL`, un `GITHUB_TOKEN`, Docker, et un provider LLM
 configurés (voir [Réglages](#réglages-env)).
 
+**Codage par abonnement (coût API `$0`).** Au lieu d'une clé API, le codeur peut
+passer par un **abonnement** ChatGPT/Codex : mettre `CODER_SUBSCRIPTION=true` +
+`SANDBOX_SUBSCRIPTION_AUTH_DIR=~/.openhands` (creds OpenHands montées dans le
+sandbox). Le reviewer/juge suit le même chemin quand son modèle n'est pas un
+modèle Gemini (`LLM_MODEL_REVIEWER=gpt-5.4` → échantillonné dans le sandbox).
+Avec `BUILD_AUTO_MERGE=true` (défaut), un seul `--execute` construit **tout le
+MVP** (merge-bot enchaîne les tâches) ; `--improve` ajoute ensuite des PR
+d'amélioration **laissées ouvertes** pour merge humain.
+
 ---
 
 ## Réglages (.env)
@@ -253,8 +263,17 @@ lit :
 | `COLLEGUE_RUN_DEADLINE_SECONDS` | Durée mur max d'un run (`0` = pas de deadline). | `0` |
 | `TASK_MAX_ATTEMPTS` | Tentatives max par tâche — retry avec backoff sur échec transitoire (`1` = pas de retry). | `3` |
 | `TASK_RETRY_BACKOFF_SECONDS` | Base du backoff linéaire entre tentatives (plafonné à 90 s). | `15` |
-| `DEPS_REQUIRE_MERGED` | Exige le **merge** d'une dépendance avant de débloquer ses dépendants (sinon le démarrage sur PR non mergée est signalé) ; arrêt `awaiting_merge` quand seuls des merges manquent. | `false` |
+| `DEPS_REQUIRE_MERGED` | Exige le **merge** d'une dépendance avant de débloquer ses dépendants (sinon le démarrage sur PR non mergée est signalé) ; arrêt `awaiting_merge` quand seuls des merges manquent. **Forcé à vrai** quand `BUILD_AUTO_MERGE` est actif. | `false` |
+| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** : auto-merge (squash) de chaque PR de tâche + resync du clone avant la suivante (+ drain de la dernière PR). `false` → tout au merge humain. La phase amélioration n'est **jamais** auto-mergée. | `true` |
 | `LLM_CALL_TIMEOUT` | Timeout par appel LLM, secondes (`0` = off). | `0` |
+| `CODER_SUBSCRIPTION` | Code via un **abonnement** ChatGPT/Codex (OpenHands `subscription_login`, coût API `$0`) au lieu d'une clé API. Le **reviewer/juge** suit aussi l'abonnement si son modèle n'est pas un modèle Gemini (échantillonné dans le sandbox). | `false` |
+| `CODER_SUBSCRIPTION_MODEL` | Modèle codeur via l'abonnement. | `gpt-5.5` |
+| `CODER_SUBSCRIPTION_FALLBACK` | Modèle(s) de repli de l'abonnement (CSV). | `gpt-5.4` |
+| `SANDBOX_SUBSCRIPTION_AUTH_DIR` | Dossier des creds d'abonnement OpenHands, monté en lecture/écriture dans le sandbox (ex. `~/.openhands`). Requis si `CODER_SUBSCRIPTION`. | — |
+| `SANDBOX_NETWORK` | Réseau Docker du sandbox coder (`bridge` / `host`). `host` si le bridge stalle les gros transferts. | `bridge` |
+| `SANDBOX_MEMORY` | Plafond mémoire du conteneur coder. | `6g` |
+| `SANDBOX_CPUS` | Plafond CPU du conteneur coder. | `2.0` |
+| `SANDBOX_TIMEOUT` | Timeout d'une exécution coder en sandbox, secondes. | `2400` |
 | `AUTO_MERGE_ENABLED` | Active l'auto-merge progressif (opt-in). | `false` |
 | `AUTO_MERGE_MAX_LOC` | Plafond de lignes nettes pour l'auto-merge. | `50` |
 | `AUTO_MERGE_PATH_ALLOWLIST` | Motifs de chemins **faible risque** (CSV ; `**` = sous-dossiers). | `docs/**,**/*.md,**/*.rst` |

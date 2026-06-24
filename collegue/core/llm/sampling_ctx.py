@@ -234,6 +234,10 @@ class LocalSamplingContext:
             subscription_enabled=sub,
             subscription_auth_dir=auth or None,
             sampler_script=sampler_script,
+            # Le sampler d'abonnement (reviewer/juge) tourne dans la MÊME image que le coder.
+            sampler_image=str(
+                getattr(settings_obj, "SANDBOX_IMAGE", "collegue-sandbox:latest") or "collegue-sandbox:latest"
+            ),
         )
 
     async def _noop(self, *args: Any, **kwargs: Any) -> None:  # ctx.info/debug/...

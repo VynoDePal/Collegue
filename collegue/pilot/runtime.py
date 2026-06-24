@@ -142,14 +142,15 @@ def _coder_sandbox_env(settings_obj) -> dict:
 
 
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
-    from collegue.sandbox import DockerSandbox
-
     # OpenHands appelle un LLM → le sandbox a besoin du réseau pour ce run précis
     # (défaut durci ``network="none"``). ``SANDBOX_NETWORK`` ("host" éprouvé contre la
     # flakiness pip du bridge, #485) ; ressources remontées (les défauts 512m/1cpu/120s
     # sont trop bas pour OpenHands). Le coder (oh_runner SDK) lit ``env`` + l'abonnement
     # via ``subscription_auth_dir`` ; la clé API passe par ``env_passthrough`` (jamais l'argv).
+    from collegue.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
+
     return DockerSandbox(
+        image=str(getattr(settings_obj, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE),
         network=str(getattr(settings_obj, "SANDBOX_NETWORK", "bridge") or "bridge"),
         dns=_sandbox_dns(settings_obj),
         pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
@@ -173,7 +174,12 @@ def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (in
 def _build_reviewer(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.executor.quality_gate import ExpertReviewer
 
-    return ExpertReviewer()
+    # Calibration de la revue PAR PROJET : contexte libre (maturité/contraintes) +
+    # consigne ownership/IDOR opt-in (à couper pour un projet où l'auth est différée).
+    return ExpertReviewer(
+        review_context=str(getattr(settings_obj, "GATE_REVIEW_CONTEXT", "") or ""),
+        ownership_review=bool(getattr(settings_obj, "GATE_OWNERSHIP_REVIEW", True)),
+    )
 
 
 def _build_clients(github_token):  # pragma: no cover - infra réelle (integration)

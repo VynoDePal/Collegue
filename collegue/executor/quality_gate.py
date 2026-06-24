@@ -2126,9 +2126,23 @@ class ExpertReviewer:
     (:func:`outcome_from_review`) est, lui, pur et testé en CI.
     """
 
-    def __init__(self, *, min_quality: float = DEFAULT_MIN_QUALITY, tool=None):
+    def __init__(
+        self,
+        *,
+        min_quality: float = DEFAULT_MIN_QUALITY,
+        tool=None,
+        review_context: str = "",
+        ownership_review: bool = True,
+    ):
         self._min_quality = min_quality
         self._tool = tool  # injectable pour les tests ; sinon construit à la volée
+        # Calibration de la revue au PROJET (générique). ``review_context`` : consigne
+        # libre injectée dans le prompt du reviewer (ex. « prototype, auth différée P2 :
+        # ne bloque pas sur l'absence d'auth/IDOR, l'isolation par projet suffit »).
+        # ``ownership_review`` : injecter (ou non) la consigne IDOR auto sur diff
+        # touchant l'auth (#500) — à désactiver pour un projet où l'auth est différée.
+        self._review_context = str(review_context or "")
+        self._ownership_review = bool(ownership_review)
 
     async def review(self, diff: str, ctx, *, issue: Optional[IssueSpec] = None) -> ReviewOutcome:
         from collegue.tools.code_review.models import CodeReviewRequest
@@ -2169,13 +2183,17 @@ class ExpertReviewer:
 
         tool = self._tool or self._build_tool()
         base_context = issue.to_prompt() if issue is not None else None
-        # #500 : si le diff touche l'auth, injecter la consigne ownership/IDOR —
-        # le diff complet (modèle + routes) est déjà envoyé en `code`, seul le
-        # prompt manquait la consigne (run v5 : IDOR clients non détecté).
-        if _diff_touches_auth(diff):
+        # #500 : si le diff touche l'auth, injecter la consigne ownership/IDOR — sauf si
+        # la revue ownership est désactivée pour ce projet (auth différée, prototype).
+        if self._ownership_review and _diff_touches_auth(diff):
             base_context = (
                 f"{base_context}\n\n{_OWNERSHIP_REVIEW_CONSIGNE}" if base_context else _OWNERSHIP_REVIEW_CONSIGNE
             )
+        # Contexte de revue PAR PROJET (calibration au stade de maturité) : appended au
+        # prompt du reviewer pour qu'il juge au bon niveau (ne pas exiger des features
+        # explicitement différées par la spec). Générique, vide par défaut.
+        if self._review_context:
+            base_context = f"{base_context}\n\n{self._review_context}" if base_context else self._review_context
         request = CodeReviewRequest(code=diff or "(diff vide)", language=language, context=base_context)
         response = await tool.execute_async(request, ctx=ctx)
         return outcome_from_review(response, min_quality=self._min_quality)
