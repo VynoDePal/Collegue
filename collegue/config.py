@@ -106,6 +106,14 @@ class Settings(BaseSettings):
     # Commande de tests du gate (vide → défaut `COLUMNS=220 python -m pytest -q`).
     # Une commande custom doit forcer elle-même sa largeur de summary (#478).
     GATE_TEST_COMMAND: str = ""
+    # Calibration de la REVUE experte au PROJET. GATE_REVIEW_CONTEXT : consigne libre
+    # injectée dans le prompt du reviewer (ex. « prototype, auth différée P2 : ne bloque
+    # pas sur l'absence d'auth/IDOR/contrôle d'accès utilisateur, l'isolation par projet
+    # suffit ; bloque sur les vrais bugs : crash, injection, secrets en dur »). Vide =
+    # comportement strict par défaut. GATE_OWNERSHIP_REVIEW : injecter (défaut) ou non la
+    # consigne IDOR auto (#500) — à couper pour un projet dont l'auth est différée.
+    GATE_REVIEW_CONTEXT: str = ""
+    GATE_OWNERSHIP_REVIEW: bool = True
     # Installabilité (#439). REQUIRE_DEPS_INSTALL : l'échec d'installation des
     # deps déclarées rend le gate ROUGE (au lieu d'un signal toléré). CHECK_
     # INSTALLABILITY : passe venv NU (install -r requirements + collecte pytest)
@@ -181,6 +189,10 @@ class Settings(BaseSettings):
     # du worker : permet au coder d'utiliser l'abo (sans coût API) et de persister le
     # token rafraîchi. Vide (défaut) = aucun montage (mode clé API inchangé).
     SANDBOX_SUBSCRIPTION_AUTH_DIR: str = ""
+    # Image Docker du sandbox (coder, gate, sampler d'abonnement). Permet une image
+    # PAR PROJET : un projet à stack lourde (ex. PostGIS + géo + WeasyPrint) builde sa
+    # propre image dérivée de collegue-sandbox sans polluer l'image partagée.
+    SANDBOX_IMAGE: str = "collegue-sandbox:latest"
     # Réseau du sandbox réel (coder OpenHands + passes réseau du gate). Le coder a
     # besoin du réseau (le défaut DURCI de DockerSandbox est "none"). "host" est
     # éprouvé contre la flakiness des transferts pip via le bridge Docker (NAT/MTU,

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from collegue.core.llm import LLMRole, model_preferences_for_role
 from collegue.core.llm.client import sample_with_timeout
@@ -49,6 +49,44 @@ explicites dans "assumptions" et avance.
 - Reste concis et concret."""
 
 
+def _flatten_to_text(value: Any) -> str:
+    """Aplatit une valeur LLM (str/dict/list) en une chaîne lisible.
+
+    Robustesse : sur une spec riche, le planner LLM renvoie parfois un champ texte
+    (ex. ``scope``) sous forme STRUCTURÉE (``{"inclus": …, "exclus": …}``) au lieu
+    d'une chaîne → la validation Pydantic échouait. On aplatit au lieu de rejeter."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return "; ".join(f"{k}: {_flatten_to_text(v)}" for k, v in value.items() if v is not None)
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_flatten_to_text(v) for v in value if v is not None)
+    return str(value)
+
+
+def _flatten_to_list(value: Any) -> List[str]:
+    """Normalise une valeur LLM en liste de chaînes (inverse de :func:`_flatten_to_text`)."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        return [f"{k}: {_flatten_to_text(v)}" for k, v in value.items() if v is not None]
+    if isinstance(value, (list, tuple)):
+        out: List[str] = []
+        for v in value:
+            if isinstance(v, (dict, list, tuple)):
+                text = _flatten_to_text(v)
+            else:
+                text = str(v) if v is not None else ""
+            if text.strip():
+                out.append(text)
+        return out
+    return [str(value)]
+
+
 class Spec(BaseModel):
     """Contrat de projet structuré, rendu en SPEC.md."""
 
@@ -59,6 +97,18 @@ class Spec(BaseModel):
     constraints: List[str] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
     acceptance_criteria: List[str] = Field(default_factory=list)
+
+    # Robustesse au LLM : un champ TEXTE renvoyé en dict/list (ex. scope structuré
+    # « inclus/exclus ») est aplati ; un champ LISTE renvoyé en str/dict est normalisé.
+    @field_validator("title", "summary", "scope", mode="before")
+    @classmethod
+    def _coerce_text(cls, v: Any) -> str:
+        return _flatten_to_text(v)
+
+    @field_validator("objectives", "constraints", "assumptions", "acceptance_criteria", mode="before")
+    @classmethod
+    def _coerce_list(cls, v: Any) -> List[str]:
+        return _flatten_to_list(v)
 
     def to_markdown(self) -> str:
         """Rend le SPEC en Markdown. Chaque champ est mis sur une ligne (anti-injection) ;
