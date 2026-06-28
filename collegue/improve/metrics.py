@@ -6,7 +6,8 @@ disque** (et non sur le diff d'une itération) pour rester **symétrique** avant
 — c'est ce qui permet à la boucle G4 de promouvoir un vrai gain sans faux-rejet
 (cf. #541) :
 
-* **couverture de tests ↑** (parsée de la sortie pytest-cov) ;
+* **couverture de tests ↑** (parsée de la sortie : pytest-cov/coverage.py, go, JS-TS
+  istanbul/jest/vitest, lcov, cobertura XML — cf. ``parse_coverage``, #577) ;
 * **sécurité ↓** : compte de secrets **pondéré par sévérité**, issu d'un scan
   **statique** (``secret_scan``, moteur regex, zéro LLM) sur le répertoire du
   projet — déterministe par construction ;
@@ -34,8 +35,10 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-# Commande de couverture par défaut (parsée depuis la sortie pytest-cov).
-DEFAULT_COVERAGE_COMMAND = "pytest -q --cov --cov-report=term-missing"
+# Commande de couverture par défaut. ``python -m pytest`` (et non ``pytest`` nu) met le
+# CWD sur ``sys.path`` → un projet src-layout (imports ``from app…``) est collectable sans
+# install editable (#577) ; cohérent avec le gate de build qui utilise déjà ``python -m``.
+DEFAULT_COVERAGE_COMMAND = "python -m pytest -q --cov --cov-report=term-missing"
 
 # Pondération par sévérité des findings de sécurité (secret_scan). Le critique pèse
 # le plus ; le composite et le gate (tolérance 0) raisonnent sur ce total pondéré.
@@ -91,9 +94,35 @@ DEFAULT_LINT_SELECT = ("E", "F", "W")
 # Seuil de complexité cyclomatique (mccabe / ruff C901) : au-delà = « bloc complexe ».
 DEFAULT_COMPLEXITY_MAX = 10
 
-# Regex de la ligne récapitulative TOTAL de pytest-cov : « TOTAL  120  6  95% ».
-# On exige un espace juste après TOTAL (rejette un fichier nommé « TOTAL.py »).
-_TOTAL_RE = re.compile(r"^\s*TOTAL\s+.*?(\d+(?:\.\d+)?)%", re.MULTILINE)
+# Regex de la ligne récapitulative TOTAL de pytest-cov / coverage.py : « TOTAL  120  6  95% ».
+# Modèle COLONNES (et non « .*? » paresseux) : TOTAL puis des colonnes numériques, puis le %.
+# (1) exige un espace après TOTAL → rejette un fichier nommé « TOTAL.py » ; (2) quantificateurs
+# POSSESSIFS (``\d++`` / ``*+``, Python 3.11+) → AUCUN backtracking : une ligne TOTAL suivie d'un
+# long run de chiffres sans « % » (stdout hostile) ne provoque PAS de ReDoS (#577, revue sécu).
+_TOTAL_RE = re.compile(r"^\s*TOTAL\s++(?:\d++(?:\.\d++)?\s++)*+(\d++(?:\.\d++)?)%", re.MULTILINE)
+
+# #577 : parseurs de couverture multi-écosystèmes, essayés du PLUS SPÉCIFIQUE au plus
+# générique (1er match gagnant). Restaure le terme couverture du composite quand
+# ``GATE_TEST_COMMAND`` émet un rapport NON pytest-cov (go / JS-TS / lcov / cobertura) —
+# sans ça, couverture non mesurée → terme dominant figé. Chaque entrée = (motif, échelle) :
+# 100.0 pour les RATIOS 0-1 (cobertura), 1.0 pour les % directs. Tous les motifs sont
+# ANCRÉS (ligne de statut / libellé / balise) et LINÉAIRES (possessifs, pas de « .*? » non
+# borné) → aucun « % » parasite capté, aucun backtracking catastrophique sur entrée hostile.
+# parse_coverage borne le résultat à [0,100] (un faux-match ne peut pas fausser le composite).
+# Limite go : « go test -cover ./... » émet une ligne PAR paquet (pas d'agrégat) → on lit la
+# 1re ; pour un total fiable, préférer « go tool cover -func » (motif ``total:``).
+_COVERAGE_PATTERNS = (
+    (_TOTAL_RE, 1.0),  # pytest-cov / coverage.py « coverage report » (ligne TOTAL)
+    (re.compile(r"^total:\s+(?:\([^)\n]*\)\s++)?(\d++(?:\.\d++)?)%", re.MULTILINE), 1.0),  # go tool cover -func
+    (
+        re.compile(r"^(?:ok|FAIL)\b[^\n]*\bcoverage:\s*+(\d++(?:\.\d++)?)%\s++of statements", re.MULTILINE),
+        1.0,
+    ),  # go test -cover (ancré sur la ligne de statut ok/FAIL)
+    (re.compile(r"^\s*Statements\s*:\s*(\d++(?:\.\d++)?)\s*%", re.MULTILINE), 1.0),  # istanbul/jest text-summary
+    (re.compile(r"^\s*All files\s*\|\s*(\d++(?:\.\d++)?)\s*\|", re.MULTILINE), 1.0),  # istanbul/vitest tableau
+    (re.compile(r"^\s*lines\.*:\s*(\d++(?:\.\d++)?)%", re.IGNORECASE | re.MULTILINE), 1.0),  # lcov --summary
+    (re.compile(r'<coverage[^>]*\bline-rate="(\d*+\.\d++|\d++)"'), 100.0),  # cobertura xml (ratio → %)
+)
 
 
 @dataclass(frozen=True)
@@ -146,15 +175,23 @@ class ProjectQualityMetrics:
 
 
 def parse_coverage(output: str) -> Optional[float]:
-    """Extrait le pourcentage de couverture de la ligne ``TOTAL`` de pytest-cov.
+    """Extrait le % de couverture TOTAL de la sortie d'une commande de test.
 
-    Retourne ``None`` si aucune ligne ``TOTAL … NN%`` n'est présente (sortie
-    tronquée, pas de couverture mesurée…). Gère les pourcentages décimaux.
+    Essaie plusieurs formats (#577) du plus spécifique au plus générique — pytest-cov /
+    coverage.py, go (``-func`` / ``-cover``), JS-TS istanbul/jest/vitest, lcov, cobertura
+    XML — et renvoie le 1er match (les ratios cobertura 0-1 sont convertis en %, décimaux
+    gérés). Retourne ``None`` si aucun format reconnu (sortie tronquée, pas de couverture…).
     """
     if not output:
         return None
-    match = _TOTAL_RE.search(output)
-    return float(match.group(1)) if match else None
+    for pattern, scale in _COVERAGE_PATTERNS:
+        match = pattern.search(output)
+        if match:
+            # Borne [0,100] (revue #577) : un faux-match ne peut pas injecter une valeur
+            # aberrante qui dominerait le composite (poids couverture = 1.0) ou casserait
+            # l'invariant ProjectQualityMetrics.coverage_pct « 0-100 ».
+            return max(0.0, min(100.0, float(match.group(1)) * scale))
+    return None
 
 
 def composite_score(
@@ -429,7 +466,8 @@ async def measure(
     """Mesure couverture + sécu + lint/complexité (déterministes) → composite.
 
     ``sandbox`` est injectable (mocké en CI) ; la couverture vient du parsing de la
-    sortie pytest-cov et ``tests_passed`` = exit 0. Sécu (``security_scan_fn``) et
+    sortie de tests (multi-format, ``parse_coverage`` #577) et ``tests_passed`` = exit 0.
+    Sécu (``security_scan_fn``) et
     lint/complexité (``quality_scan_fn``) viennent de scans **statiques déterministes**
     du **workspace** (injectables en tests). La couverture de docstrings
     (``doc_coverage_fn``) est **informative** (hors composite). Les vulns de dépendances

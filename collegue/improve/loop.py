@@ -203,11 +203,11 @@ async def run_improvement(
     # ``tests_passed`` reflète le code de sortie de la VRAIE commande de test du projet.
     # Sans ça, ``measure()`` retombe sur ``DEFAULT_COVERAGE_COMMAND`` (pytest --cov en dur)
     # → tests rouges sur un projet à setup non trivial (make, monorepo, service DB) → garde
-    # dure G2 rejette TOUTE amélioration. (Limite connue, suivi #577 : une commande custom
-    # sans rapport pytest-cov rend la couverture non mesurable → terme conservateur 0.) Le
-    # kwarg n'est émis qu'en override (≠ défaut) → chemin par défaut (et mesures scriptées
-    # en CI) inchangé (symétrie avec ``_gate_options`` qui n'émet ``test_command`` qu'en
-    # override).
+    # dure G2 rejette TOUTE amélioration. (#577 : ``parse_coverage`` reconnaît désormais
+    # aussi go / JS-TS / lcov / cobertura, donc une commande custom à format non pytest-cov
+    # rend quand même la couverture mesurable ; sinon terme conservateur 0.) Le kwarg n'est
+    # émis qu'en override (≠ défaut) → chemin par défaut (et mesures scriptées en CI)
+    # inchangé (symétrie avec ``_gate_options`` qui n'émet ``test_command`` qu'en override).
     measure_extra: dict = {}
     if coverage_command and coverage_command != DEFAULT_COVERAGE_COMMAND:
         measure_extra["coverage_command"] = coverage_command
