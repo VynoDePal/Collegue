@@ -5,6 +5,7 @@ revue LLM = informative (hors composite).
 """
 
 import math
+import time
 
 import pytest
 
@@ -17,6 +18,7 @@ from collegue.improve import (
     parse_coverage,
     persist,
 )
+from collegue.improve.metrics import DEFAULT_COVERAGE_COMMAND
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
 
@@ -81,6 +83,110 @@ def test_parse_coverage_ignores_file_named_total():
     out = "TOTAL.py   10   5   50%\n----\nTOTAL      10   1   90%\n"
     assert parse_coverage(out) == 90.0
     assert parse_coverage("TOTAL.py   10   5   50%\n") is None
+
+
+# --- parse_coverage : formats multi-écosystèmes (#577) --------------------------
+
+
+def test_parse_coverage_go_test_cover():
+    out = "ok  \tmodule/a\t0.012s\tcoverage: 50.0% of statements\n"
+    assert parse_coverage(out) == 50.0
+
+
+def test_parse_coverage_go_func_total():
+    out = "module/a/x.go:10:\tDo\t100.0%\ntotal:\t(statements)\t87.5%\n"
+    assert parse_coverage(out) == 87.5
+
+
+def test_parse_coverage_istanbul_text_summary():
+    out = (
+        "=============================== Coverage summary ===============================\n"
+        "Statements   : 91.22% ( 166/182 )\n"
+        "Branches     : 75% ( 18/24 )\n"
+        "Lines        : 90% ( 161/179 )\n"
+    )
+    assert parse_coverage(out) == 91.22
+
+
+def test_parse_coverage_istanbul_or_vitest_table():
+    out = (
+        "File           | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s\n"
+        "---------------|---------|----------|---------|---------|------------------\n"
+        "All files      |   85.71 |    66.66 |     100 |   85.71 |\n"
+    )
+    assert parse_coverage(out) == 85.71
+
+
+def test_parse_coverage_lcov_summary():
+    out = "Summary coverage rate:\n  lines......: 92.3% (1200 of 1300 lines)\n  functions..: 88.0% (44 of 50)\n"
+    assert parse_coverage(out) == 92.3
+
+
+def test_parse_coverage_cobertura_xml_ratio_converted():
+    out = '<?xml version="1.0" ?>\n<coverage line-rate="0.98" branch-rate="0.75" version="6.5">\n'
+    assert parse_coverage(out) == pytest.approx(98.0)
+
+
+def test_parse_coverage_cobertura_zero_and_full():
+    assert parse_coverage('<coverage line-rate="0" branch-rate="0">') == pytest.approx(0.0)
+    assert parse_coverage('<coverage line-rate="1.0">') == pytest.approx(100.0)
+
+
+def test_parse_coverage_ignores_parasitic_percent():
+    # Un % parasite SANS format de couverture reconnu ne doit JAMAIS matcher (#577).
+    assert parse_coverage("discount: 50% off today\n100%|####| 10/10 done\n") is None
+    assert parse_coverage("coverage rose to 80% this week") is None  # pas « of statements »
+
+
+def test_default_coverage_command_uses_python_m_pytest():
+    # #577 : src-layout — `python -m pytest` met le cwd sur sys.path (vs `pytest` nu),
+    # sinon les imports `from app...` cassent à la collecte → garde dure G2 rejette tout.
+    assert DEFAULT_COVERAGE_COMMAND.startswith("python -m pytest")
+    assert "--cov" in DEFAULT_COVERAGE_COMMAND
+
+
+def test_parse_coverage_clamps_to_0_100():
+    # #577 (revue) : un faux-match ne doit JAMAIS injecter une valeur hors [0,100] qui
+    # dominerait le composite (poids couverture = 1.0) et corromprait le delta du gate.
+    assert parse_coverage("All files |   4200 | MB used") == 100.0
+    assert parse_coverage('<coverage line-rate="1.5">') == 100.0
+
+
+def test_parse_coverage_redos_resistant():
+    # #577 (revue) : parse_coverage tourne CÔTÉ HÔTE sur une stdout NON fiable (projet LLM).
+    # Une ligne TOTAL/total: suivie d'un long run de chiffres SANS « % » ne doit pas faire
+    # exploser le temps (backtracking catastrophique) — patterns possessifs/colonnes.
+    hostile_total = "TOTAL " + "1" * 50000
+    hostile_go = "total: " + "1" * 50000
+    start = time.perf_counter()
+    assert parse_coverage(hostile_total) is None
+    assert parse_coverage(hostile_go) is None
+    assert time.perf_counter() - start < 1.0  # corrigé : ~ms ; vulnérable : plusieurs minutes
+
+
+def test_parse_coverage_go_parasitic_not_captured():
+    # #577 (revue) : le motif go ne doit PAS capter un « coverage: NN% of statements » au
+    # milieu d'une phrase / log / commentaire (ancrage sur la ligne de statut ok/FAIL).
+    assert parse_coverage("Note: coverage: 5% of statements is too low, see docs") is None
+    assert parse_coverage("// historical coverage: 99% of statements (2019)") is None
+
+
+def test_parse_coverage_go_multipackage_takes_first_documented():
+    # Limite connue documentée : « go test -cover ./... » émet une ligne PAR paquet (pas
+    # d'agrégat) → on lit le 1er (déterministe). Pour un total fiable : « go tool cover -func ».
+    out = "ok  pkg/a  0.01s  coverage: 40.0% of statements\nok  pkg/b  0.02s  coverage: 90.0% of statements\n"
+    assert parse_coverage(out) == 40.0
+
+
+def test_parse_coverage_lcov_dots_optional_and_case():
+    # #577 (revue) : tolérer 'lines:' (sans points) et 'Lines:' (capitale).
+    assert parse_coverage("  lines: 92.3% (1200 of 1300 lines)") == 92.3
+    assert parse_coverage("Lines: 88.0%") == 88.0
+
+
+def test_parse_coverage_cobertura_leading_dot():
+    # #577 (revue) : line-rate=".97" (sans zéro de tête) → 97.0.
+    assert parse_coverage('<coverage line-rate=".97" branch-rate="0.5">') == pytest.approx(97.0)
 
 
 # --- composite_score ------------------------------------------------------------
