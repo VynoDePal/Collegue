@@ -1103,6 +1103,16 @@ async def run_project(
     improvement = None
     if mvp_built and improve:
         run_imp = run_improvement_fn or _default_run_improvement
+        # #573 : la Phase 4 doit mesurer avec la commande de test du projet
+        # (``gate_options['test_command']`` = ``GATE_TEST_COMMAND``), pas pytest --cov en
+        # dur — sinon les tests virent au rouge sur un projet à setup non trivial (make,
+        # monorepo, service DB) et la garde dure G2 rejette toute amélioration. Symétrie
+        # avec ``execute_issue`` qui reçoit déjà ``gate_options``.
+        improve_extra: dict = {}
+        if gate_options:
+            improve_test_command = gate_options.get("test_command")
+            if improve_test_command:
+                improve_extra["coverage_command"] = str(improve_test_command)
         improvement = await run_imp(
             project_id,
             repo_source,
@@ -1118,6 +1128,7 @@ async def run_project(
             runner=runner,
             base=base,
             dry_run=dry_run,
+            **improve_extra,
         )
 
     return ProjectRunResult(

@@ -419,3 +419,35 @@ async def test_safety_cap(git_repo, manager):
     result = await _run(git_repo, manager, measure_seq=seq, max_iterations=1, plateau_rounds=9)
     assert result.stop_reason == "safety_cap"
     assert result.rounds == 1
+
+
+# --- propagation de la commande de test (#573) ----------------------------------
+
+
+async def test_forwards_configured_test_command_to_measure(git_repo, manager):
+    # #573 : la commande de test du projet (GATE_TEST_COMMAND) doit atteindre measure()
+    # à CHAQUE mesure (avant ET après le diff). Sans ça, measure() retombe sur
+    # DEFAULT_COVERAGE_COMMAND (pytest --cov en dur) → tests rouges sur un projet à setup
+    # non trivial (make, monorepo, service DB) → garde dure G2 rejette TOUTE amélioration.
+    seen = []
+
+    async def spy_measure(workspace, ctx, *, sandbox=None, reviewer=None, diff="", weights=None, coverage_command=None):
+        seen.append(coverage_command)
+        return _metrics(1.0)  # baseline finie → la boucle déroule un round complet
+
+    await run_improvement(
+        manager.create_project(name="cmd"),
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget([CONT, PAUSE]),
+        clients=_clients(),
+        dry_run=True,
+        coverage_command="make check",
+        measure_fn=spy_measure,
+    )
+    assert seen, "measure_fn jamais appelé"
+    assert set(seen) == {"make check"}, f"measure() doit recevoir la commande de test configurée, reçu {seen}"
