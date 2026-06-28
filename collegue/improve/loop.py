@@ -24,7 +24,14 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from collegue.improve.gate import DEFAULT_MIN_GAIN, evaluate
-from collegue.improve.metrics import DEFAULT_WEIGHTS, CompositeWeights, autofix_lint, measure, persist
+from collegue.improve.metrics import (
+    DEFAULT_COVERAGE_COMMAND,
+    DEFAULT_WEIGHTS,
+    CompositeWeights,
+    autofix_lint,
+    measure,
+    persist,
+)
 from collegue.improve.proposer import AttemptRecord, build_improvement_task, next_dimension
 
 # Raisons d'arrêt.
@@ -153,6 +160,7 @@ async def run_improvement(
     min_gain: float = DEFAULT_MIN_GAIN,
     max_iterations: int = 50,
     weights: CompositeWeights = DEFAULT_WEIGHTS,
+    coverage_command: str = DEFAULT_COVERAGE_COMMAND,
     measure_fn=measure,
 ) -> ImprovementResult:
     """Fait tourner la boucle d'amélioration jusqu'au plateau ou au budget.
@@ -190,6 +198,20 @@ async def run_improvement(
     plateau = 0
     round_num = 0
 
+    # #573 : transmettre la commande de test configurée (``GATE_TEST_COMMAND``, alias
+    # ``coverage_command`` ici, acheminée par le driver) à ``measure()`` pour que
+    # ``tests_passed`` reflète le code de sortie de la VRAIE commande de test du projet.
+    # Sans ça, ``measure()`` retombe sur ``DEFAULT_COVERAGE_COMMAND`` (pytest --cov en dur)
+    # → tests rouges sur un projet à setup non trivial (make, monorepo, service DB) → garde
+    # dure G2 rejette TOUTE amélioration. (Limite connue, suivi #577 : une commande custom
+    # sans rapport pytest-cov rend la couverture non mesurable → terme conservateur 0.) Le
+    # kwarg n'est émis qu'en override (≠ défaut) → chemin par défaut (et mesures scriptées
+    # en CI) inchangé (symétrie avec ``_gate_options`` qui n'émet ``test_command`` qu'en
+    # override).
+    measure_extra: dict = {}
+    if coverage_command and coverage_command != DEFAULT_COVERAGE_COMMAND:
+        measure_extra["coverage_command"] = coverage_command
+
     while True:
         if round_num >= max_iterations:
             result.stop_reason = STOP_SAFETY_CAP
@@ -211,7 +233,9 @@ async def run_improvement(
 
         # Levier 1 (#541) : la mesure baseline porte sur le WORKSPACE sur disque, pas
         # sur un diff (il n'y en a pas encore) — objectif symétrique avant/après.
-        before = await measure_fn(workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights)
+        before = await measure_fn(
+            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights, **measure_extra
+        )
 
         # Baseline non fiable (composite non fini, ex. scan sécu en échec → inf) :
         # round à vide. On NE lance PAS l'agent (coûteux) pour rien et on n'enregistre
@@ -251,7 +275,7 @@ async def run_improvement(
         final_diff, final_files = capture_diff(workspace)
 
         after = await measure_fn(
-            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=final_diff, weights=weights
+            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=final_diff, weights=weights, **measure_extra
         )
         result.final_score = after.composite
         gate = evaluate(before, after, min_gain=min_gain)

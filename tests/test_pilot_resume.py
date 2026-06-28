@@ -155,6 +155,39 @@ async def test_improving_mode_chains_run_improvement(repo, manager):
     assert seen["dry_run"] is False
 
 
+async def test_improving_forwards_gate_test_command_as_coverage_command(repo, manager):
+    # #573 : le test command du gate (gate_options["test_command"]) doit être transmis à
+    # run_improvement comme coverage_command, pour que la Phase 4 mesure avec la VRAIE
+    # commande de test du projet. Sinon measure() lance pytest --cov en dur → tests rouges
+    # sur un projet à setup non trivial → garde G2 rejette toute amélioration (improve mort).
+    pid = manager.create_project(name="mvp")
+    manager.add_task(pid, title="T0")
+    seen = {}
+
+    async def fake_run_improvement(project_id, repo_source, ctx, **kw):
+        seen["coverage_command"] = kw.get("coverage_command")
+        return SimpleNamespace(stop_reason="plateau")
+
+    await run_project(
+        pid,
+        repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget([ContinueDecision(action=ACTION_CONTINUE, reason="ok")]),
+        sandbox=_Sandbox(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        dry_run=False,
+        improve=True,
+        gate_options={"test_command": "make check"},
+        run_improvement_fn=fake_run_improvement,
+    )
+    assert seen["coverage_command"] == "make check"
+
+
 async def test_improving_not_chained_when_improve_false(repo, manager):
     # improve=False (défaut) → pas d'enchaînement, comportement inchangé.
     pid = manager.create_project(name="noimp")
