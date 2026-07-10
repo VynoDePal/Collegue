@@ -162,14 +162,14 @@ async def test_dry_run_builds_whole_chain_without_writes(repo, manager):
     assert all(t.status == "todo" for t in manager.get_tasks(pid))
 
 
-async def test_real_run_advances_states_and_switches_to_improving(repo, manager):
+async def test_real_run_advances_states_but_does_not_promote_unmerged_mvp(repo, manager):
     pid = _linear_project(manager, 2)
     result = await _run(manager, repo, pid, dry_run=False)
     assert result.stop_reason == "completed"
     assert result.iterations == 2
-    assert result.project_status == "improving"
+    assert result.project_status is None  # #580 : PRs ouvertes != MVP intégré
     assert all(t.status == "in_review" for t in manager.get_tasks(pid))
-    assert manager.get_project(pid).status == "improving"
+    assert manager.get_project(pid).status != "improving"
     assert result.opened_prs == [101, 101]
 
 
@@ -210,7 +210,7 @@ async def test_interrupted_in_progress_task_is_retried(repo, manager):
     result = await _run(manager, repo, pid, dry_run=False)
     assert result.stop_reason == "completed"
     assert result.iterations == 1  # re-tentée
-    assert result.project_status == "improving"
+    assert result.project_status is None  # PR encore in_review : pas de Phase 4
     assert manager.get_tasks(pid)[0].status == "in_review"
 
 

@@ -59,6 +59,42 @@ def test_branch_for_issue():
     assert branch_for_issue(42) == "collegue/issue-42"
 
 
+# --- resync_repository_base -----------------------------------------------------
+
+
+def test_resync_repository_base_fetches_before_reset():
+    from collegue.executor.workspace import resync_repository_base
+    from collegue.sandbox import SandboxResult
+
+    calls = []
+
+    class _Runner:
+        def run_command(self, command, workspace):
+            calls.append((command, workspace))
+            return SandboxResult(exit_code=0, stdout="", stderr="")
+
+    assert resync_repository_base("/repo", "main", runner=_Runner()) is True
+    assert calls == [
+        (["git", "fetch", "origin", "main"], "/repo"),
+        (["git", "reset", "--hard", "origin/main"], "/repo"),
+    ]
+
+
+def test_resync_repository_base_never_resets_after_failed_fetch():
+    from collegue.executor.workspace import resync_repository_base
+    from collegue.sandbox import SandboxResult
+
+    calls = []
+
+    class _Runner:
+        def run_command(self, command, workspace):
+            calls.append(command)
+            return SandboxResult(exit_code=1, stdout="", stderr="fetch failed")
+
+    assert resync_repository_base("/repo", "main", runner=_Runner()) is False
+    assert calls == [["git", "fetch", "origin", "main"]]
+
+
 # --- prepare_workspace ----------------------------------------------------------
 
 
