@@ -206,6 +206,14 @@ def persist_spec(
     *,
     deadline: Any = None,
     status: str = PROJECT_STATUS_PLANNED,
+    plan_sync_config: Optional[dict] = None,
 ) -> int:
     """Persiste le SPEC (rendu Markdown) dans ``Project.spec`` ; retourne le project_id."""
-    return manager.create_project(name=name, spec=spec.to_markdown(), deadline=deadline, phase="1", status=status)
+    return manager.create_project(
+        name=name,
+        spec=spec.to_markdown(),
+        deadline=deadline,
+        phase="1",
+        status=status,
+        plan_sync_config=plan_sync_config,
+    )

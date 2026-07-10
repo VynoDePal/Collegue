@@ -65,13 +65,15 @@ ou on refuse) :
 |-----------|--------------|
 | **Merge-bot (phase BUILD)** | Pendant la **construction du MVP**, une tâche réussie est **auto-mergée** (squash) puis le clone local est resynchronisé sur `origin/<base>` avant la tâche suivante (`BUILD_AUTO_MERGE=true` par défaut). Sans lui, avec 1 PR en vol + dépendances strictes, le build se figerait `awaiting_merge` (et des bases périmées créeraient des conflits). C'est le merge humain **simulé** pendant la construction autonome. Mettre `BUILD_AUTO_MERGE=false` ramène tout au merge humain. |
 | **Merge humain (phase AMÉLIORATION, §6)** | Les PR d'**amélioration** (Phase 4) restent **ouvertes** : elles ne sont **jamais** auto-mergées — relecture/merge par un **humain**. C'est le défaut sûr pour faire évoluer un produit déjà construit. |
-| **`dry_run` par défaut** | Un **run** sans `--execute` va jusqu'aux aperçus de PR sans écriture GitHub/état et sans auto-merge. La commande `plan`, elle, persiste volontairement son brouillon (SPEC/DAG/oracles) pour permettre validation et reprise, mais ne touche pas GitHub sans `--execute-sync`. |
+| **`dry_run` par défaut** | Un **run** sans `--execute` va jusqu'aux aperçus de PR sans écriture GitHub/état et sans auto-merge. `plan draft` persiste volontairement son brouillon (SPEC/DAG/oracles/cible) pour permettre validation et reprise ; seul `plan sync --execute` touche GitHub. |
 | **Budget dur** | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` atteints → **auto-pause** (les appels LLM sont stoppés). `COLLEGUE_RUN_DEADLINE_SECONDS` borne la durée mur. |
 | **Gate qualité** | Un diff dont les tests sont rouges, qui retire une exigence, ou qui porte un finding **critical/error** de la revue (sécurité réelle, défaut signalé par le reviewer LLM) **n'ouvre pas / ne merge pas** de PR. Les findings d'heuristiques crues de style/maintenabilité (complexité, duplication, nommage, exception silencieuse) sont **advisory** (informent la PR, ne bloquent pas un code aux tests verts). |
 | **Sandbox du gate sans secrets** | Le coder OpenHands et le code projet testé ne partagent plus le même conteneur produit : le sandbox du gate conserve les ressources nécessaires aux installations/tests, mais ne reçoit ni clés LLM, ni variables du coder, ni credentials d'abonnement OpenHands. |
 | **Snapshot immuable de livraison** | Avant d'exécuter le code projet, le moteur fige les payloads texte/suppressions et l'empreinte SHA-256 du diff. BUILD et Phase 4 refusent toute dérive pendant les tests/mesures ; `open_pr` pousse exclusivement ce snapshot, jamais le workspace vivant. Une remédiation déterministe de `requirements.txt` déclenche un nouveau snapshot et un second gate complet. |
 | **Acceptation §4.7 (opt-in, OFF)** | `GATE_ACCEPTANCE_TESTS=false` par défaut. En opt-in, le rôle **QA** génère un oracle pytest par tâche **avant** l'aperçu et l'approbation. Source, SHA-256, provenance et politique d'activation sont persistés atomiquement et couverts par l'empreinte du plan : omettre ensuite le flag au run ne contourne pas le gate. Celui-ci recharge et rejoue exactement cet oracle dans son sandbox isolé, sans diff ni nouvel appel LLM ; absence, altération, aucun test collecté ou exit non nul = livraison bloquée. |
-| **SPEC avant issues** | Sur le chemin produit `plan --execute-sync`, le DAG est validé intégralement puis GitHub doit confirmer le commit de `SPEC.md` **avant** la première issue. Client absent, erreur API, réponse sans `commit.sha` ou fichier distant divergent = arrêt sans issue. Un SPEC déjà identique est confirmé sans commit vide. |
+| **Validation humaine du plan** | Le produit impose trois processus séparés : `plan draft` affiche le contenu, la cible (dépôt + branche) et son SHA-256 ; `plan approve --expected-plan-hash …` scelle exactement ce snapshot sans LLM/GitHub ; `plan sync` recharge uniquement la cible persistée. SPEC, DAG, oracles, deadline et cible sont hashés. Toute mutation entre les étapes invalide le hash. |
+| **Snapshot d'écriture cohérent** | En sync réelle, cible, SPEC et tâches sont copiés dans une seule transaction verrouillée. Les appels GitHub consomment exclusivement ce snapshot approuvé : une mutation/réapprobation concurrente ne peut pas envoyer le contenu d'une révision vers la cible d'une autre. Après la première issue matérialisée, une révision différente exige une réconciliation explicite des liaisons avant réapprobation. |
+| **SPEC avant issues** | Sur le chemin produit `plan sync --execute`, le DAG est validé intégralement puis GitHub doit confirmer le commit de `SPEC.md` **avant** la première issue. Client absent, erreur API, réponse sans `commit.sha` ou fichier distant divergent = arrêt sans issue. Un SPEC déjà identique est confirmé sans commit vide. |
 | **Auto-merge RISK-GATED (politique, opt-in, distinct)** | Politique séparée du merge-bot ci-dessus : merge **fin** par risque (`AUTO_MERGE_ENABLED=false` par défaut ; activée, n'autoriserait **que** du faible risque : allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes ; garde dure code/exécutable/secret/CI insensible à la casse). ⚠️ **Pas encore câblée dans la boucle du pilote** (le câblage exige une passe CI-aware — suivi). |
 | **Auto-revert (politique)** | Filet prévu de l'auto-merge risk-gated : si `main` devenait rouge après un auto-merge (santé en sandbox), un revert serait préparé (fail-closed : santé non concluante = rouge ; un revert en échec **escalade**). Inactif tant que cette politique n'est pas câblée. |
 | **Outil MCP du pilote** | Exposé en MCP **uniquement** si `PILOT_TOOL_ENABLED=true` **et** `OAUTH_ENABLED=true` (sinon **refus de démarrer**). Allowlist d'appelants (sujets OAuth vérifiés, jamais un en-tête client). Jamais auto-découvert. `dry_run` par défaut. |
@@ -210,7 +212,30 @@ Un run de plusieurs jours peut **reprendre après un crash sans perte d'état** 
 ## Lancer un run
 
 Le pilote s'invoque **explicitement** (jamais auto-démarré par le serveur MCP) via son
-entrypoint. Le projet doit déjà exister dans l'état durable (planifié via le planner).
+entrypoint. La planification est volontairement découpée en trois commandes : le
+processus qui appelle le LLM ne peut ni approuver son propre résultat, ni changer la
+cible GitHub après coup.
+
+```bash
+# 1. Génère et persiste le brouillon, puis affiche son SHA-256
+python -m collegue.pilot plan draft \
+  --name mon-app --problem "..." --owner mon-org --repo mon-app
+
+# 2. Après relecture humaine, approuve exactement le hash affiché
+python -m collegue.pilot plan approve \
+  --project-id 1 --expected-plan-hash SHA256_AFFICHE
+
+# 3. Prévisualise la synchronisation, puis l'exécute explicitement
+python -m collegue.pilot plan sync --project-id 1
+python -m collegue.pilot plan sync --project-id 1 --execute
+```
+
+Les trois étapes peuvent vivre dans des processus distincts : le SPEC, le DAG, les
+oracles, la deadline et la cible normalisée (dépôt + branche de base) sont relus depuis l'état durable. `approve` et `sync`
+n'initialisent aucun contexte LLM. Un hash périmé, une cible altérée ou un override
+de cible à ces étapes est refusé en fail-closed.
+
+Une fois le projet synchronisé, le build consomme ce plan approuvé :
 
 ```bash
 # Aperçu (dry_run) : aucune écriture GitHub ni état
@@ -229,8 +254,8 @@ python -m collegue.pilot ... --execute --improve
 |------|-------|
 | `--project-id` | Id du projet (état durable). **Requis.** |
 | `--repo-source` | Dépôt git source (chemin / clone). **Requis.** |
-| `--owner` / `--repo` | Cible GitHub des PR. **Requis.** |
-| `--base` | Branche de base des PR (défaut `main`). |
+| `--owner` / `--repo` | Cible GitHub des PR. **Requise et obligatoirement identique au draft scellé.** |
+| `--base` | Branche de base des PR (défaut `main`), elle aussi identique au draft scellé. |
 | `--execute` | Désactive le `dry_run` : écritures réelles. |
 | `--max-iterations` | Garde-fou anti-boucle (optionnel). |
 | `--improve` | Après le MVP, enchaîne le moteur d'amélioration sous le budget restant. |

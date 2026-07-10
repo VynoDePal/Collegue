@@ -155,6 +155,20 @@ def test_deadline_resolved_from_settings():
     assert ctrl.should_continue().action == "deadline_reached"
 
 
+def test_sealed_absolute_deadline_is_enforced_and_wins_when_earlier():
+    now = T0 + timedelta(seconds=20)
+    ctrl = BudgetTimeController(
+        started_at=T0,
+        deadline_seconds=100,
+        deadline_at=T0 + timedelta(seconds=10),
+        clock=lambda: now,
+        collector=_Collector(None),
+    )
+
+    assert ctrl.deadline == T0 + timedelta(seconds=10)
+    assert ctrl.should_continue().action == "deadline_reached"
+
+
 # --- validateur de config -------------------------------------------------------
 
 

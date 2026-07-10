@@ -172,7 +172,8 @@ substrat. Étages : `planner` → `pilote` → `executor` → `improve`, sur un 
 durable (Postgres/SQLite) et de sandbox Docker.
 
 **Sûr par défaut** : un run reste en `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
-`plan` persiste seulement son brouillon durable et ne touche pas GitHub sans `--execute-sync` ;
+`plan draft` persiste seulement son brouillon durable ; l'opérateur approuve ensuite
+le hash affiché, et seul `plan sync --execute` touche GitHub ;
 budget dur auto-pausé. En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
 construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
 laisse ses PR **ouvertes pour merge humain** (§6). L'auto-merge risk-gated,
@@ -180,7 +181,12 @@ l'auto-revert et l'outil MCP du pilote restent **désactivés par défaut** et f
 Le codeur peut tourner via **abonnement** ChatGPT/Codex (coût API `$0`).
 
 ```bash
-# Aperçu (dry_run) puis exécution réelle
+# Phase 1 : trois gestes séparés — le processus LLM ne s'auto-approuve jamais
+python -m collegue.pilot plan draft --name app --problem "..." --owner org --repo app --base main
+python -m collegue.pilot plan approve --project-id 1 --expected-plan-hash SHA256_AFFICHE
+python -m collegue.pilot plan sync --project-id 1 --execute
+
+# Build : aperçu (dry_run) puis exécution réelle
 python -m collegue.pilot --project-id 1 --repo-source /chemin/clone --owner org --repo app
 python -m collegue.pilot ... --execute            # écritures réelles (PR + état)
 python -m collegue.pilot ... --execute --improve  # + cycle d'amélioration

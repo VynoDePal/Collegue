@@ -98,6 +98,12 @@ class Project(Base):
     acceptance_tests_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    # Paramètres exacts employés pour synchroniser le plan avec GitHub. La couche
+    # état les conserve comme un objet JSON opaque : leur validation et leur
+    # normalisation appartiennent au planner/pilote, pas au store durable.
+    # ``none_as_null=True`` distingue l'absence de configuration (SQL NULL) d'une
+    # éventuelle valeur JSON fournie explicitement par les couches métier.
+    plan_sync_config: Mapped[Optional[dict]] = mapped_column(JSON(none_as_null=True), nullable=True)
 
     # Cascade gérée par l'ORM (cascade="all, delete-orphan") : marche partout.
     # ondelete="CASCADE" reste sur la FK pour PostgreSQL (défense en profondeur ;

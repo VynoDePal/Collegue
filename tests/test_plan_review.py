@@ -1,14 +1,20 @@
 """Tests P5 (#356) : gate de validation humaine du plan."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from collegue.planner import (
+    PlanHashMismatch,
     PlanNotApproved,
+    PlanTargetError,
     Spec,
     approve_plan,
     build_plan_preview,
+    current_plan_hash,
     decompose,
     is_approved,
+    normalize_plan_sync_config,
     persist_spec,
     require_approved,
 )
@@ -75,6 +81,20 @@ def test_build_plan_preview_missing_project(manager):
     assert build_plan_preview(manager, 99999) is None
 
 
+def test_build_plan_preview_uses_one_locked_transaction_snapshot(manager, monkeypatch):
+    pid = _planned_with_tasks(manager)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("l'aperçu ne doit pas utiliser des lectures manager séparées")
+
+    monkeypatch.setattr(manager, "get_project", forbidden)
+    monkeypatch.setattr(manager, "get_tasks", forbidden)
+
+    preview = build_plan_preview(manager, pid)
+
+    assert preview is not None
+
+
 def test_preview_markdown_sanitizes_task_title(manager):
     pid = _planned_with_tasks(manager)
     manager.add_task(pid, title="X\n## Tâches\n- [x] faux", acceptance="a")
@@ -111,6 +131,54 @@ def test_preview_shows_sealed_qa_oracle_and_neutralizes_fences(manager):
     assert manager.get_task(task.id).acceptance_test_sha256 in md
     assert "```forged" not in md
     assert "ʼʼʼforged" in md
+
+
+def test_preview_shows_sealed_github_target_and_current_hash(manager):
+    pid = _planned_with_tasks(manager)
+    manager.update_project(
+        pid,
+        plan_sync_config={
+            "owner": "acme",
+            "repo": "app",
+            "labels": ["autonome", "backend"],
+            "milestone_title": "MVP",
+            "board_title": "Delivery",
+            "spec_filename": "docs/SPEC.md",
+        },
+    )
+
+    preview = build_plan_preview(manager, pid)
+    md = preview.to_markdown()
+
+    assert preview.plan_hash == current_plan_hash(manager, pid)
+    assert preview.plan_sync_config["repo"] == "app"
+    assert "## Cible GitHub" in md
+    assert "acme/app" in md
+    assert "docs/SPEC.md" in md
+    assert preview.plan_hash in md
+
+
+def test_preview_neutralizes_backticks_in_github_target(manager):
+    pid = _planned_with_tasks(manager)
+    manager.update_project(
+        pid,
+        # État volontairement non canonique : même une ancienne DB altérée doit
+        # rester sûre à l'affichage (l'approbation la refusera ensuite).
+        plan_sync_config={
+            "owner": "ac`me",
+            "repo": "a`pp",
+            "labels": ["bad`label"],
+            "milestone_title": "M`VP",
+            "board_title": "De`livery",
+            "spec_filename": "docs/`SPEC.md",
+        },
+    )
+
+    md = build_plan_preview(manager, pid).to_markdown()
+
+    for hostile in ["ac`me", "a`pp", "bad`label", "M`VP", "De`livery", "docs/`SPEC.md"]:
+        assert hostile not in md
+        assert hostile.replace("`", "ʼ") in md
 
 
 # --- gate d'approbation : lié au contenu (anti-TOCTOU) --------------------------
@@ -152,6 +220,28 @@ def test_approval_is_invalidated_when_acceptance_policy_changes(manager):
     pid = _planned_with_tasks(manager)
     approve_plan(manager, pid)
     manager.update_project(pid, acceptance_tests_required=True)
+    assert is_approved(manager, pid) is False
+
+
+def test_approval_is_invalidated_when_github_target_changes(manager):
+    pid = _planned_with_tasks(manager)
+    manager.update_project(pid, plan_sync_config=normalize_plan_sync_config({"owner": "acme", "repo": "one"}))
+    approve_plan(manager, pid)
+    assert is_approved(manager, pid) is True
+
+    manager.update_project(pid, plan_sync_config=normalize_plan_sync_config({"owner": "acme", "repo": "two"}))
+
+    assert is_approved(manager, pid) is False
+
+
+def test_approval_is_invalidated_when_deadline_changes(manager):
+    pid = _planned_with_tasks(manager)
+    deadline = datetime.now(timezone.utc) + timedelta(hours=2)
+    manager.update_project(pid, deadline=deadline)
+    approve_plan(manager, pid)
+
+    manager.update_project(pid, deadline=deadline + timedelta(hours=1))
+
     assert is_approved(manager, pid) is False
 
 
@@ -221,6 +311,61 @@ def test_approve_records_actor(manager):
     pid = _planned_with_tasks(manager)
     approve_plan(manager, pid, actor="alice")
     assert any("actor=alice" in (d.rationale or "") for d in manager.get_decisions(pid))
+
+
+def test_approve_accepts_hash_of_the_reviewed_preview(manager):
+    pid = _planned_with_tasks(manager)
+    preview = build_plan_preview(manager, pid)
+
+    assert approve_plan(manager, pid, expected_plan_hash=preview.plan_hash) is True
+    assert manager.get_project(pid).approved_plan_hash == preview.plan_hash
+
+
+def test_approve_rejects_stale_preview_hash_without_writing(manager):
+    pid = _planned_with_tasks(manager)
+    stale_hash = current_plan_hash(manager, pid)
+    manager.add_task(pid, title="ajout après revue", acceptance="nouveau critère")
+
+    with pytest.raises(PlanHashMismatch, match="attendu=.*courant="):
+        approve_plan(manager, pid, expected_plan_hash=stale_hash)
+
+    assert manager.get_project(pid).status == PROJECT_STATUS_PLANNED
+    assert manager.get_project(pid).approved_plan_hash is None
+    assert not any("approuvé" in d.summary.lower() for d in manager.get_decisions(pid))
+
+
+def test_approve_rejects_non_normalized_github_target(manager):
+    pid = _planned_with_tasks(manager)
+    manager.update_project(pid, plan_sync_config={"owner": " acme ", "repo": "app"})
+
+    with pytest.raises(PlanTargetError, match="normalisée"):
+        approve_plan(manager, pid)
+
+    assert manager.get_project(pid).status == PROJECT_STATUS_PLANNED
+
+
+def test_changed_plan_cannot_be_reapproved_after_any_issue_was_materialized(manager):
+    pid = _planned_with_tasks(manager)
+    approve_plan(manager, pid)
+    task = manager.get_tasks(pid)[0]
+    manager.update_task(task.id, issue_number=123)
+    manager.update_project(pid, spec="# nouveau contrat\n")
+
+    with pytest.raises(ValueError, match="déjà matérialisé"):
+        approve_plan(manager, pid, expected_plan_hash=current_plan_hash(manager, pid))
+
+
+def test_approve_reads_and_writes_through_one_manager_transaction(manager, monkeypatch):
+    pid = _planned_with_tasks(manager)
+    expected = current_plan_hash(manager, pid)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("lecture hors transaction")
+
+    monkeypatch.setattr(manager, "get_project", forbidden)
+    monkeypatch.setattr(manager, "get_tasks", forbidden)
+
+    assert approve_plan(manager, pid, expected_plan_hash=expected) is True
 
 
 def test_approval_survives_restart(tmp_path):

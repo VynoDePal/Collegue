@@ -18,9 +18,10 @@ Limites connues (gap inhérent GitHub+DB, à durcir au câblage Phase 3) :
   transactionnels. ``issue_number`` est persisté **immédiatement** après le create
   (fenêtre minimale) ; un crash entre les deux pourrait, au retry, recréer une
   issue. Les ``issue_number`` déjà écrits tracent ce qui a été créé.
-- **TOCTOU** : l'approbation est vérifiée une fois en tête ; en exécution
-  concurrente (Phase 3), une mutation du plan pendant la boucle échapperait au gate
-  (mono-écrivain aujourd'hui).
+- **Révision cohérente** : en écriture, cible, SPEC et DAG sont copiés sous verrou
+  dans un snapshot approuvé unique ; la boucle GitHub ne relit jamais ces payloads
+  depuis la DB. Une mutation concurrente ne peut donc pas produire un mélange de
+  deux révisions.
 - **Métadonnées** : labels/milestone/board ne sont appliqués qu'aux issues créées
   par ce run (pas de réconciliation des issues déjà existantes).
 
@@ -34,7 +35,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from collegue.planner.plan_review import require_approved
+from collegue.planner.plan_review import PlanStateSnapshot, load_plan_snapshot
 from collegue.tools.github_commands import (
     FileCommands,
     IssueCommands,
@@ -55,6 +56,10 @@ class SyncError(Exception):
 
 class SpecSyncError(SyncError):
     """Le contrat ``SPEC.md`` n'a pas pu être confirmé avant les issues."""
+
+
+class SyncTargetMismatch(SyncError):
+    """Les arguments d'écriture ne correspondent pas à la cible approuvée."""
 
 
 def _topo_sort_tasks(tasks: List[Any]) -> List[Any]:
@@ -125,17 +130,18 @@ def _default_clients(token: Optional[str]) -> SyncClients:
 
 def _commit_spec(
     clients: SyncClients,
-    manager: Any,
     project_id: int,
     owner: str,
     repo: str,
     spec_filename: str,
+    spec: Optional[str],
     *,
+    branch: str = "main",
     required: bool = False,
 ):
     """Committe le SPEC (``Project.spec``) comme fichier versionné du repo cible (§4.2).
 
-    Le SPEC vit en DB ; le brief en exige une matérialisation **committée** = le
+    Le SPEC vient du snapshot approuvé ; le brief en exige une matérialisation **committée** = le
     contrat du projet, lisible et versionné dans le repo. **Best-effort** : un échec
     (droits, repo absent) n'échoue PAS la synchro des issues (on journalise un
     avertissement et on renvoie ``None``). ``FileCommands.update_file`` joint le SHA
@@ -145,8 +151,6 @@ def _commit_spec(
     :class:`SpecSyncError` et aucune issue ne doit ensuite être créée.
     """
     files = getattr(clients, "files", None)
-    project = manager.get_project(project_id)
-    spec = getattr(project, "spec", None) if project is not None else None
     if files is None or not spec:
         if required:
             reason = "client GitHub files absent" if files is None else "SPEC projet vide ou absent"
@@ -159,7 +163,7 @@ def _commit_spec(
     getter = getattr(files, "get_file_content", None)
     if required and callable(getter):
         try:
-            current = getter(owner, repo, spec_filename)
+            current = getter(owner, repo, spec_filename, branch=branch)
         except Exception:  # absence ou erreur API : le PUT ci-dessous tranchera
             current = None
         if isinstance(current, dict) and current.get("content") == spec:
@@ -175,6 +179,7 @@ def _commit_spec(
             spec_filename,
             message=f"docs: SPEC du projet (planification, project_id={project_id})",
             content=spec,
+            branch=branch,
         )
         commit = response.get("commit", {}) if isinstance(response, dict) else {}
         commit_sha = commit.get("sha") if isinstance(commit, dict) else None
@@ -207,11 +212,14 @@ def build_sync_preview(
     labels: Optional[List[str]] = None,
     milestone_title: Optional[str] = None,
     board_title: Optional[str] = None,
+    tasks: Optional[List[Any]] = None,
 ) -> SyncResult:
     """Décrit ce qui serait créé, sans écrire (dry-run). ``depends_on`` = ids de tâches
     (les numéros d'issue n'existent pas avant création)."""
-    labels = labels or DEFAULT_LABELS
-    tasks = manager.get_tasks(project_id)
+    # ``None`` demande les labels par défaut ; une liste vide est un choix
+    # explicite du contrat de plan et doit rester vide jusqu'à GitHub.
+    labels = DEFAULT_LABELS if labels is None else labels
+    tasks = manager.get_tasks(project_id) if tasks is None else tasks
     issues = [
         {
             "task_id": t.id,
@@ -238,7 +246,9 @@ def sync_plan(
     token: Optional[str] = None,
     clients: Optional[SyncClients] = None,
     spec_filename: str = DEFAULT_SPEC_FILENAME,
+    base_branch: str = "main",
     require_spec_commit: bool = False,
+    snapshot: Optional[PlanStateSnapshot] = None,
 ) -> SyncResult:
     """Synchronise le plan d'un projet vers GitHub (issues + labels + milestone + board).
 
@@ -247,30 +257,57 @@ def sync_plan(
     **committe ``SPEC.md``** (le contrat, §4.2) dans le repo cible, puis crée les
     issues liées de façon idempotente.
     """
-    labels = labels or DEFAULT_LABELS
+    labels = DEFAULT_LABELS if labels is None else labels
+    if snapshot is None and not dry_run:
+        snapshot = load_plan_snapshot(manager, project_id, require_approval=True)
+    if snapshot is not None and snapshot.project_id != project_id:
+        raise SyncError("Le snapshot fourni n'appartient pas au projet demandé.")
+    if snapshot is not None and not dry_run and not snapshot.approved:
+        raise SyncError("Le snapshot fourni n'est pas un plan approuvé.")
+
+    target = snapshot.plan_sync_config if snapshot is not None else None
+    if target is not None:
+        supplied_target = {
+            "owner": owner,
+            "repo": repo,
+            "labels": list(labels),
+            "milestone_title": milestone_title,
+            "board_title": board_title,
+            "spec_filename": spec_filename,
+            "base_branch": base_branch,
+        }
+        if supplied_target != target:
+            raise SyncTargetMismatch(
+                "La synchronisation demandée ne correspond pas à la cible GitHub couverte par l'approbation."
+            )
     if dry_run:
         return build_sync_preview(
-            manager, project_id, labels=labels, milestone_title=milestone_title, board_title=board_title
+            manager,
+            project_id,
+            labels=labels,
+            milestone_title=milestone_title,
+            board_title=board_title,
+            tasks=list(snapshot.tasks) if snapshot is not None else None,
         )
-
-    # Garde-fou (contrat P5) : aucune écriture sans approbation humaine valide.
-    require_approved(manager, project_id)
 
     clients = clients or _default_clients(token)
 
     # Préflight local COMPLET avant la première écriture distante. Un DAG invalide
     # ne doit même pas pouvoir committer le SPEC.
-    tasks = manager.get_tasks(project_id)
+    # Le snapshot approuvé est l'unique source des payloads distants : aucune
+    # relecture DB ne peut mélanger cible, SPEC et DAG de révisions différentes.
+    tasks = list(snapshot.tasks)
     order = _topo_sort_tasks(tasks)  # dépendances d'abord ; raise sur cycle/dep pendante
 
     # §4.2 : le chemin produit exige une confirmation du commit avant toute issue.
     spec_committed, spec_commit_sha, spec_unchanged = _commit_spec(
         clients,
-        manager,
         project_id,
         owner,
         repo,
         spec_filename,
+        snapshot.spec,
+        branch=base_branch,
         required=require_spec_commit,
     )
 

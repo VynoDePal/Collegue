@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -440,14 +441,26 @@ async def run_project_from_settings(
     if durability:
         logger.warning(durability)
     manager = manager or _build_manager(settings_obj)
-    # Un run réel ne peut jamais partir d'un project_id local bricolé, d'un plan
-    # jamais validé, ou d'un plan muté après validation. Les couches GitHub ont
-    # leurs propres gardes, mais ce contrôle précoce évite aussi de construire le
-    # coder/sandbox et de dépenser du budget avant le refus.
-    if not dry_run:
-        from collegue.planner.plan_review import require_approved
+    # Charger une seule révision du contrat avant de construire coder/sandbox.
+    # Les projets créés par l'ancien flux (sans cible persistée) restent lisibles,
+    # mais tout nouveau draft lie aussi le BUILD au dépôt/à la branche approuvés.
+    from collegue.planner.plan_review import load_plan_snapshot
+    from collegue.planner.plan_target import PlanTargetError, normalize_plan_sync_config
 
-        require_approved(manager, project_id)
+    plan_snapshot = load_plan_snapshot(manager, project_id, require_approval=not dry_run)
+    planned_deadline = plan_snapshot.deadline if plan_snapshot is not None else None
+    target = plan_snapshot.plan_sync_config if plan_snapshot is not None else None
+    if target is not None:
+        normalized_target = normalize_plan_sync_config(target)
+        if normalized_target != target:
+            raise PlanTargetError("Cible GitHub persistée non canonique : régénérer le draft.")
+        expected = (target["owner"], target["repo"], target["base_branch"])
+        supplied = (owner, repo, base)
+        if supplied != expected:
+            raise PlanTargetError(
+                "Le BUILD doit utiliser exactement la cible approuvée "
+                f"({expected[0]}/{expected[1]}@{expected[2]}), pas {owner}/{repo}@{base}."
+            )
     sandbox_was_injected = sandbox is not None
     coder_sandbox = sandbox or _build_sandbox(settings_obj)
     agent = agent or _build_agent(coder_sandbox, settings_obj)
@@ -472,7 +485,11 @@ async def run_project_from_settings(
         from collegue.pilot.resume import load_run_start
 
         started_at = load_run_start(manager, project_id)
-        budget = BudgetTimeController(settings_obj=settings_obj, started_at=started_at)
+        budget = BudgetTimeController(
+            settings_obj=settings_obj,
+            started_at=started_at,
+            deadline_at=planned_deadline,
+        )
 
     # ctx de sampling : hors serveur MCP (CLI), aucun ``ctx`` n'est fourni → le
     # reviewer/planner/boucle agentique échoueraient. On en assemble un offline
@@ -630,6 +647,13 @@ class PlanResult:
     preview_markdown: str
     dry_run: bool
     issues: List[dict] = field(default_factory=list)
+    # ``draft`` / ``approve`` / ``sync``. La valeur par défaut conserve la
+    # compatibilité des constructions historiques de ``PlanResult``.
+    action: str = "sync"
+    plan_hash: Optional[str] = None
+    # Le draft possède encore l'objet ``Spec`` structuré. Les actions relues
+    # depuis la DB n'ont que son Markdown : ne pas inventer des compteurs.
+    spec_counts_available: bool = True
 
 
 async def plan_project_from_settings(
@@ -649,23 +673,50 @@ async def plan_project_from_settings(
     labels: Optional[List[str]] = None,
     milestone_title: Optional[str] = None,
     board_title: Optional[str] = None,
+    spec_filename: str = "SPEC.md",
+    base_branch: str = "main",
     decompose_max_tokens: int = 16384,
     decompose_attempts: int = 3,
     retry_sleep_seconds: float = 3.0,
 ) -> PlanResult:
-    """Phase 1 **par le produit** : problème → SPEC → DAG → (gate humain) → issues GitHub.
+    """Crée un **draft** durable : problème → SPEC → DAG → aperçu hashé.
 
     Assemble les dépendances depuis la config (ctx de sampling offline via ``_build_ctx``,
     état durable) et enchaîne ``generate_spec`` → ``persist_spec`` → ``decompose`` →
-    génération QA §4.7 si activée → ``build_plan_preview`` → (``approve_plan``
-    uniquement si ``approve`` est explicite) → ``sync_plan``. **dry-run GitHub par
-    défaut** (``execute_sync=False`` : SPEC/DAG restent persistés, aucune écriture
-    GitHub). ``execute_sync`` n'auto-approuve jamais. Le commit du fichier ``SPEC.md``
-    dans le repo cible est porté par ``sync_plan`` (A3).
+    génération QA §4.7 si activée → ``build_plan_preview``. La cible GitHub est
+    normalisée puis persistée **avec** le SPEC ; ce draft n'appelle jamais GitHub.
+
+    L'ancien one-shot ``approve=True`` / ``execute_sync=True`` est volontairement
+    refusé : l'opérateur doit relire le hash rendu, puis lancer séparément
+    ``plan approve`` et ``plan sync``. Cette séparation empêche qu'un même process
+    LLM génère et auto-approuve son propre plan.
 
     ``decompose`` est re-tenté sur ``ValueError`` (décomposition vide — aléa d'un modèle
     « thinking » coupé trop tôt, d'où ``max_tokens`` élargi).
     """
+    if approve or execute_sync:
+        raise ValueError(
+            "Le flux one-shot approve/execute_sync a été supprimé : créer le draft, "
+            "puis utiliser `plan approve --project-id ... --expected-plan-hash ...` "
+            "et `plan sync --project-id ... [--execute]`."
+        )
+
+    from collegue.planner.plan_target import normalize_plan_sync_config
+
+    plan_sync_config = normalize_plan_sync_config(
+        {
+            "owner": owner,
+            "repo": repo,
+            "labels": labels if labels is not None else ["autonome"],
+            # Conserver le contrat historique du produit : en l'absence
+            # d'override explicite, la planification prépare le milestone MVP.
+            "milestone_title": milestone_title if milestone_title is not None else f"{name} MVP",
+            "board_title": board_title,
+            "spec_filename": spec_filename,
+            "base_branch": base_branch,
+        }
+    )
+
     settings_obj = settings_obj or _settings()
     manager = manager or _build_manager(settings_obj)
     owns_ctx = ctx is None
@@ -675,12 +726,17 @@ async def plan_project_from_settings(
     try:
         from collegue.planner.acceptance_tests import generate_acceptance_tests
         from collegue.planner.decomposer import decompose
-        from collegue.planner.github_sync import sync_plan
-        from collegue.planner.plan_review import approve_plan, build_plan_preview, require_approved
+        from collegue.planner.plan_review import build_plan_preview
         from collegue.planner.spec_generator import generate_spec, persist_spec
 
         spec = await generate_spec(problem, ctx, context=context, settings_obj=settings_obj)
-        project_id = persist_spec(manager, name, spec, deadline=deadline)
+        project_id = persist_spec(
+            manager,
+            name,
+            spec,
+            deadline=deadline,
+            plan_sync_config=plan_sync_config,
+        )
 
         last_err: Optional[Exception] = None
         tasks: list = []
@@ -719,38 +775,10 @@ async def plan_project_from_settings(
             )
 
         preview = build_plan_preview(manager, project_id)
-        preview_md = preview.to_markdown() if preview is not None else ""
+        if preview is None or re.fullmatch(r"[0-9a-f]{64}", str(getattr(preview, "plan_hash", ""))) is None:
+            raise RuntimeError(f"Aperçu/hash du draft {project_id} indisponible : approbation impossible.")
+        preview_md = preview.to_markdown()
 
-        if approve:
-            approve_plan(
-                manager,
-                project_id,
-                actor="operator:collegue-cli",
-                require_acceptance_artifacts=acceptance_enabled,
-            )
-            # L'aperçu rendu doit refléter le statut réellement persisté.
-            preview = build_plan_preview(manager, project_id)
-            preview_md = preview.to_markdown() if preview is not None else ""
-
-        if execute_sync:
-            # `--execute-sync` n'est pas une approbation implicite. L'opérateur
-            # doit fournir `--approve` explicitement ; on vérifie ici puis
-            # `sync_plan` re-vérifie juste avant ses écritures (défense en profondeur).
-            require_approved(manager, project_id)
-
-        token = github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV)
-        sync = sync_plan(
-            manager,
-            project_id,
-            owner,
-            repo,
-            dry_run=not execute_sync,
-            token=token,
-            labels=labels if labels is not None else ["autonome"],
-            milestone_title=milestone_title if milestone_title is not None else f"{name} MVP",
-            board_title=board_title,
-            require_spec_commit=execute_sync,
-        )
         return PlanResult(
             project_id=project_id,
             spec_title=getattr(spec, "title", ""),
@@ -758,8 +786,12 @@ async def plan_project_from_settings(
             acceptance_criteria=len(getattr(spec, "acceptance_criteria", []) or []),
             task_count=len(tasks),
             preview_markdown=preview_md,
-            dry_run=not execute_sync,
-            issues=list(getattr(sync, "issues", []) or []),
+            dry_run=True,
+            issues=[],
+            action="draft",
+            # Même lecture cohérente que le contenu affiché à l'opérateur : ne
+            # jamais recalculer dans une seconde session après l'aperçu.
+            plan_hash=preview.plan_hash,
         )
     finally:
         if owns_ctx:
@@ -769,6 +801,127 @@ async def plan_project_from_settings(
                     await aclose()
                 except Exception as exc:  # noqa: BLE001 - fermeture best-effort
                     logger.warning("Fermeture du ctx de sampling échouée: %s", exc)
+
+
+def _stored_plan_result(
+    manager,
+    project_id: int,
+    *,
+    action: str,
+    dry_run: bool,
+    issues: Optional[List[dict]] = None,
+) -> PlanResult:
+    """Construit le bilan d'une action sans réinterpréter le SPEC via un LLM."""
+    from collegue.planner.plan_review import build_plan_preview
+
+    preview = build_plan_preview(manager, project_id)
+    if preview is None:
+        raise ValueError(f"Projet {project_id} introuvable.")
+    preview_tasks = list(getattr(preview, "tasks", []) or [])
+    return PlanResult(
+        project_id=project_id,
+        # Le titre structuré du ``Spec`` n'est pas stocké séparément. Le nom du
+        # projet est la représentation durable et ne nécessite aucun resampling.
+        spec_title=str(getattr(preview, "name", "") or ""),
+        objectives=0,
+        acceptance_criteria=0,
+        task_count=int(getattr(preview, "task_count", len(preview_tasks))),
+        preview_markdown=preview.to_markdown(),
+        dry_run=dry_run,
+        issues=list(issues or []),
+        action=action,
+        plan_hash=getattr(preview, "plan_hash", None),
+        spec_counts_available=False,
+    )
+
+
+def approve_project_plan_from_settings(
+    project_id: int,
+    expected_plan_hash: str,
+    *,
+    settings_obj: Optional[object] = None,
+    manager=None,
+    actor: str = "operator:collegue-cli",
+) -> PlanResult:
+    """Approuve un draft existant en liant le geste au hash relu par l'humain.
+
+    Cette action ne construit volontairement ni contexte de sampling, ni client
+    GitHub : elle ne fait que relire et modifier l'état durable local.
+    """
+    expected_plan_hash = str(expected_plan_hash or "").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", expected_plan_hash) is None:
+        raise ValueError("expected_plan_hash doit être un SHA-256 hexadécimal lowercase de 64 caractères.")
+    settings_obj = settings_obj or _settings()
+    manager = manager or _build_manager(settings_obj)
+
+    from collegue.planner.plan_review import approve_plan
+
+    approved = approve_plan(
+        manager,
+        project_id,
+        actor=actor,
+        expected_plan_hash=expected_plan_hash,
+        require_target=True,
+    )
+    if not approved:
+        raise ValueError(f"Projet {project_id} introuvable.")
+    return _stored_plan_result(manager, project_id, action="approve", dry_run=True)
+
+
+def sync_project_plan_from_settings(
+    project_id: int,
+    *,
+    execute: bool = False,
+    settings_obj: Optional[object] = None,
+    github_token: Optional[str] = None,
+    manager=None,
+    clients=None,
+) -> PlanResult:
+    """Prévisualise ou synchronise un plan avec sa cible GitHub persistée.
+
+    Aucun argument owner/repo n'est accepté : la cible scellée lors du draft est
+    l'unique source de vérité. ``execute=False`` reste sans écriture distante ; en
+    réel, ``require_spec_commit=True`` impose le commit confirmé de ``SPEC.md``
+    avant la première issue.
+    """
+    settings_obj = settings_obj or _settings()
+    manager = manager or _build_manager(settings_obj)
+    from collegue.planner.github_sync import sync_plan
+    from collegue.planner.plan_review import load_plan_snapshot
+
+    snapshot = load_plan_snapshot(
+        manager,
+        project_id,
+        require_approval=execute,
+        require_target=True,
+    )
+    if snapshot is None:
+        raise ValueError(f"Projet {project_id} introuvable.")
+    config = snapshot.plan_sync_config
+    token = github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV)
+    sync = sync_plan(
+        manager,
+        project_id,
+        config["owner"],
+        config["repo"],
+        dry_run=not execute,
+        token=token,
+        clients=clients,
+        labels=config["labels"],
+        milestone_title=config["milestone_title"],
+        board_title=config["board_title"],
+        spec_filename=config["spec_filename"],
+        base_branch=config["base_branch"],
+        require_spec_commit=execute,
+        snapshot=snapshot,
+    )
+    return _stored_plan_result(
+        manager,
+        project_id,
+        action="sync",
+        dry_run=not execute,
+        issues=list(getattr(sync, "issues", []) or []),
+    )
 
 
 # ── reporting lisible ──────────────────────────────────────────────────────────
@@ -809,13 +962,22 @@ def format_plan_report(result: PlanResult) -> str:
     Affiche l'**aperçu complet du plan** (SPEC + tâches/dépendances) : c'est ce que
     l'opérateur doit voir avant d'approuver/exécuter (gate humain P5).
     """
-    mode = "dry-run (aperçu, aucune écriture)" if result.dry_run else "EXECUTE (issues créées)"
+    if result.action == "draft":
+        mode = "non lancée (draft durable, aucune écriture GitHub)"
+    elif result.action == "approve":
+        mode = "non lancée (plan approuvé, prêt à synchroniser)"
+    else:
+        mode = "dry-run (aperçu, aucune écriture)" if result.dry_run else "EXECUTE (issues créées)"
     lines = [
         f"Plan projet #{result.project_id} — « {result.spec_title} »",
-        f"  SPEC : {result.objectives} objectif(s), {result.acceptance_criteria} critère(s) d'acceptation",
-        f"  Tâches : {result.task_count}",
-        f"  Sync GitHub : {mode}",
     ]
+    if result.spec_counts_available:
+        lines.append(f"  SPEC : {result.objectives} objectif(s), {result.acceptance_criteria} critère(s) d'acceptation")
+    else:
+        lines.append("  SPEC : relu depuis l'état durable (contenu complet ci-dessous)")
+    lines.extend([f"  Tâches : {result.task_count}", f"  Sync GitHub : {mode}"])
+    if result.plan_hash:
+        lines.append(f"  Hash du plan : {result.plan_hash}")
     for it in result.issues:
         num = it.get("issue_number")
         tag = "skip" if it.get("skipped") else (f"#{num}" if num else "(dry-run)")

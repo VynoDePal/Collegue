@@ -170,15 +170,22 @@ Beyond the **reactive** experts, Collègue can drive end-to-end development:
 Stages: `planner` → `pilote` → `executor` → `improve`, on a durable-state
 (Postgres/SQLite) + Docker-sandbox foundation.
 
-**Safe by default**: `dry_run` (no writes) until you pass `--execute`; hard
-auto-paused budget. In a real BUILD, a **merge-bot** auto-merges each task to
+**Safe by default**: a run stays in `dry_run` until you pass `--execute`.
+`plan draft` only persists its durable draft; the operator then approves the
+displayed hash, and only `plan sync --execute` writes to GitHub. The hard budget
+auto-pauses the engine. In a real BUILD, a **merge-bot** auto-merges each task to
 construct the MVP (`BUILD_AUTO_MERGE`, on by default); the **improvement** phase
 leaves its PRs **open for human merge** (§6). Risk-gated auto-merge, auto-revert and
 the pilot MCP tool stay **off by default** and fail-closed. The coder can run via a
 ChatGPT/Codex **subscription** (`$0` API cost).
 
 ```bash
-# Preview (dry_run), then real execution
+# Phase 1: three separate actions — the LLM process never approves itself
+python -m collegue.pilot plan draft --name app --problem "..." --owner org --repo app --base main
+python -m collegue.pilot plan approve --project-id 1 --expected-plan-hash DISPLAYED_SHA256
+python -m collegue.pilot plan sync --project-id 1 --execute
+
+# Build: preview (dry_run), then real execution
 python -m collegue.pilot --project-id 1 --repo-source /path/clone --owner org --repo app
 python -m collegue.pilot ... --execute            # real writes (PRs + state)
 python -m collegue.pilot ... --execute --improve  # + improvement cycle
