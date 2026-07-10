@@ -150,7 +150,9 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
         budget=_Budget(),
         ctx=_Ctx(),
     )
-    assert result.stop_reason == "completed"
+    # #580 : sans merge-bot, des PR ouvertes ne constituent pas encore un MVP
+    # intégré. Le runtime produit expose donc explicitement l'attente de merge.
+    assert result.stop_reason == "awaiting_merge"
     assert result.iterations == 2
     # Le handoff fonctionne : le run a repris les tâches planifiées et les a construites.
     assert all(t.status == "in_review" for t in manager.get_tasks(plan.project_id))

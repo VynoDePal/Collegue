@@ -184,10 +184,13 @@ python -m collegue.pilot ... --execute            # écritures réelles (PR + é
 python -m collegue.pilot ... --execute --improve  # + cycle d'amélioration
 ```
 
-`--improve` enchaîne, une fois le MVP construit, la **boucle d'amélioration continue**
+`--improve` enchaîne, une fois le MVP **réellement mergé puis resynchronisé sur
+`origin/<base>`**, la **boucle d'amélioration continue**
 (Phase 4) : un **objectif de qualité déterministe** (couverture − sécu − lint −
 complexité, sans avis de LLM) ouvre des PR seulement quand le diff **progresse sans
 régression** (gate fail-closed) ; les PR sont **stackées** et s'arrêtent au plateau.
+Une dernière PR BUILD non mergée ou un resync git en échec bloque Phase 4 au lieu
+de produire un faux succès `completed`.
 
 Architecture, boucle d'amélioration, garde-fous, observabilité/audit, reprise après
 crash et réglages : **[docs/moteur_autonome.md](docs/moteur_autonome.md)**.
