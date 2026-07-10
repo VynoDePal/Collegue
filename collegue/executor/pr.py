@@ -16,6 +16,7 @@ Limite (MVP) : les fichiers sont poussés via la Contents API en **texte UTF-8**
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -27,10 +28,20 @@ from collegue.textnorm import inline
 
 DEFAULT_BASE_BRANCH = "main"
 
+DELIVERY_UPDATE = "update"
+DELIVERY_DELETE = "delete"
+DELIVERY_SKIP_BINARY = "skip_binary"
+DELIVERY_SKIP_SYMLINK = "skip_symlink"
+
 
 def exec_marker(issue_number: int) -> str:
     """Marqueur HTML traçant la PR générée par l'exécuteur pour une issue."""
     return f"<!-- collegue-exec:{int(issue_number)} -->"
+
+
+def diff_sha256_marker(digest: str) -> str:
+    """Marqueur HTML liant la PR au diff dont le snapshot a été validé."""
+    return f"<!-- collegue-diff-sha256:{digest} -->"
 
 
 def _safe_rel_path(path: str) -> str:
@@ -70,6 +81,119 @@ class PrClients:
 
 
 @dataclass(frozen=True)
+class DeliveryFile:
+    """État immuable d'un chemin au moment où le livrable est figé.
+
+    ``content`` n'est renseigné que pour ``update``. Les suppressions et les
+    formats que la Contents API ne sait pas pousser restent représentés
+    explicitement dans le manifeste. ``source_sha256`` permet de détecter aussi
+    la dérive d'un binaire ou de la cible d'un symlink sans jamais les livrer.
+    """
+
+    path: str
+    operation: str
+    content: Optional[str] = None
+    source_sha256: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DeliverySnapshot:
+    """Manifeste immuable : payloads à pousser + empreinte du diff validé."""
+
+    files: Tuple[DeliveryFile, ...]
+    diff_sha256: str
+
+    @property
+    def paths(self) -> Tuple[str, ...]:
+        return tuple(item.path for item in self.files)
+
+    @property
+    def skipped_binaries(self) -> Tuple[str, ...]:
+        return tuple(item.path for item in self.files if item.operation == DELIVERY_SKIP_BINARY)
+
+    @property
+    def skipped_symlinks(self) -> Tuple[str, ...]:
+        return tuple(item.path for item in self.files if item.operation == DELIVERY_SKIP_SYMLINK)
+
+
+class DeliveryDriftError(RuntimeError):
+    """Le workspace vivant ne correspond plus au snapshot autorisé."""
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _capture_delivery_file(workspace_path: str, path: str) -> DeliveryFile:
+    """Capture un chemin une seule fois, sans jamais suivre un symlink terminal."""
+    rel = _safe_rel_path(path)
+    candidate = os.path.join(workspace_path, rel)
+    if os.path.islink(candidate):
+        target = os.readlink(candidate)
+        return DeliveryFile(
+            path=rel,
+            operation=DELIVERY_SKIP_SYMLINK,
+            source_sha256=_sha256(os.fsencode(target)),
+        )
+
+    full = _resolve_in_workspace(workspace_path, rel)
+    if not os.path.isfile(full):
+        return DeliveryFile(path=rel, operation=DELIVERY_DELETE)
+
+    with open(full, "rb") as handle:
+        raw = handle.read()
+    digest = _sha256(raw)
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return DeliveryFile(path=rel, operation=DELIVERY_SKIP_BINARY, source_sha256=digest)
+    return DeliveryFile(path=rel, operation=DELIVERY_UPDATE, content=content, source_sha256=digest)
+
+
+def capture_delivery_snapshot(
+    workspace: Workspace,
+    files_changed: Tuple[str, ...],
+    *,
+    diff: str = "",
+) -> DeliverySnapshot:
+    """Fige immédiatement tous les payloads qui pourront atteindre GitHub.
+
+    Le SHA-256 porte sur les octets UTF-8 exacts du diff fourni. Une fois cette
+    fonction revenue, le manifeste ne dépend plus du workspace vivant : même une
+    mutation pendant les appels réseau ne peut modifier le contenu livré.
+    """
+    files = tuple(_capture_delivery_file(workspace.path, path) for path in files_changed)
+    return DeliverySnapshot(files=files, diff_sha256=_sha256((diff or "").encode("utf-8")))
+
+
+def verify_delivery_snapshot(
+    workspace: Workspace,
+    snapshot: DeliverySnapshot,
+    *,
+    ignored_paths: Tuple[str, ...] = (),
+) -> None:
+    """Lève :class:`DeliveryDriftError` si un chemin figé a changé.
+
+    La vérification est volontairement séparée de :func:`open_pr` : le pipeline
+    peut la placer juste après ses gates, tandis que ``open_pr(snapshot=...)`` ne
+    relit ensuite jamais le filesystem et pousse exclusivement les payloads figés.
+    ``ignored_paths`` autorise une exception nominative et bornée (par exemple
+    ``requirements.txt`` pendant sa remédiation déterministe) avant de refiger le
+    livrable et de rejouer le gate sur son nouveau diff.
+    """
+    ignored = frozenset(_safe_rel_path(path) for path in ignored_paths)
+    expected_files = tuple(item for item in snapshot.files if item.path not in ignored)
+    try:
+        live = tuple(_capture_delivery_file(workspace.path, item.path) for item in expected_files)
+    except (OSError, ValueError) as exc:
+        raise DeliveryDriftError(f"snapshot de livraison invérifiable: {exc}") from exc
+    if live == expected_files:
+        return
+    changed = [expected.path for expected, current in zip(expected_files, live, strict=True) if expected != current]
+    raise DeliveryDriftError("workspace modifié depuis le snapshot: " + ", ".join(changed))
+
+
+@dataclass(frozen=True)
 class PrResult:
     """Résultat (ou aperçu) d'une ouverture de PR."""
 
@@ -85,7 +209,13 @@ class PrResult:
     skipped_symlinks: Tuple[str, ...] = ()  # liens symboliques non poussés (cf. #423)
 
 
-def build_pr_body(quality_report: QualityReport, issue: IssueSpec, *, closes_issue: bool = True) -> str:
+def build_pr_body(
+    quality_report: QualityReport,
+    issue: IssueSpec,
+    *,
+    closes_issue: bool = True,
+    diff_sha256: Optional[str] = None,
+) -> str:
     """Corps de PR : contexte issue + rapport qualité (fencé) + ``Closes`` + marqueur.
 
     ``closes_issue=False`` omet la ligne ``Closes #N`` : à utiliser quand le numéro
@@ -105,6 +235,8 @@ def build_pr_body(quality_report: QualityReport, issue: IssueSpec, *, closes_iss
     if closes_issue:
         lines += [f"Closes #{int(issue.number)}", ""]
     lines.append(exec_marker(issue.number))
+    if diff_sha256 is not None:
+        lines.append(diff_sha256_marker(diff_sha256))
     return "\n".join(lines)
 
 
@@ -116,6 +248,8 @@ def open_pr(
     repo: str,
     *,
     files_changed: Tuple[str, ...] = (),
+    snapshot: Optional[DeliverySnapshot] = None,
+    diff: str = "",
     base: str = DEFAULT_BASE_BRANCH,
     clients: Optional[PrClients] = None,
     dry_run: bool = True,
@@ -131,9 +265,34 @@ def open_pr(
     et journalisation du numéro de PR si ``manager``+``project_id`` sont fournis.
     ``closes_issue=False`` n'ajoute pas ``Closes #N`` (numéro ≠ vraie issue, ex. G4).
     """
+    # Compatibilité des appelants historiques : sans manifeste explicite, on
+    # capture UNE fois, avant tout appel réseau. Le reste de la fonction ne lit
+    # ensuite plus le workspace. Les pipelines sensibles peuvent figer le
+    # snapshot avant leurs gates puis le fournir ici.
+    if snapshot is None:
+        snapshot = capture_delivery_snapshot(workspace, files_changed, diff=diff)
+    elif files_changed and tuple(_safe_rel_path(path) for path in files_changed) != snapshot.paths:
+        raise ValueError("files_changed ne correspond pas au snapshot de livraison")
+
     head = workspace.branch
     title = f"{inline(issue.title)} (issue #{int(issue.number)})"
-    body = build_pr_body(quality_report, issue, closes_issue=closes_issue)
+    body = build_pr_body(
+        quality_report,
+        issue,
+        closes_issue=closes_issue,
+        diff_sha256=snapshot.diff_sha256,
+    )
+
+    skipped_binaries = snapshot.skipped_binaries
+    skipped_symlinks = snapshot.skipped_symlinks
+    if skipped_binaries:
+        body += "\n\n> ⚠️ Fichiers binaires non poussés (non supportés) : " + ", ".join(
+            f"`{p}`" for p in skipped_binaries
+        )
+    if skipped_symlinks:
+        body += "\n\n> ⚠️ Liens symboliques non poussés (jamais lus, non supportés) : " + ", ".join(
+            f"`{p}`" for p in skipped_symlinks
+        )
 
     if dry_run:
         return PrResult(dry_run=True, title=title, head=head, base=base, body=body)
@@ -155,43 +314,12 @@ def open_pr(
 
     clients.branches.ensure_branch(owner, repo, head, from_branch=base)
 
-    skipped_binaries: list[str] = []
-    skipped_symlinks: list[str] = []
-    for path in files_changed:
-        rel = _safe_rel_path(path)
-        if os.path.islink(os.path.join(workspace.path, rel)):
-            # Lien symbolique (ex. `node_modules/.bin/*` après un `npm install`) :
-            # la Contents API ne représente pas les symlinks, et un lien peut viser
-            # un secret hôte — on ne le LIT jamais. Même politique que les binaires :
-            # SAUTER + tracer, plutôt que faire échouer toute la tâche. [#423]
-            skipped_symlinks.append(rel)
-            continue
-        full = _resolve_in_workspace(workspace.path, rel)
-        message = f"collegue: issue #{int(issue.number)} — {rel}"
-        if os.path.isfile(full):
-            try:
-                with open(full, "r", encoding="utf-8") as handle:
-                    content = handle.read()
-            except UnicodeDecodeError:
-                # Fichier binaire (PNG/PDF/…) : la Contents API n'est câblée qu'en
-                # texte UTF-8 (limite §MVP). On le SAUTE plutôt que de faire échouer
-                # toute la tâche sur un asset — la PR porte le reste du diff. [#410]
-                skipped_binaries.append(rel)
-                continue
-            clients.files.update_file(owner, repo, rel, message, content, branch=head)
-        else:
-            # Fichier supprimé par l'agent : on le retire aussi sur la branche.
-            clients.files.delete_file(owner, repo, rel, message, branch=head)
-
-    if skipped_binaries:
-        # Trace visible pour le relecteur (la PR ne contient pas ces binaires).
-        body += "\n\n> ⚠️ Fichiers binaires non poussés (non supportés) : " + ", ".join(
-            f"`{p}`" for p in skipped_binaries
-        )
-    if skipped_symlinks:
-        body += "\n\n> ⚠️ Liens symboliques non poussés (jamais lus, non supportés) : " + ", ".join(
-            f"`{p}`" for p in skipped_symlinks
-        )
+    for item in snapshot.files:
+        message = f"collegue: issue #{int(issue.number)} — {item.path}"
+        if item.operation == DELIVERY_UPDATE:
+            clients.files.update_file(owner, repo, item.path, message, item.content or "", branch=head)
+        elif item.operation == DELIVERY_DELETE:
+            clients.files.delete_file(owner, repo, item.path, message, branch=head)
 
     pr = clients.prs.create_pr(owner, repo, title, head, base, body)
     number = getattr(pr, "number", None)
@@ -212,8 +340,8 @@ def open_pr(
         body=body,
         number=number,
         html_url=html_url,
-        skipped_binaries=tuple(skipped_binaries),
-        skipped_symlinks=tuple(skipped_symlinks),
+        skipped_binaries=skipped_binaries,
+        skipped_symlinks=skipped_symlinks,
     )
 
 

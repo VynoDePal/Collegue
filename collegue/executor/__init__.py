@@ -16,7 +16,18 @@ from collegue.executor.command import CommandRunner, LocalCommandRunner
 from collegue.executor.openhands_agent import OpenHandsAgent
 from collegue.executor.openhands_sdk_agent import OHSdkAgent
 from collegue.executor.pipeline import ExecutionOutcome, execute_issue
-from collegue.executor.pr import PrClients, PrResult, build_pr_body, exec_marker, open_pr
+from collegue.executor.pr import (
+    DeliveryDriftError,
+    DeliveryFile,
+    DeliverySnapshot,
+    PrClients,
+    PrResult,
+    build_pr_body,
+    capture_delivery_snapshot,
+    exec_marker,
+    open_pr,
+    verify_delivery_snapshot,
+)
 from collegue.executor.quality_gate import (
     AdequacyChecker,
     AdequacyOutcome,
@@ -103,6 +114,11 @@ __all__ = [
     # E4 — ouverture de PR
     "PrClients",
     "PrResult",
+    "DeliveryFile",
+    "DeliverySnapshot",
+    "DeliveryDriftError",
+    "capture_delivery_snapshot",
+    "verify_delivery_snapshot",
     "open_pr",
     "build_pr_body",
     "exec_marker",

@@ -185,12 +185,153 @@ def test_coder_sandbox_env_api_key_mode():
     assert "LLM_SUBSCRIPTION" not in env
 
 
+def test_gate_sandbox_keeps_runtime_resources_without_coder_credentials(tmp_path):
+    """Le code projet du gate garde les ressources/installations, jamais les secrets coder."""
+    import collegue.pilot.runtime as runtime
+
+    cache = tmp_path / "pip-cache"
+    auth = tmp_path / "openhands-auth"
+    auth.mkdir()
+    settings = SimpleNamespace(
+        SANDBOX_IMAGE="sandbox-project:sha256-test",
+        SANDBOX_NETWORK="bridge",
+        SANDBOX_DNS="1.1.1.1, 8.8.8.8",
+        SANDBOX_PIP_CACHE_DIR=str(cache),
+        SANDBOX_SUBSCRIPTION_AUTH_DIR=str(auth),
+        SANDBOX_MEMORY="7g",
+        SANDBOX_CPUS="3.0",
+        SANDBOX_TIMEOUT=987.0,
+        CODER_SUBSCRIPTION=True,
+        CODER_SUBSCRIPTION_MODEL="gpt-5.5",
+    )
+
+    gate = runtime._build_gate_sandbox(settings)
+
+    assert gate.image == "sandbox-project:sha256-test"
+    assert gate.network == "bridge"
+    assert gate.dns == ("1.1.1.1", "8.8.8.8")
+    assert gate.pip_cache_dir == str(cache) and cache.is_dir()
+    assert gate.memory == "7g" and gate.cpus == "3.0" and gate.timeout == 987.0
+    assert gate.subscription_auth_dir is None
+    assert gate.env == {}
+    assert gate.env_passthrough == ()
+
+    argv = gate._build_run_argv("python -m pytest -q", str(tmp_path / "workspace"))
+    rendered = " ".join(argv)
+    assert "LLM_API_KEY" not in rendered
+    assert "GEMINI_API_KEY" not in rendered
+    assert "LLM_MODEL" not in rendered
+    assert ".openhands" not in rendered
+
+
+def test_acceptance_checker_receives_runtime_settings(monkeypatch):
+    """Le checker QA résout son propre rôle/modèle depuis les settings du run."""
+    import collegue.executor.quality_gate as quality_gate
+    import collegue.pilot.runtime as runtime
+
+    captured = {}
+
+    class _Checker:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(quality_gate, "LLMAcceptanceChecker", _Checker)
+    settings = SimpleNamespace(LLM_MODEL_REVIEWER="reviewer-model")
+
+    checker = runtime._build_acceptance_checker(settings)
+
+    assert isinstance(checker, _Checker)
+    assert captured == {"settings_obj": settings}
+
+
 def test_build_agent_uses_sdk_coder():
     import collegue.pilot.runtime as runtime
     from collegue.executor import OHSdkAgent
 
     agent = runtime._build_agent(sandbox=object(), settings_obj=SimpleNamespace(LLM_PROVIDER="gemini", LLM_MODEL="m"))
     assert isinstance(agent, OHSdkAgent)
+
+
+async def test_runtime_routes_coder_and_gate_to_distinct_sandboxes(monkeypatch, manager, git_repo):
+    """Chemin produit : l'agent reçoit le sandbox avec creds, le driver celui sans creds."""
+    import collegue.pilot.runtime as runtime
+
+    coder_sandbox = object()
+    gate_sandbox = object()
+    built_agent = object()
+    captured = {}
+
+    monkeypatch.setattr(runtime, "_build_sandbox", lambda _settings: coder_sandbox)
+    monkeypatch.setattr(runtime, "_build_gate_sandbox", lambda _settings: gate_sandbox)
+
+    def _fake_build_agent(sandbox, _settings):
+        captured["agent_sandbox"] = sandbox
+        return built_agent
+
+    async def _fake_run_project(_project_id, _repo_source, _ctx, **kwargs):
+        captured["run_kwargs"] = kwargs
+        return ProjectRunResult(stop_reason="completed", iterations=0, processed=[])
+
+    monkeypatch.setattr(runtime, "_build_agent", _fake_build_agent)
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+
+    pid = _linear(manager, 1)
+    await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        ctx=object(),
+        dry_run=True,
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=False),
+        manager=manager,
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+    )
+
+    assert captured["agent_sandbox"] is coder_sandbox
+    assert captured["run_kwargs"]["agent"] is built_agent
+    assert captured["run_kwargs"]["sandbox"] is gate_sandbox
+
+
+async def test_runtime_keeps_injected_sandbox_compatibility_and_allows_gate_override(monkeypatch, manager, git_repo):
+    """Un ancien double injecté reste partagé ; gate_sandbox permet une séparation explicite."""
+    import collegue.pilot.runtime as runtime
+
+    injected = object()
+    explicit_gate = object()
+    seen = []
+
+    def _must_not_build(_settings):
+        raise AssertionError("aucun sandbox réel ne doit être construit quand un double est injecté")
+
+    async def _fake_run_project(_project_id, _repo_source, _ctx, **kwargs):
+        seen.append(kwargs["sandbox"])
+        return ProjectRunResult(stop_reason="completed", iterations=0, processed=[])
+
+    monkeypatch.setattr(runtime, "_build_sandbox", _must_not_build)
+    monkeypatch.setattr(runtime, "_build_gate_sandbox", _must_not_build)
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+
+    common = dict(
+        owner="o",
+        repo="r",
+        ctx=object(),
+        dry_run=True,
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=False),
+        manager=manager,
+        sandbox=injected,
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+    )
+    pid = _linear(manager, 1)
+    await run_project_from_settings(pid, git_repo, **common)
+    await run_project_from_settings(pid, git_repo, gate_sandbox=explicit_gate, **common)
+
+    assert seen == [injected, explicit_gate]
 
 
 # --- ctx de sampling offline (A1) ----------------------------------------------

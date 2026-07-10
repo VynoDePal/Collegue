@@ -174,6 +174,31 @@ async def test_blocking_review_stops_at_gate(repo):
     assert clients.prs.created == []
 
 
+async def test_green_gate_that_mutates_validated_file_opens_no_pr(repo):
+    """#582 : un test vert ne peut pas remplacer les octets livrés après snapshot."""
+    clients = _clients()
+
+    class _MutatingSandbox:
+        def run_tests(self, workspace, command="pytest -q"):
+            from pathlib import Path
+
+            Path(workspace, "COLLEGUE_FAKE.txt").write_text("contenu substitué après capture\n")
+            return SandboxResult(exit_code=0, stdout="2 passed", stderr="")
+
+    outcome = await execute_issue(
+        ISSUE,
+        repo,
+        ctx=None,
+        dry_run=False,
+        **_kwargs(clients=clients, sandbox=_MutatingSandbox()),
+    )
+    assert outcome.success is False
+    assert outcome.stage == "gate" and outcome.reason == "gate_failed"
+    assert "INTÉGRITÉ DU LIVRABLE REFUSÉE" in (outcome.error or "")
+    assert outcome.pr is None
+    assert clients.prs.created == [] and clients.branches.created == []
+
+
 async def test_agent_noop_stops_at_run(repo):
     clients = _clients()
     outcome = await execute_issue(
@@ -1102,6 +1127,17 @@ async def test_requirements_remediation_recaptures_diff_for_pr(repo):
     )
     green = SandboxResult(exit_code=0, stdout="2 passed", stderr="")
     clients = _clients()
+
+    class _CountingReviewer(FakeReviewer):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def review(self, diff, ctx, *, issue=None):
+            self.calls += 1
+            return await super().review(diff, ctx, issue=issue)
+
+    reviewer = _CountingReviewer()
     outcome = await execute_issue(
         ISSUE,
         repo,
@@ -1111,6 +1147,7 @@ async def test_requirements_remediation_recaptures_diff_for_pr(repo):
             agent=FakeCodeAgent(files={"requirements.txt": "fastapi\n", "app.py": "import httpx\n"}),
             sandbox=_SeqGateSandbox([red, green]),
             clients=clients,
+            reviewer=reviewer,
         ),
     )
     assert outcome.success is True
@@ -1121,6 +1158,35 @@ async def test_requirements_remediation_recaptures_diff_for_pr(repo):
     # Revue #481 : les artefacts écrits par le conteneur du gate restent hors PR.
     assert not any("node_modules" in path for path in outcome.execution.files_changed)
     assert "artefact.js" not in outcome.execution.diff
+    assert reviewer.calls == 2  # ancien diff, puis diff final réellement livrable
+    assert "collegue-diff-sha256:" in outcome.pr.body
+
+
+async def test_requirements_remediation_final_recheck_can_veto_pr(repo):
+    """#582 : le diff amendé doit repasser le gate complet avant livraison."""
+    missing = SandboxResult(
+        exit_code=2,
+        stdout="E   ModuleNotFoundError: No module named 'httpx'\n",
+        stderr="",
+    )
+    green = SandboxResult(exit_code=0, stdout="2 passed", stderr="")
+    final_red = SandboxResult(exit_code=1, stdout="1 failed", stderr="")
+    clients = _clients()
+    outcome = await execute_issue(
+        ISSUE,
+        repo,
+        ctx=None,
+        dry_run=False,
+        **_kwargs(
+            agent=FakeCodeAgent(files={"requirements.txt": "fastapi\n", "app.py": "import httpx\n"}),
+            sandbox=_SeqGateSandbox([missing, green, final_red]),
+            clients=clients,
+        ),
+    )
+    assert outcome.success is False and outcome.reason == "gate_failed"
+    assert outcome.quality_report.requirements_added == ("httpx",)
+    assert "+httpx" in outcome.execution.diff
+    assert outcome.pr is None and clients.prs.created == []
 
 
 async def test_remediation_failure_keeps_gate_red_and_diff_updated(repo):

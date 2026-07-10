@@ -1,5 +1,6 @@
 """Tests E4 (#366) : ouverture de PR (dry_run par défaut), clients GitHub mockés."""
 
+import hashlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,18 @@ from collegue.executor import (
     build_pr_body,
     exec_marker,
     open_pr,
+)
+from collegue.executor.pr import (
+    DELIVERY_DELETE,
+    DELIVERY_SKIP_BINARY,
+    DELIVERY_SKIP_SYMLINK,
+    DELIVERY_UPDATE,
+    DeliveryDriftError,
+    DeliveryFile,
+    DeliverySnapshot,
+    capture_delivery_snapshot,
+    diff_sha256_marker,
+    verify_delivery_snapshot,
 )
 from collegue.state import ProjectStateManager
 from collegue.tools.base import ToolExecutionError
@@ -82,6 +95,142 @@ def _workspace(tmp_path, files=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     return Workspace(path=str(ws_dir), branch="collegue/issue-5", base_commit="basesha123")
+
+
+# --- snapshot immuable / anti-TOCTOU -------------------------------------------
+
+
+def test_delivery_snapshot_captures_all_operations_and_diff_hash(tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    (ws_dir / "code.py").write_text("print('validé')\n", encoding="utf-8")
+    binary = b"\x89PNG\r\n\x1a\n\xff"
+    (ws_dir / "logo.png").write_bytes(binary)
+    os.symlink("code.py", ws_dir / "alias.py")
+    ws = Workspace(path=str(ws_dir), branch="collegue/issue-5", base_commit="base")
+    diff = "diff --git a/code.py b/code.py\n+print('validé')\n"
+
+    snapshot = capture_delivery_snapshot(
+        ws,
+        ("code.py", "gone.py", "logo.png", "alias.py"),
+        diff=diff,
+    )
+
+    assert isinstance(snapshot, DeliverySnapshot)
+    assert all(isinstance(item, DeliveryFile) for item in snapshot.files)
+    assert [item.operation for item in snapshot.files] == [
+        DELIVERY_UPDATE,
+        DELIVERY_DELETE,
+        DELIVERY_SKIP_BINARY,
+        DELIVERY_SKIP_SYMLINK,
+    ]
+    assert snapshot.files[0].content == "print('validé')\n"
+    assert snapshot.files[2].source_sha256 == hashlib.sha256(binary).hexdigest()
+    assert snapshot.diff_sha256 == hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    assert snapshot.skipped_binaries == ("logo.png",)
+    assert snapshot.skipped_symlinks == ("alias.py",)
+
+
+def test_verify_delivery_snapshot_detects_live_drift(tmp_path):
+    ws = _workspace(tmp_path, {"a.py": "validated\n"})
+    snapshot = capture_delivery_snapshot(ws, ("a.py",), diff="validated diff")
+
+    assert verify_delivery_snapshot(ws, snapshot) is None
+    Path(ws.path, "a.py").write_text("mutated after gate\n", encoding="utf-8")
+
+    with pytest.raises(DeliveryDriftError, match="a.py"):
+        verify_delivery_snapshot(ws, snapshot)
+
+
+def test_verify_delivery_snapshot_allows_only_explicitly_ignored_drift(tmp_path):
+    ws = _workspace(tmp_path, {"app.py": "stable\n", "requirements.txt": "fastapi\n"})
+    snapshot = capture_delivery_snapshot(ws, ("app.py", "requirements.txt"))
+    Path(ws.path, "requirements.txt").write_text("fastapi\nhttpx\n", encoding="utf-8")
+
+    assert verify_delivery_snapshot(ws, snapshot, ignored_paths=("requirements.txt",)) is None
+    with pytest.raises(DeliveryDriftError, match="requirements.txt"):
+        verify_delivery_snapshot(ws, snapshot)
+
+    Path(ws.path, "app.py").write_text("unexpected drift\n", encoding="utf-8")
+    with pytest.raises(DeliveryDriftError, match="app.py"):
+        verify_delivery_snapshot(ws, snapshot, ignored_paths=("requirements.txt",))
+
+
+def test_verify_delivery_snapshot_fingerprints_skipped_binary_and_symlink(tmp_path):
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    (ws_dir / "asset.bin").write_bytes(b"\xffold")
+    os.symlink("first-target", ws_dir / "alias")
+    ws = Workspace(path=str(ws_dir), branch="collegue/issue-5", base_commit="base")
+    snapshot = capture_delivery_snapshot(ws, ("asset.bin", "alias"))
+
+    (ws_dir / "asset.bin").write_bytes(b"\xffnew")
+    with pytest.raises(DeliveryDriftError, match="asset.bin"):
+        verify_delivery_snapshot(ws, snapshot)
+
+    (ws_dir / "asset.bin").write_bytes(b"\xffold")
+    (ws_dir / "alias").unlink()
+    os.symlink("second-target", ws_dir / "alias")
+    with pytest.raises(DeliveryDriftError, match="alias"):
+        verify_delivery_snapshot(ws, snapshot)
+
+
+def test_open_pr_with_snapshot_pushes_frozen_payload_without_reading_live_file(tmp_path):
+    ws = _workspace(tmp_path, {"a.py": "validated bytes\n"})
+    snapshot = capture_delivery_snapshot(ws, ("a.py",), diff="the reviewed diff")
+    Path(ws.path, "a.py").write_text("unvalidated mutation\n", encoding="utf-8")
+    clients = _clients()
+
+    result = open_pr(ws, REPORT, ISSUE, "o", "r", snapshot=snapshot, clients=clients, dry_run=False)
+
+    assert result.number == 101
+    assert clients.files.updated == [("a.py", "validated bytes\n", "collegue/issue-5")]
+    body = clients.prs.created[0]["body"]
+    assert diff_sha256_marker(snapshot.diff_sha256) in body
+
+
+def test_open_pr_snapshot_preserves_frozen_deletion_when_file_reappears(tmp_path):
+    ws = _workspace(tmp_path, {"keep.py": "kept\n"})
+    snapshot = capture_delivery_snapshot(ws, ("gone.py",), diff="delete gone.py")
+    Path(ws.path, "gone.py").write_text("late content\n", encoding="utf-8")
+    clients = _clients()
+
+    open_pr(ws, REPORT, ISSUE, "o", "r", snapshot=snapshot, clients=clients, dry_run=False)
+
+    assert clients.files.updated == []
+    assert clients.files.deleted == [("gone.py", "collegue/issue-5")]
+
+
+def test_historical_open_pr_captures_before_network_side_effects(tmp_path):
+    ws = _workspace(tmp_path, {"a.py": "captured first\n"})
+
+    class _MutatingBranches(_FakeBranches):
+        def ensure_branch(self, owner, repo, branch, from_branch=None):
+            Path(ws.path, "a.py").write_text("changed during network call\n", encoding="utf-8")
+            return super().ensure_branch(owner, repo, branch, from_branch=from_branch)
+
+    clients = PrClients(branches=_MutatingBranches(), files=_FakeFiles(), prs=_FakePRs())
+    open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("a.py",), clients=clients, dry_run=False)
+
+    assert clients.files.updated == [("a.py", "captured first\n", "collegue/issue-5")]
+
+
+def test_open_pr_rejects_files_changed_that_disagree_with_snapshot(tmp_path):
+    ws = _workspace(tmp_path, {"a.py": "a\n", "b.py": "b\n"})
+    snapshot = capture_delivery_snapshot(ws, ("a.py",))
+
+    with pytest.raises(ValueError, match="ne correspond pas"):
+        open_pr(
+            ws,
+            REPORT,
+            ISSUE,
+            "o",
+            "r",
+            files_changed=("b.py",),
+            snapshot=snapshot,
+            clients=_clients(),
+            dry_run=False,
+        )
 
 
 # --- dry-run --------------------------------------------------------------------
