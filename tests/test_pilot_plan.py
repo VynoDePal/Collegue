@@ -130,6 +130,7 @@ async def test_execute_sync_with_explicit_approval_creates(monkeypatch):
     assert calls["approve"][0] == 42  # gate P5 satisfait
     assert calls["require"] == 42  # re-vérification avant les écritures
     assert calls["sync"]["dry_run"] is False
+    assert calls["sync"]["require_spec_commit"] is True
     assert calls["sync"]["labels"] == ["x"]
     assert calls["sync"]["milestone_title"] == "M"
     assert result.issues[0]["issue_number"] == 101

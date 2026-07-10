@@ -53,6 +53,10 @@ class SyncError(Exception):
     """Graphe de tâches invalide pour la synchronisation (cycle, dépendance pendante)."""
 
 
+class SpecSyncError(SyncError):
+    """Le contrat ``SPEC.md`` n'a pas pu être confirmé avant les issues."""
+
+
 def _topo_sort_tasks(tasks: List[Any]) -> List[Any]:
     """Ordonne les tâches topologiquement (dépendances d'abord).
 
@@ -105,6 +109,8 @@ class SyncResult:
     board: Optional[str] = None
     # A3 : chemin du SPEC committé dans le repo cible (None si non committé).
     spec_committed: Optional[str] = None
+    spec_commit_sha: Optional[str] = None
+    spec_unchanged: bool = False
 
 
 def _default_clients(token: Optional[str]) -> SyncClients:
@@ -117,7 +123,16 @@ def _default_clients(token: Optional[str]) -> SyncClients:
     )
 
 
-def _commit_spec(clients: SyncClients, manager: Any, project_id: int, owner: str, repo: str, spec_filename: str):
+def _commit_spec(
+    clients: SyncClients,
+    manager: Any,
+    project_id: int,
+    owner: str,
+    repo: str,
+    spec_filename: str,
+    *,
+    required: bool = False,
+):
     """Committe le SPEC (``Project.spec``) comme fichier versionné du repo cible (§4.2).
 
     Le SPEC vit en DB ; le brief en exige une matérialisation **committée** = le
@@ -126,25 +141,53 @@ def _commit_spec(clients: SyncClients, manager: Any, project_id: int, owner: str
     avertissement et on renvoie ``None``). ``FileCommands.update_file`` joint le SHA
     courant (anti-conflit) ; un contenu identique ne crée pas de commit vide côté
     GitHub (arbre inchangé), donc re-synchroniser est sûr. No-op si pas de client
-    ``files`` ou pas de spec.
+    ``files`` ou pas de spec. En mode ``required``, tout doute lève
+    :class:`SpecSyncError` et aucune issue ne doit ensuite être créée.
     """
     files = getattr(clients, "files", None)
     project = manager.get_project(project_id)
     spec = getattr(project, "spec", None) if project is not None else None
     if files is None or not spec:
-        return None
+        if required:
+            reason = "client GitHub files absent" if files is None else "SPEC projet vide ou absent"
+            raise SpecSyncError(f"Commit obligatoire de {spec_filename} impossible : {reason}.")
+        return None, None, False
+
+    # Idempotence stricte : si le fichier distant est déjà identique, sa lecture
+    # confirme le contrat sans créer un commit vide. Un contenu divergent n'est
+    # jamais écrasé automatiquement en mode produit.
+    getter = getattr(files, "get_file_content", None)
+    if required and callable(getter):
+        try:
+            current = getter(owner, repo, spec_filename)
+        except Exception:  # absence ou erreur API : le PUT ci-dessous tranchera
+            current = None
+        if isinstance(current, dict) and current.get("content") == spec:
+            return spec_filename, None, True
+        if isinstance(current, dict) and current.get("content") is not None:
+            raise SpecSyncError(
+                f"{spec_filename} existe avec un contenu divergent ; refus de l'écraser sans validation humaine."
+            )
     try:
-        files.update_file(
+        response = files.update_file(
             owner,
             repo,
             spec_filename,
             message=f"docs: SPEC du projet (planification, project_id={project_id})",
             content=spec,
         )
-        return spec_filename
-    except Exception as exc:  # noqa: BLE001 - commit best-effort, ne bloque pas la synchro
+        commit = response.get("commit", {}) if isinstance(response, dict) else {}
+        commit_sha = commit.get("sha") if isinstance(commit, dict) else None
+        if required and not commit_sha:
+            raise SpecSyncError(f"GitHub n'a pas confirmé le commit de {spec_filename} (commit.sha absent).")
+        return spec_filename, commit_sha, False
+    except Exception as exc:  # noqa: BLE001 - best-effort legacy ou refus strict produit
+        if required:
+            if isinstance(exc, SpecSyncError):
+                raise
+            raise SpecSyncError(f"Commit obligatoire de {spec_filename} échoué : {exc}") from exc
         logger.warning("Commit de %s échoué (synchro des issues poursuivie) : %s", spec_filename, exc)
-        return None
+        return None, None, False
 
 
 def _issue_body(task: Any, dep_numbers: List[int]) -> str:
@@ -195,6 +238,7 @@ def sync_plan(
     token: Optional[str] = None,
     clients: Optional[SyncClients] = None,
     spec_filename: str = DEFAULT_SPEC_FILENAME,
+    require_spec_commit: bool = False,
 ) -> SyncResult:
     """Synchronise le plan d'un projet vers GitHub (issues + labels + milestone + board).
 
@@ -214,12 +258,21 @@ def sync_plan(
 
     clients = clients or _default_clients(token)
 
-    # §4.2 : matérialiser le SPEC (DB) en fichier committé du repo cible. AVANT les
-    # issues pour que le contrat atterrisse en premier ; best-effort (n'échoue pas la synchro).
-    spec_committed = _commit_spec(clients, manager, project_id, owner, repo, spec_filename)
-
+    # Préflight local COMPLET avant la première écriture distante. Un DAG invalide
+    # ne doit même pas pouvoir committer le SPEC.
     tasks = manager.get_tasks(project_id)
     order = _topo_sort_tasks(tasks)  # dépendances d'abord ; raise sur cycle/dep pendante
+
+    # §4.2 : le chemin produit exige une confirmation du commit avant toute issue.
+    spec_committed, spec_commit_sha, spec_unchanged = _commit_spec(
+        clients,
+        manager,
+        project_id,
+        owner,
+        repo,
+        spec_filename,
+        required=require_spec_commit,
+    )
 
     # Mapping task.id → numéro d'issue (inclut celles déjà synchronisées).
     task_to_issue: Dict[int, int] = {t.id: t.issue_number for t in tasks if t.issue_number}
@@ -230,6 +283,8 @@ def sync_plan(
             dry_run=False,
             issues=[{"task_id": t.id, "issue_number": t.issue_number, "skipped": True} for t in order],
             spec_committed=spec_committed,
+            spec_commit_sha=spec_commit_sha,
+            spec_unchanged=spec_unchanged,
         )
 
     # Pré-garantir labels / milestone / board (idempotent).
@@ -280,4 +335,6 @@ def sync_plan(
         milestone=(milestone.title if milestone else None),
         board=(board.title if board else None),
         spec_committed=spec_committed,
+        spec_commit_sha=spec_commit_sha,
+        spec_unchanged=spec_unchanged,
     )

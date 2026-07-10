@@ -10,7 +10,14 @@ enchaîne pas.
 
 from collegue.planner.acceptance_tests import generate_acceptance_tests
 from collegue.planner.decomposer import decompose
-from collegue.planner.github_sync import SyncClients, SyncError, SyncResult, build_sync_preview, sync_plan
+from collegue.planner.github_sync import (
+    SpecSyncError,
+    SyncClients,
+    SyncError,
+    SyncResult,
+    build_sync_preview,
+    sync_plan,
+)
 from collegue.planner.plan_review import (
     PlanNotApproved,
     PlanPreview,
@@ -38,4 +45,5 @@ __all__ = [
     "SyncResult",
     "SyncClients",
     "SyncError",
+    "SpecSyncError",
 ]
