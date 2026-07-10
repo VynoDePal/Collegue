@@ -148,6 +148,48 @@ def test_issue_from_task_injects_dependency_context():
     assert _issue_from_task(schema, by_id).context == ""
 
 
+def test_issue_from_task_maps_persisted_acceptance_to_structured_criteria():
+    from collegue.pilot.driver import _issue_from_task
+
+    task = SimpleNamespace(
+        id=7,
+        issue_number=42,
+        title="API clients",
+        acceptance="  retourne 200\n sans erreur  ",
+        depends_on=[],
+    )
+    issue = _issue_from_task(task)
+    assert issue.body == ""
+    assert issue.acceptance_criteria == ("retourne 200 sans erreur",)
+
+    task.acceptance = "   "
+    assert _issue_from_task(task).acceptance_criteria == ()
+
+
+async def test_persisted_acceptance_reaches_enabled_gate(repo, manager):
+    from collegue.executor.quality_gate import AcceptanceOutcome
+
+    class _Checker:
+        called_with = None
+
+        async def check(self, workspace, diff, issue, ctx, *, sandbox):
+            self.called_with = issue.acceptance_criteria
+            return AcceptanceOutcome(passed=True)
+
+    pid = manager.create_project(name="acceptance-wiring")
+    manager.add_task(pid, title="API", acceptance="retourne HTTP 200")
+    checker = _Checker()
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=True,
+        gate_options={"acceptance_checker": checker},
+    )
+    assert result.stop_reason == "completed"
+    assert checker.called_with == ("retourne HTTP 200",)
+
+
 # --- bout en bout ---------------------------------------------------------------
 
 

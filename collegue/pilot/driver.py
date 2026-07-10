@@ -79,6 +79,7 @@ from collegue.pilot.scheduler import (
     remaining_tasks,
 )
 from collegue.sandbox.executor import TIMEOUT_NOTE
+from collegue.textnorm import inline
 
 # Statut projet une fois le MVP construit (le moteur d'amélioration = Phase 4).
 PROJECT_STATUS_IMPROVING = "improving"
@@ -268,10 +269,13 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     if best_diff or attempts > 0:
         # #482 : prompts de réparation/retry seulement — le prompt initial reste inchangé.
         parts.append(REQUIREMENTS_APPEND_ONLY_RULE)
+    criterion = inline(getattr(task, "acceptance", "") or "")
     return IssueSpec(
         number=task.issue_number or task.id,
         title=task.title,
-        body=task.acceptance or "",
+        # #582 : le critère persistant doit atteindre le contrat structuré de
+        # l'exécuteur. Le mettre dans ``body`` rendait la gate §4.7 inatteignable.
+        acceptance_criteria=(criterion,) if criterion else (),
         context=" ".join(parts),
     )
 

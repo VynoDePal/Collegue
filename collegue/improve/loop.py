@@ -179,6 +179,11 @@ async def run_improvement(
     # est aussi lazy car importer le sous-module déclenche ``pilot/__init__`` (→ driver
     # → exécuteur) — on ne veut pas tirer tout ça au simple import du package improve.
     from collegue.executor.agent import IssueSpec
+    from collegue.executor.pr import (
+        DeliveryDriftError,
+        capture_delivery_snapshot,
+        verify_delivery_snapshot,
+    )
     from collegue.executor.runner import capture_diff, run_issue
     from collegue.executor.workspace import prepare_workspace
     from collegue.pilot.budget import ACTION_PAUSED_BUDGET, BudgetTimeController
@@ -273,10 +278,27 @@ async def run_improvement(
         # utilisent la version corrigée. Un fix cassant un test ⇒ rejeté par le gate.
         autofix_lint(workspace.path, execution.files_changed)
         final_diff, final_files = capture_diff(workspace)
+        delivery_snapshot = capture_delivery_snapshot(
+            workspace,
+            final_files,
+            diff=final_diff,
+        )
 
         after = await measure_fn(
             workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=final_diff, weights=weights, **measure_extra
         )
+        try:
+            verify_delivery_snapshot(workspace, delivery_snapshot)
+        except DeliveryDriftError as exc:
+            # #582 : measure_fn exécute du code projet en RW. Une mesure verte
+            # portant sur des octets différents du snapshot livrable est invalide.
+            history.append(AttemptRecord(dimension, improved=False))
+            result.rejected.append((dimension.value, f"intégrité du livrable refusée : {exc}"))
+            plateau += 1
+            if plateau >= plateau_rounds:
+                result.stop_reason = STOP_PLATEAU
+                break
+            continue
         result.final_score = after.composite
         gate = evaluate(before, after, min_gain=min_gain)
         history.append(AttemptRecord(dimension, improved=gate.accepted))
@@ -292,6 +314,7 @@ async def run_improvement(
                 owner,
                 repo,
                 files_changed=final_files,
+                snapshot=delivery_snapshot,
                 # Stacking (#554) : base = branche de la promotion précédente si elle
                 # existe (mode --execute), sinon la base d'origine. → diff de PR propre.
                 base=(last_promoted_branch or base),

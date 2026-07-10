@@ -1,9 +1,10 @@
 """Tests §4.7 (Phase B) : tests d'acceptation exécutables, auteur indépendant du coder.
 
 Vérifie le mécanisme (LLMAcceptanceChecker : génère via sample_fn mocké → écrit en
-workspace → lance via sandbox mockée → verdict = exit code) et son intégration au
-gate (un ÉCHEC bloque ; une erreur de génération non ; skip sans critères ; pas
-lancé si le gate est déjà rouge). Aucun LLM ni Docker réel.
+tmpfs isolé → lance via sandbox mockée → verdict = exit code) et son intégration
+au gate fail-closed (échec, erreur, skip ou absence de verdict bloquent lorsque
+le checker est activé ; il n'est pas lancé si le gate est déjà rouge). Aucun LLM
+ni Docker réel.
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ async def test_skipped_without_criteria():
     assert out.skipped is True and out.passed is None
 
 
-async def test_writes_file_and_passes_on_green(tmp_path):
+async def test_uses_isolated_random_temp_file_and_passes_on_green(tmp_path):
     async def _gen(prompt, system):
         # le diff et les critères sont bien dans le prompt
         assert "TVA" in prompt
@@ -73,9 +74,15 @@ async def test_writes_file_and_passes_on_green(tmp_path):
     sb = _green()
     out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sb)
     assert out.passed is True
-    written = (tmp_path / "tests" / "acceptance" / "test_acceptance_generated.py").read_text()
-    assert "def test_ok" in written  # fences retirées, code écrit
-    assert any("tests/acceptance/test_acceptance_generated.py" in c for c in sb.commands)  # lancé
+    assert list(tmp_path.iterdir()) == []  # aucun chemin du dépôt n'est créé/écrasé
+    command = sb.commands[0]
+    assert "python -I -c" in command  # pytest importé avant d'exposer le workspace
+    assert "tempfile.mkstemp" in command and 'dir="/tmp"' in command
+    assert "os.unlink(path)" in command  # nettoyage explicite même si pytest lève
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" in command
+    assert "PYTEST_ADDOPTS=" in command and "PYTHONPATH=" in command
+    assert "--noconftest" in command and "/dev/null" in command
+    assert "tests/acceptance/test_acceptance_generated.py" not in command
 
 
 async def test_fails_on_red(tmp_path):
@@ -86,18 +93,18 @@ async def test_fails_on_red(tmp_path):
     assert out.passed is False  # verdict OBJECTIF = exit code pytest
 
 
-async def test_exit5_no_tests_collected_is_soft(tmp_path):
-    # Génération sans aucune fonction test_* → pytest exit 5 → ne bloque PAS (best-effort).
+async def test_exit5_no_tests_collected_is_failure(tmp_path):
+    # Génération sans fonction test_* → contrat non prouvé → échec fail-closed.
     async def _gen(prompt, system):
         return "# rien de testable\nx = 1\n"
 
     sb = _Sandbox(SandboxResult(exit_code=5, stdout="no tests ran", stderr=""))
     out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sb)
-    assert out.passed is None  # ni bloquant ni « réussi »
+    assert out.passed is False
     assert out.error and "collecté" in out.error
 
 
-async def test_generation_error_is_soft(tmp_path):
+async def test_generation_error_is_reported_for_fail_closed_gate(tmp_path):
     async def _boom(prompt, system):
         raise RuntimeError("LLM indisponible")
 
@@ -113,16 +120,53 @@ async def test_empty_generation_is_error(tmp_path):
     assert out.passed is None and out.error
 
 
+async def test_default_sampler_uses_ctx_reviewer_role_and_settings(tmp_path):
+    class _Ctx:
+        def __init__(self):
+            self.kwargs = None
+
+        async def sample(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(text="def test_ok():\n    assert True\n")
+
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini",
+        LLM_MODEL="fallback-model",
+        LLM_PROVIDER_REVIEWER="openai",
+        LLM_MODEL_REVIEWER="reviewer-model",
+        LLM_CALL_TIMEOUT=0,
+        MAX_TOKENS=321,
+    )
+    ctx = _Ctx()
+    out = await LLMAcceptanceChecker(settings_obj=settings).check(str(tmp_path), DIFF, ISSUE_AC, ctx, sandbox=_green())
+    assert out.passed is True
+    assert ctx.kwargs["model_preferences"] == ["reviewer-model"]
+    assert ctx.kwargs["temperature"] == 0.2
+    assert ctx.kwargs["max_tokens"] == 321
+    assert ctx.kwargs["system_prompt"]
+
+
+async def test_default_sampler_without_ctx_is_error(tmp_path):
+    out = await LLMAcceptanceChecker(settings_obj=SimpleNamespace()).check(
+        str(tmp_path), DIFF, ISSUE_AC, None, sandbox=_green()
+    )
+    assert out.passed is None
+    assert "ctx de sampling absent" in (out.error or "")
+
+
 # --- intégration au gate (run_quality_gate) ------------------------------------
 
 
 class _FakeAcceptance:
-    def __init__(self, *, passed=None, error=None):
-        self._outcome = AcceptanceOutcome(passed=passed, error=error)
+    def __init__(self, *, passed=None, error=None, skipped=False, raises=None):
+        self._outcome = AcceptanceOutcome(passed=passed, error=error, skipped=skipped)
+        self._raises = raises
         self.called = False
 
     async def check(self, workspace, diff, issue, ctx, *, sandbox):
         self.called = True
+        if self._raises is not None:
+            raise self._raises
         return self._outcome
 
 
@@ -144,22 +188,58 @@ async def test_gate_passes_when_acceptance_passes():
     assert report.acceptance_passed is True and report.passed is True
 
 
-async def test_gate_generation_error_does_not_block():
+async def test_gate_generation_error_blocks():
     chk = _FakeAcceptance(passed=None, error="génération KO")
     report = await run_quality_gate(
         "/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_AC, acceptance_checker=chk
     )
     assert report.acceptance_error == "génération KO"
-    assert report.passed is True  # best-effort : une génération indisponible ne bloque pas
+    assert report.passed is False
 
 
-async def test_gate_skips_acceptance_without_criteria():
+async def test_gate_missing_criteria_blocks_without_calling_checker():
     chk = _FakeAcceptance(passed=False)  # bloquerait SI appelé
     report = await run_quality_gate(
         "/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_NO_AC, acceptance_checker=chk
     )
-    assert chk.called is False  # pas de critères → pas lancé
+    assert chk.called is False
+    assert report.passed is False
+    assert "aucun critère" in (report.acceptance_error or "")
+
+
+async def test_gate_none_verdict_blocks():
+    chk = _FakeAcceptance(passed=None)
+    report = await run_quality_gate(
+        "/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_AC, acceptance_checker=chk
+    )
+    assert report.passed is False
+    assert "sans verdict" in (report.acceptance_error or "")
+
+
+async def test_gate_skipped_verdict_blocks():
+    chk = _FakeAcceptance(passed=True, skipped=True)
+    report = await run_quality_gate(
+        "/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_AC, acceptance_checker=chk
+    )
+    assert report.acceptance_passed is None
+    assert report.passed is False
+    assert "ignoré" in (report.acceptance_error or "")
+
+
+async def test_gate_checker_exception_blocks():
+    chk = _FakeAcceptance(raises=RuntimeError("checker indisponible"))
+    report = await run_quality_gate(
+        "/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_AC, acceptance_checker=chk
+    )
+    assert report.passed is False
+    assert report.acceptance_error == "checker indisponible"
+
+
+async def test_gate_without_checker_keeps_historical_behavior():
+    report = await run_quality_gate("/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_NO_AC)
     assert report.passed is True
+    assert report.acceptance_passed is None
+    assert report.acceptance_error is None
 
 
 async def test_gate_skips_acceptance_when_already_failing():
@@ -187,6 +267,23 @@ def test_acceptance_failure_rendered_in_report():
     assert "tests d'acceptation dérivés du SPEC en ÉCHEC" in md
 
 
+def test_acceptance_unavailable_rendered_as_fail_closed():
+    from collegue.executor import QualityReport
+
+    md = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=False,
+        acceptance_error="LLM indisponible",
+    ).to_markdown()
+    assert "indisponible (fail-closed)" in md
+    assert "LLM indisponible" in md
+
+
 # --- câblage runtime (opt-in) --------------------------------------------------
 
 
@@ -203,3 +300,9 @@ def test_gate_options_excludes_acceptance_by_default():
 
     opts = runtime._gate_options(SimpleNamespace())
     assert "acceptance_checker" not in opts
+
+
+def test_acceptance_gate_setting_is_off_by_default():
+    from collegue.config import Settings
+
+    assert Settings.model_fields["GATE_ACCEPTANCE_TESTS"].default is False

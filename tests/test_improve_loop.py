@@ -193,6 +193,40 @@ async def test_regression_is_not_promoted(git_repo, manager):
     assert "rouges" in result.rejected[0][1]
 
 
+async def test_measure_that_mutates_snapshot_is_never_promoted(git_repo, manager):
+    """#582 : Phase 4 livre exactement les octets mesurés, sinon elle rejette."""
+
+    class _MutatingMeasure:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, workspace, ctx, *, sandbox=None, reviewer=None, diff="", weights=None):
+            self.calls += 1
+            if self.calls == 2:
+                from pathlib import Path
+
+                Path(workspace, "COLLEGUE_FAKE.txt").write_text("mutation pendant la mesure\n")
+                return _metrics(0.9)
+            return _metrics(0.5)
+
+    result = await run_improvement(
+        manager.create_project(name="drift"),
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        dry_run=False,
+        plateau_rounds=1,
+        measure_fn=_MutatingMeasure(),
+    )
+    assert result.promoted == []
+    assert result.rejected and "intégrité du livrable refusée" in result.rejected[0][1]
+
+
 async def test_no_diff_round_counts_as_no_gain(git_repo, manager):
     # Agent qui n'écrit rien → aucun diff → round à vide (pas de promotion).
     result = await _run(git_repo, manager, measure_seq=[_metrics(0.5)], agent=FakeCodeAgent(files={}), plateau_rounds=1)

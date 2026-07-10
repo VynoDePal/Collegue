@@ -163,6 +163,28 @@ def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integrati
     )
 
 
+def _build_gate_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
+    """Sandbox dédié au code projet exécuté par le gate.
+
+    Le gate conserve l'image, le réseau, le DNS, le cache pip et les ressources du
+    sandbox coder : ses passes d'installation/tests en ont besoin. En revanche, il
+    ne reçoit **aucun** environnement LLM ni montage des identifiants d'abonnement.
+    Les tests, hooks pytest et scripts d'installation du projet sont non fiables et
+    ne doivent jamais pouvoir lire ces secrets.
+    """
+    from collegue.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
+
+    return DockerSandbox(
+        image=str(getattr(settings_obj, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE),
+        network=str(getattr(settings_obj, "SANDBOX_NETWORK", "bridge") or "bridge"),
+        dns=_sandbox_dns(settings_obj),
+        pip_cache_dir=_sandbox_pip_cache(settings_obj),
+        memory=str(getattr(settings_obj, "SANDBOX_MEMORY", "6g") or "6g"),
+        cpus=str(getattr(settings_obj, "SANDBOX_CPUS", "2.0") or "2.0"),
+        timeout=float(getattr(settings_obj, "SANDBOX_TIMEOUT", 2400.0) or 2400.0),
+    )
+
+
 def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (integration)
     # OpenHands 1.7 est SDK-first : ``openhands.core.main`` n'existe plus → on utilise
     # l'agent SDK (``oh_runner`` baké dans l'image), qui gère aussi l'abonnement gpt-5.5.
@@ -263,7 +285,7 @@ def _build_adequacy_checker(settings_obj):  # pragma: no cover - infra réelle (
 def _build_acceptance_checker(settings_obj):  # pragma: no cover - infra réelle (integration)
     from collegue.executor.quality_gate import LLMAcceptanceChecker
 
-    return LLMAcceptanceChecker()
+    return LLMAcceptanceChecker(settings_obj=settings_obj)
 
 
 # ── point d'entrée assemblé ────────────────────────────────────────────────────
@@ -371,6 +393,7 @@ async def run_project_from_settings(
     github_token: Optional[str] = None,
     manager=None,
     sandbox=None,
+    gate_sandbox=None,
     agent=None,
     reviewer=None,
     clients=None,
@@ -388,6 +411,12 @@ async def run_project_from_settings(
     ``integration``) ; les tests injectent des doubles. ``dry_run`` par défaut.
     En réel, journalise un résumé du run (``record_decision``).
 
+    ``sandbox`` est celui du coder OpenHands. Sur le chemin produit, un
+    ``gate_sandbox`` distinct et sans identifiants LLM est construit pour exécuter
+    le code non fiable du projet. Un ``sandbox`` injecté reste aussi utilisé par le
+    gate si aucun ``gate_sandbox`` n'est fourni, afin de préserver les doubles et
+    intégrations existants ; l'appelant peut injecter les deux explicitement.
+
     ``improve`` (H5) : enchaîne le moteur d'amélioration (Phase 4) sous le budget
     restant une fois le MVP construit (off par défaut ; activable via ``--improve``).
 
@@ -402,8 +431,14 @@ async def run_project_from_settings(
     if durability:
         logger.warning(durability)
     manager = manager or _build_manager(settings_obj)
-    sandbox = sandbox or _build_sandbox(settings_obj)
-    agent = agent or _build_agent(sandbox, settings_obj)
+    sandbox_was_injected = sandbox is not None
+    coder_sandbox = sandbox or _build_sandbox(settings_obj)
+    agent = agent or _build_agent(coder_sandbox, settings_obj)
+    if gate_sandbox is None:
+        # Compatibilité : un double/custom sandbox injecté historiquement servait
+        # aux deux usages. Le chemin produit, lui, construit toujours une instance
+        # séparée et dépourvue de secrets pour le gate.
+        gate_sandbox = coder_sandbox if sandbox_was_injected else _build_gate_sandbox(settings_obj)
     reviewer = reviewer or _build_reviewer(settings_obj)
     clients = clients or _build_clients(github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV))
     # #441 : gouvernance de coût branchée PAR DÉFAUT en réel — audit persistant
@@ -444,7 +479,7 @@ async def run_project_from_settings(
         manager=manager,
         base=base,
         budget=budget,
-        sandbox=sandbox,
+        sandbox=gate_sandbox,
         reviewer=reviewer,
         clients=clients,
         dry_run=dry_run,

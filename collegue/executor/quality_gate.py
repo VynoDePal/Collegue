@@ -22,6 +22,7 @@ qu'il ne puisse pas forger de fausse bannière/section (cf. P5).
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -931,9 +932,9 @@ class QualityReport:
     forbidden_files_blocking: bool = False
     # §4.7 (Phase B) : tests d'acceptation EXÉCUTABLES dérivés des critères du SPEC,
     # écrits par un rôle INDÉPENDANT du coder et lancés en sandbox → verdict OBJECTIF
-    # (exit code pytest), pas un avis LLM (anti-vérification circulaire). None = non
-    # évalué (checker absent / pas de critères) ; False ⇒ gate rouge. Une erreur de
-    # GÉNÉRATION (best-effort) renseigne ``acceptance_error`` sans bloquer.
+    # (exit code pytest), pas un avis LLM. None = non évalué quand le checker est
+    # absent ; dès qu'il est activé, False/None/skip/erreur rendent le gate rouge.
+    # La génération plan-time indépendante et hashée reste le lot suivant (#582).
     acceptance_passed: Optional[bool] = None
     acceptance_output: str = ""
     acceptance_error: Optional[str] = None
@@ -1033,7 +1034,8 @@ class QualityReport:
         elif self.acceptance_error:
             lines += [
                 "",
-                f"> ⚠️ contrôle d'acceptation (§4.7) indisponible : {_fence_safe_line(self.acceptance_error)}",
+                f"> ⛔ contrôle d'acceptation (§4.7) indisponible (fail-closed) : "
+                f"{_fence_safe_line(self.acceptance_error)}",
             ]
         lines += ["", f"**Verdict** : {'✅ PASSÉ' if self.passed else '❌ NON PASSÉ'}"]
         return "\n".join(lines)
@@ -1541,7 +1543,7 @@ class AcceptanceOutcome:
 
     passed: Optional[bool] = None  # None = non évalué (pas de critères / checker absent)
     output: str = ""
-    error: Optional[str] = None  # erreur de GÉNÉRATION (best-effort, ne bloque pas)
+    error: Optional[str] = None  # toute erreur bloque quand le checker est activé
     skipped: bool = False
 
 
@@ -1557,10 +1559,9 @@ _ACCEPTANCE_SYSTEM = (
     "d'acceptation d'une issue et du code livré (diff), écris des tests pytest EXÉCUTABLES qui "
     "VÉRIFIENT chaque critère contre le code réel (imports, fixtures, démarrage d'app si nécessaire). "
     "Les tests doivent ÉCHOUER si un critère n'est pas respecté. Réponds UNIQUEMENT avec un module "
-    "Python exécutable (aucune prose), en commençant par les imports."
+    "Python exécutable (aucune prose), en commençant par les imports. Le module doit être "
+    "AUTONOME : n'utilise aucun conftest, plugin pytest ni configuration pytest du projet."
 )
-
-_ACCEPTANCE_TEST_PATH = "tests/acceptance/test_acceptance_generated.py"
 
 
 def _strip_code_fences(text: str) -> str:
@@ -1574,12 +1575,58 @@ def _strip_code_fences(text: str) -> str:
     return (stripped + "\n") if stripped else ""
 
 
-def _write_acceptance_file(workspace: str, code: str) -> None:
-    """Écrit le module de tests d'acceptation généré dans le workspace (chemin fixe)."""
-    path = os.path.join(workspace, _ACCEPTANCE_TEST_PATH)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(code)
+def _acceptance_pytest_command(code: str) -> str:
+    """Commande pytest isolée pour un module QA non fiable.
+
+    Le module est transporté en base64 puis créé **dans le tmpfs du conteneur**
+    avec :func:`tempfile.mkstemp` (nom imprévisible, création exclusive). Il ne
+    touche donc jamais un chemin du dépôt choisi par le codeur et il est supprimé
+    dans un ``finally``. ``pytest`` est importé sous ``python -I`` *avant* que le
+    workspace soit ajouté à ``sys.path`` : un ``pytest.py`` livré par le diff ne
+    peut pas détourner le runner. Les conftest, plugins tiers et configurations
+    du projet sont également neutralisés ; le code du projet reste importable via
+    ``/workspace`` et ``/workspace/src``.
+    """
+    payload = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    launcher = f"""\
+import base64
+import os
+import site
+import sys
+import tempfile
+
+import pytest
+
+user_site = site.getusersitepackages()
+project_paths = [path for path in ("/workspace", "/workspace/src", user_site) if path]
+# pytest est déjà importé depuis l'image sous -I : on peut maintenant préfixer
+# les dépendances installées --user et le projet sans permettre un pytest.py local.
+sys.path[:0] = [path for path in project_paths if path not in sys.path]
+os.chdir("/workspace")
+fd, path = tempfile.mkstemp(prefix="collegue_acceptance_", suffix=".py", dir="/tmp")
+exit_code = 1
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(base64.b64decode({payload!r}))
+    exit_code = pytest.main([
+        "--noconftest",
+        "-c", "/dev/null",
+        "--rootdir=/tmp",
+        "-q",
+        path,
+    ])
+finally:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+raise SystemExit(exit_code)
+"""
+    return (
+        f"{_PYTEST_WIDE_COLUMNS} PYTHONPATH= PYTEST_ADDOPTS= "
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_PLUGINS= "
+        f"python -I -c {shlex.quote(launcher)}"
+    )
 
 
 class LLMAcceptanceChecker:
@@ -1587,15 +1634,42 @@ class LLMAcceptanceChecker:
 
     Anti-circularité (§4.7) : le verdict est l'**exit code** de pytest (objectif), pas
     un avis du modèle, et l'auteur des tests est **distinct du coder**. ``sample_fn``
-    injectable (mocké en CI). La GÉNÉRATION est best-effort (une erreur ⇒ ``error``
-    renseigné, gate non bloqué sur ce volet) ; mais des tests qui ÉCHOUENT ⇒
-    ``passed=False`` (bloquant). Les tests générés sont écrits dans le workspace pour
-    la durée du gate (hors diff de la PR, déjà capturé) et lancés avec les deps du projet.
+    injectable (mocké en CI). Sans injection, l'appel passe par le ``ctx`` du
+    pilote, son timeout/budget et le modèle du rôle REVIEWER. Toute génération
+    indisponible ou inexploitable est fail-closed lorsque ce checker est activé.
+    Le module généré vit uniquement dans un fichier aléatoire du tmpfs du sandbox,
+    puis est supprimé ; il n'entre jamais dans le diff ni dans la PR.
     """
 
-    def __init__(self, sample_fn=None, *, max_diff_chars: int = 60000):
-        self._sample_fn = sample_fn or _default_acceptance_sample_fn()
+    def __init__(self, sample_fn=None, *, settings_obj=None, max_diff_chars: int = 60000):
+        self._sample_fn = sample_fn
+        self._settings_obj = settings_obj
         self._max_diff_chars = max_diff_chars
+
+    async def _sample(self, prompt: str, ctx) -> str:
+        if self._sample_fn is not None:
+            # Compatibilité de l'interface historique utilisée par les tests et
+            # les harness : async (prompt, system_prompt) -> str.
+            return await self._sample_fn(prompt, _ACCEPTANCE_SYSTEM)
+        if ctx is None:
+            raise RuntimeError("ctx de sampling absent pour les tests d'acceptation")
+
+        from collegue.config import settings as global_settings
+        from collegue.core.llm import LLMRole, model_preferences_for_role
+        from collegue.core.llm.client import sample_with_timeout
+
+        settings_obj = self._settings_obj or global_settings
+        sample_kwargs = {
+            "messages": prompt,
+            "system_prompt": _ACCEPTANCE_SYSTEM,
+            "temperature": 0.2,
+            "max_tokens": int(getattr(settings_obj, "MAX_TOKENS", 8192)),
+        }
+        preferences = model_preferences_for_role(LLMRole.REVIEWER, settings_obj)
+        if preferences:
+            sample_kwargs["model_preferences"] = preferences
+        result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
+        return str(getattr(result, "text", "") or "")
 
     async def check(self, workspace: str, diff: str, issue: IssueSpec, ctx, *, sandbox) -> AcceptanceOutcome:
         if issue is None or not issue.acceptance_criteria:
@@ -1607,48 +1681,25 @@ class LLMAcceptanceChecker:
             "Écris le module de tests pytest d'acceptation."
         )
         try:
-            code = _strip_code_fences(await self._sample_fn(prompt, _ACCEPTANCE_SYSTEM))
-        except Exception as exc:  # noqa: BLE001 - génération best-effort (BaseException budget remonte)
+            code = _strip_code_fences(await self._sample(prompt, ctx))
+        except Exception as exc:  # noqa: BLE001 - fail-closed ; BaseException budget remonte
             return AcceptanceOutcome(error=str(exc) or repr(exc))
         if not code.strip():
             return AcceptanceOutcome(error="génération de tests d'acceptation vide")
-        try:
-            _write_acceptance_file(workspace, code)
-        except OSError as exc:
-            return AcceptanceOutcome(error=f"écriture des tests d'acceptation impossible : {exc}")
         prelude = deps_install_prelude(workspace)
-        pytest_cmd = f"{_PYTEST_WIDE_COLUMNS} python -m pytest {shlex.quote(_ACCEPTANCE_TEST_PATH)} -q"
+        pytest_cmd = _acceptance_pytest_command(code)
         command = f"({prelude}) && {pytest_cmd}" if prelude else pytest_cmd
         res = sandbox.run_tests(workspace, command)
         output = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
         # pytest exit 5 = AUCUN test collecté → génération inexploitable (0 fonction
-        # test_*). Best-effort : on NE bloque PAS (passed=None + error), sinon une
-        # génération dégénérée serait un faux-rouge dur, à l'inverse de la sémantique.
+        # test_*). Checker activé = contrat exigé : l'absence de verdict bloque.
         if getattr(res, "exit_code", None) == 5:
             return AcceptanceOutcome(
-                error="aucun test d'acceptation collecté (génération inexploitable)", output=output
+                passed=False,
+                error="aucun test d'acceptation collecté (génération inexploitable)",
+                output=output,
             )
         return AcceptanceOutcome(passed=bool(res.ok), output=output)
-
-
-def _default_acceptance_sample_fn():  # pragma: no cover - chemin réel (integration)
-    from collegue.config import settings
-    from collegue.core.llm.roles import LLMRole, resolve_role
-    from collegue.resources.llm.providers import LLMConfig, generate_text
-
-    _provider, model = resolve_role(LLMRole.REVIEWER, settings)  # auteur INDÉPENDANT du coder
-    config = LLMConfig(
-        model_name=model or settings.llm_model,
-        api_key=settings.llm_api_key,
-        max_tokens=settings.MAX_TOKENS,
-        temperature=0.2,
-    )
-
-    async def sample(prompt: str, system_prompt: str) -> str:
-        response = await generate_text(config, prompt, system_prompt)
-        return response.text
-
-    return sample
 
 
 class FakeAdequacyChecker:
@@ -1942,32 +1993,44 @@ async def run_quality_gate(
             adequacy_error = str(exc) or repr(exc)
 
     # §4.7 (Phase B) : tests d'acceptation EXÉCUTABLES (auteur indépendant du coder)
-    # lancés en sandbox — verdict OBJECTIF. Seulement si le reste est vert ET qu'il y a
-    # des critères (borne le coût). Une erreur de GÉNÉRATION ne bloque pas (best-effort) ;
-    # des tests qui ÉCHOUENT (``acceptance_passed is False``) bloquent.
+    # lancés en sandbox — verdict OBJECTIF. Seulement si le reste est vert (borne
+    # le coût). Dès qu'un checker est fourni, son contrat devient OBLIGATOIRE :
+    # issue/critères absents, skip, verdict None ou erreur bloquent fail-closed.
     acceptance_passed: Optional[bool] = None
     acceptance_output = ""
     acceptance_error: Optional[str] = None
-    if acceptance_checker is not None and issue is not None and issue.acceptance_criteria and would_pass:
-        try:
-            acc = await acceptance_checker.check(workspace, diff, issue, ctx, sandbox=sandbox)
-            acceptance_passed = acc.passed
-            acceptance_output = acc.output
-            acceptance_error = acc.error
-        except Exception as exc:  # noqa: BLE001 - fail-soft sur génération ; BaseException (budget) remonte
-            acceptance_error = str(exc) or repr(exc)
+    acceptance_required = acceptance_checker is not None
+    if acceptance_required and would_pass:
+        if issue is None:
+            acceptance_error = "issue absente : critères d'acceptation impossibles à vérifier"
+        elif not issue.acceptance_criteria:
+            acceptance_error = "aucun critère d'acceptation à vérifier"
+        else:
+            try:
+                acc = await acceptance_checker.check(workspace, diff, issue, ctx, sandbox=sandbox)
+                acceptance_passed = acc.passed
+                acceptance_output = acc.output
+                acceptance_error = acc.error
+                if acc.skipped:
+                    acceptance_passed = None
+                    acceptance_error = acceptance_error or "contrôle d'acceptation ignoré sans verdict"
+                elif acceptance_passed is None:
+                    acceptance_error = acceptance_error or "contrôle d'acceptation terminé sans verdict"
+            except Exception as exc:  # noqa: BLE001 - fail-closed ; BaseException (budget) remonte
+                acceptance_error = str(exc) or repr(exc)
 
     touched = tests_touched(diff)
     # #499 : `is not False` — None (non évalué) et True passent ; seul False
     # bloque (rétrocompat #437 : un checker qui n'évalue pas la couverture ne
-    # rend jamais le gate rouge sur ce volet). Idem §4.7 : seul un ÉCHEC de tests
-    # d'acceptation (False) bloque ; une génération indisponible (error, passed=None) non.
+    # rend jamais le gate rouge sur ce volet). §4.7 est opt-in : checker absent =
+    # comportement historique ; checker présent = seul True sans erreur passe.
+    acceptance_ok = not acceptance_required or (acceptance_passed is True and acceptance_error is None)
     passed = (
         would_pass
         and adequacy_implemented is not False
         and adequacy_tests_assert is not False
         and adequacy_error is None
-        and acceptance_passed is not False
+        and acceptance_ok
     )
     if require_test_changes and not touched:
         passed = False

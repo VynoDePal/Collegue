@@ -30,7 +30,14 @@ from typing import Mapping, Optional
 
 from collegue.executor.agent import AgentResult, CodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner
-from collegue.executor.pr import PrClients, PrResult, open_pr
+from collegue.executor.pr import (
+    DeliveryDriftError,
+    PrClients,
+    PrResult,
+    capture_delivery_snapshot,
+    open_pr,
+    verify_delivery_snapshot,
+)
 from collegue.executor.quality_gate import QualityReport, Reviewer, run_quality_gate
 from collegue.executor.runner import ExecutionResult, capture_diff, run_issue
 from collegue.executor.workspace import Workspace, apply_seed_diff, prepare_workspace
@@ -527,8 +534,18 @@ async def execute_issue(
                 reason=reason,
             )
 
+        # #582 : figer AVANT toute exécution du code projet les octets qui
+        # pourront être livrés. Les tests/reviewers ne doivent jamais pouvoir
+        # modifier après coup ce que ``open_pr`` enverra à GitHub.
+        delivery_snapshot = capture_delivery_snapshot(
+            workspace,
+            execution.files_changed,
+            diff=execution.diff,
+        )
+
         # E3 : gate qualité (fail-closed).
         stage = STAGE_GATE
+        gate_kwargs = dict(gate_options or {})
         report = await run_quality_gate(
             workspace.path,
             execution.diff,
@@ -536,7 +553,7 @@ async def execute_issue(
             sandbox=sandbox,
             reviewer=reviewer,
             issue=issue,
-            **dict(gate_options or {}),
+            **gate_kwargs,
         )
         if getattr(report, "requirements_added", ()):
             # #481 : le gate a amendé requirements.txt (remédiation déterministe)
@@ -547,8 +564,51 @@ async def execute_issue(
             # monté (node_modules, __pycache__, fichiers du smoke) qu'un add -A
             # global embarquerait dans la PR. Une WorkspaceError ici est
             # absorbée par la barrière #435 (engine_error, retentable).
+            # La remédiation déterministe est la SEULE mutation autorisée du
+            # snapshot initial. Toute dérive d'un autre fichier est bloquante.
+            try:
+                verify_delivery_snapshot(
+                    workspace,
+                    delivery_snapshot,
+                    ignored_paths=("requirements.txt",),
+                )
+            except DeliveryDriftError as exc:
+                return ExecutionOutcome(
+                    success=False,
+                    stage=STAGE_GATE,
+                    workspace=workspace,
+                    execution=execution,
+                    quality_report=report,
+                    final_status=final_status,
+                    reason=REASON_GATE_FAILED,
+                    error=f"INTÉGRITÉ DU LIVRABLE REFUSÉE : {exc}",
+                )
+
+            added_requirements = tuple(report.requirements_added)
             diff, files_changed = capture_diff(workspace, runner=runner, paths=("requirements.txt",))
             execution = replace(execution, diff=diff, files_changed=files_changed, changed=bool(files_changed))
+            delivery_snapshot = capture_delivery_snapshot(
+                workspace,
+                execution.files_changed,
+                diff=execution.diff,
+            )
+
+            # #582 : le premier reviewer/checker a vu l'ancien diff. Si le gate
+            # était vert, rejouer le gate COMPLET sur le diff réellement livrable
+            # (remédiation désactivée pour garantir une seule convergence bornée).
+            if report.passed:
+                recheck_kwargs = dict(gate_kwargs)
+                recheck_kwargs["fix_missing_requirements"] = False
+                report = await run_quality_gate(
+                    workspace.path,
+                    execution.diff,
+                    ctx,
+                    sandbox=sandbox,
+                    reviewer=reviewer,
+                    issue=issue,
+                    **recheck_kwargs,
+                )
+                report.requirements_added = added_requirements
         if not report.passed:
             return ExecutionOutcome(
                 success=False,
@@ -560,6 +620,22 @@ async def execute_issue(
                 reason=REASON_GATE_FAILED,
             )
 
+        try:
+            verify_delivery_snapshot(workspace, delivery_snapshot)
+        except DeliveryDriftError as exc:
+            # Le gate a exécuté du code non fiable en RW. Même avec un verdict
+            # vert, une mutation post-snapshot invalide le contrat testé/revu.
+            return ExecutionOutcome(
+                success=False,
+                stage=STAGE_GATE,
+                workspace=workspace,
+                execution=execution,
+                quality_report=report,
+                final_status=final_status,
+                reason=REASON_GATE_FAILED,
+                error=f"INTÉGRITÉ DU LIVRABLE REFUSÉE : {exc}",
+            )
+
         # E4 : ouverture de PR (dry_run respecté).
         stage = STAGE_PR
         pr = open_pr(
@@ -569,6 +645,7 @@ async def execute_issue(
             owner,
             repo,
             files_changed=execution.files_changed,
+            snapshot=delivery_snapshot,
             base=base,
             clients=clients,
             dry_run=dry_run,
