@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import collegue.planner.acceptance_tests as at
-from collegue.core.llm import LLMRole
+from collegue.core.llm import LLMRole, UsageAccountingError
 from collegue.planner import Spec, generate_acceptance_tests
 
 VALID_SOURCE = """\
@@ -211,6 +211,36 @@ async def test_sample_fn_may_be_synchronous():
         clock=lambda: FIXED_NOW,
     )
     assert result[1]["source"] == VALID_SOURCE
+
+
+@pytest.mark.asyncio
+async def test_sample_fn_cannot_bypass_active_hard_budget_or_persist_partial_artifacts():
+    manager = _Manager()
+    sampled = False
+
+    def sample(_prompt, _system):
+        nonlocal sampled
+        sampled = True
+        return VALID_SOURCE
+
+    with pytest.raises(UsageAccountingError, match="sans preuve d'usage"):
+        await generate_acceptance_tests(
+            _spec(),
+            [_task(1)],
+            None,
+            manager=manager,
+            project_id=1,
+            settings_obj=SimpleNamespace(
+                LLM_PROVIDER="openai",
+                LLM_MODEL="gpt-5.4",
+                MAX_TOKENS_BUDGET=100,
+                MAX_COST_USD=0,
+            ),
+            sample_fn=sample,
+        )
+
+    assert sampled is False
+    assert manager.calls == []
 
 
 @pytest.mark.asyncio

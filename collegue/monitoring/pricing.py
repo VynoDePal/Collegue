@@ -14,11 +14,10 @@ locaux (LM Studio, Ollama, Unsloth) sont gratuits → coût 0, mais uniquement s
 ``provider`` est passé à :func:`cost_per_token` (le nom du modèle seul ne suffit
 pas à savoir qu'un modèle tourne en local).
 
-Note (périmètre) : le ``MetricsCollector`` calcule le coût avec un tarif unique
-résolu au démarrage depuis ``settings.LLM_MODEL``/``LLM_PROVIDER``. Le modèle
-réellement utilisé par appel est capturé pour l'``activity_log`` (affichage),
-mais le coût par-modèle-capturé n'est pas encore branché dans ``record_execution``
-(amélioration ultérieure).
+Le collecteur conserve son tarif global pour les outils historiques. Le chemin
+planner/QA comptabilisé fournit désormais un ``cost_usd`` explicite calculé avec
+le provider et le modèle réellement capturés. Sous ``MAX_COST_USD``, un modèle
+remote absent de la grille est refusé avant l'appel plutôt que valorisé au repli.
 """
 
 from __future__ import annotations
@@ -90,3 +89,11 @@ def cost_per_token(model: str, provider: Optional[str] = None) -> Tuple[float, f
     if prices is None:
         prices = _DEFAULT_PER_1M
     return prices[0] / _PER_1M, prices[1] / _PER_1M
+
+
+def has_explicit_pricing(model: str, provider: Optional[str] = None) -> bool:
+    """Vrai si le coût est autoritaire (provider local ou modèle dans la grille)."""
+    if provider and provider.strip().lower() in _LOCAL_PROVIDERS:
+        return True
+    key = _normalize(model)
+    return any(key == known or key.startswith(known + "-") for known in _MODEL_PRICES_PER_1M)

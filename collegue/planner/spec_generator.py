@@ -25,7 +25,7 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from collegue.core.llm import LLMRole, model_preferences_for_role
-from collegue.core.llm.client import sample_with_timeout
+from collegue.core.llm.client import accounted_sample
 from collegue.planner._parsing import inline, json_from_text
 from collegue.planner.status import PROJECT_STATUS_PLANNED
 
@@ -192,7 +192,13 @@ async def generate_spec(
     if prefs:
         sample_kwargs["model_preferences"] = prefs
 
-    result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
+    result = await accounted_sample(
+        ctx,
+        role=LLMRole.PLANNER,
+        operation="planner.spec",
+        settings_obj=settings_obj,
+        **sample_kwargs,
+    )
     spec = _extract_spec(result)
     if not [a for a in spec.acceptance_criteria if str(a).strip()]:
         raise ValueError("SPEC invalide : aucun critère d'acceptation testable (contrat vide).")

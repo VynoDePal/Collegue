@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
 from collegue.core.llm import LLMRole, model_preferences_for_role, resolve_role
-from collegue.core.llm.client import sample_with_timeout
+from collegue.core.llm.client import UsageAccountingError, accounted_sample
 
 PROVENANCE_SCHEMA_VERSION = 1
 GENERATOR_NAME = "collegue.planner.acceptance_tests"
@@ -287,6 +287,13 @@ async def _sample_source(
     max_tokens: int,
 ) -> str:
     if sample_fn is not None:
+        if (
+            int(getattr(settings_obj, "MAX_TOKENS_BUDGET", 0) or 0) > 0
+            or float(getattr(settings_obj, "MAX_COST_USD", 0) or 0) > 0
+        ):
+            raise UsageAccountingError(
+                "sample_fn QA injecté sans preuve d'usage : interdit lorsqu'un budget dur est actif."
+            )
         result = sample_fn(prompt, ACCEPTANCE_TEST_SYSTEM_PROMPT)
         if inspect.isawaitable(result):
             result = await result
@@ -302,7 +309,13 @@ async def _sample_source(
     preferences = model_preferences_for_role(LLMRole.QA, settings_obj)
     if preferences:
         kwargs["model_preferences"] = preferences
-    result = await sample_with_timeout(ctx, settings_obj=settings_obj, **kwargs)
+    result = await accounted_sample(
+        ctx,
+        role=LLMRole.QA,
+        operation="planner.acceptance",
+        settings_obj=settings_obj,
+        **kwargs,
+    )
     text = getattr(result, "text", "") or ""
     if not text and isinstance(getattr(result, "result", None), str):
         text = result.result

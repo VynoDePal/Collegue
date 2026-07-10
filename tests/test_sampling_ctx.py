@@ -257,6 +257,37 @@ async def test_sample_gpt_model_goes_through_subscription_sampler(monkeypatch):
     assert payload["system"] == "Tu es QA" and "revois ce diff" in payload["prompt"]
 
 
+async def test_subscription_sampler_records_trusted_usage_envelope(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        "collegue.monitoring.sampling_usage.record_usage",
+        lambda prompt, completion, model: seen.update(prompt=prompt, completion=completion, model=model),
+    )
+    output = (
+        "<<<SAMPLE_BEGIN>>>ok<<<SAMPLE_END>>>"
+        '<<<SAMPLE_USAGE>>>{"prompt_tokens":12,"completion_tokens":4,'
+        '"model":"gpt-5.4","billable":false}<<<SAMPLE_USAGE_END>>>'
+    )
+    ctx = _sub_ctx(runner=lambda _argv, _payload: (0, output, ""))
+
+    result = await ctx.sample("x", model_preferences=["gpt-5.4"])
+
+    assert result.text == "ok"
+    assert seen == {"prompt": 12, "completion": 4, "model": "gpt-5.4"}
+
+
+async def test_subscription_sampler_rejects_untrusted_usage_envelope():
+    output = (
+        "<<<SAMPLE_BEGIN>>>ok<<<SAMPLE_END>>>"
+        '<<<SAMPLE_USAGE>>>{"prompt_tokens":12,"completion_tokens":4,'
+        '"model":"gpt-5.4","billable":true}<<<SAMPLE_USAGE_END>>>'
+    )
+    ctx = _sub_ctx(runner=lambda _argv, _payload: (0, output, ""))
+
+    with pytest.raises(RuntimeError, match="enveloppe usage invalide"):
+        await ctx.sample("x", model_preferences=["gpt-5.4"])
+
+
 async def test_sample_subscription_failure_raises(monkeypatch):
     ctx = _sub_ctx(runner=lambda a, p: (1, "", "auth expirée"))
     import pytest as _pytest

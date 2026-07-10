@@ -284,10 +284,10 @@ lit :
 |----------|-------------|--------|
 | `STATE_DATABASE_URL` | État durable (Postgres ou SQLite). Requis pour un run réel. | — |
 | `LLM_MODEL_CODER` / `_QA` / `_PLANNER` / `_REVIEWER` | Modèle par **rôle** (codeur fort, QA économique, planificateur, revue). Retombe sur `LLM_MODEL` si absent. | `LLM_MODEL` |
-| `MAX_COST_USD` | Plafond dur de dépense cumulée (`0` = désactivé) → auto-pause. Le canal **coder** est bien pris en compte dans l'enforcement (#495 : l'accumulateur coder-seul est sommé avant comparaison). Résidu : il faut des prix `LLM_PRICE_*` pour **valoriser** les tokens coder en `$` — sans eux, un modèle non mappé litellm laisse `cost_usd=0` (seul le plafond *tokens* mord ; événement d'audit `cost_unknown`, #484/#504). | `0` |
+| `MAX_COST_USD` | Plafond dur de dépense cumulée (`0` = désactivé) → auto-pause. Le canal **coder** est pris en compte (#495). Planner et QA débitent chaque appel/retry au tarif du rôle/modèle effectif ; sous plafond `$`, un modèle remote sans tarif autoritaire est refusé avant sampling. L'abonnement reste à coût API `$0`, avec ses tokens comptés séparément. | `0` |
 | `LLM_PRICE_PROMPT_PER_1M` | Prix de secours du canal coder, $/1M tokens prompt — utilisé quand le runner émet `cost_usd=0` malgré des tokens (#484). | `0` |
 | `LLM_PRICE_COMPLETION_PER_1M` | Idem, $/1M tokens completion. `0` = désactivé. | `0` |
-| `MAX_TOKENS_BUDGET` | Plafond dur de tokens cumulés (`0` = désactivé). | `0` |
+| `MAX_TOKENS_BUDGET` | Plafond dur de tokens cumulés (`0` = désactivé). Planner/QA exigent une enveloppe d'usage non nulle quand ce plafond est actif ; réponse sans preuve = planification refusée avant persistance. | `0` |
 | `BUDGET_EXHAUSTED_ACTION` | `pause` (refuse les appels LLM) ou `warn` (journalise seulement). | `pause` |
 | `COLLEGUE_RUN_DEADLINE_SECONDS` | Durée mur max d'un run (`0` = pas de deadline). | `0` |
 | `TASK_MAX_ATTEMPTS` | Tentatives max par tâche — retry avec backoff sur échec transitoire (`1` = pas de retry). | `3` |

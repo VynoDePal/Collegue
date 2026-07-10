@@ -17,7 +17,7 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from collegue.core.llm import LLMRole, model_preferences_for_role
-from collegue.core.llm.client import sample_with_timeout
+from collegue.core.llm.client import accounted_sample
 from collegue.planner._parsing import json_from_text
 from collegue.state.models import Decision, Task
 
@@ -143,7 +143,13 @@ async def decompose(
     if prefs:
         sample_kwargs["model_preferences"] = prefs
 
-    result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
+    result = await accounted_sample(
+        ctx,
+        role=LLMRole.PLANNER,
+        operation="planner.decompose",
+        settings_obj=settings_obj,
+        **sample_kwargs,
+    )
     planned = _extract_decomposition(result).tasks
     if not planned:
         raise ValueError("Décomposition vide : aucune tâche produite.")
