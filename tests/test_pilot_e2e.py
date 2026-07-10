@@ -26,7 +26,11 @@ from collegue.state import ProjectStateManager
 
 
 class _Sandbox:
+    def __init__(self):
+        self.commands = []
+
     def run_tests(self, workspace, command="pytest -q"):
+        self.commands.append(command)
         return SandboxResult(exit_code=0, stdout="ok", stderr="")
 
 
@@ -68,6 +72,24 @@ class _Ctx:
 
     async def aclose(self):
         return None
+
+
+class _QACtx(_Ctx):
+    """Sampling QA déterministe ; ne voit que le SPEC/DAG transmis au plan-time."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def sample(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            text=(
+                "from pathlib import Path\n\n"
+                "def test_contract():\n"
+                "    workspace = Path('/workspace')\n"
+                "    assert workspace.is_dir()\n"
+            )
+        )
 
 
 def _git(cwd, *args):
@@ -150,7 +172,7 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
         budget=_Budget(),
         ctx=_Ctx(),
     )
-    assert result.stop_reason == "completed"
+    assert result.stop_reason == "completed", [task.last_error for task in manager.get_tasks(plan.project_id)]
     assert result.iterations == 2
     # Le handoff fonctionne : le run a repris les tâches planifiées et les a construites.
     assert all(t.status == "in_review" for t in manager.get_tasks(plan.project_id))
@@ -167,3 +189,73 @@ async def test_plan_dry_run_sync_writes_nothing_to_github(monkeypatch, manager):
     assert plan.task_count == 2
     # issues en aperçu (pas de numéro réel attribué).
     assert all(i.get("issue_number") is None for i in plan.issues)
+
+
+async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(monkeypatch, manager, git_repo):
+    """Tranche §4.7 complète : QA au plan → hash → gate stocké au run."""
+    _patch_planner_llm(monkeypatch)
+    qa_ctx = _QACtx()
+
+    plan = await plan_project_from_settings(
+        "E2E-QA",
+        "construire une app testable",
+        owner="o",
+        repo="r",
+        settings_obj=SimpleNamespace(
+            GATE_ACCEPTANCE_TESTS=True,
+            LLM_PROVIDER="test",
+            LLM_MODEL="qa-fixture",
+        ),
+        manager=manager,
+        ctx=qa_ctx,
+        approve=True,
+    )
+
+    project = manager.get_project(plan.project_id)
+    tasks = manager.get_tasks(plan.project_id)
+    assert project.acceptance_tests_required is True
+    assert len(qa_ctx.calls) == len(tasks) == 2
+    assert all(task.acceptance_test_source for task in tasks)
+    assert all(task.acceptance_test_sha256 for task in tasks)
+    assert all(task.acceptance_test_provenance["role"] == "qa" for task in tasks)
+    assert "oracle QA" in plan.preview_markdown
+
+    from collegue.executor.quality_gate import StoredAcceptanceChecker
+    from collegue.pilot.driver import _issue_from_task
+
+    preflight = await StoredAcceptanceChecker(manager=manager, project_id=plan.project_id).check(
+        git_repo,
+        "diff ignoré",
+        _issue_from_task(tasks[0], {task.id: task for task in tasks}),
+        _Ctx(),
+        sandbox=_Sandbox(),
+    )
+    assert preflight.passed is True, preflight.error
+
+    # Le flag env est volontairement OFF au run : la politique persistée du plan
+    # doit tout de même imposer le checker stocké, sans aucun nouveau sampling.
+    sandbox = _Sandbox()
+    result = await run_project_from_settings(
+        plan.project_id,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,
+        settings_obj=SimpleNamespace(
+            BUILD_AUTO_MERGE=False,
+            GATE_ACCEPTANCE_TESTS=False,
+            TASK_MAX_ATTEMPTS=1,
+            TASK_RETRY_BACKOFF_SECONDS=0,
+        ),
+        manager=manager,
+        sandbox=sandbox,
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+        ctx=_Ctx(),
+    )
+
+    assert result.stop_reason == "completed", [task.last_error for task in manager.get_tasks(plan.project_id)]
+    acceptance_commands = [command for command in sandbox.commands if "python -I -c" in command]
+    assert len(acceptance_commands) == 2

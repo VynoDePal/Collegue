@@ -5,6 +5,7 @@
 - roundtrip Postgres marqué `integration` (skippé en CI).
 """
 
+import hashlib
 import os
 import pathlib
 
@@ -98,6 +99,125 @@ def test_update_task_status(manager):
     assert manager.update_task_status(99999, "done") is False
 
 
+def test_set_acceptance_test_artifact_computes_sha_and_copies_provenance(manager):
+    pid = manager.create_project(name="demo")
+    tid = manager.add_task(pid, title="t", acceptance="TVA exacte")
+    source = "def test_tva():\n    assert total_tva(100) == 1\n"
+    provenance = {"role": "qa", "model": "qa-test", "prompt": {"version": 1}}
+
+    assert manager.set_acceptance_test_artifact(tid, source, provenance) is True
+    provenance["prompt"]["version"] = 999  # ne doit pas muter la valeur persistée
+
+    task = manager.get_task(tid)
+    assert task.acceptance_test_source == source
+    assert task.acceptance_test_sha256 == hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert task.acceptance_test_provenance == {"model": "qa-test", "prompt": {"version": 1}, "role": "qa"}
+
+
+def test_set_acceptance_test_artifact_missing_task_returns_false(manager):
+    assert manager.set_acceptance_test_artifact(99999, "def test_ok(): pass\n", {"role": "qa"}) is False
+
+
+@pytest.mark.parametrize(
+    ("source", "provenance"),
+    [
+        ("", {"role": "qa"}),
+        ("  \n", {"role": "qa"}),
+        ("def test_ok(): pass\n", {}),
+        ("def test_ok(): pass\n", {"value": float("nan")}),
+        ("def test_ok(): pass\n", {"value": object()}),
+    ],
+)
+def test_set_acceptance_test_artifact_rejects_invalid_payload(manager, source, provenance):
+    pid = manager.create_project(name="demo")
+    tid = manager.add_task(pid, title="t")
+    with pytest.raises(ValueError):
+        manager.set_acceptance_test_artifact(tid, source, provenance)
+    task = manager.get_task(tid)
+    assert task.acceptance_test_source is None
+    assert task.acceptance_test_sha256 is None
+    assert task.acceptance_test_provenance is None
+
+
+def test_acceptance_test_artifact_db_constraint_rejects_partial_triplet(manager):
+    from sqlalchemy.exc import IntegrityError
+
+    pid = manager.create_project(name="demo")
+    tid = manager.add_task(pid, title="t")
+    with pytest.raises(IntegrityError):
+        manager.update_task(tid, acceptance_test_source="def test_partial(): pass\n")
+
+    # La transaction partielle a été rollbackée.
+    task = manager.get_task(tid)
+    assert task.acceptance_test_source is None
+    assert task.acceptance_test_sha256 is None
+    assert task.acceptance_test_provenance is None
+
+
+def test_set_acceptance_test_artifacts_persists_exact_project_batch(manager):
+    pid = manager.create_project(name="demo")
+    t1 = manager.add_task(pid, title="a")
+    t2 = manager.add_task(pid, title="b")
+    source_1 = "def test_a():\n    assert True\n"
+    source_2 = "def test_b():\n    assert True\n"
+
+    assert manager.set_acceptance_test_artifacts(
+        pid,
+        {
+            t1: {"source": source_1, "provenance": {"role": "qa", "criterion": "a"}},
+            t2: {"source": source_2, "provenance": {"role": "qa", "criterion": "b"}},
+        },
+    )
+
+    tasks = {task.id: task for task in manager.get_tasks(pid)}
+    assert manager.get_project(pid).acceptance_tests_required is True
+    assert tasks[t1].acceptance_test_sha256 == hashlib.sha256(source_1.encode()).hexdigest()
+    assert tasks[t2].acceptance_test_sha256 == hashlib.sha256(source_2.encode()).hexdigest()
+    assert tasks[t1].acceptance_test_provenance["criterion"] == "a"
+    assert tasks[t2].acceptance_test_provenance["criterion"] == "b"
+
+
+@pytest.mark.parametrize("extra_id", [None, 99999])
+def test_set_acceptance_test_artifacts_requires_exact_task_ids_and_rolls_back(manager, extra_id):
+    pid = manager.create_project(name="demo")
+    t1 = manager.add_task(pid, title="a")
+    t2 = manager.add_task(pid, title="b")
+    artifacts = {
+        t1: {"source": "def test_a(): pass\n", "provenance": {"role": "qa"}},
+    }
+    if extra_id is not None:
+        artifacts[extra_id] = {"source": "def test_x(): pass\n", "provenance": {"role": "qa"}}
+
+    with pytest.raises(ValueError, match="manquants=.*étrangers="):
+        manager.set_acceptance_test_artifacts(pid, artifacts)
+
+    # Ni le premier artefact valide ni un artefact étranger ne sont persistés.
+    tasks = {task.id: task for task in manager.get_tasks(pid)}
+    assert set(tasks) == {t1, t2}
+    assert all(task.acceptance_test_source is None for task in tasks.values())
+
+
+def test_set_acceptance_test_artifacts_invalid_member_rolls_back_whole_batch(manager):
+    pid = manager.create_project(name="demo")
+    t1 = manager.add_task(pid, title="a")
+    t2 = manager.add_task(pid, title="b")
+
+    with pytest.raises(ValueError):
+        manager.set_acceptance_test_artifacts(
+            pid,
+            {
+                t1: {"source": "def test_a(): pass\n", "provenance": {"role": "qa"}},
+                t2: {"source": "", "provenance": {"role": "qa"}},
+            },
+        )
+
+    assert all(task.acceptance_test_source is None for task in manager.get_tasks(pid))
+
+
+def test_set_acceptance_test_artifacts_missing_project_returns_false(manager):
+    assert manager.set_acceptance_test_artifacts(99999, {}) is False
+
+
 # --- décisions / métriques ------------------------------------------------------
 
 
@@ -168,12 +288,59 @@ def test_alembic_migration_creates_schema(tmp_path, monkeypatch):
     insp = inspect(create_engine(url))
     tables = set(insp.get_table_names())
     assert {"projects", "tasks", "decisions", "metrics", "checkpoints"} <= tables
+    task_columns = {column["name"] for column in insp.get_columns("tasks")}
+    assert {
+        "acceptance_test_source",
+        "acceptance_test_sha256",
+        "acceptance_test_provenance",
+    } <= task_columns
+    task_checks = {constraint["name"] for constraint in insp.get_check_constraints("tasks")}
+    assert "ck_tasks_acceptance_test_artifact_complete" in task_checks
+    project_columns = {column["name"] for column in insp.get_columns("projects")}
+    assert "acceptance_tests_required" in project_columns
 
     # downgrade : retour à un schéma vide (hors table de version Alembic).
     command.downgrade(cfg, "base")
     insp2 = inspect(create_engine(url))
     remaining = set(insp2.get_table_names()) - {"alembic_version"}
     assert remaining == set()
+
+
+def test_acceptance_artifact_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
+    """0008 ajoute puis retire proprement le triplet QA et sa contrainte."""
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect
+
+    from alembic import command
+
+    url = f"sqlite:///{tmp_path / 'artifact-migration.db'}"
+    monkeypatch.setenv("STATE_DATABASE_URL", url)
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+
+    command.upgrade(cfg, "0007")
+    before = {column["name"] for column in inspect(create_engine(url)).get_columns("tasks")}
+    assert "acceptance_test_source" not in before
+    assert "acceptance_tests_required" not in {
+        column["name"] for column in inspect(create_engine(url)).get_columns("projects")
+    }
+
+    command.upgrade(cfg, "0008")
+    upgraded = inspect(create_engine(url))
+    columns = {column["name"] for column in upgraded.get_columns("tasks")}
+    assert {"acceptance_test_source", "acceptance_test_sha256", "acceptance_test_provenance"} <= columns
+    checks = {constraint["name"] for constraint in upgraded.get_check_constraints("tasks")}
+    assert "ck_tasks_acceptance_test_artifact_complete" in checks
+    assert "acceptance_tests_required" in {column["name"] for column in upgraded.get_columns("projects")}
+
+    command.downgrade(cfg, "0007")
+    downgraded = inspect(create_engine(url))
+    columns = {column["name"] for column in downgraded.get_columns("tasks")}
+    assert "acceptance_test_source" not in columns
+    assert "ck_tasks_acceptance_test_artifact_complete" not in {
+        constraint["name"] for constraint in downgraded.get_check_constraints("tasks")
+    }
+    assert "acceptance_tests_required" not in {column["name"] for column in downgraded.get_columns("projects")}
 
 
 def _migrate_sqlite(tmp_path, monkeypatch, name: str) -> str:
@@ -201,13 +368,19 @@ def test_crud_on_migrated_schema(tmp_path, monkeypatch):
     mgr = ProjectStateManager.from_url(url, create=False)
     pid = mgr.create_project(name="migr", spec="via migration")
     tid = mgr.add_task(pid, title="t", depends_on=[1])
+    source = "def test_migrated_schema():\n    assert True\n"
+    assert mgr.set_acceptance_test_artifact(tid, source, {"role": "qa", "schema_version": 1})
     mgr.add_decision(pid, summary="d")
     mgr.add_metric(pid, name="cov", value=60.0)
     mgr.save_checkpoint(pid, iteration=1, state_json={"k": "v"})
 
     project = mgr.get_project(pid)
     assert project.name == "migr"
-    assert mgr.get_tasks(pid)[0].id == tid
+    migrated_task = mgr.get_tasks(pid)[0]
+    assert migrated_task.id == tid
+    assert migrated_task.acceptance_test_source == source
+    assert migrated_task.acceptance_test_sha256 == hashlib.sha256(source.encode()).hexdigest()
+    assert migrated_task.acceptance_test_provenance == {"role": "qa", "schema_version": 1}
     assert mgr.get_decisions(pid)[0].summary == "d"
     assert mgr.get_metrics(pid)[0].value == 60.0
     assert mgr.get_latest_checkpoint(pid).state_json == {"k": "v"}

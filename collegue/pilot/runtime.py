@@ -217,7 +217,7 @@ def _build_ctx(settings_obj):  # pragma: no cover - infra réelle (integration)
     return LocalSamplingContext.from_settings(settings_obj)
 
 
-def _gate_options(settings_obj) -> dict:
+def _gate_options(settings_obj, *, manager=None, project_id: Optional[int] = None) -> dict:
     """Options du gate qualité depuis la config (#437/#438/#439) — vers ``execute_issue``.
 
     ``GATE_TEST_COMMAND`` vide/None → commande par défaut du gate (pytest).
@@ -251,8 +251,15 @@ def _gate_options(settings_obj) -> dict:
         options["adequacy_checker"] = _build_adequacy_checker(settings_obj)
     # §4.7 (Phase B, opt-in) : tests d'acceptation EXÉCUTABLES dérivés du SPEC, écrits
     # par un rôle indépendant du coder et lancés en sandbox (verdict objectif).
-    if bool(getattr(settings_obj, "GATE_ACCEPTANCE_TESTS", False)):
-        options["acceptance_checker"] = _build_acceptance_checker(settings_obj)
+    configured_acceptance = bool(getattr(settings_obj, "GATE_ACCEPTANCE_TESTS", False))
+    persisted_acceptance = False
+    if not configured_acceptance and manager is not None and project_id is not None:
+        project = manager.get_project(project_id)
+        persisted_acceptance = bool(getattr(project, "acceptance_tests_required", False)) if project else False
+    if configured_acceptance or persisted_acceptance:
+        if manager is None or project_id is None:
+            raise ValueError("GATE_ACCEPTANCE_TESTS exige manager et project_id pour charger l'oracle plan-time")
+        options["acceptance_checker"] = _build_acceptance_checker(manager, project_id)
     # Smoke run (#458, opt-in) : démarrer l'app livrée et vérifier qu'elle répond.
     if bool(getattr(settings_obj, "GATE_SMOKE_RUN", False)):
         options["smoke_run"] = True
@@ -282,10 +289,10 @@ def _build_adequacy_checker(settings_obj):  # pragma: no cover - infra réelle (
     return LLMAdequacyChecker()
 
 
-def _build_acceptance_checker(settings_obj):  # pragma: no cover - infra réelle (integration)
-    from collegue.executor.quality_gate import LLMAcceptanceChecker
+def _build_acceptance_checker(manager, project_id: int):  # pragma: no cover - infra réelle (integration)
+    from collegue.executor.quality_gate import StoredAcceptanceChecker
 
-    return LLMAcceptanceChecker(settings_obj=settings_obj)
+    return StoredAcceptanceChecker(manager=manager, project_id=project_id)
 
 
 # ── point d'entrée assemblé ────────────────────────────────────────────────────
@@ -433,6 +440,14 @@ async def run_project_from_settings(
     if durability:
         logger.warning(durability)
     manager = manager or _build_manager(settings_obj)
+    # Un run réel ne peut jamais partir d'un project_id local bricolé, d'un plan
+    # jamais validé, ou d'un plan muté après validation. Les couches GitHub ont
+    # leurs propres gardes, mais ce contrôle précoce évite aussi de construire le
+    # coder/sandbox et de dépenser du budget avant le refus.
+    if not dry_run:
+        from collegue.planner.plan_review import require_approved
+
+        require_approved(manager, project_id)
     sandbox_was_injected = sandbox is not None
     coder_sandbox = sandbox or _build_sandbox(settings_obj)
     agent = agent or _build_agent(coder_sandbox, settings_obj)
@@ -500,7 +515,7 @@ async def run_project_from_settings(
         # Intégration sérielle en mode strict (#434) : 1 PR en vol par défaut.
         max_inflight_reviews=getattr(settings_obj, "STRICT_MAX_INFLIGHT_PRS", 1),
         # Gate configurable par projet (#438) : commande de tests + passe frontend.
-        gate_options=_gate_options(settings_obj),
+        gate_options=_gate_options(settings_obj, manager=manager, project_id=project_id),
         # Gouvernance de coût (#441) : ledger + source process branchés en réel.
         audit=audit,
         cost_source=cost_source,
@@ -642,9 +657,10 @@ async def plan_project_from_settings(
 
     Assemble les dépendances depuis la config (ctx de sampling offline via ``_build_ctx``,
     état durable) et enchaîne ``generate_spec`` → ``persist_spec`` → ``decompose`` →
-    ``build_plan_preview`` → (``approve_plan`` si ``approve``/``execute_sync``) →
-    ``sync_plan``. **dry-run par défaut** (``execute_sync=False`` : aucune écriture GitHub).
-    ``approve`` satisfait le gate humain P5 (anti-TOCTOU). Le commit du fichier ``SPEC.md``
+    génération QA §4.7 si activée → ``build_plan_preview`` → (``approve_plan``
+    uniquement si ``approve`` est explicite) → ``sync_plan``. **dry-run GitHub par
+    défaut** (``execute_sync=False`` : SPEC/DAG restent persistés, aucune écriture
+    GitHub). ``execute_sync`` n'auto-approuve jamais. Le commit du fichier ``SPEC.md``
     dans le repo cible est porté par ``sync_plan`` (A3).
 
     ``decompose`` est re-tenté sur ``ValueError`` (décomposition vide — aléa d'un modèle
@@ -657,9 +673,10 @@ async def plan_project_from_settings(
         ctx = _build_ctx(settings_obj)
 
     try:
+        from collegue.planner.acceptance_tests import generate_acceptance_tests
         from collegue.planner.decomposer import decompose
         from collegue.planner.github_sync import sync_plan
-        from collegue.planner.plan_review import approve_plan, build_plan_preview
+        from collegue.planner.plan_review import approve_plan, build_plan_preview, require_approved
         from collegue.planner.spec_generator import generate_spec, persist_spec
 
         spec = await generate_spec(problem, ctx, context=context, settings_obj=settings_obj)
@@ -687,11 +704,39 @@ async def plan_project_from_settings(
         else:
             raise last_err if last_err is not None else ValueError("Décomposition impossible.")
 
+        acceptance_enabled = bool(getattr(settings_obj, "GATE_ACCEPTANCE_TESTS", False))
+        if acceptance_enabled:
+            # §4.7 : l'oracle est écrit AVANT tout code, sans workspace ni diff,
+            # puis persisté en un batch atomique. Une génération invalide remonte
+            # et empêche aperçu approuvable / sync (fail-closed).
+            await generate_acceptance_tests(
+                spec,
+                tasks,
+                ctx,
+                manager=manager,
+                project_id=project_id,
+                settings_obj=settings_obj,
+            )
+
         preview = build_plan_preview(manager, project_id)
         preview_md = preview.to_markdown() if preview is not None else ""
 
-        if approve or execute_sync:
-            approve_plan(manager, project_id, actor="operator:collegue-cli")
+        if approve:
+            approve_plan(
+                manager,
+                project_id,
+                actor="operator:collegue-cli",
+                require_acceptance_artifacts=acceptance_enabled,
+            )
+            # L'aperçu rendu doit refléter le statut réellement persisté.
+            preview = build_plan_preview(manager, project_id)
+            preview_md = preview.to_markdown() if preview is not None else ""
+
+        if execute_sync:
+            # `--execute-sync` n'est pas une approbation implicite. L'opérateur
+            # doit fournir `--approve` explicitement ; on vérifie ici puis
+            # `sync_plan` re-vérifie juste avant ses écritures (défense en profondeur).
+            require_approved(manager, project_id)
 
         token = github_token if github_token is not None else os.environ.get(GITHUB_TOKEN_ENV)
         sync = sync_plan(

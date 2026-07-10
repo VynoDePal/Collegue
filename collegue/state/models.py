@@ -23,7 +23,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -79,6 +92,12 @@ class Project(Base):
     # Lie l'approbation à un contenu précis : toute mutation ultérieure du plan
     # invalide le gate (anti-TOCTOU). NULL tant que non approuvé.
     approved_plan_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Politique §4.7 persistée avec le projet : une fois les oracles QA générés,
+    # désactiver accidentellement le flag d'environnement au run ne doit pas les
+    # contourner. Toute modification de cette valeur invalide aussi le plan hashé.
+    acceptance_tests_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     # Cascade gérée par l'ORM (cascade="all, delete-orphan") : marche partout.
     # ondelete="CASCADE" reste sur la FK pour PostgreSQL (défense en profondeur ;
@@ -93,12 +112,35 @@ class Task(Base):
     __tablename__ = "tasks"
     # Un numéro d'issue GitHub ne mappe qu'une seule tâche (NULL multiples permis :
     # tâches non encore synchronisées). Intégrité du mapping task↔issue (P4).
-    __table_args__ = (UniqueConstraint("project_id", "issue_number", name="uq_tasks_project_issue"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "issue_number", name="uq_tasks_project_issue"),
+        # §4.7 : l'artefact QA constitue un triplet indivisible. Un source sans
+        # empreinte/provenance (ou l'inverse) ne doit jamais survivre à un crash
+        # ni à une mise à jour partielle. ``JSON(none_as_null=True)`` ci-dessous
+        # garantit que Python ``None`` devient bien SQL NULL pour cette contrainte.
+        CheckConstraint(
+            "(acceptance_test_source IS NULL "
+            "AND acceptance_test_sha256 IS NULL "
+            "AND acceptance_test_provenance IS NULL) "
+            "OR (acceptance_test_source IS NOT NULL "
+            "AND acceptance_test_sha256 IS NOT NULL "
+            "AND acceptance_test_provenance IS NOT NULL)",
+            name="ck_tasks_acceptance_test_artifact_complete",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     acceptance: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Artefact de test d'acceptation produit au plan-time par le rôle QA (§4.7).
+    # Le source exact est conservé pour rejouer le même oracle ; son SHA-256 et
+    # sa provenance rendent toute substitution détectable et auditable. Les trois
+    # colonnes sont nullables pour les projets historiques, mais la contrainte de
+    # table impose qu'elles soient renseignées atomiquement ou toutes absentes.
+    acceptance_test_source: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    acceptance_test_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    acceptance_test_provenance: Mapped[Optional[dict]] = mapped_column(JSON(none_as_null=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo", server_default="todo")
     # Liste d'IDs de tâches dont celle-ci dépend (graphe de tâches).
     depends_on: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)

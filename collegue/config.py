@@ -143,10 +143,10 @@ class Settings(BaseSettings):
     # « livraison fantôme » (feature fermée par +1 ligne de requirements) ne
     # passe plus. Opt-in : un appel LLM par PR candidate.
     GATE_ADEQUACY: bool = False
-    # §4.7 (fondation expérimentale) : tests d'acceptation EXÉCUTABLES écrits par
-    # le rôle REVIEWER et jugés par exit code, strictement fail-closed en opt-in.
-    # OFF tant que la génération plan-time indépendante, persistée et hashée n'est
-    # pas câblée ; ne pas présenter ce flag comme la preuve §4.7 complète.
+    # §4.7 : tests d'acceptation EXÉCUTABLES générés au PLAN-TIME par le rôle QA,
+    # persistés avec SHA-256/provenance et inclus dans l'empreinte approuvée. Le
+    # gate rejoue exactement cet oracle en sandbox, sans voir le diff et sans
+    # nouvel appel LLM. Strictement fail-closed en opt-in ; OFF par défaut.
     GATE_ACCEPTANCE_TESTS: bool = False
     # Exiger qu'un diff touche au moins un fichier de test (sinon : simple
     # signal ⚠️ dans le rapport de gate / corps de PR).

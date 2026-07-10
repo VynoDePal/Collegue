@@ -26,8 +26,14 @@ def test_state_survives_simulated_restart(db_url):
     # Process 1 : on écrit l'état puis on "ferme" le process.
     mgr1 = ProjectStateManager.from_url(db_url, create=True)
     pid = mgr1.create_project(name="run-long", spec="construire le moteur", phase="2")
-    mgr1.add_task(pid, title="t1", status="done", depends_on=[])
+    t1 = mgr1.add_task(pid, title="t1", status="done", depends_on=[])
     mgr1.add_task(pid, title="t2", status="todo", depends_on=[1])
+    acceptance_source = "def test_contract():\n    assert True\n"
+    mgr1.set_acceptance_test_artifact(
+        t1,
+        acceptance_source,
+        {"role": "qa", "model": "qa-model", "schema_version": 1},
+    )
     mgr1.record_decision(pid, summary="choisir PostgreSQL", rationale="durabilité")
     mgr1.save_checkpoint(pid, iteration=5, state_json={"cursor": 42, "phase": "2"})
     del mgr1  # simule l'arrêt du process
@@ -45,6 +51,14 @@ def test_state_survives_simulated_restart(db_url):
     assert snap.latest_checkpoint["state_json"] == {"cursor": 42, "phase": "2"}
     # Valeurs identiques jusqu'au détail : depends_on (JSON) + tz des datetimes.
     assert snap.tasks[1]["depends_on"] == [1]
+    assert snap.tasks[0]["acceptance_test_source"] == acceptance_source
+    assert len(snap.tasks[0]["acceptance_test_sha256"]) == 64
+    assert snap.tasks[0]["acceptance_test_provenance"] == {
+        "model": "qa-model",
+        "role": "qa",
+        "schema_version": 1,
+    }
+    assert snap.tasks[1]["acceptance_test_source"] is None  # projet historique / artefact absent
     assert snap.project["created_at"].endswith("+00:00")  # tz-aware préservée
     assert snap.decisions[0]["ts"].endswith("+00:00")
 
@@ -53,13 +67,19 @@ def test_snapshot_is_json_serializable(db_url):
     # Le snapshot doit pouvoir être json.dumps (datetimes en ISO-8601).
     mgr = ProjectStateManager.from_url(db_url, create=True)
     pid = mgr.create_project(name="p", spec="s")
-    mgr.add_task(pid, title="t", depends_on=[1])
+    tid = mgr.add_task(pid, title="t", depends_on=[1])
+    mgr.set_acceptance_test_artifact(
+        tid,
+        "def test_snapshot():\n    assert True\n",
+        {"role": "qa", "prompt": {"sha256": "a" * 64}},
+    )
     mgr.record_decision(pid, summary="d")
     mgr.add_metric(pid, name="cov", value=63.5)
     mgr.save_checkpoint(pid, iteration=1, state_json={"k": "v"})
     snap = load_snapshot(mgr, pid)
     dumped = json.dumps(asdict(snap))  # ne doit pas lever
     assert "cov" in dumped
+    assert "acceptance_test_sha256" in dumped
 
 
 def test_load_snapshot_missing_project(db_url):

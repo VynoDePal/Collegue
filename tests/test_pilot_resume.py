@@ -17,6 +17,7 @@ from collegue.pilot import (
     run_project_from_settings,
 )
 from collegue.pilot.budget import ACTION_DEADLINE
+from collegue.planner import approve_plan
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
 
@@ -250,9 +251,10 @@ async def test_improving_chains_on_resumed_completed_mvp(repo, manager):
 
 async def test_runtime_threads_improve_flag(repo, manager):
     # Le runtime propage `improve`/`run_improvement_fn` jusqu'au driver (sinon mode mort).
-    pid = manager.create_project(name="rt2")
+    pid = manager.create_project(name="rt2", spec="# SPEC\n")
     tid = manager.add_task(pid, title="T0")
     manager.update_task_status(tid, "in_review")  # MVP déjà construit
+    approve_plan(manager, pid)
     seen = {}
 
     async def fake_run_improvement(project_id, repo_source, ctx, **kw):
@@ -287,8 +289,9 @@ async def test_runtime_rebuilds_budget_from_persisted_start(repo, manager):
     # Start d'origine dans un passé lointain + deadline 1s → la deadline (absolue) est
     # déjà dépassée à la reprise → arrêt immédiat (0 tâche) : preuve que le runtime a
     # repris le started_at d'ORIGINE et non « maintenant ».
-    pid = manager.create_project(name="rt")
+    pid = manager.create_project(name="rt", spec="# SPEC\n")
     manager.add_task(pid, title="T0")
+    approve_plan(manager, pid)
     persist_run_start(manager, pid, datetime(2020, 1, 1, tzinfo=timezone.utc))
     settings_obj = SimpleNamespace(
         COLLEGUE_RUN_DEADLINE_SECONDS=1, MAX_COST_USD=0, MAX_TOKENS_BUDGET=0, BUDGET_EXHAUSTED_ACTION="pause"

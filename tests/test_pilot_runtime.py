@@ -11,6 +11,7 @@ from collegue.executor import FakeCodeAgent, FakeReviewer, PrClients
 from collegue.pilot import ProjectRunResult, TaskOutcome, format_run_report, run_project_from_settings
 from collegue.pilot.__main__ import build_parser
 from collegue.pilot.runtime import collegue_home_durability_warning
+from collegue.planner import PlanNotApproved, approve_plan
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
 
@@ -80,7 +81,7 @@ def manager(tmp_path):
 
 
 def _linear(manager, n):
-    pid = manager.create_project(name="demo")
+    pid = manager.create_project(name="demo", spec="# SPEC\n")
     prev = None
     for i in range(n):
         prev = manager.add_task(pid, title=f"T{i}", depends_on=[prev] if prev else None)
@@ -88,6 +89,8 @@ def _linear(manager, n):
 
 
 async def _run(manager, git_repo, pid, *, dry_run):
+    if not dry_run:
+        approve_plan(manager, pid)
     return await run_project_from_settings(
         pid,
         git_repo,
@@ -115,6 +118,25 @@ async def test_dry_run_builds_chain_without_writes(git_repo, manager):
     assert manager.get_decisions(pid) == []  # pas de résumé en dry_run
 
 
+async def test_real_run_rejects_unapproved_plan_before_execution(git_repo, manager):
+    pid = _linear(manager, 1)
+    with pytest.raises(PlanNotApproved):
+        await run_project_from_settings(
+            pid,
+            git_repo,
+            owner="o",
+            repo="r",
+            dry_run=False,
+            manager=manager,
+            sandbox=_Sandbox(),
+            agent=FakeCodeAgent(),
+            reviewer=FakeReviewer(),
+            clients=_clients(),
+            budget=_Budget(),
+        )
+    assert manager.get_tasks(pid)[0].status == "todo"
+
+
 async def test_real_run_records_summary_decision(git_repo, manager):
     pid = _linear(manager, 1)
     result = await _run(manager, git_repo, pid, dry_run=False)
@@ -140,6 +162,7 @@ async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
             return dataclasses.replace(result, prompt_tokens=1000, completion_tokens=200, cost_usd=0.003)
 
     pid = _linear(manager, 1)
+    approve_plan(manager, pid)
     result = await run_project_from_settings(
         pid,
         git_repo,
@@ -224,8 +247,8 @@ def test_gate_sandbox_keeps_runtime_resources_without_coder_credentials(tmp_path
     assert ".openhands" not in rendered
 
 
-def test_acceptance_checker_receives_runtime_settings(monkeypatch):
-    """Le checker QA résout son propre rôle/modèle depuis les settings du run."""
+def test_acceptance_checker_receives_durable_project_identity(monkeypatch):
+    """Le checker d'exécution recharge l'oracle exact depuis l'état durable."""
     import collegue.executor.quality_gate as quality_gate
     import collegue.pilot.runtime as runtime
 
@@ -235,13 +258,13 @@ def test_acceptance_checker_receives_runtime_settings(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(quality_gate, "LLMAcceptanceChecker", _Checker)
-    settings = SimpleNamespace(LLM_MODEL_REVIEWER="reviewer-model")
+    monkeypatch.setattr(quality_gate, "StoredAcceptanceChecker", _Checker)
+    manager = object()
 
-    checker = runtime._build_acceptance_checker(settings)
+    checker = runtime._build_acceptance_checker(manager, 17)
 
     assert isinstance(checker, _Checker)
-    assert captured == {"settings_obj": settings}
+    assert captured == {"manager": manager, "project_id": 17}
 
 
 def test_build_agent_uses_sdk_coder():
@@ -461,6 +484,7 @@ async def test_build_auto_merge_loops_until_complete(monkeypatch, manager, git_r
     import collegue.pilot.runtime as runtime
 
     pid = _linear(manager, 2)
+    approve_plan(manager, pid)
     calls = {"run": 0, "merge": 0, "require_merged": []}
 
     async def _fake_run_project(p, src, ctx, **kw):
@@ -509,6 +533,7 @@ async def test_build_auto_merge_drains_last_pr_on_complete(monkeypatch, manager,
     import collegue.pilot.runtime as runtime
 
     pid = _linear(manager, 1)
+    approve_plan(manager, pid)
     calls = {"run": 0, "merge": 0}
 
     async def _fake_run_project(p, src, ctx, **kw):
