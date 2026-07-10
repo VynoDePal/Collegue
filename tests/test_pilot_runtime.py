@@ -118,7 +118,7 @@ async def test_dry_run_builds_chain_without_writes(git_repo, manager):
 async def test_real_run_records_summary_decision(git_repo, manager):
     pid = _linear(manager, 1)
     result = await _run(manager, git_repo, pid, dry_run=False)
-    assert result.stop_reason == "completed"
+    assert result.stop_reason == "awaiting_merge"  # #580 : le fake ne sait pas merger
     assert any("Run pilote" in d.summary for d in manager.get_decisions(pid))
     assert manager.get_tasks(pid)[0].status == "in_review"
 
@@ -153,7 +153,7 @@ async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
         clients=_clients(),
         budget=_Budget(),
     )
-    assert result.stop_reason == "completed"
+    assert result.stop_reason == "awaiting_merge"  # usage compté, mais PR non mergée
     summary = run_cost_summary(manager, pid)
     assert summary["tokens"] == 1200  # canal coder enfin compté
     assert summary["usd"] == pytest.approx(0.003)
@@ -405,6 +405,135 @@ async def test_build_auto_merge_drains_last_pr_on_complete(monkeypatch, manager,
     )
     assert calls["run"] == 1  # pas d'awaiting_merge → 1 passe
     assert calls["merge"] == 1  # drain final exécuté quand même (dernière PR)
+
+
+async def test_build_improve_handoff_orders_merge_resync_then_phase4(monkeypatch, manager, git_repo):
+    """#580 : preuve combinée du vrai runtime, sans LLM/réseau.
+
+    La dernière PR BUILD doit être ouverte, mergée, le clone resynchronisé, puis
+    seulement Phase 4 peut démarrer dans une seconde passe sans tâche.
+    """
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 1)
+    events = []
+    pr = SimpleNamespace(number=77, html_url="https://gh/pull/77", head_branch="collegue/issue-1")
+
+    class _TrackingPRs:
+        def __init__(self):
+            self.created = False
+
+        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+            return pr if self.created else None
+
+        def create_pr(self, owner, repo, title, head, base, body):
+            self.created = True
+            events.append("pr_opened")
+            return pr
+
+        def merge_pr(self, owner, repo, number, method="squash", expected_head_sha=None):
+            events.append("merged")
+            return SimpleNamespace(merged=True, already_merged=False)
+
+    async def fake_improvement(project_id, repo_source, ctx, **kwargs):
+        events.append("improved")
+        return SimpleNamespace(stop_reason="plateau")
+
+    def strict_handoff_sync(_src, _base):
+        events.append("handoff_resynced")
+        return True
+
+    # Le merge-bot fait déjà un resync après merge ; on le rend déterministe et
+    # visible, puis le driver effectue sa seconde vérification stricte.
+    monkeypatch.setattr(
+        runtime,
+        "_resync_repo_source",
+        lambda _src, _base, **_kw: events.append("merge_resynced") or True,
+    )
+    monkeypatch.setattr("collegue.executor.openhands_agent.coder_pricing_resolvable", lambda s=None: True)
+
+    clients = PrClients(branches=_Branches(), files=_Files(), prs=_TrackingPRs())
+    result = await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=True),
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=clients,
+        budget=_Budget(),
+        ctx=SimpleNamespace(),
+        improve=True,
+        run_improvement_fn=fake_improvement,
+        sync_base_fn=strict_handoff_sync,
+        audit=SimpleNamespace(
+            record=lambda *a, **k: None,
+            record_cost=lambda *a, **k: None,
+            record_once=lambda *a, **k: None,
+            cost_summary=lambda: {"usd": 0.0, "tokens": 0},
+        ),
+        cost_source=lambda: (0.0, 0),
+    )
+
+    assert result.stop_reason == "completed"
+    assert result.improvement.stop_reason == "plateau"
+    assert manager.get_task(1).status == "merged"
+    assert events == ["pr_opened", "merged", "merge_resynced", "handoff_resynced", "improved"]
+
+
+async def test_failed_final_merge_never_reports_completed_or_runs_phase4(monkeypatch, manager, git_repo):
+    """#580 : un drain final KO reste awaiting_merge, sans faux succès ni Phase 4."""
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 1)
+    improved = {"called": False}
+
+    async def never_merge(*args, **kwargs):
+        return False, "CI/merge indisponible"
+
+    async def fake_improvement(*args, **kwargs):
+        improved["called"] = True
+        raise AssertionError("Phase 4 interdite après un merge BUILD échoué")
+
+    class _KnownPRs(_PRs):
+        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+            return SimpleNamespace(number=88)
+
+    monkeypatch.setattr(runtime, "_try_merge_pr", never_merge)
+    clients = PrClients(branches=_Branches(), files=_Files(), prs=_KnownPRs())
+    result = await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,
+        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=True),
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=clients,
+        budget=_Budget(),
+        ctx=SimpleNamespace(),
+        improve=True,
+        run_improvement_fn=fake_improvement,
+        sync_base_fn=lambda _src, _base: True,
+        audit=SimpleNamespace(
+            record=lambda *a, **k: None,
+            record_cost=lambda *a, **k: None,
+            record_once=lambda *a, **k: None,
+            cost_summary=lambda: {"usd": 0.0, "tokens": 0},
+        ),
+        cost_source=lambda: (0.0, 0),
+    )
+
+    assert result.stop_reason == "awaiting_merge"
+    assert result.pending_reviews == [1]
+    assert result.improvement is None and improved["called"] is False
 
 
 async def test_build_auto_merge_off_single_pass(monkeypatch, manager, git_repo):

@@ -30,7 +30,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.openhands_agent import coder_pricing_resolvable, estimate_cost_usd
@@ -43,7 +43,12 @@ from collegue.executor.pipeline import (
     is_infra_noise,
     log_tail,
 )
-from collegue.executor.workspace import branch_for_issue, cleanup_workspace, sweep_stale_temp_clones
+from collegue.executor.workspace import (
+    branch_for_issue,
+    cleanup_workspace,
+    resync_repository_base,
+    sweep_stale_temp_clones,
+)
 from collegue.pilot.audit import (
     BUDGET_EVENT,
     CHECKPOINT_SAVED,
@@ -91,6 +96,7 @@ STOP_BLOCKED = "blocked"  # graphe coincé (dépendance échouée)
 STOP_AWAITING_MERGE = "awaiting_merge"  # mode strict (#411) : tout est prêt SAUF des merges humains
 STOP_SAFETY_CAP = "safety_cap"  # garde-fou anti-boucle
 STOP_SANDBOX_BROKEN = "sandbox_broken"  # crash-loop d'import agent : image/runner cassé (#498)
+STOP_REPO_SYNC_FAILED = "repo_sync_failed"  # base locale non vérifiée → Phase 4 interdite (#580)
 
 
 class CostPricingUnresolvedError(RuntimeError):
@@ -518,6 +524,7 @@ async def run_project(
     reconcile_reviews: bool = True,
     cleanup_workspaces: bool = True,
     require_cost_pricing: bool = False,
+    sync_base_fn: Optional[Callable[[str, str], bool]] = None,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -576,6 +583,10 @@ async def run_project(
     (merge 405 irrécupérable sans opérateur). Augmenter rétablit N PRs en vol
     (au risque documenté de #434). Ignoré hors mode strict (comportement
     historique inchangé : ``in_review`` débloque déjà les dépendants).
+
+    ``sync_base_fn`` (#580) : barrière injectable ``(repo_source, base) -> bool``
+    exécutée avant la Phase 4. Le défaut fait ``git fetch`` + ``reset --hard`` sur
+    ``origin/<base>``. Un échec interdit l'amélioration (``repo_sync_failed``).
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
@@ -729,6 +740,11 @@ async def run_project(
             # run après merge reprend naturellement) ; soit un graphe coincé
             # (dépendance échouée) → bloqué ; sinon, tout est construit → MVP.
             if not remaining_tasks(tasks):
+                # Le BUILD a produit toutes ses PR. Elles peuvent encore être
+                # ``in_review`` : ce stop historique reste ``completed`` pour le
+                # driver bas niveau, mais #580 interdit désormais de le confondre
+                # avec un MVP INTÉGRÉ (voir ``mvp_built`` ci-dessous). Le runtime
+                # produit transforme ce cas en awaiting_merge si le drain échoue.
                 stop_reason = STOP_COMPLETED
             elif require_merged_deps and ready_tasks(tasks):
                 stop_reason = STOP_AWAITING_MERGE
@@ -1082,16 +1098,37 @@ async def run_project(
             )
             audit.record(CHECKPOINT_SAVED, iteration=iteration)
 
-    audit.record(RUN_STOP, iteration=iteration, reason=stop_reason, iterations=len(processed))
-
     project_status: Optional[str] = None
-    # MVP atteint : run terminé (``STOP_COMPLETED`` implique qu'aucune tâche n'a échoué
-    # — sinon ``STOP_BLOCKED``) et le projet a des tâches, toutes satisfaites. Vrai aussi
-    # à la REPRISE d'un MVP déjà construit (tâches déjà ``in_review`` en DB → ``processed``
-    # vide) : on se base donc sur ``len(tasks) > 0`` et non sur ``processed`` (sinon une
-    # reprise ne basculerait jamais en amélioration — le cas même que H5 doit couvrir).
-    # ``len(tasks) > 0`` exclut le projet vide (anti-vacuité). Réel uniquement.
-    mvp_built = stop_reason == STOP_COMPLETED and len(tasks) > 0 and not dry_run
+    # #580 : « construit » signifie désormais INTÉGRÉ dans la branche de base.
+    # ``in_review`` n'est pas suffisant : la PR peut encore échouer au merge et son
+    # code n'est pas dans ``repo_source``. Les statuts stricts sont précisément
+    # ``done``/``merged``. ``len(tasks) > 0`` conserve l'anti-vacuité.
+    mvp_built = (
+        stop_reason == STOP_COMPLETED
+        and len(tasks) > 0
+        and all(t.status in SATISFIED_STATUSES_STRICT for t in tasks)
+        and not dry_run
+    )
+
+    # Barrière de handoff BUILD → IMPROVE : même après des merges confirmés dans
+    # l'état durable, on refuse de mesurer une copie locale qui n'a pas été
+    # explicitement réalignée sur origin/<base>. Ce second resync vérifie aussi le
+    # chemin « merges humains entre deux runs », que le merge-bot n'a pas vu.
+    if mvp_built and improve:
+        sync = sync_base_fn or resync_repository_base
+        try:
+            base_current = bool(sync(repo_source, base))
+        except Exception as exc:  # noqa: BLE001 - plomberie git : fail-closed
+            logger.warning("handoff BUILD→IMPROVE : resync de la base en erreur : %s", exc)
+            base_current = False
+        if not base_current:
+            stop_reason = STOP_REPO_SYNC_FAILED
+            mvp_built = False
+            logger.error(
+                "Phase 4 interdite : impossible de vérifier que %s est aligné sur origin/%s (#580).",
+                repo_source,
+                base,
+            )
     if mvp_built:
         manager.update_project(project_id, status=PROJECT_STATUS_IMPROVING)
         project_status = PROJECT_STATUS_IMPROVING
@@ -1130,6 +1167,10 @@ async def run_project(
             dry_run=dry_run,
             **improve_extra,
         )
+
+    # Le motif peut changer pendant la barrière de handoff (#580) : journaliser
+    # seulement le verdict FINAL, pas le faux ``completed`` calculé avant resync.
+    audit.record(RUN_STOP, iteration=iteration, reason=stop_reason, iterations=len(processed))
 
     return ProjectRunResult(
         stop_reason=stop_reason,
