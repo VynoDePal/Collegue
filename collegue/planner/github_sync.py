@@ -195,13 +195,23 @@ def _commit_spec(
         return None, None, False
 
 
-def _issue_body(task: Any, dep_numbers: List[int]) -> str:
+def _issue_body(
+    task: Any,
+    dep_numbers: List[int],
+    *,
+    project_id: Optional[int] = None,
+    plan_hash: Optional[str] = None,
+) -> str:
     parts: List[str] = []
     if task.acceptance:
         parts.append(f"## Critère d'acceptation\n{task.acceptance}")
     if dep_numbers:
         parts.append("Dépend de : " + ", ".join(f"#{n}" for n in dep_numbers))
     parts.append(f"<!-- collegue-task:{task.id} -->")  # marqueur de traçabilité
+    if project_id is not None and plan_hash:
+        # Corrélation distante durable : permet de réconcilier/nettoyer une issue
+        # même si le POST a réussi mais que sa réponse n'a jamais atteint la DB.
+        parts.append(f"<!-- collegue-plan:{plan_hash};project:{int(project_id)};task:{int(task.id)} -->")
     return "\n\n".join(parts)
 
 
@@ -337,13 +347,34 @@ def sync_plan(
             continue
         # Ordre topo + validation → toutes les dépendances ont déjà un numéro (pas de drop silencieux).
         dep_numbers = [task_to_issue[d] for d in dict.fromkeys(task.depends_on or [])]
-        issue = clients.issues.create_issue(owner, repo, title=task.title, body=_issue_body(task, dep_numbers))
+        issue_body = _issue_body(
+            task,
+            dep_numbers,
+            project_id=project_id,
+            plan_hash=getattr(snapshot, "plan_hash", None),
+        )
+        create_with_metadata = getattr(clients.issues, "create_issue_with_metadata", None)
+        if callable(create_with_metadata):
+            issue = create_with_metadata(
+                owner,
+                repo,
+                title=task.title,
+                body=issue_body,
+                labels=labels,
+                milestone_number=getattr(milestone, "number", None),
+            )
+            metadata_created_atomically = True
+        else:
+            # Compatibilité des clients injectés historiques. Le client GitHub
+            # produit expose toujours ``create_issue_with_metadata``.
+            issue = clients.issues.create_issue(owner, repo, title=task.title, body=issue_body)
+            metadata_created_atomically = False
         number = issue.number
         task_to_issue[task.id] = number
         manager.update_task(task.id, issue_number=number)
-        if labels:
+        if labels and not metadata_created_atomically:
             clients.labels.add_labels_to_issue(owner, repo, number, labels)
-        if milestone is not None:
+        if milestone is not None and not metadata_created_atomically:
             clients.milestones.assign_milestone(owner, repo, number, milestone.number)
         if board is not None:
             node_id = clients.projects.issue_node_id(owner, repo, number)

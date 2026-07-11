@@ -231,6 +231,7 @@ async def test_stored_checker_runs_exact_approved_source_without_llm(tmp_path):
     out = await checker.check(str(tmp_path), "diff hostile ignoré", issue, _NoSampling(), sandbox=sandbox)
 
     assert out.passed is True and out.error is None
+    assert out.oracle_sha256 == _task.acceptance_test_sha256
     assert approvals and approvals[0][1] == 3
     assert len(sandbox.commands) == 1
     assert "python -I -c" in sandbox.commands[0]
@@ -311,8 +312,13 @@ async def test_stored_checker_requires_opaque_task_id(tmp_path):
 
 
 class _FakeAcceptance:
-    def __init__(self, *, passed=None, error=None, skipped=False, raises=None):
-        self._outcome = AcceptanceOutcome(passed=passed, error=error, skipped=skipped)
+    def __init__(self, *, passed=None, error=None, skipped=False, oracle_sha256=None, raises=None):
+        self._outcome = AcceptanceOutcome(
+            passed=passed,
+            error=error,
+            skipped=skipped,
+            oracle_sha256=oracle_sha256,
+        )
         self._raises = raises
         self.called = False
 
@@ -334,11 +340,13 @@ async def test_gate_blocks_when_acceptance_fails():
 
 
 async def test_gate_passes_when_acceptance_passes():
-    chk = _FakeAcceptance(passed=True)
+    digest = "a" * 64
+    chk = _FakeAcceptance(passed=True, oracle_sha256=digest)
     report = await run_quality_gate(
         "/ws", DIFF, ctx=None, sandbox=_green(), reviewer=FakeReviewer(), issue=ISSUE_AC, acceptance_checker=chk
     )
     assert report.acceptance_passed is True and report.passed is True
+    assert report.acceptance_oracle_sha256 == digest
 
 
 async def test_gate_generation_error_blocks():
@@ -418,6 +426,25 @@ def test_acceptance_failure_rendered_in_report():
         acceptance_passed=False,
     ).to_markdown()
     assert "tests d'acceptation dérivés du SPEC en ÉCHEC" in md
+
+
+def test_acceptance_success_renders_executed_oracle_sha():
+    from collegue.executor import QualityReport
+
+    digest = "b" * 64
+    md = QualityReport(
+        tests_passed=True,
+        test_exit_code=0,
+        test_output="",
+        review_summary="",
+        review_findings=(),
+        review_blocking=False,
+        passed=True,
+        acceptance_passed=True,
+        acceptance_oracle_sha256=digest,
+    ).to_markdown()
+    assert "Tests d'acceptation (§4.7)" in md
+    assert f"sha256:{digest}" in md
 
 
 def test_acceptance_unavailable_rendered_as_fail_closed():

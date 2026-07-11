@@ -175,7 +175,7 @@ async def test_persisted_acceptance_reaches_enabled_gate(repo, manager):
 
         async def check(self, workspace, diff, issue, ctx, *, sandbox):
             self.called_with = issue.acceptance_criteria
-            return AcceptanceOutcome(passed=True)
+            return AcceptanceOutcome(passed=True, oracle_sha256="c" * 64)
 
     pid = manager.create_project(name="acceptance-wiring")
     manager.add_task(pid, title="API", acceptance="retourne HTTP 200")
@@ -189,6 +189,9 @@ async def test_persisted_acceptance_reaches_enabled_gate(repo, manager):
     )
     assert result.stop_reason == "completed"
     assert checker.called_with == ("retourne HTTP 200",)
+    assert result.processed[0].acceptance_passed is True
+    assert result.processed[0].acceptance_error is None
+    assert result.processed[0].acceptance_oracle_sha256 == "c" * 64
 
 
 # --- bout en bout ---------------------------------------------------------------

@@ -7,6 +7,7 @@
 # Et avec secrets (chiffrés, jamais en clair dans le dépôt) :
 #   - les tests LLM réels (INTEGRATION_LLM_API_KEY), sous budget DUR borné
 #   - Sentry/GitHub réels si fournis (sinon les tests se skippent proprement)
+#   - en opt-in, le cycle produit plan→run→PR→cleanup sur un dépôt fixture dédié
 #
 # Les tests `integration` skippent quand un prérequis manque : le rapport liste
 # les skips (-rs) et l'étape « Bilan » échoue si TOUT a été skippé (un nightly
@@ -21,7 +22,6 @@ on:
 
 permissions:
   contents: read
-  issues: write # notification d'échec (issue de suivi)
 
 concurrency:
   group: integration-nightly
@@ -53,13 +53,6 @@ jobs:
       STATE_DATABASE_URL: postgresql+psycopg2://collegue:collegue@localhost:5432/collegue_state
       # Sandbox Docker réel : image légère publique (pullée ci-dessous).
       SANDBOX_TEST_IMAGE: python:3.12-slim
-      # Secrets chiffrés (Settings → Secrets and variables → Actions). Absent = les
-      # tests correspondants se skippent — JAMAIS de clé en clair dans le dépôt.
-      LLM_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
-      GEMINI_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.INTEGRATION_GITHUB_TOKEN }}
-      SENTRY_AUTH_TOKEN: ${{ secrets.INTEGRATION_SENTRY_AUTH_TOKEN }}
-      SENTRY_ORG: ${{ secrets.INTEGRATION_SENTRY_ORG }}
       # Budget DUR : borne le coût d'un nightly même si un test LLM s'emballe.
       MAX_COST_USD: "2.0"
       MAX_TOKENS_BUDGET: "2000000"
@@ -69,6 +62,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -91,6 +86,13 @@ jobs:
         id: pytest
         env:
           PYTHONPATH: .
+          # Secrets limités au processus de test qui les consomme : setup, pip,
+          # Docker et les actions de rapport ne les reçoivent jamais.
+          LLM_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_GITHUB_TOKEN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.INTEGRATION_SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.INTEGRATION_SENTRY_ORG }}
         # --override-ini neutralise l'addopts `-m 'not integration'` du pyproject ;
         # -rs liste chaque skip avec sa raison (lisible dans le log du run).
         run: |
@@ -121,21 +123,239 @@ jobs:
             integration-report.xml
             pytest-integration.log
 
-      - name: Notifier l'échec (issue de suivi)
-        if: failure()
+  build-sandbox-openhands:
+    name: Build image sandbox OpenHands (#404)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Construit l'image #404 depuis les SOURCES COMMITTÉES SEULES (le harnais
+      # gitignoré scripts/facnor_run/ n'est pas présent en CI) — prouve que le
+      # blocage « image non constructible » est levé. Ce job reste build-only ;
+      # le job product-e2e ci-dessous reconstruit l'image sur son propre runner
+      # avant le smoke réel secret-gated.
+      - name: Build OpenHands sandbox image (committed sources only)
+        run: docker build -f docker/sandbox/Dockerfile.openhands -t collegue-sandbox-openhands:ci .
+      - name: Vérifier le runner produit OpenHands SDK
+        run: |
+          docker run --rm collegue-sandbox-openhands:ci \
+            python -c "from pathlib import Path; from openhands.sdk import Conversation, LLM; from openhands.tools.preset.default import get_default_agent; assert Path('/opt/oh_runner.py').is_file(); print('OpenHands SDK runner OK')"
+
+  product-e2e:
+    name: Produit E2E — plan → run → PR → cleanup (#404)
+    if: vars.INTEGRATION_E2E_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      # Opt-in et identité immuable du dépôt fixture public.
+      COLLEGUE_NIGHTLY_E2E: "true"
+      INTEGRATION_FIXTURE_REPOSITORY: ${{ vars.INTEGRATION_FIXTURE_REPOSITORY }}
+      INTEGRATION_FIXTURE_REPOSITORY_ID: ${{ vars.INTEGRATION_FIXTURE_REPOSITORY_ID }}
+      INTEGRATION_FIXTURE_ROOT_BRANCH: ${{ vars.INTEGRATION_FIXTURE_ROOT_BRANCH }}
+      INTEGRATION_FIXTURE_SEED_SHA: ${{ vars.INTEGRATION_FIXTURE_SEED_SHA }}
+      COLLEGUE_NIGHTLY_MANIFEST: ${{ runner.temp }}/collegue-nightly/manifest.json
+
+      # Endpoint/modèles configurables sans modifier le workflow. Les overrides
+      # vides retombent sur le provider/modèle global dans la résolution par rôle.
+      LLM_PROVIDER: ${{ vars.INTEGRATION_LLM_PROVIDER }}
+      LLM_MODEL: ${{ vars.INTEGRATION_LLM_MODEL }}
+      LLM_PROVIDER_CODER: ${{ vars.INTEGRATION_LLM_PROVIDER_CODER }}
+      LLM_MODEL_CODER: ${{ vars.INTEGRATION_LLM_MODEL_CODER }}
+      LLM_PROVIDER_QA: ${{ vars.INTEGRATION_LLM_PROVIDER_QA }}
+      LLM_MODEL_QA: ${{ vars.INTEGRATION_LLM_MODEL_QA }}
+      LLM_PROVIDER_REVIEWER: ${{ vars.INTEGRATION_LLM_PROVIDER_REVIEWER }}
+      LLM_MODEL_REVIEWER: ${{ vars.INTEGRATION_LLM_MODEL_REVIEWER }}
+      LLM_PROVIDER_PLANNER: ${{ vars.INTEGRATION_LLM_PROVIDER_PLANNER }}
+      LLM_MODEL_PLANNER: ${{ vars.INTEGRATION_LLM_MODEL_PLANNER }}
+      LLM_PRICE_PROMPT_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_PROMPT_PER_1M }}
+      LLM_PRICE_COMPLETION_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_COMPLETION_PER_1M }}
+
+      # État local éphémère, mais chemins absolus et stables pendant tout le job.
+      STATE_DATABASE_URL: sqlite:///${{ runner.temp }}/collegue-nightly/state.sqlite3
+      COLLEGUE_HOME: ${{ runner.temp }}/collegue-nightly/home
+      SANDBOX_PIP_CACHE_DIR: ${{ runner.temp }}/collegue-nightly/pip-cache
+      SANDBOX_IMAGE: collegue-sandbox-openhands:ci
+      SANDBOX_NETWORK: bridge
+      SANDBOX_MEMORY: 6g
+      SANDBOX_CPUS: "2.0"
+      SANDBOX_TIMEOUT: "720"
+
+      # Contrat objectif §4.7 et posture sans merge : la preuve attend une PR
+      # ouverte, puis le module ferme PR/issues et supprime ses branches exactes.
+      GATE_ACCEPTANCE_TESTS: "true"
+      GATE_TEST_COMMAND: python -m pytest -q
+      GATE_FRONTEND: "false"
+      GATE_SMOKE_RUN: "true"
+      GATE_SMOKE_PATHS: /nightly
+      GATE_SMOKE_CORS_ORIGIN: ""
+      BUILD_AUTO_MERGE: "false"
+      AUTO_MERGE_ENABLED: "false"
+      DEPS_REQUIRE_MERGED: "true"
+      STRICT_MAX_INFLIGHT_PRS: "1"
+      TASK_MAX_ATTEMPTS: "1"
+      TASK_RETRY_BACKOFF_SECONDS: "0"
+
+      # Bornes cumulatives et par appel/processus. Les prix de secours sont
+      # obligatoires pour que le plafond USD ne soit jamais aveugle.
+      REQUIRE_COST_PRICING: "true"
+      BUDGET_EXHAUSTED_ACTION: pause
+      MAX_COST_USD: "2.0"
+      MAX_TOKENS_BUDGET: "250000"
+      COLLEGUE_RUN_DEADLINE_SECONDS: "900"
+      LLM_CALL_TIMEOUT: "180"
+      COLLEGUE_NIGHTLY_COMMAND_TIMEOUT_SECONDS: "1200"
+      CODER_LLM_NUM_RETRIES: "3"
+      CODER_LLM_RETRY_MIN_WAIT: "5"
+      CODER_LLM_RETRY_MAX_WAIT: "30"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Préflight — secrets et variables obligatoires
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+        run: |
+          required=(
+            GITHUB_TOKEN LLM_API_KEY
+            INTEGRATION_FIXTURE_REPOSITORY INTEGRATION_FIXTURE_REPOSITORY_ID
+            INTEGRATION_FIXTURE_ROOT_BRANCH INTEGRATION_FIXTURE_SEED_SHA
+            LLM_PROVIDER LLM_MODEL
+            LLM_PRICE_PROMPT_PER_1M LLM_PRICE_COMPLETION_PER_1M
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Configuration E2E absente : ${missing[*]}"
+            exit 1
+          fi
+          if ! awk -v prompt="$LLM_PRICE_PROMPT_PER_1M" \
+            -v completion="$LLM_PRICE_COMPLETION_PER_1M" \
+            'BEGIN { exit !((prompt + 0) > 0 || (completion + 0) > 0) }'; then
+            echo "::error::Au moins un prix LLM par million de tokens doit être strictement positif."
+            exit 1
+          fi
+          if [[ "${LLM_PROVIDER,,}" != "gemini" ]]; then
+            echo "::error::Le premier smoke produit impose LLM_PROVIDER=gemini."
+            exit 1
+          fi
+          for name in LLM_PROVIDER_CODER LLM_PROVIDER_QA LLM_PROVIDER_REVIEWER LLM_PROVIDER_PLANNER; do
+            value="${!name:-}"
+            if [[ -n "$value" && "${value,,}" != "gemini" ]]; then
+              echo "::error::$name doit être vide ou égal à gemini."
+              exit 1
+            fi
+          done
+          for name in LLM_MODEL LLM_MODEL_CODER LLM_MODEL_QA LLM_MODEL_REVIEWER LLM_MODEL_PLANNER; do
+            value="${!name:-$LLM_MODEL}"
+            if [[ ! "${value,,}" =~ ^gemini-[a-z0-9][a-z0-9._-]*$ ]]; then
+              echo "::error::$name effectif doit être un modèle Gemini non préfixé."
+              exit 1
+            fi
+          done
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Initialiser l'état durable local
+        run: |
+          mkdir -p \
+            "$COLLEGUE_HOME" \
+            "$SANDBOX_PIP_CACHE_DIR" \
+            "$(dirname "$COLLEGUE_NIGHTLY_MANIFEST")"
+          python -m alembic upgrade head
+
+      - name: Build OpenHands sandbox image from committed sources
+        run: docker build -f docker/sandbox/Dockerfile.openhands -t "$SANDBOX_IMAGE" .
+
+      - name: Vérifier le runner OpenHands SDK embarqué
+        run: |
+          docker run --rm "$SANDBOX_IMAGE" \
+            python -c "from pathlib import Path; from openhands.sdk import Conversation, LLM; from openhands.tools.preset.default import get_default_agent; assert Path('/opt/oh_runner.py').is_file(); print('OpenHands SDK runner OK')"
+
+      - name: Exécuter le cycle produit réel
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+        run: python -m collegue.pilot.nightly_e2e run
+
+      - name: Réconcilier et nettoyer la fixture
+        if: always()
+        # Le finalizer n'a besoin que du PAT fixture : aucune clé LLM n'est
+        # injectée dans ce chemin, y compris après un échec du préflight run.
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: python -m collegue.pilot.nightly_e2e cleanup
+
+  notify-failure:
+    name: Notifier l'échec nightly (#404)
+    needs: [integration, build-sandbox-openhands, product-e2e]
+    if: >-
+      ${{ always() &&
+          ((needs.integration.result != 'success' && needs.integration.result != 'skipped') ||
+           (needs.build-sandbox-openhands.result != 'success' && needs.build-sandbox-openhands.result != 'skipped') ||
+           (needs.product-e2e.result != 'success' && needs.product-e2e.result != 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      INTEGRATION_RESULT: ${{ needs.integration.result }}
+      SANDBOX_BUILD_RESULT: ${{ needs.build-sandbox-openhands.result }}
+      PRODUCT_E2E_RESULT: ${{ needs.product-e2e.result }}
+    steps:
+      - name: Ouvrir ou commenter l'issue de suivi
         uses: actions/github-script@v7
         with:
+          github-token: ${{ github.token }}
           script: |
-            const title = "CI nightly integration en échec";
+            const title = "CI nightly en échec";
+            const results = {
+              integration: process.env.INTEGRATION_RESULT,
+              "build-sandbox-openhands": process.env.SANDBOX_BUILD_RESULT,
+              "product-e2e": process.env.PRODUCT_E2E_RESULT,
+            };
+            const failed = Object.entries(results)
+              .filter(([, result]) => !["success", "skipped"].includes(result))
+              .map(([job, result]) => `${job} (${result})`);
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = `Le run nightly integration a échoué : ${runUrl}\n\n_(notification automatique du workflow integration-nightly — #404)_`;
+            const body = [
+              `Le run nightly a échoué : ${runUrl}`,
+              `Jobs en échec : ${failed.join(", ")}`,
+              "",
+              "_(notification automatique du workflow integration-nightly — #404)_",
+            ].join("\n");
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: "open",
               per_page: 100,
             });
-            const existing = issues.find((i) => i.title === title);
+            const existing = issues.find((issue) => !issue.pull_request && issue.title === title);
             if (existing) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -151,21 +371,3 @@ jobs:
                 body,
               });
             }
-
-  build-sandbox-openhands:
-    name: Build image sandbox OpenHands (#404)
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-      # Construit l'image #404 depuis les SOURCES COMMITTÉES SEULES (le harnais
-      # gitignoré scripts/facnor_run/ n'est pas présent en CI) — prouve que le
-      # blocage « image non constructible » est levé. Build-only : aucun run réel
-      # (LLM/GitHub) ici ; le smoke e2e réel (plan→execute→PR sur fixture) reste
-      # un suivi secret-gated.
-      - name: Build OpenHands sandbox image (committed sources only)
-        run: docker build -f docker/sandbox/Dockerfile.openhands -t collegue-sandbox-openhands:ci .
-      - name: Vérifier l'entrypoint produit (openhands.core.main) importable
-        run: |
-          docker run --rm collegue-sandbox-openhands:ci \
-            python -c "import openhands.core.main; print('openhands.core.main OK')"

@@ -941,6 +941,10 @@ class QualityReport:
     acceptance_passed: Optional[bool] = None
     acceptance_output: str = ""
     acceptance_error: Optional[str] = None
+    # SHA-256 de l'oracle réellement exécuté. Le checker plan-time le renseigne
+    # après avoir rechargé et vérifié l'artefact durable exact ; ``None`` pour
+    # les checkers historiques/dynamiques qui ne peuvent pas fournir cette preuve.
+    acceptance_oracle_sha256: Optional[str] = None
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -1027,7 +1031,10 @@ class QualityReport:
                 "> ⚠️ **aucun fichier de test touché** par ce diff (#437) — la feature livrée "
                 "n'est couverte par aucun test nouveau ou modifié.",
             ]
-        if self.acceptance_passed is False:
+        if self.acceptance_passed is True:
+            oracle = f" — oracle `sha256:{self.acceptance_oracle_sha256}`" if self.acceptance_oracle_sha256 else ""
+            lines += ["", f"**Tests d'acceptation (§4.7)** : ✅ réussis{oracle}"]
+        elif self.acceptance_passed is False:
             lines += [
                 "",
                 "> ⛔ **tests d'acceptation dérivés du SPEC en ÉCHEC (§4.7)** — des tests exécutables "
@@ -1548,6 +1555,7 @@ class AcceptanceOutcome:
     output: str = ""
     error: Optional[str] = None  # toute erreur bloque quand le checker est activé
     skipped: bool = False
+    oracle_sha256: Optional[str] = None
 
 
 @runtime_checkable
@@ -1632,7 +1640,13 @@ raise SystemExit(exit_code)
     )
 
 
-def _run_acceptance_source(workspace: str, source: str, *, sandbox) -> AcceptanceOutcome:
+def _run_acceptance_source(
+    workspace: str,
+    source: str,
+    *,
+    sandbox,
+    oracle_sha256: Optional[str] = None,
+) -> AcceptanceOutcome:
     """Lance un source QA déjà déterminé avec l'oracle pytest isolé commun.
 
     Cette fonction ne génère rien et ne lit aucun diff. Elle est partagée par le
@@ -1645,7 +1659,10 @@ def _run_acceptance_source(workspace: str, source: str, *, sandbox) -> Acceptanc
     try:
         res = sandbox.run_tests(workspace, command)
     except Exception as exc:  # noqa: BLE001 - checker activé = erreur bloquante
-        return AcceptanceOutcome(error=f"exécution de l'oracle d'acceptation impossible : {exc}")
+        return AcceptanceOutcome(
+            error=f"exécution de l'oracle d'acceptation impossible : {exc}",
+            oracle_sha256=oracle_sha256,
+        )
     output = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
     # pytest exit 5 = AUCUN test collecté : le contrat n'est pas prouvé.
     if getattr(res, "exit_code", None) == 5:
@@ -1653,8 +1670,9 @@ def _run_acceptance_source(workspace: str, source: str, *, sandbox) -> Acceptanc
             passed=False,
             error="aucun test d'acceptation collecté (oracle inexploitable)",
             output=output,
+            oracle_sha256=oracle_sha256,
         )
-    return AcceptanceOutcome(passed=bool(res.ok), output=output)
+    return AcceptanceOutcome(passed=bool(res.ok), output=output, oracle_sha256=oracle_sha256)
 
 
 _STORED_ACCEPTANCE_SCHEMA_VERSION = 1
@@ -1820,7 +1838,12 @@ class StoredAcceptanceChecker:
         source, error = self._load_and_verify(issue)
         if error is not None or source is None:
             return AcceptanceOutcome(error=error or "oracle plan-time invalide")
-        return _run_acceptance_source(workspace, source, sandbox=sandbox)
+        return _run_acceptance_source(
+            workspace,
+            source,
+            sandbox=sandbox,
+            oracle_sha256=_text_sha256(source),
+        )
 
 
 class LLMAcceptanceChecker:
@@ -2180,6 +2203,7 @@ async def run_quality_gate(
     acceptance_passed: Optional[bool] = None
     acceptance_output = ""
     acceptance_error: Optional[str] = None
+    acceptance_oracle_sha256: Optional[str] = None
     acceptance_required = acceptance_checker is not None
     if acceptance_required and would_pass:
         if issue is None:
@@ -2192,6 +2216,7 @@ async def run_quality_gate(
                 acceptance_passed = acc.passed
                 acceptance_output = acc.output
                 acceptance_error = acc.error
+                acceptance_oracle_sha256 = acc.oracle_sha256
                 if acc.skipped:
                     acceptance_passed = None
                     acceptance_error = acceptance_error or "contrôle d'acceptation ignoré sans verdict"
@@ -2245,6 +2270,7 @@ async def run_quality_gate(
         acceptance_passed=acceptance_passed,
         acceptance_output=acceptance_output,
         acceptance_error=acceptance_error,
+        acceptance_oracle_sha256=acceptance_oracle_sha256,
     )
 
 

@@ -122,18 +122,27 @@ def _coder_sandbox_env(settings_obj) -> dict:
     modèle d'**abonnement** nu (gpt-5.5 + ``LLM_SUBSCRIPTION=1`` + fallback gpt-5.4 ;
     le runner appelle ``subscription_login`` avec les creds montées), soit le modèle
     **CODER** au format LiteLLM (``gemini/<modèle>``) avec clé API. ``HOME`` hors /tmp est
-    requis par le montage des creds d'abonnement.
+    requis uniquement par le montage des creds d'abonnement ; en mode clé API,
+    :class:`DockerSandbox` conserve son ``HOME=/tmp`` écrivable quel que soit l'UID hôte.
     """
     from collegue.executor.openhands_sdk_agent import OHSdkAgent
 
     env = {
-        "HOME": "/home/sandbox",
         "OPENHANDS_SUPPRESS_BANNER": "1",
         "OH_NUM_RETRIES": str(getattr(settings_obj, "CODER_LLM_NUM_RETRIES", 8)),
         "OH_RETRY_MIN": str(getattr(settings_obj, "CODER_LLM_RETRY_MIN_WAIT", 8)),
         "OH_RETRY_MAX": str(getattr(settings_obj, "CODER_LLM_RETRY_MAX_WAIT", 90)),
     }
+    try:
+        call_timeout = float(getattr(settings_obj, "LLM_CALL_TIMEOUT", 0) or 0)
+    except (TypeError, ValueError):
+        call_timeout = 0.0
+    if call_timeout > 0 and call_timeout < float("inf"):
+        # Le runner OpenHands a son propre nom d'env. Propager le plafond produit
+        # évite qu'un appel coder dépasse silencieusement la limite planner/QA.
+        env["OH_LLM_TIMEOUT"] = str(max(1, int(call_timeout)))
     if bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False)):
+        env["HOME"] = "/home/sandbox"
         env["LLM_MODEL"] = str(getattr(settings_obj, "CODER_SUBSCRIPTION_MODEL", "gpt-5.5") or "gpt-5.5")
         env["LLM_SUBSCRIPTION"] = "1"
         env["OH_FALLBACK_MODELS"] = str(getattr(settings_obj, "CODER_SUBSCRIPTION_FALLBACK", "gpt-5.4") or "gpt-5.4")

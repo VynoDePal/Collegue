@@ -343,7 +343,10 @@ def _branches(sha_seq, *, default_branch="main", repo_get_error=False):
     seq = list(sha_seq)
 
     def fake_sha(owner, repo, branch):
-        return seq.pop(0) if seq else None
+        value = seq.pop(0) if seq else None
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     def fake_get(endpoint, params=None):
         rec.calls.append(("GET", endpoint))
@@ -367,10 +370,116 @@ def test_delete_branch_deletes_existing():
     assert any(c[0] == "DELETE" for c in rec.calls)
 
 
+@pytest.mark.parametrize("status_code", [0, 401, 403, 500])
+def test_branch_absence_probe_propagates_every_non_404_error(status_code):
+    br = BranchCommands(token=None)
+    error = ToolExecutionError("lecture de ref indisponible", status_code=status_code)
+    br._api_get = lambda *args, **kwargs: (_ for _ in ()).throw(error)
+
+    with pytest.raises(ToolExecutionError) as caught:
+        br._branch_sha_or_none("o", "r", "feat/x")
+
+    assert caught.value is error
+
+
+def test_branch_absence_probe_only_converts_http_404_to_none():
+    br = BranchCommands(token=None)
+    br._api_get = lambda *args, **kwargs: (_ for _ in ()).throw(ToolExecutionError("ref absente", status_code=404))
+
+    assert br._branch_sha_or_none("o", "r", "feat/x") is None
+
+
+def test_get_branch_sha_preserves_http_404_status():
+    br = BranchCommands(token=None)
+    br._api_get = lambda *args, **kwargs: (_ for _ in ()).throw(ToolExecutionError("ref absente", status_code=404))
+
+    with pytest.raises(ToolExecutionError, match="not found") as caught:
+        br.get_branch_sha("o", "r", "feat/x")
+
+    assert caught.value.status_code == 404
+
+
 def test_delete_branch_idempotent_when_absent():
     br, rec = _branches([None])
     assert br.delete_branch("o", "r", "feat/x") is True
     assert not any(c[0] == "DELETE" for c in rec.calls)  # rien à supprimer
+
+
+def test_delete_branch_propagates_transient_initial_ref_read():
+    error = ToolExecutionError("rate limit", status_code=403)
+    br, rec = _branches([error])
+
+    with pytest.raises(ToolExecutionError) as caught:
+        br.delete_branch("o", "r", "feat/x")
+
+    assert caught.value is error
+    assert not any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_confirms_absence_after_successful_delete():
+    br, rec = _branches(["before", None])
+
+    assert br.delete_branch("o", "r", "feat/x") is True
+    assert any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_refuses_unconfirmed_successful_delete():
+    br, rec = _branches(["before", "still-present"])
+
+    with pytest.raises(ToolExecutionError, match="non confirmée"):
+        br.delete_branch("o", "r", "feat/x")
+
+    assert any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_propagates_transient_confirmation_read():
+    error = ToolExecutionError("GitHub indisponible", status_code=500)
+    br, rec = _branches(["before", error])
+
+    with pytest.raises(ToolExecutionError) as caught:
+        br.delete_branch("o", "r", "feat/x")
+
+    assert caught.value is error
+    assert any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_propagates_delete_error_when_ref_still_exists():
+    error = ToolExecutionError("suppression refusée", status_code=403)
+    br, _ = _branches(["before", "before"])
+    br._request_json = lambda *args, **kwargs: (_ for _ in ()).throw(error)
+
+    with pytest.raises(ToolExecutionError) as caught:
+        br.delete_branch("o", "r", "feat/x")
+
+    assert caught.value is error
+
+
+def test_delete_branch_accepts_delete_error_only_after_confirmed_absence():
+    br, _ = _branches(["before", None])
+    br._request_json = lambda *args, **kwargs: (_ for _ in ()).throw(
+        ToolExecutionError("réponse DELETE perdue", status_code=500)
+    )
+
+    assert br.delete_branch("o", "r", "feat/x") is True
+
+
+def test_delete_branch_expected_sha_allows_exact_head():
+    br, rec = _branches(["expected"])
+    assert br.delete_branch("o", "r", "feat/x", expected_sha="expected") is True
+    assert any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_expected_sha_refuses_moved_head_before_delete():
+    br, rec = _branches(["moved"])
+    with pytest.raises(ToolExecutionError, match="SHA attendu"):
+        br.delete_branch("o", "r", "feat/x", expected_sha="expected")
+    assert not any(c[0] == "DELETE" for c in rec.calls)
+
+
+def test_delete_branch_expected_sha_remains_idempotent_when_absent():
+    br, rec = _branches([None])
+    assert br.delete_branch("o", "r", "feat/x", expected_sha="expected") is True
+    assert not any(c[0] == "DELETE" for c in rec.calls)
 
 
 def test_delete_branch_refuses_protected():

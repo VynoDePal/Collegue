@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -448,6 +449,7 @@ def test_cli_parses_plan_subcommand():
     assert args.plan_action == "draft"
     assert args.problem == "P" and args.owner == "o" and args.repo == "r"
     assert args.execute is False
+    assert args.format == "text"
 
 
 def test_cli_parses_approve_and_sync_actions():
@@ -455,10 +457,11 @@ def test_cli_parses_approve_and_sync_actions():
 
     parser = build_parser()
     approve = parser.parse_args(["plan", "approve", "--project-id", "7", "--expected-plan-hash", "abc"])
-    sync = parser.parse_args(["plan", "sync", "--project-id", "7", "--execute"])
+    sync = parser.parse_args(["plan", "sync", "--project-id", "7", "--execute", "--format", "json"])
     assert approve.plan_action == "approve" and approve.project_id == 7
     assert approve.expected_plan_hash == "abc"
     assert sync.plan_action == "sync" and sync.execute is True
+    assert sync.format == "json"
 
 
 def test_cli_plan_dispatches_and_parses_args(monkeypatch, capsys):
@@ -515,6 +518,121 @@ def test_cli_approve_and_sync_dispatch_without_async_planner(monkeypatch, capsys
     assert cli.main(["plan", "sync", "--project-id", "7", "--execute"]) == 0
     assert calls == [("approve", 7, "abc"), ("sync", 7, True)]
     assert capsys.readouterr().out.count("REPORT") == 2
+
+
+def test_cli_draft_json_has_stable_machine_contract(monkeypatch, capsys):
+    import collegue.pilot.__main__ as cli
+
+    async def _fake_plan(*args, **kwargs):
+        return PlanResult(
+            project_id=17,
+            spec_title="Fixture",
+            objectives=1,
+            acceptance_criteria=2,
+            task_count=2,
+            preview_markdown="# aperçu non exposé en JSON",
+            dry_run=True,
+            action="draft",
+            plan_hash="a" * 64,
+        )
+
+    monkeypatch.setattr("collegue.pilot.runtime.plan_project_from_settings", _fake_plan)
+
+    assert (
+        cli.main(
+            [
+                "plan",
+                "draft",
+                "--problem",
+                "P",
+                "--owner",
+                "o",
+                "--repo",
+                "r",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "project_id": 17,
+        "plan_hash": "a" * 64,
+        "task_count": 2,
+        "action": "draft",
+        "issues": [],
+    }
+
+
+def test_cli_approve_and_sync_json_share_the_same_schema(monkeypatch, capsys):
+    import collegue.pilot.__main__ as cli
+
+    approved = PlanResult(
+        project_id=7,
+        spec_title="Fixture",
+        objectives=0,
+        acceptance_criteria=0,
+        task_count=1,
+        preview_markdown="",
+        dry_run=True,
+        action="approve",
+        plan_hash="b" * 64,
+    )
+    synced = PlanResult(
+        project_id=7,
+        spec_title="Fixture",
+        objectives=0,
+        acceptance_criteria=0,
+        task_count=1,
+        preview_markdown="",
+        dry_run=False,
+        issues=[{"task_id": 11, "title": "T", "issue_number": 101, "skipped": False}],
+        action="sync",
+        plan_hash="b" * 64,
+    )
+    monkeypatch.setattr(
+        "collegue.pilot.runtime.approve_project_plan_from_settings",
+        lambda project_id, expected_hash: approved,
+    )
+    monkeypatch.setattr(
+        "collegue.pilot.runtime.sync_project_plan_from_settings",
+        lambda project_id, *, execute=False: synced,
+    )
+
+    assert (
+        cli.main(
+            [
+                "plan",
+                "approve",
+                "--project-id",
+                "7",
+                "--expected-plan-hash",
+                "a" * 64,
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    approve_payload = json.loads(capsys.readouterr().out)
+    assert approve_payload == {
+        "project_id": 7,
+        "plan_hash": "b" * 64,
+        "task_count": 1,
+        "action": "approve",
+        "issues": [],
+    }
+
+    assert cli.main(["plan", "sync", "--project-id", "7", "--execute", "--format", "json"]) == 0
+    sync_payload = json.loads(capsys.readouterr().out)
+    assert set(sync_payload) == set(approve_payload)
+    assert sync_payload == {
+        "project_id": 7,
+        "plan_hash": "b" * 64,
+        "task_count": 1,
+        "action": "sync",
+        "issues": [{"task_id": 11, "title": "T", "issue_number": 101, "skipped": False}],
+    }
 
 
 @pytest.mark.parametrize(

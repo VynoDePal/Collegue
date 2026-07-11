@@ -351,12 +351,128 @@ test dont le pré-requis manque se **skippe** avec sa raison (`-rs`). Garde-fou
 anti-vacuité : si *tous* les tests ont été skippés, le job **échoue** (un nightly
 vert qui n'a rien exercé serait une fausse assurance). Les coûts LLM sont bornés
 par le budget dur (`MAX_COST_USD=2`, `MAX_TOKENS_BUDGET=2M`, deadline 30 min) —
-coût attendu par run : ~0 à 2 $ selon les secrets fournis.
+coût attendu par run : ~0 à 2 $ selon les secrets fournis. Ces secrets sont
+injectés uniquement dans l'étape pytest qui les consomme ; le checkout, l'installation
+des dépendances, Docker et l'upload du rapport ne les reçoivent pas.
 
-En cas d'échec, le workflow ouvre (ou commente) une issue **« CI nightly
-integration en échec »** avec le lien du run — la CI PR normale n'est jamais
-bloquée par le nightly.
+Un job de notification dédié, seul titulaire de `issues: write`, agrège les
+échecs **et annulations** des jobs `integration`, `build-sandbox-openhands` et
+`product-e2e`, puis ouvre (ou commente) une issue **« CI nightly en échec »** avec
+le lien du run, les jobs concernés et leur résultat. Un job volontairement
+`skipped` parce que l'opt-in est OFF n'est pas signalé. La CI PR normale n'est
+jamais bloquée par le nightly.
 
-> Étape suivante (suivi #404) : un smoke **end-to-end** réel (plan → `--execute`
-> sur un dépôt fixture → PR ouverte puis nettoyée). Il exige une image sandbox
-> embarquant OpenHands, que le dépôt ne fournit pas encore.
+#### Smoke produit end-to-end (opt-in)
+
+Le job séparé `product-e2e` exerce le chemin public complet, sans ancien harnais :
+`plan draft` → `plan approve` → `plan sync --execute` → RUN `--execute` avec le
+vrai coder OpenHands → gate d'acceptation objectif → PR ouverte. L'orchestrateur
+committé s'invoque par `python -m collegue.pilot.nightly_e2e run`; une étape
+`if: always()` relance ensuite `python -m collegue.pilot.nightly_e2e cleanup`.
+Le manifeste local corrèle les ressources à leur SHA exact : le cleanup ferme les
+PR/issues du run et supprime uniquement leurs branches, sans toucher à la branche
+par défaut. Le JSON du RUN et le corps de la PR doivent en outre porter le verdict
+`acceptance_passed=true` et le même SHA-256 que l'oracle QA généré au plan-time ;
+un simple succès générique du gate ne suffit pas à rendre ce smoke vert.
+
+Les mutations distantes ont des intents écrits avant leur POST. La base démarre
+sur un commit propriétaire vérifiable par `parent + tree + message` exact. Si le
+head code est poussé mais que la création de PR échoue, le cleanup ne l'adopte
+qu'après avoir prouvé une chaîne bornée de commits `collegue: issue #… — chemin`
+jusqu'au SHA de base scellé. Ces preuves couvrent les réponses GitHub perdues sans
+confondre une branche homonyme préexistante avec une ressource du run.
+
+Ce double finalizer (dans `run`, puis étape `if: always()`) couvre les erreurs et
+timeouts tant que le runner reste disponible. Il ne peut pas garantir le nettoyage
+après une perte brutale du runner ou l'arrêt forcé du job avant le finalizer : le
+manifeste vit dans `${{ runner.temp }}` et des ressources balisées
+`collegue-nightly-<run>-<attempt>` peuvent alors rester sur la fixture. Elles doivent
+être inspectées et nettoyées manuellement avec leurs SHA/marqueurs exacts ; un
+janitor inter-run ou un manifeste distant durable reste nécessaire pour couvrir ce
+cas sans intervention.
+
+Ce job est **désactivé par défaut**. Il n'existe dans un run planifié que si la
+variable de dépôt `INTEGRATION_E2E_ENABLED` vaut exactement `true`. Une
+configuration incomplète échoue avant le build ou la première écriture GitHub ;
+elle n'est jamais transformée en skip vert.
+
+##### Dépôt fixture
+
+Créer un dépôt GitHub **public et dédié**, distinct de Collègue, avec les issues
+activées. Sa branche par défaut (par exemple `main`) sert de racine immuable et
+contient une petite application FastAPI déjà verte : objet `app` dans
+`app/main.py`, un endpoint de santé, `tests/test_app.py`, `requirements.txt` et
+les fichiers `__init__.py` nécessaires. Elle ne doit contenir ni `SPEC.md`, ni
+route `/nightly` : ces éléments sont produits sur la branche éphémère du run.
+
+À la racine, créer `.collegue-nightly-fixture` avec **exactement 28 octets** :
+
+```text
+COLLEGUE_NIGHTLY_FIXTURE_V1
+```
+
+Il s'agit exactement de `COLLEGUE_NIGHTLY_FIXTURE_V1\n` : un unique LF final,
+sans BOM, espace ni seconde ligne. Après le commit seed, relever son SHA Git
+complet de 40 caractères et l'identifiant numérique REST du dépôt. Ne plus
+modifier la branche racine sans mettre volontairement à jour les deux variables
+scellées ; tout écart arrête le smoke avant écriture.
+
+Protéger en plus cette branche racine par un **ruleset GitHub** ciblé : refuser sa
+suppression, les force-push et les mises à jour directes. Le PAT du nightly ne doit
+figurer dans **aucune bypass list** de ce ruleset. Il conserve `Contents: write`
+pour créer les branches éphémères, mais ne peut ainsi pas altérer la racine ; les
+comparaisons de SHA du moteur restent une détection supplémentaire, pas l'unique
+protection.
+
+Variables GitHub Actions requises :
+
+| Variable | Valeur |
+|----------|--------|
+| `INTEGRATION_E2E_ENABLED` | `true` pour activer explicitement le job. |
+| `INTEGRATION_FIXTURE_REPOSITORY` | Coordonnée `owner/repo` du dépôt public dédié. |
+| `INTEGRATION_FIXTURE_REPOSITORY_ID` | Identifiant numérique renvoyé par l'API REST GitHub. |
+| `INTEGRATION_FIXTURE_ROOT_BRANCH` | Branche racine immuable, par exemple `main`. |
+| `INTEGRATION_FIXTURE_SEED_SHA` | SHA Git complet (40 caractères) du commit seed. |
+| `INTEGRATION_LLM_PROVIDER` / `INTEGRATION_LLM_MODEL` | Endpoint et modèle globaux du nightly. |
+| `INTEGRATION_LLM_PRICE_PROMPT_PER_1M` | Prix USD de secours par million de tokens d'entrée. |
+| `INTEGRATION_LLM_PRICE_COMPLETION_PER_1M` | Prix USD de secours par million de tokens de sortie. |
+
+Les overrides par rôle `INTEGRATION_LLM_{PROVIDER,MODEL}_{CODER,QA,REVIEWER,PLANNER}`
+sont optionnels ; une valeur absente retombe sur le couple global. Le premier
+smoke impose actuellement **Gemini pour tous les rôles** : tout override de
+provider doit être vide ou égal au provider global `gemini`, et chaque modèle
+effectif doit être un nom Gemini non préfixé (`gemini-…`) présent dans la grille
+de prix autoritative de Collègue. Par exemple `gemini-2.5-flash` ou
+`gemini-3-flash-preview`; `openai/...`, `models/...` et un modèle inconnu sont
+refusés avant toute écriture. Cette restriction évite de router la clé vers un
+autre provider et garantit que le plafond USD est calculable. Les prix de secours
+doivent refléter le modèle coder ; au moins l'un des deux doit être strictement
+positif.
+
+Secrets GitHub Actions requis :
+
+| Secret | Usage |
+|--------|-------|
+| `INTEGRATION_LLM_API_KEY` | Planner, QA, reviewer et coder OpenHands en mode API. |
+| `INTEGRATION_FIXTURE_GITHUB_TOKEN` | Écritures limitées au seul dépôt fixture. |
+
+Le token fixture doit être un token finement restreint à ce dépôt, avec
+`Metadata: read`, `Contents: read/write`, `Issues: read/write` et
+`Pull requests: read/write`. Le checkout du dépôt source utilise
+`persist-credentials: false`, et le job n'accorde au `GITHUB_TOKEN` automatique
+que `contents: read`. Le dépôt fixture étant public, son clone ne transporte
+aucun secret ; le token dédié n'est utilisé que par les étapes préflight, run et
+cleanup. La clé LLM n'est présente que pendant le préflight et le run, jamais
+pendant `pip install`, le build Docker ou le cleanup. Le finalizer n'exige donc
+que le PAT restreint à la fixture et reste exécutable après un échec de
+configuration du modèle.
+
+Le job construit lui-même `docker/sandbox/Dockerfile.openhands`, initialise une
+base SQLite via Alembic, impose une seule tentative, sonde explicitement
+`GET /nightly` et laisse tous les auto-merges désactivés. Ses plafonds sont
+`MAX_COST_USD=2`, `MAX_TOKENS_BUDGET=250000`, 15 minutes de deadline RUN,
+12 minutes par processus sandbox, 20 minutes par processus produit et 180 secondes
+par appel LLM. Le coût attendu reste inférieur à 2 USD pour cette tâche unique si
+les prix configurés sont fidèles ; il dépend du modèle choisi et doit être suivi
+dans le ledger du run. Le job GitHub lui-même expire après 90 minutes, build de
+l'image inclus, afin de réserver une marge au finalizer.

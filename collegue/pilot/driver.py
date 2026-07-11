@@ -174,6 +174,11 @@ class TaskOutcome:
     success: bool
     stage: str
     pr_number: Optional[int] = None
+    # Preuve machine §4.7 issue du rapport du gate. ``None`` signifie que le
+    # checker n'a pas rendu de verdict / n'était pas câblé.
+    acceptance_passed: Optional[bool] = None
+    acceptance_error: Optional[str] = None
+    acceptance_oracle_sha256: Optional[str] = None
 
 
 @dataclass
@@ -896,6 +901,13 @@ async def run_project(
                 success=outcome.success,
                 stage=outcome.stage,
                 pr_number=pr_number,
+                acceptance_passed=getattr(outcome.quality_report, "acceptance_passed", None),
+                acceptance_error=getattr(outcome.quality_report, "acceptance_error", None),
+                acceptance_oracle_sha256=getattr(
+                    outcome.quality_report,
+                    "acceptance_oracle_sha256",
+                    None,
+                ),
             )
         )
 
