@@ -104,6 +104,12 @@ def test_revert_pr_preview_is_pure():
         revert_pr_preview("nope")
 
 
+def test_revert_pr_preview_describes_opt_in_automatic_merge_truthfully():
+    out = revert_pr_preview("0123456789abcdef", automatic=True)
+    assert "merge automatique sous gardes CI/SHA" in out["body"]
+    assert "approbation humaine" not in out["body"]
+
+
 # --- pas de clone orphelin quand prepare_revert échoue (#466) -----------------------
 
 

@@ -251,6 +251,39 @@ async def test_phase5_guard_failure_reason_propagates(git_repo, manager):
     assert result.promoted[0].auto_merged is True
 
 
+async def test_phase5_recovered_revert_is_not_reported_or_persisted_as_current_quality(git_repo, manager):
+    project_id = manager.create_project(name="reverted")
+
+    async def hook(pr):
+        return SimpleNamespace(
+            merged=True,
+            continue_loop=False,
+            stop_reason="auto_revert_recovered",
+            reason="main restaurée",
+            remote_revert=SimpleNamespace(restored=True),
+        )
+
+    result = await run_improvement(
+        project_id,
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        dry_run=False,
+        measure_fn=_ScriptedMeasure([_metrics(0.5), _metrics(0.7)]),
+        promotion_hook=hook,
+    )
+    assert result.stop_reason == "auto_revert_recovered"
+    assert result.final_score == result.initial_score == 0.5
+    assert result.promoted[0].reverted is True
+    assert result.promoted[0].auto_merged is False
+    assert manager.get_metrics(project_id) == []
+
+
 async def test_phase5_hook_is_never_called_in_dry_run(git_repo, manager):
     def forbidden(_pr):
         raise AssertionError("hook interdit en dry-run")

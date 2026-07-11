@@ -35,6 +35,16 @@ def test_disabled_by_default_never_allows():
     assert decision.allowed is False and "§6" in decision.reason
 
 
+def test_rebase_method_is_refused_because_atomic_rollback_is_ambiguous():
+    decision = evaluate_automerge(
+        ["docs/x.md"],
+        additions=1,
+        checks=["success"],
+        policy=_policy(method="rebase"),
+    )
+    assert decision.allowed is False and "rollback atomique" in decision.reason
+
+
 # --- allowlist faible risque (balisage non exécutable) --------------------------
 
 
@@ -214,8 +224,16 @@ class _PRs:
         return SimpleNamespace(merged=True, sha="merged-sha", already_merged=False)
 
 
-def _clients(prs):
-    return SimpleNamespace(prs=prs)
+class _Branches:
+    def __init__(self, heads=None):
+        self.heads = list(heads or ["merged-sha"])
+
+    def get_branch_sha(self, owner, repo, branch):
+        return self.heads.pop(0) if len(self.heads) > 1 else self.heads[0]
+
+
+def _clients(prs, branches=None):
+    return SimpleNamespace(prs=prs, branches=branches or _Branches())
 
 
 def test_maybe_auto_merge_disabled_does_not_merge():
@@ -380,8 +398,66 @@ class _Phase5PRs(_PRs):
         return CommitChecks(states=list(states), names=["ci"] * len(states), complete=True)
 
 
+class _Phase5State:
+    def __init__(self):
+        self.incident = None
+        self.cleared = False
+        self.transitions = []
+
+    def begin_phase5_incident(self, project_id, **payload):
+        self.incident = SimpleNamespace(
+            project_id=project_id,
+            state="merge_pending",
+            revision=0,
+            revert_claim_token=None,
+            revert_claim_expires_at=None,
+            **payload,
+        )
+        return self.incident
+
+    def claim_phase5_revert(self, project_id, **payload):
+        assert self.incident is not None and self.incident.state == "revert_pending"
+        values = vars(self.incident).copy()
+        values.update(
+            state="revert_in_progress",
+            revision=self.incident.revision + 1,
+            revert_claim_token="claim",
+            revert_claim_expires_at=object(),
+        )
+        self.incident = SimpleNamespace(**values)
+        return self.incident
+
+    def transition_phase5_incident(self, project_id, **payload):
+        assert self.incident is not None
+        assert payload["expected_state"] == self.incident.state
+        assert payload["expected_revision"] == self.incident.revision
+        self.transitions.append(payload.copy())
+        values = vars(self.incident).copy()
+        values.update(
+            state=payload["new_state"],
+            revision=self.incident.revision + 1,
+            last_error=payload.get("last_error"),
+        )
+        if "merge_sha" in payload:
+            values["merge_sha"] = payload["merge_sha"]
+        if self.incident.state == "revert_in_progress":
+            values["revert_claim_token"] = None
+            values["revert_claim_expires_at"] = None
+        self.incident = SimpleNamespace(**values)
+        return self.incident
+
+    def clear_phase5_incident(self, project_id, **payload):
+        assert self.incident is not None
+        assert payload["expected_state"] == self.incident.state
+        assert payload["expected_revision"] == self.incident.revision
+        self.cleared = True
+        self.incident = None
+        return True
+
+
 async def test_phase5_success_merges_resyncs_then_guards():
     prs = _Phase5PRs()
+    state = _Phase5State()
     events = []
     out = await auto_merge_promotion(
         SimpleNamespace(number=42),
@@ -393,6 +469,8 @@ async def test_phase5_success_merges_resyncs_then_guards():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        manager=state,
+        project_id=1,
         ci_timeout_seconds=0,
         sync_base_fn=lambda src, base: events.append(("sync", src, base)) or True,
         guard_fn=lambda src, sha, **kw: (
@@ -402,6 +480,7 @@ async def test_phase5_success_merges_resyncs_then_guards():
     assert out.merged is True and out.continue_loop is True
     assert prs.merged_calls == [{"number": 42, "method": "squash", "sha": "head", "base": "main", "base_sha": "base"}]
     assert events == [("sync", "/repo", "main"), ("guard", "/repo", "merged-sha")]
+    assert state.cleared is True
 
 
 async def test_phase5_pending_timeout_leaves_pr_open_and_stops():
@@ -440,6 +519,7 @@ async def test_phase5_head_move_is_rejected_before_merge():
 
 async def test_phase5_guard_red_stops_after_merge():
     prs = _Phase5PRs()
+    state = _Phase5State()
     out = await auto_merge_promotion(
         SimpleNamespace(number=42),
         policy=_policy(),
@@ -450,11 +530,137 @@ async def test_phase5_guard_red_stops_after_merge():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        manager=state,
+        project_id=1,
         sync_base_fn=lambda src, base: True,
         guard_fn=lambda *a, **kw: SimpleNamespace(checked=True, healthy=False, reverted=True, reason="rouge"),
     )
     assert out.merged is True and out.continue_loop is False
     assert out.stop_reason == "post_merge_guard_failed"
+    assert state.incident.state == "attention"
+
+
+async def test_phase5_main_move_during_health_guard_never_clears_incident():
+    prs = _Phase5PRs()
+    state = _Phase5State()
+    branches = _Branches(["merged-sha", "merged-sha", "other-sha"])
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs, branches),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        manager=state,
+        project_id=1,
+        sync_base_fn=lambda src, base: True,
+        guard_fn=lambda *a, **kw: SimpleNamespace(checked=True, healthy=True, reason="vert"),
+    )
+    assert out.continue_loop is False and out.stop_reason == "post_merge_guard_failed"
+    assert state.incident.state == "attention" and state.cleared is False
+
+
+async def test_phase5_guard_red_publishes_remote_revert_and_stops_recovered():
+    prs = _Phase5PRs()
+    state = _Phase5State()
+    local_revert = SimpleNamespace(reverted=True, branch="collegue/revert-merged-sha")
+    seen = {}
+
+    async def remote(revert, bad_sha, base_sha, **kwargs):
+        seen.update(revert=revert, bad_sha=bad_sha, base_sha=base_sha, kwargs=kwargs)
+        return SimpleNamespace(
+            restored=True,
+            status="auto_revert_recovered",
+            reason="main restaurée",
+        )
+
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True, revert_enabled=True, health_command="pytest -q"),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        manager=state,
+        project_id=1,
+        sync_base_fn=lambda src, base: True,
+        guard_fn=lambda *a, **kw: SimpleNamespace(
+            checked=True,
+            healthy=False,
+            reverted=True,
+            revert=local_revert,
+            reason="rouge",
+        ),
+        remote_revert_fn=remote,
+    )
+    assert out.merged is True and out.continue_loop is False
+    assert out.stop_reason == "auto_revert_recovered"
+    assert out.remote_revert.restored is True
+    assert seen["revert"] is local_revert
+    assert seen["bad_sha"] == "merged-sha" and seen["base_sha"] == "base"
+    assert seen["kwargs"]["merge_method"] == "squash"
+    assert state.incident.state == "recovered"
+
+
+async def test_phase5_remote_revert_failure_status_is_propagated():
+    prs = _Phase5PRs()
+    state = _Phase5State()
+
+    async def remote(*args, **kwargs):
+        return SimpleNamespace(
+            restored=False,
+            status="auto_revert_base_moved",
+            reason="main a bougé",
+        )
+
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True, revert_enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        manager=state,
+        project_id=1,
+        sync_base_fn=lambda src, base: True,
+        guard_fn=lambda *a, **kw: SimpleNamespace(
+            checked=True,
+            healthy=False,
+            reverted=True,
+            revert=SimpleNamespace(reverted=True),
+            reason="rouge",
+        ),
+        remote_revert_fn=remote,
+    )
+    assert out.stop_reason == "auto_revert_base_moved"
+    assert out.remote_revert.restored is False and out.continue_loop is False
+    assert state.incident.state == "attention"
+
+
+async def test_phase5_refuses_merge_when_durable_write_ahead_is_unavailable():
+    prs = _Phase5PRs()
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+    )
+    assert out.stop_reason == "phase5_incident_pending"
+    assert prs.merged_calls == []
 
 
 async def test_phase5_off_and_dry_run_perform_no_github_reads():

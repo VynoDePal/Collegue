@@ -8,9 +8,9 @@ annulé sans attendre.
 
 **Fail-closed** : si la mesure de santé est **non concluante** (clone/sandbox
 indisponible), on considère ``main`` **non sain** → revert (sécurité > disponibilité).
-N'a d'effet que si la politique est active (suit l'auto-merge). Le revert produit est
-**local** (branche + commit d'annulation) ; le push + l'ouverture de la PR de revert
-relèvent de ``integration`` (comme H1), le merge restant humain (§6).
+N'a d'effet que si la politique est active (suit l'auto-merge). Cette brique prépare
+la preuve locale ; :mod:`collegue.pilot.remote_revert` publie ensuite un commit/PR
+exact et peut le merger automatiquement sous l'opt-in Phase 5.
 """
 
 from __future__ import annotations
@@ -164,7 +164,8 @@ def guard_post_merge(
 
     Désactivé (politique off) → ``checked=False`` (rien). Sain → aucun revert. Rouge
     ou **non concluant** (fail-closed) → ``prepare_revert`` (H1, local), décision
-    journalisée + événement d'audit (H4). Le push + la PR de revert sont ``integration``.
+    journalisée + événement d'audit (H4). La publication distante est déléguée au
+    chemin Phase 5 dédié, sans récursion.
     """
     if not policy.enabled:
         return GuardOutcome(checked=False, reason="auto-revert désactivé (politique off)")

@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("task_id", type=int, help="Id de la tâche à réinitialiser.")
     rs.add_argument("--status", default="todo", help="Statut cible (défaut: todo).")
     rs.add_argument("--message", required=True, help="Motif du reset (tracé dans decisions).")
+    phase5_p = sub.add_parser("phase5", help="Inspecte ou acquitte un incident terminal Phase 5.")
+    phase5_p.add_argument("phase5_action", choices=("show", "ack"))
+    phase5_p.add_argument("--project-id", type=int, required=True)
+    phase5_p.add_argument("--expected-revision", type=int, default=None, help="Révision CAS requise pour ack.")
+    phase5_p.add_argument("--message", default="Incident Phase 5 inspecté et acquitté par l'opérateur.")
     # Phase 1 : trois gestes séparés. Le positionnel est optionnel pour préserver
     # `plan --problem ...` comme alias explicite de `plan draft --problem ...`.
     plan_p = sub.add_parser("plan", help="Planifie en trois étapes : draft → approve → sync.")
@@ -238,11 +243,42 @@ def _run_task_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_phase5_command(args: argparse.Namespace) -> int:
+    from collegue.pilot.runtime import _build_manager, _settings
+
+    manager = _build_manager(_settings())
+    incident = manager.get_phase5_incident(args.project_id)
+    if incident is None:
+        print(f"Aucun incident Phase 5 actif pour le projet {args.project_id}.")
+        return 0
+    print(
+        f"Phase 5 projet={args.project_id} state={incident.state} revision={incident.revision} "
+        f"PR=#{incident.source_pr_number} merge={incident.merge_sha or '-'} erreur={incident.last_error or '-'}"
+    )
+    if args.phase5_action == "show":
+        return 0
+    if args.expected_revision is None:
+        print("phase5 ack exige --expected-revision (valeur affichée par phase5 show).")
+        return 1
+    try:
+        manager.acknowledge_phase5_incident(args.project_id, expected_revision=args.expected_revision)
+    except Exception as exc:
+        print(f"Acquittement refusé: {exc}")
+        return 1
+    manager.record_decision(
+        args.project_id, args.message, rationale=f"incident Phase 5 revision={args.expected_revision}"
+    )
+    print("Incident Phase 5 acquitté ; un nouveau run peut reprendre.")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "task":
         return _run_task_command(args)
+    if args.command == "phase5":
+        return _run_phase5_command(args)
     if args.command == "plan":
         _validate_plan_args(parser, args)
         if args.plan_action == "draft":

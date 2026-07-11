@@ -43,6 +43,13 @@ STOP_DEADLINE = "deadline_reached"
 STOP_SAFETY_CAP = "safety_cap"
 STOP_AUTOMERGE_BLOCKED = "auto_merge_blocked"
 STOP_POST_MERGE_GUARD = "post_merge_guard_failed"
+STOP_AUTO_REVERT_RECOVERED = "auto_revert_recovered"
+STOP_AUTO_REVERT_PENDING = "auto_revert_pending"
+STOP_AUTO_REVERT_BASE_MOVED = "auto_revert_base_moved"
+STOP_AUTO_REVERT_PUBLISH_FAILED = "auto_revert_publish_failed"
+STOP_AUTO_REVERT_MERGE_FAILED = "auto_revert_merge_failed"
+STOP_AUTO_REVERT_HEALTH_FAILED = "auto_revert_health_failed"
+STOP_PHASE5_INCIDENT_PENDING = "phase5_incident_pending"
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,7 @@ class PromotedImprovement:
     delta: float
     pr_number: Optional[int]
     auto_merged: bool = False
+    reverted: bool = False
 
 
 @dataclass
@@ -168,6 +176,7 @@ async def run_improvement(
     coverage_command: str = DEFAULT_COVERAGE_COMMAND,
     measure_fn=measure,
     promotion_hook=None,
+    recovery_hook=None,
 ) -> ImprovementResult:
     """Fait tourner la boucle d'amélioration jusqu'au plateau ou au budget.
 
@@ -181,7 +190,8 @@ async def run_improvement(
     pour des diffs incrémentaux mergeables dans l'ordre sans conflit (le compounding
     rendrait sinon les PR cumulatives).
 
-    ``promotion_hook`` (Phase 5, opt-in) est appelé immédiatement après chaque PR
+    ``recovery_hook`` est appelé avant le premier round réel et doit réconcilier
+    tout incident Phase 5 durable. ``promotion_hook`` (Phase 5, opt-in) est appelé immédiatement après chaque PR
     réelle. Il doit réaliser la séquence CI → merge → resync → garde. La boucle
     s'arrête au premier refus : continuer créerait une PR enfant sur une branche
     non intégrée. Absent (défaut) : comportement historique, PR stackées et merge
@@ -228,6 +238,20 @@ async def run_improvement(
     measure_extra: dict = {}
     if coverage_command and coverage_command != DEFAULT_COVERAGE_COMMAND:
         measure_extra["coverage_command"] = coverage_command
+
+    if not dry_run and recovery_hook is not None:
+        try:
+            recovered = recovery_hook()
+            if inspect.isawaitable(recovered):
+                recovered = await recovered
+        except Exception as exc:  # reprise durable indisponible => aucun agent/PR
+            result.stop_reason = STOP_PHASE5_INCIDENT_PENDING
+            result.rejected.append(("phase5_recovery", f"reprise Phase 5 impossible: {exc}"))
+            return result
+        if not bool(getattr(recovered, "continue_loop", False)):
+            result.stop_reason = str(getattr(recovered, "stop_reason", "phase5_incident_pending"))
+            result.rejected.append(("phase5_recovery", str(getattr(recovered, "reason", "incident non résolu"))))
+            return result
 
     while True:
         if round_num >= max_iterations:
@@ -351,10 +375,22 @@ async def run_improvement(
                             hook_outcome = await hook_outcome
                     except Exception as exc:  # noqa: BLE001 - hook externe fail-closed
                         hook_error = f"hook Phase 5 en erreur: {exc}"
-            if not dry_run:
-                persist(manager, project_id, after)
             auto_merged = bool(getattr(hook_outcome, "merged", False))
-            if auto_merged:
+            auto_reverted = bool(
+                getattr(getattr(hook_outcome, "remote_revert", None), "restored", False)
+                or getattr(hook_outcome, "stop_reason", None) == "auto_revert_recovered"
+            )
+            if not dry_run and not auto_reverted:
+                persist(manager, project_id, after)
+            if auto_reverted:
+                # Le diff a été retiré de main : ne pas présenter son score comme
+                # l'état courant ni le réinjecter au prochain round/run.
+                result.final_score = before.composite
+                history[-1] = AttemptRecord(dimension, improved=False)
+                auto_merged = False
+                last_promoted_branch = None
+                promoted_diffs.clear()
+            elif auto_merged:
                 # Le hook a resynchronisé repo_source sur main : le diff promu y est
                 # déjà présent. Le réappliquer via compounding le dupliquerait.
                 last_promoted_branch = None
@@ -364,7 +400,9 @@ async def run_improvement(
                     # Stacking humain historique (#554).
                     last_promoted_branch = pr.head
                 promoted_diffs.append(final_diff)
-            result.promoted.append(PromotedImprovement(dimension.value, gate.delta, pr.number, auto_merged))
+            result.promoted.append(
+                PromotedImprovement(dimension.value, gate.delta, pr.number, auto_merged, reverted=auto_reverted)
+            )
             plateau = 0
             if hook_error is not None:
                 result.rejected.append((dimension.value, hook_error))

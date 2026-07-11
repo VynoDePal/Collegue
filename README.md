@@ -178,8 +178,14 @@ budget dur auto-pausé. En BUILD réel, un **merge-bot** auto-merge chaque tâch
 construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
 laisse ses PR **ouvertes pour merge humain** (§6) par défaut. L'auto-merge
 risk-gated Phase 5 est réellement câblé mais reste opt-in : CI complète, SHA stable,
-resync et santé de `main` sont obligatoires. L'auto-revert et l'outil MCP du pilote
-restent **désactivés par défaut** et fail-closed.
+resync et santé de `main` sont obligatoires. Si cette santé régresse et que
+`AUTO_REVERT_ENABLED` est actif, un commit qui restaure exactement l'arbre précédent
+est publié, validé par CI, fusionné sous gardes SHA puis contrôlé une dernière fois.
+Une transaction durable écrite avant le merge permet de reprendre après un crash
+sans dupliquer le merge ou le revert. Le rollback utilise un lease CAS entre
+workers et reste en état `recovered` jusqu'à acquittement humain (`phase5 show/ack`),
+ce qui empêche de reproposer en boucle le même changement. L'ensemble reste
+**désactivé par défaut** et fail-closed.
 Le codeur peut tourner via **abonnement** ChatGPT/Codex (coût API `$0`).
 
 ```bash

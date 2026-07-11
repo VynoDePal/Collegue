@@ -1178,7 +1178,17 @@ async def run_project(
             **improve_extra,
         )
         improvement_stop = str(getattr(improvement, "stop_reason", "") or "")
-        if improvement_stop in {"auto_merge_blocked", "post_merge_guard_failed"}:
+        if improvement_stop in {
+            "auto_merge_blocked",
+            "post_merge_guard_failed",
+            "auto_revert_recovered",
+            "auto_revert_pending",
+            "auto_revert_base_moved",
+            "auto_revert_publish_failed",
+            "auto_revert_merge_failed",
+            "auto_revert_health_failed",
+            "phase5_incident_pending",
+        }:
             # Un BUILD réussi ne doit pas masquer un arrêt critique Phase 5 dans
             # le verdict global ni dans RUN_STOP / le journal opérateur.
             stop_reason = improvement_stop

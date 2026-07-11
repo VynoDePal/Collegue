@@ -73,6 +73,28 @@ class Base(DeclarativeBase):
     """Base déclarative commune ; ``Base.metadata`` alimente create_all / Alembic."""
 
 
+# État write-ahead de la transaction Phase 5. Ces valeurs sont aussi reprises
+# dans une contrainte SQL : une faute de frappe ne doit pas créer un incident que
+# le moteur de reprise ne saurait interpréter.
+PHASE5_MERGE_PENDING = "merge_pending"
+PHASE5_HEALTH_PENDING = "health_pending"
+PHASE5_REVERT_PENDING = "revert_pending"
+PHASE5_REVERT_IN_PROGRESS = "revert_in_progress"
+PHASE5_ATTENTION = "attention"
+PHASE5_RECOVERED = "recovered"
+PHASE5_INCIDENT_STATES = frozenset(
+    {
+        PHASE5_MERGE_PENDING,
+        PHASE5_HEALTH_PENDING,
+        PHASE5_REVERT_PENDING,
+        PHASE5_REVERT_IN_PROGRESS,
+        PHASE5_ATTENTION,
+        PHASE5_RECOVERED,
+    }
+)
+PHASE5_MERGE_METHODS = frozenset({"squash", "merge"})
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -112,6 +134,11 @@ class Project(Base):
     decisions: Mapped[List["Decision"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     metrics: Mapped[List["Metric"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     checkpoints: Mapped[List["Checkpoint"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    phase5_incident: Mapped[Optional["Phase5Incident"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class Task(Base):
@@ -214,3 +241,83 @@ class Checkpoint(Base):
     ts: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=_utcnow, server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="checkpoints")
+
+
+class Phase5Incident(Base):
+    """Transaction Phase 5 active, persistée avant le premier effet GitHub.
+
+    ``project_id`` est à la fois PK et FK : un projet ne peut avoir qu'un seul
+    incident actif. Les incidents résolus sont supprimés ; leur historique reste
+    dans le journal append-only ``decisions``. Les colonnes contiennent uniquement
+    les ancres nécessaires à une reprise déterministe, jamais un workspace local.
+    """
+
+    __tablename__ = "phase5_incidents"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('merge_pending', 'health_pending', 'revert_pending', "
+            "'revert_in_progress', 'attention', 'recovered')",
+            name="ck_phase5_incidents_state",
+        ),
+        CheckConstraint(
+            "merge_method IN ('squash', 'merge')",
+            name="ck_phase5_incidents_merge_method",
+        ),
+        CheckConstraint("source_pr_number > 0", name="ck_phase5_incidents_source_pr_positive"),
+        CheckConstraint("revision >= 0", name="ck_phase5_incidents_revision_nonnegative"),
+        CheckConstraint(
+            "length(source_head_sha) = 40 AND length(base_sha_before_merge) = 40 "
+            "AND (merge_sha IS NULL OR length(merge_sha) = 40)",
+            name="ck_phase5_incidents_sha_lengths",
+        ),
+        CheckConstraint(
+            "length(trim(owner)) > 0 AND length(trim(repo)) > 0 "
+            "AND length(trim(base_branch)) > 0 AND length(trim(health_command)) > 0",
+            name="ck_phase5_incidents_required_text",
+        ),
+        CheckConstraint(
+            "(state = 'merge_pending' AND merge_sha IS NULL) "
+            "OR (state IN ('health_pending', 'revert_pending', 'revert_in_progress', 'recovered') "
+            "AND merge_sha IS NOT NULL) "
+            "OR state = 'attention'",
+            name="ck_phase5_incidents_state_merge_sha",
+        ),
+        CheckConstraint(
+            "(state = 'revert_in_progress' AND revert_claim_token IS NOT NULL "
+            "AND revert_claim_expires_at IS NOT NULL) "
+            "OR (state <> 'revert_in_progress' AND revert_claim_token IS NULL "
+            "AND revert_claim_expires_at IS NULL)",
+            name="ck_phase5_incidents_revert_claim",
+        ),
+    )
+
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Jeton CAS monotone. Chaque transition compare puis incrémente cette valeur :
+    # deux workers partis du même snapshot ne peuvent pas valider tous les deux.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    owner: Mapped[str] = mapped_column(String(255), nullable=False)
+    repo: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    base_sha_before_merge: Mapped[str] = mapped_column(String(40), nullable=False)
+    merge_method: Mapped[str] = mapped_column(String(16), nullable=False)
+    merge_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    health_command: Mapped[str] = mapped_column(Text, nullable=False)
+    revert_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    revert_claim_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    revert_claim_expires_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow, server_default=func.now()
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="phase5_incident")

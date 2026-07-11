@@ -204,6 +204,10 @@ def evaluate_automerge(
     """
     if not policy.enabled:
         return AutoMergeDecision(False, "auto-merge désactivé (AUTO_MERGE_ENABLED off) — merge humain (§6)")
+    if policy.method not in {"squash", "merge"}:
+        # ``rebase`` peut intégrer plusieurs commits Contents API ; le SHA renvoyé
+        # ne désigne alors que le dernier et n'est pas réversible atomiquement.
+        return AutoMergeDecision(False, "méthode rebase/non supportée : rollback atomique non prouvable")
     if policy.max_loc <= 0:
         return AutoMergeDecision(False, "plafond LOC non configuré (<= 0) — fail-closed")
     if not files_complete:
@@ -248,6 +252,7 @@ class PromotionAutoMergeOutcome:
     reason: str
     automerge: Optional[AutoMergeOutcome] = None
     guard: Optional[object] = None
+    remote_revert: Optional[object] = None
 
 
 def maybe_auto_merge(
@@ -318,6 +323,8 @@ def maybe_auto_merge(
 
 
 _PENDING_CHECK_STATES = frozenset({"pending", "queued", "in_progress", "requested", "waiting"})
+_INCIDENT_UNSET = object()
+_REVERT_LEASE_GRACE_SECONDS = 3600.0
 
 
 async def _sleep(value: float, sleep_fn: Callable[[float], object]) -> None:
@@ -347,6 +354,7 @@ async def auto_merge_promotion(
     clock: Callable[[], float] = time.monotonic,
     sync_base_fn: Optional[Callable[[str, str], bool]] = None,
     guard_fn: Optional[Callable[..., object]] = None,
+    remote_revert_fn: Optional[Callable[..., object]] = None,
     continue_fn: Optional[Callable[[], object]] = None,
 ) -> PromotionAutoMergeOutcome:
     """Tente l'auto-merge d'une PR Phase 4 puis vérifie la santé de ``main``.
@@ -379,6 +387,48 @@ async def auto_merge_promotion(
             **kwargs,
         )
 
+    incident = None
+
+    def incident_transition(new_state: str, *, merge_sha_value=_INCIDENT_UNSET, last_error=None):
+        nonlocal incident
+        if incident is None:
+            raise RuntimeError("incident Phase 5 absent")
+        params = {
+            "expected_state": incident.state,
+            "expected_revision": incident.revision,
+            "expected_source_pr_number": incident.source_pr_number,
+            "expected_source_head_sha": incident.source_head_sha,
+            "new_state": new_state,
+            "last_error": last_error,
+        }
+        if merge_sha_value is not _INCIDENT_UNSET:
+            params["merge_sha"] = merge_sha_value
+        if getattr(incident, "state", None) == "revert_in_progress":
+            params["expected_revert_claim_token"] = incident.revert_claim_token
+        incident = manager.transition_phase5_incident(project_id, **params)
+        return incident
+
+    def incident_attention(message: str) -> None:
+        if incident is None or getattr(incident, "state", None) == "attention":
+            return
+        try:
+            incident_transition("attention", last_error=message)
+        except Exception:
+            pass
+
+    def incident_clear() -> None:
+        nonlocal incident
+        if incident is None:
+            raise RuntimeError("incident Phase 5 absent")
+        manager.clear_phase5_incident(
+            project_id,
+            expected_state=incident.state,
+            expected_revision=incident.revision,
+            expected_source_pr_number=incident.source_pr_number,
+            expected_source_head_sha=incident.source_head_sha,
+        )
+        incident = None
+
     if not policy.enabled:
         return PromotionAutoMergeOutcome(False, True, None, "auto-merge désactivé")
     if dry_run:
@@ -390,8 +440,9 @@ async def auto_merge_promotion(
         return blocked("numéro de PR absent — contexte invérifiable")
 
     prs = getattr(clients, "prs", None)
-    if prs is None:
-        return blocked("client GitHub PR absent — contexte invérifiable")
+    branches = getattr(clients, "branches", None)
+    if prs is None or branches is None:
+        return blocked("clients GitHub PR/branches absents — contexte invérifiable")
     try:
         current = prs.get_pr(owner, repo, int(number))
     except Exception as exc:  # noqa: BLE001 - frontière réseau fail-closed
@@ -492,6 +543,41 @@ async def auto_merge_promotion(
             return blocked("délai d'attente CI dépassé (checks absents ou pending)")
         await _sleep(ci_poll_seconds, sleep_fn)
 
+    required_state_methods = (
+        "begin_phase5_incident",
+        "claim_phase5_revert",
+        "transition_phase5_incident",
+        "clear_phase5_incident",
+    )
+    if manager is None or project_id is None or not all(hasattr(manager, name) for name in required_state_methods):
+        return blocked(
+            "état durable Phase 5 indisponible — merge refusé avant toute écriture",
+            stop_reason="phase5_incident_pending",
+        )
+    try:
+        incident = manager.begin_phase5_incident(
+            project_id,
+            owner=owner,
+            repo=repo,
+            base_branch=base,
+            source_pr_number=int(number),
+            source_head_sha=head_sha,
+            base_sha_before_merge=base_sha,
+            merge_method=policy.method,
+            health_command=str(getattr(revert_policy, "health_command", "") or "pytest -q"),
+            revert_enabled=bool(getattr(revert_policy, "revert_enabled", False)),
+        )
+    except Exception as exc:  # write-ahead obligatoire avant le merge GitHub
+        return blocked(
+            f"écriture write-ahead Phase 5 impossible: {exc}",
+            stop_reason="phase5_incident_pending",
+        )
+    if getattr(incident, "state", None) != "merge_pending":
+        return blocked(
+            f"incident Phase 5 existant à reprendre ({getattr(incident, 'state', 'inconnu')})",
+            stop_reason="phase5_incident_pending",
+        )
+
     try:
         merge_outcome = maybe_auto_merge(
             current,
@@ -508,13 +594,51 @@ async def auto_merge_promotion(
             audit=audit,
         )
     except Exception as exc:  # noqa: BLE001 - GitHub refuse : PR laissée à l'humain
-        return blocked(f"merge GitHub refusé: {exc}")
+        # Réponse réseau ambiguë : le write-ahead reste en merge_pending. Une
+        # reprise relira GitHub avant toute nouvelle amélioration.
+        return blocked(f"merge GitHub non confirmé: {exc}", stop_reason="phase5_incident_pending")
     if not merge_outcome.merged:
+        try:
+            incident_clear()
+        except Exception as exc:
+            return blocked(f"merge refusé et incident impossible à clore: {exc}", stop_reason="phase5_incident_pending")
         return blocked(merge_outcome.decision.reason, automerge=merge_outcome)
     merge_sha = getattr(merge_outcome.merge_result, "sha", None)
     if not merge_sha:
+        incident_attention("merge confirmé sans SHA")
         return blocked(
             "merge confirmé sans SHA — garde post-merge impossible",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    try:
+        incident_transition("health_pending", merge_sha_value=merge_sha)
+    except Exception as exc:
+        return blocked(
+            f"merge réussi mais transition durable health_pending impossible: {exc}",
+            stop_reason="phase5_incident_pending",
+            merged=True,
+            automerge=merge_outcome,
+        )
+
+    try:
+        remote_main_sha = branches.get_branch_sha(owner, repo, base)
+    except Exception as exc:
+        try:
+            incident_transition("health_pending", last_error=f"HEAD post-merge illisible: {exc}")
+        except Exception:
+            pass
+        return blocked(
+            f"tête distante post-merge invérifiable: {exc}",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    if remote_main_sha != merge_sha:
+        incident_attention("main a avancé après l'auto-merge")
+        return blocked(
+            "main a avancé après l'auto-merge",
             stop_reason="post_merge_guard_failed",
             merged=True,
             automerge=merge_outcome,
@@ -527,6 +651,10 @@ async def auto_merge_promotion(
     try:
         synced = bool(sync_base_fn(repo_source, base))
     except Exception as exc:  # noqa: BLE001 - plomberie git fail-closed
+        try:
+            incident_transition("health_pending", last_error=f"resynchronisation post-merge impossible: {exc}")
+        except Exception:
+            pass
         return blocked(
             f"resynchronisation post-merge impossible: {exc}",
             stop_reason="post_merge_guard_failed",
@@ -534,8 +662,33 @@ async def auto_merge_promotion(
             automerge=merge_outcome,
         )
     if not synced:
+        try:
+            incident_transition("health_pending", last_error="resynchronisation post-merge échouée")
+        except Exception:
+            pass
         return blocked(
             "resynchronisation post-merge échouée",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    try:
+        remote_main_sha = branches.get_branch_sha(owner, repo, base)
+    except Exception as exc:
+        try:
+            incident_transition("health_pending", last_error=f"HEAD avant garde illisible: {exc}")
+        except Exception:
+            pass
+        return blocked(
+            f"tête distante avant garde invérifiable: {exc}",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    if remote_main_sha != merge_sha:
+        incident_attention("main a avancé pendant la resynchronisation")
+        return blocked(
+            "main a avancé pendant la resynchronisation",
             stop_reason="post_merge_guard_failed",
             merged=True,
             automerge=merge_outcome,
@@ -545,20 +698,162 @@ async def auto_merge_promotion(
         from collegue.pilot.guard import guard_post_merge
 
         guard_fn = guard_post_merge
-    guard = guard_fn(
-        repo_source,
-        merge_sha,
-        sandbox=sandbox,
-        policy=revert_policy,
-        merge_parent=1 if policy.method == "merge" else None,
-        manager=manager,
-        project_id=project_id,
-        audit=audit,
-    )
+    try:
+        guard = guard_fn(
+            repo_source,
+            merge_sha,
+            sandbox=sandbox,
+            policy=revert_policy,
+            merge_parent=1 if policy.method == "merge" else None,
+            manager=manager,
+            project_id=project_id,
+            audit=audit,
+        )
+        if inspect.isawaitable(guard):
+            guard = await guard
+    except Exception as exc:  # noqa: BLE001 - santé non prouvée
+        try:
+            incident_transition("health_pending", last_error=f"garde post-merge impossible: {exc}")
+        except Exception:
+            pass
+        return blocked(
+            f"garde post-merge impossible: {exc}",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    try:
+        remote_main_sha = branches.get_branch_sha(owner, repo, base)
+    except Exception as exc:
+        try:
+            incident_transition("health_pending", last_error=f"HEAD après garde illisible: {exc}")
+        except Exception:
+            pass
+        return blocked(
+            f"tête distante après garde invérifiable: {exc}",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+            guard=guard,
+        )
+    if remote_main_sha != merge_sha:
+        incident_attention("main a avancé pendant la garde de santé")
+        return blocked(
+            "main a avancé pendant la garde de santé",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+            guard=guard,
+        )
+    if bool(getattr(guard, "checked", False)) and getattr(guard, "healthy", None) is not True:
+        local_revert = getattr(guard, "revert", None)
+        if (
+            bool(getattr(revert_policy, "revert_enabled", False))
+            and bool(getattr(guard, "reverted", False))
+            and local_revert is not None
+        ):
+            try:
+                incident_transition("revert_pending", last_error=getattr(guard, "reason", "main rouge"))
+                incident = manager.claim_phase5_revert(
+                    project_id,
+                    expected_state=incident.state,
+                    expected_revision=incident.revision,
+                    expected_source_pr_number=incident.source_pr_number,
+                    expected_source_head_sha=incident.source_head_sha,
+                    lease_seconds=max(300.0, float(ci_timeout_seconds) + _REVERT_LEASE_GRACE_SECONDS),
+                )
+            except Exception as exc:
+                incident_attention(f"transition revert_pending impossible: {exc}")
+                return blocked(
+                    f"revert local prêt mais transition durable impossible: {exc}",
+                    stop_reason="phase5_incident_pending",
+                    merged=True,
+                    automerge=merge_outcome,
+                    guard=guard,
+                )
+            if remote_revert_fn is None:
+                from collegue.pilot.remote_revert import publish_and_merge_revert
+
+                remote_revert_fn = publish_and_merge_revert
+            try:
+                remote_revert = remote_revert_fn(
+                    local_revert,
+                    merge_sha,
+                    base_sha,
+                    merge_method=policy.method,
+                    enabled=True,
+                    clients=clients,
+                    owner=owner,
+                    repo=repo,
+                    base=base,
+                    repo_source=repo_source,
+                    sandbox=sandbox,
+                    health_command=str(getattr(revert_policy, "health_command", "") or "pytest -q"),
+                    reason=getattr(guard, "reason", ""),
+                    manager=manager,
+                    project_id=project_id,
+                    audit=audit,
+                    dry_run=False,
+                    ci_timeout_seconds=ci_timeout_seconds,
+                    ci_poll_seconds=ci_poll_seconds,
+                    sleep_fn=sleep_fn,
+                    clock=clock,
+                    sync_base_fn=sync_base_fn,
+                )
+                if inspect.isawaitable(remote_revert):
+                    remote_revert = await remote_revert
+            except Exception as exc:  # noqa: BLE001 - récupération fail-closed
+                try:
+                    incident_transition("revert_pending", last_error=f"rollback distant impossible: {exc}")
+                except Exception:
+                    pass
+                return blocked(
+                    f"rollback distant impossible: {exc}",
+                    stop_reason="auto_revert_publish_failed",
+                    merged=True,
+                    automerge=merge_outcome,
+                    guard=guard,
+                )
+            remote_status = str(getattr(remote_revert, "status", "auto_revert_publish_failed"))
+            try:
+                if bool(getattr(remote_revert, "restored", False)):
+                    incident_transition("recovered", last_error=getattr(remote_revert, "reason", remote_status))
+                elif remote_status == "auto_revert_pending":
+                    incident_transition("revert_pending", last_error=getattr(remote_revert, "reason", remote_status))
+                else:
+                    incident_transition("attention", last_error=getattr(remote_revert, "reason", remote_status))
+            except Exception as exc:
+                return blocked(
+                    f"rollback distant terminé mais état durable incohérent: {exc}",
+                    stop_reason="phase5_incident_pending",
+                    merged=True,
+                    automerge=merge_outcome,
+                    guard=guard,
+                    remote_revert=remote_revert,
+                )
+            return blocked(
+                getattr(remote_revert, "reason", "rollback distant terminé sans verdict"),
+                stop_reason=remote_status,
+                merged=True,
+                automerge=merge_outcome,
+                guard=guard,
+                remote_revert=remote_revert,
+            )
     if not bool(getattr(guard, "checked", False)) or getattr(guard, "healthy", None) is not True:
+        incident_attention(getattr(guard, "reason", "santé de main non concluante"))
         return blocked(
             getattr(guard, "reason", "santé de main non concluante"),
             stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+            guard=guard,
+        )
+    try:
+        incident_clear()
+    except Exception as exc:
+        return blocked(
+            f"main verte mais clôture durable Phase 5 impossible: {exc}",
+            stop_reason="phase5_incident_pending",
             merged=True,
             automerge=merge_outcome,
             guard=guard,

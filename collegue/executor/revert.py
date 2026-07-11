@@ -143,12 +143,15 @@ def prepare_revert(
     )
 
 
-def revert_pr_preview(sha: str, *, base: str = "main", reason: str = "") -> dict:
+def revert_pr_preview(sha: str, *, base: str = "main", reason: str = "", automatic: bool = False) -> dict:
     """Titre + corps proposés pour la PR de revert (**aperçu dry_run**, sans écriture)."""
     _validate_sha(sha)
     short = sha[:12]
     lines = [f"Annulation automatique du commit `{short}` (garde post-merge).", ""]
     if reason:
         lines += [f"Raison : {reason}", ""]
-    lines.append("PR de revert générée par Collègue (Phase 5, H3). Merge sous approbation humaine (§6).")
+    if automatic:
+        lines.append("PR de revert de sécurité générée par Collègue (Phase 5) ; merge automatique sous gardes CI/SHA.")
+    else:
+        lines.append("PR de revert générée par Collègue (Phase 5, H3). Merge sous approbation humaine (§6).")
     return {"title": f"Revert de {short} sur {base}", "body": "\n".join(lines)}

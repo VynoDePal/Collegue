@@ -4,6 +4,7 @@ Branch Commands for GitHub Operations.
 Handles branch listing, creation, and commit operations.
 """
 
+import re
 from typing import Iterable, List, Optional
 
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ from ._helpers import validate_ref
 
 # Branches refusées par défaut à la suppression (garde-fou contre la perte de la base).
 PROTECTED_BRANCHES = ("main", "master")
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 class BranchInfo(BaseModel):
@@ -28,6 +30,14 @@ class CommitInfo(BaseModel):
     author: str
     date: str
     html_url: str
+
+
+class GitCommitInfo(BaseModel):
+    """Objet commit Git autoritatif (Git Data API), réduit aux invariants utiles."""
+
+    sha: str
+    tree_sha: str
+    parents: List[str]
 
 
 class BranchCommands(GitHubClient):
@@ -61,6 +71,148 @@ class BranchCommands(GitHubClient):
             return resp["object"]["sha"]
         except ToolExecutionError as e:
             raise ToolExecutionError(f"Source branch '{branch}' not found") from e
+
+    def get_branch_sha(self, owner: str, repo: str, branch: str) -> str:
+        """SHA courant d'une branche (API publique, fail-closed)."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        self._validate_branch_name(branch)
+        return self._get_branch_sha(owner, repo, branch)
+
+    @staticmethod
+    def _validate_branch_name(branch: str) -> None:
+        invalid_char = any(c.isspace() or ord(c) < 32 or c in "~^:?*[\\" for c in branch)
+        invalid_part = any(not part or part.endswith(".lock") for part in branch.split("/"))
+        if (
+            not branch
+            or branch.startswith(("/", "."))
+            or branch.endswith(("/", "."))
+            or ".." in branch
+            or "@{" in branch
+            or invalid_char
+            or invalid_part
+        ):
+            raise ToolExecutionError(f"nom de branche invalide: {branch!r}")
+
+    @staticmethod
+    def _validate_full_sha(sha: str, label: str) -> str:
+        if not sha or not _SHA_RE.fullmatch(str(sha)):
+            raise ToolExecutionError(f"{label} invalide: {sha!r}")
+        return str(sha)
+
+    def get_git_commit(self, owner: str, repo: str, sha: str) -> GitCommitInfo:
+        """Lit un objet commit Git et valide strictement son tree et ses parents."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        sha = self._validate_full_sha(sha, "SHA du commit")
+        data = self._api_get(f"/repos/{owner}/{repo}/git/commits/{sha}") or {}
+        response_sha = self._validate_full_sha(data.get("sha"), "SHA du commit retourné")
+        if response_sha != sha:
+            raise ToolExecutionError(f"commit Git inattendu: demandé {sha}, reçu {response_sha}")
+        tree_sha = self._validate_full_sha((data.get("tree") or {}).get("sha"), "SHA du tree")
+        raw_parents = data.get("parents")
+        if not isinstance(raw_parents, list):
+            raise ToolExecutionError("parents du commit Git absents ou malformés")
+        parents = [
+            self._validate_full_sha(parent.get("sha") if isinstance(parent, dict) else None, "SHA parent")
+            for parent in raw_parents
+        ]
+        return GitCommitInfo(sha=response_sha, tree_sha=tree_sha, parents=parents)
+
+    def _branch_matches_commit_tree(
+        self,
+        owner: str,
+        repo: str,
+        branch_sha: str,
+        *,
+        parent_sha: str,
+        tree_sha: str,
+    ) -> bool:
+        try:
+            commit = self.get_git_commit(owner, repo, branch_sha)
+        except ToolExecutionError:
+            return False
+        return commit.tree_sha == tree_sha and commit.parents == [parent_sha]
+
+    def ensure_commit_branch(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        *,
+        parent_sha: str,
+        tree_sha: str,
+        message: str,
+    ) -> BranchInfo:
+        """Crée une branche sur un nouveau commit qui réutilise un tree Git existant.
+
+        Aucun fichier local n'est téléversé : le tree doit déjà appartenir au dépôt.
+        Idempotent après crash, sans force-push : une branche existante n'est admise
+        que si son commit possède exactement ``parent_sha`` et ``tree_sha``.
+        """
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        self._validate_branch_name(branch)
+        parent_sha = self._validate_full_sha(parent_sha, "SHA parent")
+        tree_sha = self._validate_full_sha(tree_sha, "SHA tree")
+        if not str(message).strip():
+            raise ToolExecutionError("message du commit vide — refus fail-closed")
+
+        existing = self._branch_sha_or_none(owner, repo, branch)
+        if existing is not None:
+            if self._branch_matches_commit_tree(
+                owner,
+                repo,
+                existing,
+                parent_sha=parent_sha,
+                tree_sha=tree_sha,
+            ):
+                return BranchInfo(name=branch, commit_sha=existing, protected=False)
+            raise ToolExecutionError(f"branche {branch!r} déjà présente avec un autre parent/tree — refus")
+
+        commit = (
+            self._api_post(
+                f"/repos/{owner}/{repo}/git/commits",
+                {"message": str(message), "tree": tree_sha, "parents": [parent_sha]},
+            )
+            or {}
+        )
+        commit_sha = self._validate_full_sha(commit.get("sha"), "commit créé")
+        if not self._branch_matches_commit_tree(
+            owner,
+            repo,
+            commit_sha,
+            parent_sha=parent_sha,
+            tree_sha=tree_sha,
+        ):
+            raise ToolExecutionError("le commit de branche créé ne correspond pas au parent/tree demandés")
+        try:
+            self._api_post(
+                f"/repos/{owner}/{repo}/git/refs",
+                {"ref": f"refs/heads/{branch}", "sha": commit_sha},
+            )
+        except ToolExecutionError:
+            # Course/reprise : seule une branche exactement équivalente est admise.
+            raced = self._branch_sha_or_none(owner, repo, branch)
+            if raced is None or not self._branch_matches_commit_tree(
+                owner,
+                repo,
+                raced,
+                parent_sha=parent_sha,
+                tree_sha=tree_sha,
+            ):
+                raise
+            commit_sha = raced
+        current = self._branch_sha_or_none(owner, repo, branch)
+        if current != commit_sha or not self._branch_matches_commit_tree(
+            owner,
+            repo,
+            commit_sha,
+            parent_sha=parent_sha,
+            tree_sha=tree_sha,
+        ):
+            raise ToolExecutionError(f"branche {branch!r} mobile ou commit distant non conforme")
+        return BranchInfo(name=branch, commit_sha=commit_sha, protected=False)
 
     def create_branch(self, owner: str, repo: str, branch: str, from_branch: Optional[str] = None) -> BranchInfo:
         if not from_branch:
@@ -125,8 +277,7 @@ class BranchCommands(GitHubClient):
         # Les noms de branche GitHub peuvent contenir des '/' (``feat/x``), donc on
         # ne réutilise pas ``validate_ref`` (alphanum strict) : on bloque seulement la
         # traversée / les caractères dangereux avant interpolation dans l'URL.
-        if not branch or branch.startswith("/") or ".." in branch or any(c.isspace() for c in branch):
-            raise ToolExecutionError(f"nom de branche invalide: {branch!r}")
+        self._validate_branch_name(branch)
 
         def _norm(name: str) -> str:
             return name.strip().rstrip("/.").lower()

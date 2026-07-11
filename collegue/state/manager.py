@@ -17,14 +17,48 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import secrets
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, List, Mapping, Optional
 
-from sqlalchemy import create_engine, event, or_, select
+from sqlalchemy import create_engine, delete, event, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from collegue.state.models import Base, Checkpoint, Decision, Metric, Project, Task
+from collegue.state.models import (
+    PHASE5_ATTENTION,
+    PHASE5_HEALTH_PENDING,
+    PHASE5_INCIDENT_STATES,
+    PHASE5_MERGE_METHODS,
+    PHASE5_MERGE_PENDING,
+    PHASE5_RECOVERED,
+    PHASE5_REVERT_IN_PROGRESS,
+    PHASE5_REVERT_PENDING,
+    Base,
+    Checkpoint,
+    Decision,
+    Metric,
+    Phase5Incident,
+    Project,
+    Task,
+)
+
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_UNSET = object()
+_PHASE5_TRANSITIONS = {
+    PHASE5_MERGE_PENDING: frozenset({PHASE5_HEALTH_PENDING, PHASE5_ATTENTION}),
+    PHASE5_HEALTH_PENDING: frozenset({PHASE5_REVERT_PENDING, PHASE5_ATTENTION}),
+    PHASE5_REVERT_PENDING: frozenset({PHASE5_ATTENTION}),
+    PHASE5_REVERT_IN_PROGRESS: frozenset({PHASE5_REVERT_PENDING, PHASE5_RECOVERED, PHASE5_ATTENTION}),
+    PHASE5_ATTENTION: frozenset(),
+    PHASE5_RECOVERED: frozenset(),
+}
+
+
+class Phase5IncidentConflictError(RuntimeError):
+    """Une création/transition Phase 5 ne correspond plus à l'état durable."""
 
 
 def _like_escape(query: str) -> str:
@@ -54,6 +88,51 @@ def _normalize_acceptance_test_artifact(source: Any, provenance: Any) -> tuple[s
     except (TypeError, ValueError) as exc:
         raise ValueError("provenance du test d'acceptation non sérialisable en JSON") from exc
     return hashlib.sha256(source.encode("utf-8")).hexdigest(), normalized_provenance
+
+
+def _phase5_text(value: Any, label: str, *, max_length: Optional[int] = None) -> str:
+    """Valide un texte d'ancrage Phase 5 sans le normaliser silencieusement."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} Phase 5 vide ou invalide")
+    if max_length is not None and len(value) > max_length:
+        raise ValueError(f"{label} Phase 5 trop long ({len(value)} > {max_length})")
+    return value
+
+
+def _phase5_sha(value: Any, label: str, *, nullable: bool = False) -> Optional[str]:
+    if value is None and nullable:
+        return None
+    if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
+        raise ValueError(f"{label} Phase 5 invalide: {value!r}")
+    return value.lower()
+
+
+def _phase5_state(value: Any) -> str:
+    if value not in PHASE5_INCIDENT_STATES:
+        raise ValueError(f"état d'incident Phase 5 invalide: {value!r}")
+    return str(value)
+
+
+def _phase5_revision(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"révision CAS Phase 5 invalide: {value!r}")
+    return value
+
+
+def _phase5_identity_matches(incident: Phase5Incident, payload: Mapping[str, Any]) -> bool:
+    """Identité immuable d'une promotion, utilisée pour un begin idempotent."""
+    fields = (
+        "owner",
+        "repo",
+        "base_branch",
+        "source_pr_number",
+        "source_head_sha",
+        "base_sha_before_merge",
+        "merge_method",
+        "health_command",
+        "revert_enabled",
+    )
+    return all(getattr(incident, field) == payload[field] for field in fields)
 
 
 class ProjectStateManager:
@@ -136,6 +215,7 @@ class ProjectStateManager:
                     selectinload(Project.decisions),
                     selectinload(Project.metrics),
                     selectinload(Project.checkpoints),
+                    selectinload(Project.phase5_incident),
                 ],
             )
 
@@ -330,6 +410,282 @@ class ProjectStateManager:
             return list(s.scalars(stmt))
 
     # ── metrics ─────────────────────────────────────────────────────────────────
+
+    def begin_phase5_incident(
+        self,
+        project_id: int,
+        *,
+        owner: str,
+        repo: str,
+        base_branch: str,
+        source_pr_number: int,
+        source_head_sha: str,
+        base_sha_before_merge: str,
+        merge_method: str,
+        health_command: str,
+        revert_enabled: bool,
+    ) -> Phase5Incident:
+        """Insère le write-ahead Phase 5 avant le merge GitHub.
+
+        L'opération est idempotente uniquement pour la même identité immuable.
+        Un autre incident actif lève :class:`Phase5IncidentConflictError`.
+        """
+        if not isinstance(project_id, int) or isinstance(project_id, bool) or project_id <= 0:
+            raise ValueError(f"project_id Phase 5 invalide: {project_id!r}")
+        if not isinstance(source_pr_number, int) or isinstance(source_pr_number, bool) or source_pr_number <= 0:
+            raise ValueError(f"numéro de PR Phase 5 invalide: {source_pr_number!r}")
+        if merge_method not in PHASE5_MERGE_METHODS:
+            raise ValueError(f"méthode de merge Phase 5 invalide: {merge_method!r}")
+        if not isinstance(revert_enabled, bool):
+            raise ValueError(f"revert_enabled Phase 5 doit être booléen: {revert_enabled!r}")
+        payload = {
+            "owner": _phase5_text(owner, "owner", max_length=255),
+            "repo": _phase5_text(repo, "repo", max_length=255),
+            "base_branch": _phase5_text(base_branch, "branche de base", max_length=255),
+            "source_pr_number": source_pr_number,
+            "source_head_sha": _phase5_sha(source_head_sha, "SHA source"),
+            "base_sha_before_merge": _phase5_sha(base_sha_before_merge, "SHA de base"),
+            "merge_method": str(merge_method),
+            "health_command": _phase5_text(health_command, "commande de santé"),
+            "revert_enabled": revert_enabled,
+        }
+
+        try:
+            with self.session() as s:
+                if s.get(Project, project_id) is None:
+                    raise ValueError(f"projet Phase 5 introuvable: {project_id}")
+                existing = s.get(Phase5Incident, project_id)
+                if existing is not None:
+                    if _phase5_identity_matches(existing, payload):
+                        return existing
+                    raise Phase5IncidentConflictError(
+                        f"le projet {project_id} possède déjà un autre incident Phase 5 "
+                        f"({existing.state}, PR #{existing.source_pr_number})"
+                    )
+                incident = Phase5Incident(
+                    project_id=project_id,
+                    state=PHASE5_MERGE_PENDING,
+                    revision=0,
+                    **payload,
+                )
+                s.add(incident)
+                s.flush()
+                return incident
+        except IntegrityError as exc:
+            # Course d'insertion : le PK project_id garantit un gagnant.
+            existing = self.get_phase5_incident(project_id)
+            if existing is not None and _phase5_identity_matches(existing, payload):
+                return existing
+            raise Phase5IncidentConflictError(
+                f"création concurrente d'un incident Phase 5 pour le projet {project_id}"
+            ) from exc
+
+    def get_phase5_incident(self, project_id: int) -> Optional[Phase5Incident]:
+        """Incident Phase 5 actif du projet, ou ``None``."""
+        with self.session() as s:
+            return s.get(Phase5Incident, project_id)
+
+    def claim_phase5_revert(
+        self,
+        project_id: int,
+        *,
+        expected_state: str,
+        expected_revision: int,
+        expected_source_pr_number: int,
+        expected_source_head_sha: str,
+        lease_seconds: float = 300.0,
+        now: Optional[datetime] = None,
+        claim_token: Optional[str] = None,
+    ) -> Phase5Incident:
+        """Acquiert par CAS un lease avant toute écriture GitHub de rollback.
+
+        Un lease actif bloque les autres workers. Après expiration, un nouveau
+        worker peut le reprendre avec la révision et le token persistés.
+        """
+        if expected_state not in {PHASE5_REVERT_PENDING, PHASE5_REVERT_IN_PROGRESS}:
+            raise ValueError(f"état non réclamable pour le revert Phase 5: {expected_state!r}")
+        expected_revision = _phase5_revision(expected_revision)
+        expected_head = _phase5_sha(expected_source_head_sha, "SHA source attendu")
+        if not isinstance(expected_source_pr_number, int) or expected_source_pr_number <= 0:
+            raise ValueError("numéro de PR CAS Phase 5 invalide")
+        duration = float(lease_seconds)
+        if duration <= 0:
+            raise ValueError("durée de lease Phase 5 invalide")
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        token = claim_token or secrets.token_hex(16)
+        if not isinstance(token, str) or not token.strip() or len(token) > 64:
+            raise ValueError("token de lease Phase 5 invalide")
+
+        filters = [
+            Phase5Incident.project_id == project_id,
+            Phase5Incident.state == expected_state,
+            Phase5Incident.revision == expected_revision,
+            Phase5Incident.source_pr_number == expected_source_pr_number,
+            Phase5Incident.source_head_sha == expected_head,
+        ]
+        if expected_state == PHASE5_REVERT_IN_PROGRESS:
+            filters.append(Phase5Incident.revert_claim_expires_at <= now)
+        with self.session() as s:
+            changed = s.execute(
+                update(Phase5Incident)
+                .where(*filters)
+                .values(
+                    state=PHASE5_REVERT_IN_PROGRESS,
+                    revision=expected_revision + 1,
+                    revert_claim_token=token,
+                    revert_claim_expires_at=now + timedelta(seconds=duration),
+                    updated_at=now,
+                )
+            )
+            if changed.rowcount != 1:
+                raise Phase5IncidentConflictError("lease de revert Phase 5 déjà détenu ou CAS périmé")
+            incident = s.get(Phase5Incident, project_id, populate_existing=True)
+            if incident is None:  # pragma: no cover
+                raise Phase5IncidentConflictError("incident disparu après acquisition du lease")
+            return incident
+
+    def transition_phase5_incident(
+        self,
+        project_id: int,
+        *,
+        expected_state: str,
+        expected_revision: int,
+        expected_source_pr_number: int,
+        expected_source_head_sha: str,
+        new_state: str,
+        merge_sha: Any = _UNSET,
+        last_error: Any = _UNSET,
+        expected_revert_claim_token: Optional[str] = None,
+    ) -> Phase5Incident:
+        """Transition CAS stricte : compare état/révision/PR/SHA puis incrémente."""
+        expected_state = _phase5_state(expected_state)
+        new_state = _phase5_state(new_state)
+        expected_revision = _phase5_revision(expected_revision)
+        if (
+            not isinstance(expected_source_pr_number, int)
+            or isinstance(expected_source_pr_number, bool)
+            or expected_source_pr_number <= 0
+        ):
+            raise ValueError(f"numéro de PR CAS Phase 5 invalide: {expected_source_pr_number!r}")
+        expected_head = _phase5_sha(expected_source_head_sha, "SHA source attendu")
+        if new_state != expected_state and new_state not in _PHASE5_TRANSITIONS[expected_state]:
+            raise ValueError(f"transition Phase 5 interdite: {expected_state!r} -> {new_state!r}")
+        if new_state == PHASE5_REVERT_IN_PROGRESS:
+            raise ValueError("utiliser claim_phase5_revert pour entrer en revert_in_progress")
+        if expected_state == PHASE5_REVERT_IN_PROGRESS:
+            if not expected_revert_claim_token:
+                raise ValueError("token du lease requis pour quitter revert_in_progress")
+        elif expected_revert_claim_token is not None:
+            raise ValueError("token de lease inattendu hors revert_in_progress")
+
+        values: dict[str, Any] = {
+            "state": new_state,
+            "revision": expected_revision + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if merge_sha is not _UNSET:
+            values["merge_sha"] = _phase5_sha(merge_sha, "SHA de merge", nullable=True)
+        if new_state in {PHASE5_HEALTH_PENDING, PHASE5_REVERT_PENDING}:
+            if expected_state == PHASE5_MERGE_PENDING and values.get("merge_sha") is None:
+                raise ValueError("SHA de merge requis pour quitter merge_pending")
+            if merge_sha is not _UNSET and values["merge_sha"] is None:
+                raise ValueError(f"SHA de merge interdit à NULL pour l'état {new_state}")
+        if new_state == PHASE5_MERGE_PENDING and merge_sha is not _UNSET and values["merge_sha"] is not None:
+            raise ValueError("merge_pending ne peut pas porter de SHA de merge")
+        if last_error is not _UNSET:
+            if last_error is not None and not isinstance(last_error, str):
+                raise ValueError("last_error Phase 5 doit être une chaîne ou None")
+            values["last_error"] = last_error
+        if expected_state == PHASE5_REVERT_IN_PROGRESS:
+            values["revert_claim_token"] = None
+            values["revert_claim_expires_at"] = None
+
+        with self.session() as s:
+            filters = [
+                Phase5Incident.project_id == project_id,
+                Phase5Incident.state == expected_state,
+                Phase5Incident.revision == expected_revision,
+                Phase5Incident.source_pr_number == expected_source_pr_number,
+                Phase5Incident.source_head_sha == expected_head,
+            ]
+            if expected_state == PHASE5_REVERT_IN_PROGRESS:
+                filters.append(Phase5Incident.revert_claim_token == expected_revert_claim_token)
+            result = s.execute(update(Phase5Incident).where(*filters).values(**values))
+            if result.rowcount != 1:
+                actual = s.get(Phase5Incident, project_id)
+                observed = (
+                    "absent"
+                    if actual is None
+                    else f"state={actual.state}, revision={actual.revision}, PR=#{actual.source_pr_number}"
+                )
+                raise Phase5IncidentConflictError(
+                    f"CAS Phase 5 refusé pour le projet {project_id}: attendu "
+                    f"state={expected_state}, revision={expected_revision}, PR=#{expected_source_pr_number}; "
+                    f"observé {observed}"
+                )
+            incident = s.get(Phase5Incident, project_id, populate_existing=True)
+            if incident is None:  # pragma: no cover - protégé par rowcount=1
+                raise Phase5IncidentConflictError("incident Phase 5 disparu après son CAS")
+            return incident
+
+    def clear_phase5_incident(
+        self,
+        project_id: int,
+        *,
+        expected_state: str,
+        expected_revision: int,
+        expected_source_pr_number: int,
+        expected_source_head_sha: str,
+        expected_revert_claim_token: Optional[str] = None,
+    ) -> bool:
+        """Supprime un incident résolu via le même CAS strict."""
+        expected_state = _phase5_state(expected_state)
+        expected_revision = _phase5_revision(expected_revision)
+        if (
+            not isinstance(expected_source_pr_number, int)
+            or isinstance(expected_source_pr_number, bool)
+            or expected_source_pr_number <= 0
+        ):
+            raise ValueError(f"numéro de PR CAS Phase 5 invalide: {expected_source_pr_number!r}")
+        expected_head = _phase5_sha(expected_source_head_sha, "SHA source attendu")
+        if expected_state == PHASE5_REVERT_IN_PROGRESS and not expected_revert_claim_token:
+            raise ValueError("token du lease requis pour supprimer revert_in_progress")
+        filters = [
+            Phase5Incident.project_id == project_id,
+            Phase5Incident.state == expected_state,
+            Phase5Incident.revision == expected_revision,
+            Phase5Incident.source_pr_number == expected_source_pr_number,
+            Phase5Incident.source_head_sha == expected_head,
+        ]
+        if expected_state == PHASE5_REVERT_IN_PROGRESS:
+            filters.append(Phase5Incident.revert_claim_token == expected_revert_claim_token)
+        with self.session() as s:
+            result = s.execute(delete(Phase5Incident).where(*filters))
+            if result.rowcount != 1:
+                raise Phase5IncidentConflictError(
+                    f"suppression CAS Phase 5 refusée pour le projet {project_id} "
+                    f"(state={expected_state}, revision={expected_revision}, PR=#{expected_source_pr_number})"
+                )
+            return True
+
+    def acknowledge_phase5_incident(self, project_id: int, *, expected_revision: int) -> bool:
+        """Acquitte explicitement un incident terminal après inspection humaine."""
+        incident = self.get_phase5_incident(project_id)
+        if incident is None:
+            return False
+        if incident.state not in {PHASE5_ATTENTION, PHASE5_RECOVERED}:
+            raise Phase5IncidentConflictError(f"incident Phase 5 non terminal ({incident.state}) — acquittement refusé")
+        if incident.revision != _phase5_revision(expected_revision):
+            raise Phase5IncidentConflictError("révision d'acquittement Phase 5 périmée")
+        return self.clear_phase5_incident(
+            project_id,
+            expected_state=incident.state,
+            expected_revision=incident.revision,
+            expected_source_pr_number=incident.source_pr_number,
+            expected_source_head_sha=incident.source_head_sha,
+        )
 
     def add_metric(self, project_id: int, name: str, value: float) -> int:
         with self.session() as s:
