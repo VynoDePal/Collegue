@@ -36,6 +36,7 @@ def _project_to_dict(p: Project) -> Dict[str, Any]:
         "deadline": _iso(p.deadline),
         "phase": p.phase,
         "status": p.status,
+        "acceptance_tests_required": p.acceptance_tests_required,
         "created_at": _iso(p.created_at),
         "updated_at": _iso(p.updated_at),
     }
@@ -46,6 +47,11 @@ def _task_to_dict(t: Task) -> Dict[str, Any]:
         "id": t.id,
         "title": t.title,
         "acceptance": t.acceptance,
+        # §4.7 : conserver l'oracle QA plan-time EXACT dans la vue de reprise.
+        # Le snapshot reste JSON-sérialisable (source/SHA = str, provenance = JSON).
+        "acceptance_test_source": t.acceptance_test_source,
+        "acceptance_test_sha256": t.acceptance_test_sha256,
+        "acceptance_test_provenance": t.acceptance_test_provenance,
         "status": t.status,
         "depends_on": t.depends_on,
         "created_at": _iso(t.created_at),

@@ -11,11 +11,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from collegue.executor import FakeReviewer, IssueSpec, run_quality_gate
 from collegue.executor.quality_gate import (
     AcceptanceOutcome,
     LLMAcceptanceChecker,
+    StoredAcceptanceChecker,
+    _normalized_plan_text,
     _strip_code_fences,
+    _task_contract_sha256,
+    _text_sha256,
 )
 from collegue.sandbox import SandboxResult
 
@@ -40,6 +46,63 @@ def _green():
 
 def _red():
     return _Sandbox(SandboxResult(exit_code=1, stdout="", stderr="1 failed"))
+
+
+def _stored_fixture(*, source="def test_ok():\n    observed = True\n    assert observed\n", provenance_overrides=None):
+    from collegue.planner.acceptance_tests import acceptance_prompt_sha256
+
+    criterion = "La TVA est calculée à 0.01 près"
+    provenance = {
+        "schema_version": 1,
+        "generator": "collegue.planner.acceptance_tests",
+        "role": "qa",
+        "requested_provider": "openai",
+        "requested_model": "qa-model",
+        "prompt_sha256": "1" * 64,
+        "spec_sha256": _text_sha256(_normalized_plan_text("# SPEC\n")),
+        "criteria_sha256": _text_sha256(_normalized_plan_text(criterion)),
+        "contract_sha256": "2" * 64,
+        "runner": "pytest",
+        "generated_at": "2026-07-10T12:00:00Z",
+    }
+    provenance.update(provenance_overrides or {})
+    task = SimpleNamespace(
+        id=7,
+        project_id=3,
+        title="T",
+        acceptance=criterion,
+        depends_on=[],
+        acceptance_test_source=source,
+        acceptance_test_sha256=_text_sha256(source),
+        acceptance_test_provenance=provenance,
+    )
+    task.acceptance_test_provenance["contract_sha256"] = _task_contract_sha256(3, task)
+    project = SimpleNamespace(id=3, spec="# SPEC\n")
+    task.acceptance_test_provenance["prompt_sha256"] = acceptance_prompt_sha256(project.spec, task, [task], 3)
+    task.acceptance_test_provenance.update(provenance_overrides or {})
+
+    class _Manager:
+        def get_task(self, task_id):
+            return task if task_id == 7 else None
+
+        def get_project(self, project_id):
+            return project if project_id == 3 else None
+
+        def get_tasks(self, project_id):
+            return [task] if project_id == 3 else []
+
+    issue = IssueSpec(
+        number=5,
+        title="T",
+        acceptance_criteria=(criterion,),
+        source_task_id=7,
+    )
+    approvals = []
+
+    def _approved(manager, project_id):
+        approvals.append((manager, project_id))
+
+    return StoredAcceptanceChecker(manager=_Manager(), project_id=3, approval_check=_approved), issue, task, approvals
 
 
 # --- _strip_code_fences --------------------------------------------------------
@@ -152,6 +215,96 @@ async def test_default_sampler_without_ctx_is_error(tmp_path):
     )
     assert out.passed is None
     assert "ctx de sampling absent" in (out.error or "")
+
+
+# --- StoredAcceptanceChecker ---------------------------------------------------
+
+
+async def test_stored_checker_runs_exact_approved_source_without_llm(tmp_path):
+    checker, issue, _task, approvals = _stored_fixture()
+
+    class _NoSampling:
+        async def sample(self, **kwargs):
+            raise AssertionError("le gate stocké ne doit jamais appeler un LLM")
+
+    sandbox = _green()
+    out = await checker.check(str(tmp_path), "diff hostile ignoré", issue, _NoSampling(), sandbox=sandbox)
+
+    assert out.passed is True and out.error is None
+    assert approvals and approvals[0][1] == 3
+    assert len(sandbox.commands) == 1
+    assert "python -I -c" in sandbox.commands[0]
+
+
+async def test_stored_checker_fails_closed_when_artifact_is_absent(tmp_path):
+    checker, issue, task, _approvals = _stored_fixture()
+    task.acceptance_test_source = None
+    task.acceptance_test_sha256 = None
+    task.acceptance_test_provenance = None
+
+    sandbox = _green()
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+
+    assert out.passed is None and "source" in (out.error or "")
+    assert sandbox.commands == []
+
+
+async def test_stored_checker_rejects_source_sha_mismatch(tmp_path):
+    checker, issue, task, _approvals = _stored_fixture()
+    task.acceptance_test_source += "# mutation\n"
+
+    sandbox = _green()
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+
+    assert out.passed is None and "SHA-256" in (out.error or "")
+    assert sandbox.commands == []
+
+
+async def test_stored_checker_rejects_skipped_oracle_even_with_matching_sha(tmp_path):
+    source = "import pytest\ndef test_contract():\n    pytest.skip('disabled')\n    assert True\n"
+    checker, issue, task, _approvals = _stored_fixture(source=source)
+    task.acceptance_test_sha256 = _text_sha256(source)
+    sandbox = _green()
+
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+
+    assert out.passed is None and "skip" in (out.error or "")
+    assert sandbox.commands == []
+
+
+async def test_stored_checker_rejects_wrong_provenance_and_contract(tmp_path):
+    checker, issue, _task, _approvals = _stored_fixture(provenance_overrides={"role": "coder"})
+    sandbox = _green()
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+    assert out.passed is None and "rôle" in (out.error or "")
+    assert sandbox.commands == []
+
+    checker, issue, _task, _approvals = _stored_fixture(provenance_overrides={"criteria_sha256": "f" * 64})
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+    assert out.passed is None and "critères" in (out.error or "")
+
+
+async def test_stored_checker_rejects_unapproved_plan_before_reading_artifact(tmp_path):
+    checker, issue, _task, _approvals = _stored_fixture()
+
+    def _unapproved(manager, project_id):
+        raise RuntimeError("hash du plan différent")
+
+    checker._approval_check = _unapproved
+    sandbox = _green()
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+
+    assert out.passed is None and "non approuvé" in (out.error or "")
+    assert sandbox.commands == []
+
+
+async def test_stored_checker_requires_opaque_task_id(tmp_path):
+    checker, issue, _task, _approvals = _stored_fixture()
+    issue = IssueSpec(number=issue.number, title=issue.title, acceptance_criteria=issue.acceptance_criteria)
+    sandbox = _green()
+    out = await checker.check(str(tmp_path), DIFF, issue, None, sandbox=sandbox)
+    assert out.passed is None and "source_task_id" in (out.error or "")
+    assert sandbox.commands == []
 
 
 # --- intégration au gate (run_quality_gate) ------------------------------------
@@ -290,9 +443,28 @@ def test_acceptance_unavailable_rendered_as_fail_closed():
 def test_gate_options_includes_acceptance_when_enabled(monkeypatch):
     from collegue.pilot import runtime
 
-    monkeypatch.setattr(runtime, "_build_acceptance_checker", lambda s: "CHECKER")
-    opts = runtime._gate_options(SimpleNamespace(GATE_ACCEPTANCE_TESTS=True))
-    assert opts.get("acceptance_checker") == "CHECKER"
+    monkeypatch.setattr(runtime, "_build_acceptance_checker", lambda manager, project_id: (manager, project_id))
+    opts = runtime._gate_options(SimpleNamespace(GATE_ACCEPTANCE_TESTS=True), manager="MANAGER", project_id=42)
+    assert opts.get("acceptance_checker") == ("MANAGER", 42)
+
+
+def test_gate_options_fails_closed_without_state_when_enabled():
+    from collegue.pilot import runtime
+
+    with pytest.raises(ValueError, match="manager et project_id"):
+        runtime._gate_options(SimpleNamespace(GATE_ACCEPTANCE_TESTS=True))
+
+
+def test_gate_options_honors_persisted_acceptance_policy_when_env_is_off(monkeypatch):
+    from collegue.pilot import runtime
+
+    project = SimpleNamespace(acceptance_tests_required=True)
+    manager = SimpleNamespace(get_project=lambda project_id: project if project_id == 42 else None)
+    monkeypatch.setattr(runtime, "_build_acceptance_checker", lambda manager, project_id: (manager, project_id))
+
+    opts = runtime._gate_options(SimpleNamespace(GATE_ACCEPTANCE_TESTS=False), manager=manager, project_id=42)
+
+    assert opts["acceptance_checker"] == (manager, 42)
 
 
 def test_gate_options_excludes_acceptance_by_default():

@@ -15,9 +15,11 @@ Module **isolé** : non importé par ``app.py`` (le pilote, Phase 3, le câblera
 
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator, List, Optional
+from typing import Any, Iterator, List, Mapping, Optional
 
 from sqlalchemy import create_engine, event, or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
@@ -32,6 +34,26 @@ def _like_escape(query: str) -> str:
     pas le texte littéral « 100% ». À utiliser avec ``.ilike(pattern, escape="\\")``.
     """
     return query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _normalize_acceptance_test_artifact(source: Any, provenance: Any) -> tuple[str, dict]:
+    """Valide/copie un artefact QA et retourne ``(sha256, provenance JSON)``."""
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source du test d'acceptation vide ou invalide")
+    if not isinstance(provenance, dict) or not provenance:
+        raise ValueError("provenance du test d'acceptation vide ou invalide")
+    try:
+        provenance_blob = json.dumps(
+            provenance,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        normalized_provenance = json.loads(provenance_blob)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("provenance du test d'acceptation non sérialisable en JSON") from exc
+    return hashlib.sha256(source.encode("utf-8")).hexdigest(), normalized_provenance
 
 
 class ProjectStateManager:
@@ -174,7 +196,85 @@ class ProjectStateManager:
                     setattr(task, key, value)
             return True
 
-    # ── decisions ───────────────────────────────────────────────────────────────
+    # ── artefacts QA ──────────────────────────────────────────────────────────
+
+    def set_acceptance_test_artifact(self, task_id: int, source: str, provenance: dict) -> bool:
+        """Persiste atomiquement l'artefact QA plan-time d'une tâche (§4.7).
+
+        L'appelant ne fournit jamais l'empreinte : elle est calculée ici sur les
+        octets UTF-8 exacts du source, dans la même transaction que le source et
+        la provenance. La provenance est validée comme objet JSON strict puis
+        copiée par round-trip pour qu'une mutation ultérieure du dictionnaire de
+        l'appelant ne modifie pas silencieusement la valeur persistée.
+
+        Retourne ``False`` si la tâche n'existe pas. Un artefact vide ou une
+        provenance vide/non sérialisable lève ``ValueError`` : mieux vaut ne rien
+        persister qu'un oracle incomplet pris pour une preuve d'acceptation.
+        """
+        digest, normalized_provenance = _normalize_acceptance_test_artifact(source, provenance)
+        with self.session() as s:
+            task = s.get(Task, task_id)
+            if task is None:
+                return False
+            task.acceptance_test_source = source
+            task.acceptance_test_sha256 = digest
+            task.acceptance_test_provenance = normalized_provenance
+            return True
+
+    def set_acceptance_test_artifacts(
+        self,
+        project_id: int,
+        artifacts: Mapping[int, Mapping[str, Any]],
+    ) -> bool:
+        """Persiste en une transaction le jeu COMPLET d'oracles QA d'un projet.
+
+        ``artifacts`` mappe chaque ``task_id`` vers exactement ``source`` et
+        ``provenance``. L'ensemble des IDs doit être identique à celui des tâches
+        du projet : une omission ou un ID étranger annule toute l'opération. Tous
+        les payloads sont normalisés avant la première affectation ; le context
+        transactionnel garantit ensuite le rollback sur toute erreur SQL.
+
+        Retourne ``False`` si le projet n'existe pas, ``True`` après persistance
+        (y compris pour un projet sans tâche avec un mapping vide).
+        """
+        if not isinstance(artifacts, Mapping):
+            raise ValueError("artefacts d'acceptation invalides : mapping attendu")
+
+        normalized: dict[int, tuple[str, str, dict]] = {}
+        for task_id, artifact in artifacts.items():
+            if not isinstance(task_id, int) or isinstance(task_id, bool):
+                raise ValueError(f"ID de tâche invalide dans les artefacts : {task_id!r}")
+            if not isinstance(artifact, Mapping) or set(artifact) != {"source", "provenance"}:
+                raise ValueError(f"artefact de la tâche {task_id} invalide : clés source/provenance exactes requises")
+            source = artifact["source"]
+            digest, provenance = _normalize_acceptance_test_artifact(source, artifact["provenance"])
+            normalized[task_id] = (source, digest, provenance)
+
+        with self.session() as s:
+            if s.get(Project, project_id) is None:
+                return False
+            tasks = list(s.scalars(select(Task).where(Task.project_id == project_id).order_by(Task.id)))
+            expected_ids = {task.id for task in tasks}
+            supplied_ids = set(normalized)
+            if supplied_ids != expected_ids:
+                missing = sorted(expected_ids - supplied_ids)
+                foreign = sorted(supplied_ids - expected_ids)
+                raise ValueError(
+                    "jeu d'artefacts incomplet ou étranger au projet "
+                    f"{project_id} (manquants={missing}, étrangers={foreign})"
+                )
+            for task in tasks:
+                source, digest, provenance = normalized[task.id]
+                task.acceptance_test_source = source
+                task.acceptance_test_sha256 = digest
+                task.acceptance_test_provenance = provenance
+            # Politique durable : un plan qui contient ces oracles doit toujours
+            # les exécuter, même si l'environnement du run omet ensuite le flag.
+            project = s.get(Project, project_id)
+            project.acceptance_tests_required = True
+            return True
+
+    # ── decisions ──────────────────────────────────────────────────
 
     def add_decision(self, project_id: int, summary: str, rationale: Optional[str] = None) -> int:
         with self.session() as s:

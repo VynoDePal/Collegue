@@ -161,6 +161,7 @@ def test_issue_from_task_maps_persisted_acceptance_to_structured_criteria():
     issue = _issue_from_task(task)
     assert issue.body == ""
     assert issue.acceptance_criteria == ("retourne 200 sans erreur",)
+    assert issue.source_task_id == 7
 
     task.acceptance = "   "
     assert _issue_from_task(task).acceptance_criteria == ()

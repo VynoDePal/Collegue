@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from collegue.pilot import PlanResult, format_plan_report, plan_project_from_settings
+from collegue.planner import PlanNotApproved
 
 # --- doubles du planner (monkeypatchés là où plan_project_from_settings les importe) ---
 
@@ -15,29 +16,55 @@ def _spec(title="T", objectives=("o1",), criteria=("c1", "c2")):
     return SimpleNamespace(title=title, objectives=list(objectives), acceptance_criteria=list(criteria))
 
 
-def _patch_planner(monkeypatch, *, tasks=None, decompose_fn=None, sync_issues=None, calls=None):
+def _patch_planner(
+    monkeypatch,
+    *,
+    tasks=None,
+    decompose_fn=None,
+    acceptance_fn=None,
+    sync_issues=None,
+    calls=None,
+):
     calls = calls if calls is not None else {}
+    order = calls.setdefault("order", [])
 
     async def _generate_spec(problem, ctx, **kw):
+        order.append("generate")
         calls["generate"] = (problem, kw)
         return _spec()
 
     def _persist_spec(manager, name, spec, **kw):
+        order.append("persist")
         calls["persist"] = (name, kw)
         return 42
 
     async def _decompose(spec, ctx, **kw):
+        order.append("decompose")
         calls["decompose"] = kw
         return list(tasks if tasks is not None else [object(), object()])
 
+    async def _acceptance(spec, task_list, ctx, **kw):
+        order.append("acceptance")
+        calls["acceptance"] = {"spec": spec, "tasks": task_list, **kw}
+        return {1: {"source": "def test_x():\n    assert True\n", "provenance": {"role": "qa"}}}
+
     def _build_preview(manager, project_id):
+        order.append("preview")
         return SimpleNamespace(to_markdown=lambda: "PREVIEW")
 
     def _approve(manager, project_id, **kw):
+        order.append("approve")
         calls["approve"] = (project_id, kw)
         return True
 
+    def _require(manager, project_id):
+        order.append("require")
+        calls["require"] = project_id
+        if "approve" not in calls:
+            raise PlanNotApproved("approbation explicite absente")
+
     def _sync(manager, project_id, owner, repo, **kw):
+        order.append("sync")
         calls["sync"] = {"owner": owner, "repo": repo, **kw}
         issues = sync_issues if sync_issues is not None else [{"task_id": 1, "title": "T1", "issue_number": None}]
         return SimpleNamespace(issues=issues)
@@ -45,8 +72,13 @@ def _patch_planner(monkeypatch, *, tasks=None, decompose_fn=None, sync_issues=No
     monkeypatch.setattr("collegue.planner.spec_generator.generate_spec", _generate_spec)
     monkeypatch.setattr("collegue.planner.spec_generator.persist_spec", _persist_spec)
     monkeypatch.setattr("collegue.planner.decomposer.decompose", decompose_fn or _decompose)
+    monkeypatch.setattr(
+        "collegue.planner.acceptance_tests.generate_acceptance_tests",
+        acceptance_fn or _acceptance,
+    )
     monkeypatch.setattr("collegue.planner.plan_review.build_plan_preview", _build_preview)
     monkeypatch.setattr("collegue.planner.plan_review.approve_plan", _approve)
+    monkeypatch.setattr("collegue.planner.plan_review.require_approved", _require)
     monkeypatch.setattr("collegue.planner.github_sync.sync_plan", _sync)
     return calls
 
@@ -91,15 +123,24 @@ async def test_dry_run_does_not_approve_and_syncs_in_dry_run(monkeypatch):
     assert calls["sync"]["milestone_title"] == "proj MVP"  # défaut
 
 
-async def test_execute_sync_approves_and_creates(monkeypatch):
+async def test_execute_sync_with_explicit_approval_creates(monkeypatch):
     calls = _patch_planner(monkeypatch, sync_issues=[{"task_id": 1, "title": "T1", "issue_number": 101}])
-    result, _ = await _plan(monkeypatch, execute_sync=True, labels=["x"], milestone_title="M")
+    result, _ = await _plan(monkeypatch, approve=True, execute_sync=True, labels=["x"], milestone_title="M")
     assert result.dry_run is False
     assert calls["approve"][0] == 42  # gate P5 satisfait
+    assert calls["require"] == 42  # re-vérification avant les écritures
     assert calls["sync"]["dry_run"] is False
     assert calls["sync"]["labels"] == ["x"]
     assert calls["sync"]["milestone_title"] == "M"
     assert result.issues[0]["issue_number"] == 101
+
+
+async def test_execute_sync_never_implicitly_approves(monkeypatch):
+    calls = _patch_planner(monkeypatch)
+    with pytest.raises(PlanNotApproved, match="explicite"):
+        await _plan(monkeypatch, execute_sync=True)
+    assert "approve" not in calls
+    assert "sync" not in calls
 
 
 async def test_approve_flag_alone_approves_without_execute(monkeypatch):
@@ -107,6 +148,44 @@ async def test_approve_flag_alone_approves_without_execute(monkeypatch):
     result, _ = await _plan(monkeypatch, approve=True)
     assert "approve" in calls
     assert calls["sync"]["dry_run"] is True  # approuvé mais pas exécuté → dry-run
+
+
+async def test_acceptance_artifacts_are_generated_before_preview_and_approval(monkeypatch):
+    tasks = [SimpleNamespace(id=1, title="T", acceptance="A", depends_on=[])]
+    calls = _patch_planner(monkeypatch, tasks=tasks)
+
+    await _plan(
+        monkeypatch,
+        approve=True,
+        settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True),
+    )
+
+    assert calls["acceptance"]["tasks"] == tasks
+    assert calls["acceptance"]["project_id"] == 42
+    assert calls["approve"][1]["require_acceptance_artifacts"] is True
+    assert calls["order"].index("decompose") < calls["order"].index("acceptance")
+    assert calls["order"].index("acceptance") < calls["order"].index("preview")
+    assert calls["order"].index("preview") < calls["order"].index("approve")
+
+
+async def test_acceptance_generation_failure_prevents_approval_and_sync(monkeypatch):
+    async def _boom(*args, **kwargs):
+        raise ValueError("oracle invalide")
+
+    calls = _patch_planner(
+        monkeypatch,
+        tasks=[SimpleNamespace(id=1, title="T", acceptance="A", depends_on=[])],
+        acceptance_fn=_boom,
+    )
+    with pytest.raises(ValueError, match="oracle invalide"):
+        await _plan(
+            monkeypatch,
+            approve=True,
+            execute_sync=True,
+            settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True),
+        )
+    assert "approve" not in calls
+    assert "sync" not in calls
 
 
 async def test_decompose_max_tokens_widened(monkeypatch):

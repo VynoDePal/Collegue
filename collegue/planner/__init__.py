@@ -8,6 +8,7 @@ Modules **isolés** : non câblés au runtime tant que le pilote (Phase 3) ne le
 enchaîne pas.
 """
 
+from collegue.planner.acceptance_tests import generate_acceptance_tests
 from collegue.planner.decomposer import decompose
 from collegue.planner.github_sync import SyncClients, SyncError, SyncResult, build_sync_preview, sync_plan
 from collegue.planner.plan_review import (
@@ -25,6 +26,7 @@ __all__ = [
     "generate_spec",
     "persist_spec",
     "decompose",
+    "generate_acceptance_tests",
     "PlanPreview",
     "PlanNotApproved",
     "build_plan_preview",

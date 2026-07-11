@@ -34,6 +34,12 @@ def test_issue_to_prompt_minimal():
     assert prompt == "Issue #1: Titre"
 
 
+def test_issue_to_prompt_never_exposes_internal_task_id():
+    prompt = IssueSpec(number=1, title="Titre", source_task_id=987654321).to_prompt()
+    assert prompt == "Issue #1: Titre"
+    assert "987654321" not in prompt
+
+
 def test_issue_to_prompt_drops_blank_criteria():
     prompt = IssueSpec(number=1, title="T", acceptance_criteria=("", "   ", "Vrai")).to_prompt()
     assert "- Vrai" in prompt

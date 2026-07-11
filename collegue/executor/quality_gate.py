@@ -23,12 +23,15 @@ qu'il ne puisse pas forger de fausse bannière/section (cf. P5).
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import os
 import re
 import shlex
 import sys
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from collegue.executor.agent import IssueSpec
@@ -1549,7 +1552,7 @@ class AcceptanceOutcome:
 
 @runtime_checkable
 class AcceptanceChecker(Protocol):
-    """Génère des tests d'acceptation depuis les critères du SPEC puis les LANCE (§4.7)."""
+    """Vérifie puis lance un oracle d'acceptation exécutable (§4.7)."""
 
     async def check(self, workspace: str, diff: str, issue: IssueSpec, ctx, *, sandbox) -> AcceptanceOutcome: ...
 
@@ -1629,6 +1632,197 @@ raise SystemExit(exit_code)
     )
 
 
+def _run_acceptance_source(workspace: str, source: str, *, sandbox) -> AcceptanceOutcome:
+    """Lance un source QA déjà déterminé avec l'oracle pytest isolé commun.
+
+    Cette fonction ne génère rien et ne lit aucun diff. Elle est partagée par le
+    checker historique et le checker plan-time afin que les mêmes protections
+    (tmpfs aléatoire, ``python -I``, plugins/config projet neutralisés) s'appliquent.
+    """
+    prelude = deps_install_prelude(workspace)
+    pytest_cmd = _acceptance_pytest_command(source)
+    command = f"({prelude}) && {pytest_cmd}" if prelude else pytest_cmd
+    try:
+        res = sandbox.run_tests(workspace, command)
+    except Exception as exc:  # noqa: BLE001 - checker activé = erreur bloquante
+        return AcceptanceOutcome(error=f"exécution de l'oracle d'acceptation impossible : {exc}")
+    output = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
+    # pytest exit 5 = AUCUN test collecté : le contrat n'est pas prouvé.
+    if getattr(res, "exit_code", None) == 5:
+        return AcceptanceOutcome(
+            passed=False,
+            error="aucun test d'acceptation collecté (oracle inexploitable)",
+            output=output,
+        )
+    return AcceptanceOutcome(passed=bool(res.ok), output=output)
+
+
+_STORED_ACCEPTANCE_SCHEMA_VERSION = 1
+_STORED_ACCEPTANCE_GENERATOR = "collegue.planner.acceptance_tests"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _normalized_plan_text(value) -> str:
+    """Normalisation textuelle utilisée par les empreintes du planner §4.7."""
+    from collegue.planner.acceptance_tests import normalize_plan_text
+
+    return normalize_plan_text(value)
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _valid_sha256(value) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _task_contract_sha256(project_id: int, task) -> str:
+    """Empreinte canonique de l'identité/contrat de tâche utilisée au plan-time."""
+    from collegue.planner.acceptance_tests import task_contract_sha256
+
+    return task_contract_sha256(project_id, task)
+
+
+class StoredAcceptanceChecker:
+    """Exécute l'oracle QA immuable produit avant le code et approuvé avec le plan.
+
+    Le checker ne reçoit jamais le source via :class:`IssueSpec` : il ne transporte
+    qu'un ``source_task_id`` opaque, puis recharge l'artefact depuis l'état durable
+    **après** l'exécution du codeur. Avant tout pytest, il exige un plan toujours
+    approuvé et vérifie provenance, empreintes du contrat et SHA-256 exact du source.
+    Aucun appel LLM ni aucune lecture du ``diff`` n'existe sur ce chemin.
+    """
+
+    def __init__(self, *, manager, project_id: int, approval_check=None):
+        self._manager = manager
+        self._project_id = int(project_id)
+        self._approval_check = approval_check
+
+    def _require_approved(self) -> Optional[str]:
+        try:
+            checker = self._approval_check
+            if checker is None:
+                from collegue.planner.plan_review import require_approved
+
+                checker = require_approved
+            checker(self._manager, self._project_id)
+        except Exception as exc:  # noqa: BLE001 - tout doute sur l'approbation bloque
+            return f"plan non approuvé ou modifié depuis son approbation : {exc}"
+        return None
+
+    def _load_and_verify(self, issue: IssueSpec) -> tuple[Optional[str], Optional[str]]:
+        approval_error = self._require_approved()
+        if approval_error:
+            return None, approval_error
+
+        task_id = getattr(issue, "source_task_id", None)
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+            return None, "source_task_id absent ou invalide : oracle plan-time introuvable"
+
+        try:
+            task = self._manager.get_task(task_id)
+            project = self._manager.get_project(self._project_id)
+            tasks = self._manager.get_tasks(self._project_id)
+        except Exception as exc:  # noqa: BLE001 - état durable indisponible = fail-closed
+            return None, f"lecture de l'oracle plan-time impossible : {exc}"
+        if task is None or project is None:
+            return None, "tâche ou projet de l'oracle plan-time introuvable"
+        if int(getattr(task, "project_id", -1)) != self._project_id:
+            return None, "l'oracle référencé appartient à un autre projet"
+
+        expected_criterion = inline(getattr(task, "acceptance", "") or "")
+        actual_criteria = tuple(inline(value) for value in issue.acceptance_criteria if inline(value))
+        expected_criteria = (expected_criterion,) if expected_criterion else ()
+        if actual_criteria != expected_criteria:
+            return None, "critères de l'issue différents du contrat QA persisté"
+        if inline(issue.title) != inline(getattr(task, "title", "") or ""):
+            return None, "titre de l'issue différent du contrat QA persisté"
+
+        source = getattr(task, "acceptance_test_source", None)
+        stored_sha256 = getattr(task, "acceptance_test_sha256", None)
+        provenance = getattr(task, "acceptance_test_provenance", None)
+        if not isinstance(source, str) or not source.strip():
+            return None, "source de l'oracle d'acceptation absent"
+        if not _valid_sha256(stored_sha256):
+            return None, "SHA-256 de l'oracle d'acceptation absent ou invalide"
+        actual_sha256 = _text_sha256(source)
+        if not hmac.compare_digest(stored_sha256, actual_sha256):
+            return None, "SHA-256 de l'oracle d'acceptation incohérent"
+        if not isinstance(provenance, dict):
+            return None, "provenance de l'oracle d'acceptation absente ou invalide"
+
+        if provenance.get("schema_version") != _STORED_ACCEPTANCE_SCHEMA_VERSION:
+            return None, "version de provenance de l'oracle non supportée"
+        if provenance.get("generator") != _STORED_ACCEPTANCE_GENERATOR:
+            return None, "générateur de provenance de l'oracle non autorisé"
+        if provenance.get("role") != "qa":
+            return None, "rôle de provenance de l'oracle non indépendant du codeur"
+        if provenance.get("runner") != "pytest":
+            return None, "runner de l'oracle d'acceptation non supporté"
+        for field in ("requested_provider", "requested_model"):
+            if not isinstance(provenance.get(field), str) or not provenance[field].strip():
+                return None, f"provenance de l'oracle incomplète : {field} absent"
+        for field in ("prompt_sha256", "spec_sha256", "criteria_sha256", "contract_sha256"):
+            if not _valid_sha256(provenance.get(field)):
+                return None, f"provenance de l'oracle incomplète : {field} invalide"
+
+        try:
+            from collegue.planner.acceptance_tests import (
+                acceptance_prompt_sha256,
+                criteria_text,
+                sha256_text,
+                spec_text,
+                task_contract_sha256,
+                validate_pytest_source,
+            )
+
+            # Défense au moment du verdict : même une source+SHA remplacés puis
+            # ré-approuvés ne peuvent transformer l'oracle en `skip`/`xfail`, en
+            # module sans test ou en tautologie `assert True` qui sortirait à 0.
+            validate_pytest_source(source)
+            expected_spec_sha = sha256_text(spec_text(getattr(project, "spec", "") or ""))
+            expected_criteria_sha = sha256_text(criteria_text(task))
+            expected_contract_sha = task_contract_sha256(self._project_id, task)
+            expected_prompt_sha = acceptance_prompt_sha256(
+                getattr(project, "spec", "") or "",
+                task,
+                tasks,
+                self._project_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - oracle/provenance douteux = fail-closed
+            return None, f"oracle ou empreintes de provenance invérifiables : {exc}"
+        for field, expected, label in (
+            ("spec_sha256", expected_spec_sha, "SPEC"),
+            ("criteria_sha256", expected_criteria_sha, "critères"),
+            ("contract_sha256", expected_contract_sha, "contrat de tâche"),
+            ("prompt_sha256", expected_prompt_sha, "prompt QA"),
+        ):
+            if not hmac.compare_digest(provenance[field], expected):
+                return None, f"empreinte {label} de l'oracle d'acceptation incohérente"
+
+        generated_at = provenance.get("generated_at")
+        if not isinstance(generated_at, str) or not generated_at.endswith("Z"):
+            return None, "horodatage de provenance de l'oracle absent ou invalide"
+        try:
+            parsed_at = datetime.fromisoformat(generated_at[:-1] + "+00:00")
+        except ValueError:
+            return None, "horodatage de provenance de l'oracle absent ou invalide"
+        if parsed_at.utcoffset() is None:
+            return None, "horodatage de provenance de l'oracle doit être UTC"
+
+        return source, None
+
+    async def check(self, workspace: str, diff: str, issue: IssueSpec, ctx, *, sandbox) -> AcceptanceOutcome:
+        del diff, ctx  # preuve structurelle : aucun code livré ne nourrit l'oracle.
+        if issue is None or not issue.acceptance_criteria:
+            return AcceptanceOutcome(error="issue ou critères absents : oracle plan-time invérifiable")
+        source, error = self._load_and_verify(issue)
+        if error is not None or source is None:
+            return AcceptanceOutcome(error=error or "oracle plan-time invalide")
+        return _run_acceptance_source(workspace, source, sandbox=sandbox)
+
+
 class LLMAcceptanceChecker:
     """:class:`AcceptanceChecker` — un LLM (rôle REVIEWER, ≠ coder) écrit les tests, la SANDBOX les lance.
 
@@ -1686,20 +1880,7 @@ class LLMAcceptanceChecker:
             return AcceptanceOutcome(error=str(exc) or repr(exc))
         if not code.strip():
             return AcceptanceOutcome(error="génération de tests d'acceptation vide")
-        prelude = deps_install_prelude(workspace)
-        pytest_cmd = _acceptance_pytest_command(code)
-        command = f"({prelude}) && {pytest_cmd}" if prelude else pytest_cmd
-        res = sandbox.run_tests(workspace, command)
-        output = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
-        # pytest exit 5 = AUCUN test collecté → génération inexploitable (0 fonction
-        # test_*). Checker activé = contrat exigé : l'absence de verdict bloque.
-        if getattr(res, "exit_code", None) == 5:
-            return AcceptanceOutcome(
-                passed=False,
-                error="aucun test d'acceptation collecté (génération inexploitable)",
-                output=output,
-            )
-        return AcceptanceOutcome(passed=bool(res.ok), output=output)
+        return _run_acceptance_source(workspace, code, sandbox=sandbox)
 
 
 class FakeAdequacyChecker:

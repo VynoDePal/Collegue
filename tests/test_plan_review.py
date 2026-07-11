@@ -99,6 +99,20 @@ def test_preview_spec_is_fenced_no_forged_banner(manager):
     assert any("Approuvé : ❌ non" in ln for ln in lines[: fences[0]])  # vrai bandeau, statut réel
 
 
+def test_preview_shows_sealed_qa_oracle_and_neutralizes_fences(manager):
+    pid = _planned_with_tasks(manager)
+    task = manager.get_tasks(pid)[0]
+    source = 'def test_contract():\n    assert "```forged" != ""\n'
+    manager.set_acceptance_test_artifact(task.id, source, {"role": "qa"})
+
+    md = build_plan_preview(manager, pid).to_markdown()
+
+    assert "oracle QA" in md
+    assert manager.get_task(task.id).acceptance_test_sha256 in md
+    assert "```forged" not in md
+    assert "ʼʼʼforged" in md
+
+
 # --- gate d'approbation : lié au contenu (anti-TOCTOU) --------------------------
 
 
@@ -132,6 +146,54 @@ def test_approval_is_invalidated_by_plan_mutation(manager):
     assert is_approved(manager, pid) is False
     with pytest.raises(PlanNotApproved):
         require_approved(manager, pid)
+
+
+def test_approval_is_invalidated_when_acceptance_policy_changes(manager):
+    pid = _planned_with_tasks(manager)
+    approve_plan(manager, pid)
+    manager.update_project(pid, acceptance_tests_required=True)
+    assert is_approved(manager, pid) is False
+
+
+@pytest.mark.parametrize("field", ["acceptance_test_source", "acceptance_test_sha256", "acceptance_test_provenance"])
+def test_approval_is_invalidated_by_any_qa_artifact_mutation(manager, field):
+    pid = _planned_with_tasks(manager)
+    task = manager.get_tasks(pid)[0]
+    manager.set_acceptance_test_artifact(task.id, "def test_contract():\n    assert True\n", {"role": "qa"})
+    approve_plan(manager, pid)
+    assert is_approved(manager, pid) is True
+
+    changed = {
+        "acceptance_test_source": "def test_contract():\n    assert False\n",
+        "acceptance_test_sha256": "0" * 64,
+        "acceptance_test_provenance": {"role": "reviewer"},
+    }[field]
+    manager.update_task(task.id, **{field: changed})
+
+    assert is_approved(manager, pid) is False
+
+
+def test_approve_requires_qa_artifacts_when_gate_is_enabled(manager):
+    pid = _planned_with_tasks(manager)
+    with pytest.raises(ValueError, match="Oracle QA manquant"):
+        approve_plan(manager, pid, require_acceptance_artifacts=True)
+
+
+def test_persisted_acceptance_policy_requires_artifacts_without_env_flag(manager):
+    pid = _planned_with_tasks(manager)
+    manager.update_project(pid, acceptance_tests_required=True)
+    with pytest.raises(ValueError, match="Oracle QA manquant"):
+        approve_plan(manager, pid)
+
+
+def test_approve_rejects_corrupt_qa_artifact_digest(manager):
+    pid = _planned_with_tasks(manager)
+    task = manager.get_tasks(pid)[0]
+    manager.set_acceptance_test_artifact(task.id, "def test_contract():\n    assert True\n", {"role": "qa"})
+    manager.update_task(task.id, acceptance_test_sha256="0" * 64)
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        approve_plan(manager, pid, require_acceptance_artifacts=True)
 
 
 def test_approve_empty_plan_raises(manager):

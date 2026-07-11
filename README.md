@@ -155,6 +155,7 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `COLLEGUE_HOME` | Racine de persistance (budget, métriques, checkpoints) | |
 | `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Codage par **abonnement** ChatGPT/Codex (coût API `$0`) au lieu d'une clé | |
 | `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **on** par défaut). L'amélioration reste à merge humain | |
+| `GATE_ACCEPTANCE_TESTS` | Oracles pytest générés au plan-time par le rôle QA, scellés avec le plan puis rejoués sans LLM (**off** par défaut) | |
 | `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Réseau et ressources du conteneur coder | |
 | `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes risk-gated (opt-in, **off** par défaut) | |
 
@@ -170,7 +171,8 @@ bout : **planifier → coder → tester → ouvrir des PR**, sous budget, avec G
 substrat. Étages : `planner` → `pilote` → `executor` → `improve`, sur un socle d'état
 durable (Postgres/SQLite) et de sandbox Docker.
 
-**Sûr par défaut** : `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
+**Sûr par défaut** : un run reste en `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
+`plan` persiste seulement son brouillon durable et ne touche pas GitHub sans `--execute-sync` ;
 budget dur auto-pausé. En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
 construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
 laisse ses PR **ouvertes pour merge humain** (§6). L'auto-merge risk-gated,

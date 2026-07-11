@@ -277,6 +277,9 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
         # l'exécuteur. Le mettre dans ``body`` rendait la gate §4.7 inatteignable.
         acceptance_criteria=(criterion,) if criterion else (),
         context=" ".join(parts),
+        # Canal opaque vers l'oracle QA persisté. ``IssueSpec.to_prompt`` ne rend
+        # jamais cet identifiant et ne divulgue aucun artefact au codeur.
+        source_task_id=task.id,
     )
 
 

@@ -43,6 +43,11 @@ class IssueSpec:
     # injecté par le pilote pour que l'agent BÂTISSE sur l'existant au lieu de coder
     # depuis une consigne d'une ligne → cohérence inter-tâches. Voir issue #412.
     context: str = ""
+    # Identifiant interne de la tâche persistée dont provient cette issue. Il sert
+    # uniquement au gate d'acceptation pour retrouver l'oracle QA plan-time exact.
+    # Champ volontairement OPAQUE : ``to_prompt`` ne le rend jamais, donc le codeur
+    # ne reçoit ni ce lien interne ni, a fortiori, le source de l'oracle.
+    source_task_id: Optional[int] = None
 
     def to_prompt(self) -> str:
         """Construit la consigne (sanitizée) donnée à l'agent.

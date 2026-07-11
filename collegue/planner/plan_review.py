@@ -42,6 +42,7 @@ class PlanPreview:
     spec: Optional[str]
     tasks: List[Dict[str, Any]]
     task_count: int
+    acceptance_tests_required: bool = False
 
     def to_markdown(self) -> str:
         lines = [
@@ -49,6 +50,7 @@ class PlanPreview:
             "",
             f"Statut : `{self.status}` · Tâches : {self.task_count} · "
             f"Approuvé : {'✅ oui' if self.approved else '❌ non'}",
+            f"Oracles QA §4.7 : {'requis' if self.acceptance_tests_required else 'désactivés'}",
             "",
             "## SPEC",
             # SPEC clôturé dans un bloc de code : son Markdown (titres, cases) est
@@ -68,6 +70,21 @@ class PlanPreview:
             acceptance = inline(task.get("acceptance") or "")
             if acceptance:
                 lines.append(f"  - critère : {acceptance}")
+            artifact_sha = inline(task.get("acceptance_test_sha256") or "")
+            artifact_source = task.get("acceptance_test_source") or ""
+            provenance = task.get("acceptance_test_provenance") or {}
+            if artifact_sha:
+                role = inline(str(provenance.get("role", ""))) if isinstance(provenance, dict) else ""
+                role_label = f" · rôle `{role}`" if role else ""
+                lines.append(f"  - oracle QA : `sha256:{artifact_sha}`{role_label}")
+                lines.extend(
+                    [
+                        "",
+                        "  ```python",
+                        *[f"  {line}" for line in artifact_source.replace("```", "ʼʼʼ").splitlines()],
+                        "  ```",
+                    ]
+                )
         return "\n".join(lines)
 
 
@@ -75,6 +92,7 @@ def _plan_hash(project: Any, tasks: List[Any]) -> str:
     """Empreinte stable du plan (SPEC + tâches) — base de l'anti-TOCTOU."""
     payload = {
         "spec": getattr(project, "spec", None) or "",
+        "acceptance_tests_required": bool(getattr(project, "acceptance_tests_required", False)),
         "tasks": sorted(
             (
                 {
@@ -82,6 +100,13 @@ def _plan_hash(project: Any, tasks: List[Any]) -> str:
                     "title": t.title,
                     "acceptance": t.acceptance,
                     "depends_on": t.depends_on or [],
+                    # L'approbation couvre l'oracle exact ET ses métadonnées. Le
+                    # SHA seul ne suffit pas : une mutation coordonnée
+                    # source+digest, ou un changement de provenance, doit aussi
+                    # invalider le plan approuvé.
+                    "acceptance_test_source": getattr(t, "acceptance_test_source", None),
+                    "acceptance_test_sha256": getattr(t, "acceptance_test_sha256", None),
+                    "acceptance_test_provenance": getattr(t, "acceptance_test_provenance", None),
                 }
                 for t in tasks
             ),
@@ -104,6 +129,9 @@ def build_plan_preview(manager: Any, project_id: int) -> Optional[PlanPreview]:
             "title": t["title"],
             "acceptance": t.get("acceptance"),
             "depends_on": t.get("depends_on") or [],
+            "acceptance_test_source": t.get("acceptance_test_source"),
+            "acceptance_test_sha256": t.get("acceptance_test_sha256"),
+            "acceptance_test_provenance": t.get("acceptance_test_provenance"),
         }
         for t in snapshot.tasks
     ]
@@ -115,6 +143,7 @@ def build_plan_preview(manager: Any, project_id: int) -> Optional[PlanPreview]:
         spec=project.get("spec"),
         tasks=tasks,
         task_count=len(tasks),
+        acceptance_tests_required=bool(project.get("acceptance_tests_required", False)),
     )
 
 
@@ -127,7 +156,40 @@ def is_approved(manager: Any, project_id: int) -> bool:
     return bool(project.approved_plan_hash) and project.approved_plan_hash == _plan_hash(project, tasks)
 
 
-def approve_plan(manager: Any, project_id: int, *, actor: str = "human") -> bool:
+def _validate_acceptance_artifacts(tasks: List[Any], *, required: bool) -> None:
+    """Valide l'intégrité minimale des oracles QA avant approbation.
+
+    Quand §4.7 est activé, toute tâche doit posséder un triplet complet. Même
+    lorsqu'il est désactivé, un triplet partiel ou un digest faux est refusé :
+    on ne scelle jamais silencieusement un artefact incohérent.
+    """
+    for task in tasks:
+        source = getattr(task, "acceptance_test_source", None)
+        digest = getattr(task, "acceptance_test_sha256", None)
+        provenance = getattr(task, "acceptance_test_provenance", None)
+        present = (source is not None, digest is not None, provenance is not None)
+        if not any(present):
+            if required:
+                raise ValueError(f"Oracle QA manquant pour la tâche {task.id}.")
+            continue
+        if not all(present):
+            raise ValueError(f"Oracle QA partiel pour la tâche {task.id}.")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(f"Source de l'oracle QA vide pour la tâche {task.id}.")
+        expected = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        if digest != expected:
+            raise ValueError(f"SHA-256 de l'oracle QA invalide pour la tâche {task.id}.")
+        if not isinstance(provenance, dict):
+            raise ValueError(f"Provenance de l'oracle QA invalide pour la tâche {task.id}.")
+
+
+def approve_plan(
+    manager: Any,
+    project_id: int,
+    *,
+    actor: str = "human",
+    require_acceptance_artifacts: bool = False,
+) -> bool:
     """Approuve le plan (lie l'approbation à son contenu). Retourne False si projet absent.
 
     Préconditions : le projet a un SPEC et au moins une tâche. Idempotent : ré-approuver
@@ -139,6 +201,10 @@ def approve_plan(manager: Any, project_id: int, *, actor: str = "human") -> bool
     tasks = manager.get_tasks(project_id)
     if not tasks or not (project.spec or "").strip():
         raise ValueError("Plan incomplet (SPEC ou tâches manquants) : rien à approuver.")
+    _validate_acceptance_artifacts(
+        tasks,
+        required=require_acceptance_artifacts or bool(getattr(project, "acceptance_tests_required", False)),
+    )
 
     current_hash = _plan_hash(project, tasks)
     if project.status == PROJECT_STATUS_APPROVED and project.approved_plan_hash == current_hash:
