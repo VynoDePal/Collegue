@@ -157,7 +157,6 @@ jobs:
       INTEGRATION_FIXTURE_REPOSITORY_ID: ${{ vars.INTEGRATION_FIXTURE_REPOSITORY_ID }}
       INTEGRATION_FIXTURE_ROOT_BRANCH: ${{ vars.INTEGRATION_FIXTURE_ROOT_BRANCH }}
       INTEGRATION_FIXTURE_SEED_SHA: ${{ vars.INTEGRATION_FIXTURE_SEED_SHA }}
-      COLLEGUE_NIGHTLY_MANIFEST: ${{ runner.temp }}/collegue-nightly/manifest.json
 
       # Endpoint/modèles configurables sans modifier le workflow. Les overrides
       # vides retombent sur le provider/modèle global dans la résolution par rôle.
@@ -174,10 +173,8 @@ jobs:
       LLM_PRICE_PROMPT_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_PROMPT_PER_1M }}
       LLM_PRICE_COMPLETION_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_COMPLETION_PER_1M }}
 
-      # État local éphémère, mais chemins absolus et stables pendant tout le job.
-      STATE_DATABASE_URL: sqlite:///${{ runner.temp }}/collegue-nightly/state.sqlite3
-      COLLEGUE_HOME: ${{ runner.temp }}/collegue-nightly/home
-      SANDBOX_PIP_CACHE_DIR: ${{ runner.temp }}/collegue-nightly/pip-cache
+      # État local éphémère. Les chemins dépendant du runner sont exportés dans
+      # GITHUB_ENV par le premier step, une fois le runner réellement alloué.
       SANDBOX_IMAGE: collegue-sandbox-openhands:ci
       SANDBOX_NETWORK: bridge
       SANDBOX_MEMORY: 6g
@@ -213,6 +210,17 @@ jobs:
       CODER_LLM_RETRY_MAX_WAIT: "30"
 
     steps:
+      - name: Initialiser les chemins éphémères du runner
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/collegue-nightly"
+          {
+            printf 'COLLEGUE_NIGHTLY_MANIFEST=%s/manifest.json\n' "$root"
+            printf 'STATE_DATABASE_URL=sqlite:///%s/state.sqlite3\n' "$root"
+            printf 'COLLEGUE_HOME=%s/home\n' "$root"
+            printf 'SANDBOX_PIP_CACHE_DIR=%s/pip-cache\n' "$root"
+          } >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
