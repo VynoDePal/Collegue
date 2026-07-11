@@ -786,6 +786,7 @@ async def plan_project_from_settings(
             labels=labels if labels is not None else ["autonome"],
             milestone_title=milestone_title if milestone_title is not None else f"{name} MVP",
             board_title=board_title,
+            require_spec_commit=execute_sync,
         )
         return PlanResult(
             project_id=project_id,

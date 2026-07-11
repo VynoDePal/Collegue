@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from collegue.planner import PlanNotApproved, Spec, approve_plan, persist_spec, sync_plan
+from collegue.planner import PlanNotApproved, Spec, SpecSyncError, approve_plan, persist_spec, sync_plan
 from collegue.planner.github_sync import SyncClients, SyncError, _default_clients
 from collegue.state import ProjectStateManager
 
@@ -66,15 +66,24 @@ class _FakeProjects:
 
 
 class _FakeFiles:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, current_content=None, commit_sha="abc"):
         self.calls = []
+        self.get_calls = []
         self._fail = fail
+        self._current_content = current_content
+        self._commit_sha = commit_sha
+
+    def get_file_content(self, owner, repo, path, branch=None):
+        self.get_calls.append({"owner": owner, "repo": repo, "path": path})
+        if self._current_content is None:
+            raise RuntimeError("not found")
+        return {"content": self._current_content, "sha": "blob-sha"}
 
     def update_file(self, owner, repo, path, message, content, branch=None):
         if self._fail:
             raise RuntimeError("commit refusé")
         self.calls.append({"owner": owner, "repo": repo, "path": path, "message": message, "content": content})
-        return {"commit": {"sha": "abc"}}
+        return {"commit": {"sha": self._commit_sha} if self._commit_sha else {}}
 
 
 def _clients():
@@ -216,6 +225,28 @@ def test_real_sync_raises_on_cycle(manager):
         sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients())
 
 
+def test_product_preflight_rejects_invalid_dag_before_spec_write(manager):
+    pid = persist_spec(manager, name="d", spec=Spec(title="D", acceptance_criteria=["AC"]))
+    task = manager.add_task(pid, title="A")
+    manager.update_task(task, depends_on=[task])
+    approve_plan(manager, pid)
+    files = _FakeFiles()
+
+    with pytest.raises(SyncError, match="cycle"):
+        sync_plan(
+            manager,
+            pid,
+            "o",
+            "r",
+            dry_run=False,
+            clients=_clients_with_files(files),
+            require_spec_commit=True,
+        )
+
+    assert files.get_calls == []
+    assert files.calls == []
+
+
 # --- idempotence : pas de gaspillage d'API quand tout est déjà synchronisé ------
 
 
@@ -270,6 +301,7 @@ def test_real_sync_commits_spec_md(manager):
     files = _FakeFiles()
     result = sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients_with_files(files))
     assert result.spec_committed == "SPEC.md"
+    assert result.spec_commit_sha == "abc"
     assert len(files.calls) == 1
     call = files.calls[0]
     assert call["path"] == "SPEC.md" and call["owner"] == "o" and call["repo"] == "r"
@@ -292,6 +324,58 @@ def test_spec_commit_is_best_effort(manager):
     result = sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients_with_files(_FakeFiles(fail=True)))
     assert result.spec_committed is None  # échec signalé
     assert all(t.issue_number for t in manager.get_tasks(pid))  # issues créées quand même
+
+
+def test_product_sync_fails_closed_when_spec_commit_fails(manager):
+    pid = _planned(manager, approve=True)
+    clients = _clients_with_files(_FakeFiles(fail=True))
+
+    with pytest.raises(SpecSyncError, match="Commit obligatoire"):
+        sync_plan(manager, pid, "o", "r", dry_run=False, clients=clients, require_spec_commit=True)
+
+    assert clients.issues.created == []
+    assert clients.labels.ensured == []
+    assert clients.milestones.assigned == []
+    assert clients.projects.added == []
+    assert all(t.issue_number is None for t in manager.get_tasks(pid))
+
+
+def test_product_sync_requires_files_client_and_confirmed_commit_sha(manager):
+    pid = _planned(manager, approve=True)
+    with pytest.raises(SpecSyncError, match="client GitHub files absent"):
+        sync_plan(manager, pid, "o", "r", dry_run=False, clients=_clients(), require_spec_commit=True)
+
+    clients = _clients_with_files(_FakeFiles(commit_sha=None))
+    with pytest.raises(SpecSyncError, match="commit.sha absent"):
+        sync_plan(manager, pid, "o", "r", dry_run=False, clients=clients, require_spec_commit=True)
+    assert clients.issues.created == []
+
+
+def test_product_sync_reuses_identical_spec_without_empty_commit(manager):
+    pid = _planned(manager, approve=True)
+    spec = manager.get_project(pid).spec
+    files = _FakeFiles(current_content=spec)
+    clients = _clients_with_files(files)
+
+    result = sync_plan(manager, pid, "o", "r", dry_run=False, clients=clients, require_spec_commit=True)
+
+    assert result.spec_committed == "SPEC.md"
+    assert result.spec_unchanged is True
+    assert result.spec_commit_sha is None
+    assert files.calls == []
+    assert len(clients.issues.created) == 2
+
+
+def test_product_sync_refuses_to_overwrite_divergent_spec(manager):
+    pid = _planned(manager, approve=True)
+    files = _FakeFiles(current_content="# SPEC humain\n")
+    clients = _clients_with_files(files)
+
+    with pytest.raises(SpecSyncError, match="contenu divergent"):
+        sync_plan(manager, pid, "o", "r", dry_run=False, clients=clients, require_spec_commit=True)
+
+    assert files.calls == []
+    assert clients.issues.created == []
 
 
 def test_no_files_client_skips_spec_commit(manager):
