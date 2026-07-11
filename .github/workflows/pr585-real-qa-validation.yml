@@ -31,10 +31,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Verify the exact PR head is the validation commit parent
-        run: test "$(git rev-parse HEAD^)" = "$PR585_HEAD_SHA"
+      - name: Verify the product code is exactly the PR head
+        run: |
+          git merge-base --is-ancestor "$PR585_HEAD_SHA" HEAD
+          test "$(git rev-parse "$PR585_HEAD_SHA:collegue")" = "$(git rev-parse HEAD:collegue)"
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
