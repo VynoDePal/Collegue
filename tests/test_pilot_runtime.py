@@ -11,7 +11,7 @@ from collegue.executor import FakeCodeAgent, FakeReviewer, PrClients
 from collegue.pilot import ProjectRunResult, TaskOutcome, format_run_report, run_project_from_settings
 from collegue.pilot.__main__ import build_parser
 from collegue.pilot.runtime import collegue_home_durability_warning
-from collegue.planner import PlanNotApproved, approve_plan
+from collegue.planner import PlanNotApproved, PlanTargetError, approve_plan, normalize_plan_sync_config
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
 
@@ -135,6 +135,29 @@ async def test_real_run_rejects_unapproved_plan_before_execution(git_repo, manag
             budget=_Budget(),
         )
     assert manager.get_tasks(pid)[0].status == "todo"
+
+
+async def test_real_run_refuses_repository_or_base_outside_sealed_target(git_repo, manager):
+    target = normalize_plan_sync_config({"owner": "sealed", "repo": "app", "base_branch": "develop"})
+    pid = manager.create_project(name="sealed", spec="# SPEC\n", plan_sync_config=target)
+    manager.add_task(pid, title="T")
+    approve_plan(manager, pid)
+
+    with pytest.raises(PlanTargetError, match="cible approuvée"):
+        await run_project_from_settings(
+            pid,
+            git_repo,
+            owner="sealed",
+            repo="other",
+            base="main",
+            dry_run=False,
+            manager=manager,
+            sandbox=_Sandbox(),
+            agent=FakeCodeAgent(),
+            reviewer=FakeReviewer(),
+            clients=_clients(),
+            budget=_Budget(),
+        )
 
 
 async def test_real_run_records_summary_decision(git_repo, manager):

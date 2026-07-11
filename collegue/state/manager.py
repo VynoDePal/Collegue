@@ -108,9 +108,17 @@ class ProjectStateManager:
         deadline: Optional[datetime] = None,
         phase: str = "0",
         status: str = "active",
+        plan_sync_config: Optional[dict] = None,
     ) -> int:
         with self.session() as s:
-            project = Project(name=name, spec=spec, deadline=deadline, phase=phase, status=status)
+            project = Project(
+                name=name,
+                spec=spec,
+                deadline=deadline,
+                phase=phase,
+                status=status,
+                plan_sync_config=plan_sync_config,
+            )
             s.add(project)
             s.flush()
             return project.id

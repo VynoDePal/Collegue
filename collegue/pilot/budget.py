@@ -61,7 +61,9 @@ class BudgetTimeController:
 
     ``deadline_seconds`` : durée mur max depuis ``started_at`` ; si ``None``, lue
     dans les settings (``COLLEGUE_RUN_DEADLINE_SECONDS``) ; ``<= 0`` = pas de
-    deadline. ``collector`` (métriques C4) et ``clock`` sont injectables.
+    deadline. ``deadline_at`` est une échéance absolue scellée avec le plan. Si
+    les deux existent, la plus proche gagne. ``collector`` (métriques C4) et
+    ``clock`` sont injectables.
     """
 
     def __init__(
@@ -69,6 +71,7 @@ class BudgetTimeController:
         *,
         started_at: Optional[datetime] = None,
         deadline_seconds: Optional[float] = None,
+        deadline_at: Optional[datetime] = None,
         collector=None,
         settings_obj: Optional[object] = None,
         clock: Optional[Callable[[], datetime]] = None,
@@ -84,10 +87,15 @@ class BudgetTimeController:
         self._extra_totals = extra_totals
         if deadline_seconds is None:
             deadline_seconds = getattr(self._resolve_settings(), "COLLEGUE_RUN_DEADLINE_SECONDS", 0.0) or 0.0
-        self._deadline_seconds = float(deadline_seconds)
-        # Deadline absolue (aware) ou None si pas de limite de temps.
-        self._deadline: Optional[datetime] = (
-            self._started_at + timedelta(seconds=self._deadline_seconds) if self._deadline_seconds > 0 else None
+        configured_seconds = float(deadline_seconds)
+        configured_deadline = (
+            self._started_at + timedelta(seconds=configured_seconds) if configured_seconds > 0 else None
+        )
+        sealed_deadline = _aware(deadline_at)
+        candidates = [candidate for candidate in (configured_deadline, sealed_deadline) if candidate is not None]
+        self._deadline: Optional[datetime] = min(candidates) if candidates else None
+        self._deadline_seconds = (
+            (self._deadline - self._started_at).total_seconds() if self._deadline is not None else 0.0
         )
 
     def _resolve_settings(self):

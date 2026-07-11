@@ -15,17 +15,24 @@ from collegue.planner.github_sync import (
     SyncClients,
     SyncError,
     SyncResult,
+    SyncTargetMismatch,
     build_sync_preview,
     sync_plan,
 )
 from collegue.planner.plan_review import (
+    PlanHashMismatch,
     PlanNotApproved,
     PlanPreview,
+    PlanStateSnapshot,
+    PlanTaskSnapshot,
     approve_plan,
     build_plan_preview,
+    current_plan_hash,
     is_approved,
+    load_plan_snapshot,
     require_approved,
 )
+from collegue.planner.plan_target import PLAN_SYNC_CONFIG_KEYS, PlanTargetError, normalize_plan_sync_config
 from collegue.planner.spec_generator import Spec, generate_spec, persist_spec
 
 __all__ = [
@@ -36,8 +43,16 @@ __all__ = [
     "generate_acceptance_tests",
     "PlanPreview",
     "PlanNotApproved",
+    "PlanHashMismatch",
+    "PlanStateSnapshot",
+    "PlanTaskSnapshot",
+    "PlanTargetError",
+    "PLAN_SYNC_CONFIG_KEYS",
+    "normalize_plan_sync_config",
     "build_plan_preview",
     "approve_plan",
+    "current_plan_hash",
+    "load_plan_snapshot",
     "is_approved",
     "require_approved",
     "sync_plan",
@@ -46,4 +61,5 @@ __all__ = [
     "SyncClients",
     "SyncError",
     "SpecSyncError",
+    "SyncTargetMismatch",
 ]

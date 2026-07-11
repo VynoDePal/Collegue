@@ -17,7 +17,13 @@ from types import SimpleNamespace
 import pytest
 
 from collegue.executor import FakeCodeAgent, FakeReviewer, PrClients
-from collegue.pilot import plan_project_from_settings, run_project_from_settings
+from collegue.pilot import (
+    approve_project_plan_from_settings,
+    plan_project_from_settings,
+    run_project_from_settings,
+    sync_project_plan_from_settings,
+)
+from collegue.planner.github_sync import SyncClients
 from collegue.planner.spec_generator import Spec
 from collegue.sandbox import SandboxResult
 from collegue.state import ProjectStateManager
@@ -41,7 +47,7 @@ class _Branches:
 
 class _Files:
     def update_file(self, owner, repo, path, message, content, branch=None):
-        return {}
+        return {"commit": {"sha": "fixture-commit-sha"}}
 
     def delete_file(self, owner, repo, path, message, branch=None):
         return {}
@@ -137,7 +143,7 @@ def _patch_planner_llm(monkeypatch):
 async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo):
     _patch_planner_llm(monkeypatch)
 
-    # 1) PLAN (sync en dry-run → pas de GitHub) : crée projet + SPEC + tâches en DB.
+    # 1) DRAFT puis approbation séparée : crée projet + SPEC + tâches en DB.
     plan = await plan_project_from_settings(
         "E2E",
         "construire une app X",
@@ -146,10 +152,14 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
         settings_obj=SimpleNamespace(),
         manager=manager,
         ctx=_Ctx(),
-        approve=True,
-        execute_sync=False,
     )
     assert plan.task_count == 2
+    approve_project_plan_from_settings(
+        plan.project_id,
+        plan.plan_hash,
+        settings_obj=SimpleNamespace(),
+        manager=manager,
+    )
     project = manager.get_project(plan.project_id)
     assert project.spec and "E2E" in project.spec  # SPEC persisté (markdown)
     assert all(t.status == "todo" for t in manager.get_tasks(plan.project_id))
@@ -181,16 +191,92 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
     assert any("Run pilote" in d.summary for d in manager.get_decisions(plan.project_id))
 
 
-async def test_plan_dry_run_sync_writes_nothing_to_github(monkeypatch, manager):
-    # En dry-run de sync, la planification persiste en DB mais ne touche pas GitHub.
+async def test_plan_draft_persists_without_touching_github(monkeypatch, manager):
+    # Le draft persiste en DB mais n'entre pas encore dans la couche GitHub.
     _patch_planner_llm(monkeypatch)
     plan = await plan_project_from_settings(
         "E2E", "x", owner="o", repo="r", settings_obj=SimpleNamespace(), manager=manager, ctx=_Ctx()
     )
     assert plan.dry_run is True
     assert plan.task_count == 2
-    # issues en aperçu (pas de numéro réel attribué).
-    assert all(i.get("issue_number") is None for i in plan.issues)
+    assert plan.issues == []
+
+
+async def test_draft_approve_sync_survives_manager_restart(monkeypatch, tmp_path):
+    """Le produit reprend les 3 gestes depuis la DB, sans garder de ctx en mémoire."""
+    _patch_planner_llm(monkeypatch)
+    url = f"sqlite:///{tmp_path / 'durable-plan.db'}"
+    draft_manager = ProjectStateManager.from_url(url, create=True)
+    draft = await plan_project_from_settings(
+        "Durable",
+        "construire X",
+        owner="sealed-owner",
+        repo="sealed-repo",
+        settings_obj=SimpleNamespace(),
+        manager=draft_manager,
+        ctx=_Ctx(),
+    )
+    del draft_manager
+
+    approve_manager = ProjectStateManager.from_url(url, create=False)
+    approved = approve_project_plan_from_settings(
+        draft.project_id,
+        draft.plan_hash,
+        settings_obj=SimpleNamespace(),
+        manager=approve_manager,
+    )
+    assert approved.plan_hash == draft.plan_hash
+    del approve_manager
+
+    events = []
+
+    class _SyncFiles:
+        def update_file(self, owner, repo, path, message, content, branch=None):
+            events.append(("spec", owner, repo, path))
+            return {"commit": {"sha": "spec-commit"}}
+
+    class _SyncIssues:
+        def __init__(self):
+            self.number = 200
+
+        def create_issue(self, owner, repo, title, body=None):
+            self.number += 1
+            events.append(("issue", owner, repo, title))
+            return SimpleNamespace(number=self.number)
+
+    class _SyncLabels:
+        def ensure_label(self, *args, **kwargs):
+            return None
+
+        def add_labels_to_issue(self, *args, **kwargs):
+            return None
+
+    class _SyncMilestones:
+        def ensure_milestone(self, owner, repo, title):
+            return SimpleNamespace(number=7, title=title)
+
+        def assign_milestone(self, owner, repo, issue_number, milestone_number):
+            return None
+
+    sync_manager = ProjectStateManager.from_url(url, create=False)
+    result = sync_project_plan_from_settings(
+        draft.project_id,
+        execute=True,
+        settings_obj=SimpleNamespace(),
+        manager=sync_manager,
+        clients=SyncClients(
+            issues=_SyncIssues(),
+            labels=_SyncLabels(),
+            milestones=_SyncMilestones(),
+            projects=object(),
+            files=_SyncFiles(),
+        ),
+    )
+
+    assert result.action == "sync" and result.dry_run is False
+    assert events[0] == ("spec", "sealed-owner", "sealed-repo", "SPEC.md")
+    assert [event[0] for event in events] == ["spec", "issue", "issue"]
+    assert all(task.issue_number for task in sync_manager.get_tasks(draft.project_id))
 
 
 async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(monkeypatch, manager, git_repo):
@@ -210,7 +296,12 @@ async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(m
         ),
         manager=manager,
         ctx=qa_ctx,
-        approve=True,
+    )
+    approve_project_plan_from_settings(
+        plan.project_id,
+        plan.plan_hash,
+        settings_obj=SimpleNamespace(),
+        manager=manager,
     )
 
     project = manager.get_project(plan.project_id)

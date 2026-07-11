@@ -37,6 +37,7 @@ def _project_to_dict(p: Project) -> Dict[str, Any]:
         "phase": p.phase,
         "status": p.status,
         "acceptance_tests_required": p.acceptance_tests_required,
+        "plan_sync_config": p.plan_sync_config,
         "created_at": _iso(p.created_at),
         "updated_at": _iso(p.updated_at),
     }

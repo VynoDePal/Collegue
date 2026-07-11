@@ -13,6 +13,12 @@ Exemple :
 Interventions opérateur tracées (#506) — hors-boucle, journalisées dans ``decisions`` :
     python -m collegue.pilot task requeue <task_id> --message "motif"   # re-file (#460)
     python -m collegue.pilot task reset <task_id> --message "motif" [--status todo]
+
+Planification avec validation humaine anti-TOCTOU (#588) :
+    python -m collegue.pilot plan draft --problem "..." --owner moi --repo app
+    python -m collegue.pilot plan approve --project-id 1 --expected-plan-hash SHA256_AFFICHE
+    python -m collegue.pilot plan sync --project-id 1              # aperçu local
+    python -m collegue.pilot plan sync --project-id 1 --execute    # SPEC + issues
 """
 
 from __future__ import annotations
@@ -51,21 +57,37 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("task_id", type=int, help="Id de la tâche à réinitialiser.")
     rs.add_argument("--status", default="todo", help="Statut cible (défaut: todo).")
     rs.add_argument("--message", required=True, help="Motif du reset (tracé dans decisions).")
-    # Phase 1 (A2) : planification — problème → SPEC → DAG → issues GitHub. dry-run par défaut.
-    plan_p = sub.add_parser("plan", help="Planifie un projet (SPEC → graphe de tâches → issues GitHub).")
-    plan_p.add_argument("--name", default="projet", help="Nom du projet (état durable).")
-    plan_p.add_argument("--problem", required=True, help="Problématique en langage naturel (1+ phrases).")
-    plan_p.add_argument("--owner", required=True, help="Owner GitHub cible des issues.")
-    plan_p.add_argument("--repo", required=True, help="Repo GitHub cible des issues.")
+    # Phase 1 : trois gestes séparés. Le positionnel est optionnel pour préserver
+    # `plan --problem ...` comme alias explicite de `plan draft --problem ...`.
+    plan_p = sub.add_parser("plan", help="Planifie en trois étapes : draft → approve → sync.")
+    plan_p.add_argument(
+        "plan_action",
+        nargs="?",
+        choices=("draft", "approve", "sync"),
+        default="draft",
+        help="Action (défaut: draft).",
+    )
+    plan_p.add_argument("--name", default=None, help="Nom du projet (défaut pour draft : projet).")
+    plan_p.add_argument("--problem", default=None, help="Problématique (requise pour draft).")
+    plan_p.add_argument("--owner", default=None, help="Owner GitHub cible (requis pour draft, puis persisté).")
+    plan_p.add_argument("--repo", default=None, help="Repo GitHub cible (requis pour draft, puis persisté).")
+    plan_p.add_argument("--project-id", type=int, default=None, help="Projet durable (requis pour approve/sync).")
+    plan_p.add_argument(
+        "--expected-plan-hash",
+        default=None,
+        help="SHA-256 affiché par draft (requis pour approve, anti-TOCTOU).",
+    )
     plan_p.add_argument("--deadline-hours", type=float, default=None, help="Deadline du run, en heures (optionnel).")
-    plan_p.add_argument(
-        "--approve", action="store_true", help="Approuve le plan (gate humain P5) — requis pour --execute-sync."
-    )
-    plan_p.add_argument(
-        "--execute-sync", action="store_true", help="Crée RÉELLEMENT les issues GitHub (sinon dry-run/aperçu)."
-    )
     plan_p.add_argument("--labels", default=None, help="Labels d'issue (CSV ; défaut: autonome).")
-    plan_p.add_argument("--milestone", default=None, help="Titre du milestone (défaut: '<name> MVP').")
+    plan_p.add_argument("--milestone", default=None, help="Titre du milestone (défaut draft : '<name> MVP').")
+    plan_p.add_argument("--board", default=None, help="Titre du board GitHub à persister.")
+    plan_p.add_argument("--spec-filename", default=None, help="Chemin du SPEC dans le dépôt cible.")
+    plan_p.add_argument("--base", default=None, help="Branche de base scellée (défaut draft : main).")
+    plan_p.add_argument(
+        "--execute",
+        action="store_true",
+        help="Pour `plan sync` uniquement : commit SPEC + création réelle des issues.",
+    )
     # --- args du RUN par défaut (required=False : validés dans main si pas de sous-commande) ---
     parser.add_argument("--project-id", type=int, default=None, help="Id du projet (état durable).")
     parser.add_argument("--repo-source", default=None, help="Dépôt git source (repo-agnostique).")
@@ -101,7 +123,7 @@ async def _run(args: argparse.Namespace) -> int:
     return 0 if result.stop_reason in _OK_STOPS else 1
 
 
-async def _plan(args: argparse.Namespace) -> int:
+async def _plan_draft(args: argparse.Namespace) -> int:
     from datetime import datetime, timedelta, timezone
 
     from collegue.pilot.runtime import format_plan_report, plan_project_from_settings
@@ -111,18 +133,83 @@ async def _plan(args: argparse.Namespace) -> int:
         deadline = datetime.now(timezone.utc) + timedelta(hours=args.deadline_hours)
     labels = [s.strip() for s in args.labels.split(",") if s.strip()] if args.labels else None
     result = await plan_project_from_settings(
-        args.name,
+        args.name or "projet",
         args.problem,
         owner=args.owner,
         repo=args.repo,
         deadline=deadline,
-        approve=args.approve,
-        execute_sync=args.execute_sync,
         labels=labels,
         milestone_title=args.milestone,
+        board_title=args.board,
+        spec_filename=args.spec_filename or "SPEC.md",
+        base_branch=args.base or "main",
     )
     print(format_plan_report(result))
     return 0
+
+
+def _approve_plan(args: argparse.Namespace) -> int:
+    from collegue.pilot.runtime import approve_project_plan_from_settings, format_plan_report
+
+    result = approve_project_plan_from_settings(args.project_id, args.expected_plan_hash)
+    print(format_plan_report(result))
+    return 0
+
+
+def _sync_plan(args: argparse.Namespace) -> int:
+    from collegue.pilot.runtime import format_plan_report, sync_project_plan_from_settings
+
+    result = sync_project_plan_from_settings(args.project_id, execute=args.execute)
+    print(format_plan_report(result))
+    return 0
+
+
+def _validate_plan_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Validation conditionnelle des trois actions du sous-parser ``plan``."""
+    action = args.plan_action
+    if action == "draft":
+        missing = [name for name in ("problem", "owner", "repo") if not getattr(args, name)]
+        if missing:
+            parser.error(
+                "plan draft : arguments requis manquants : "
+                + ", ".join("--" + name.replace("_", "-") for name in missing)
+            )
+        if args.project_id is not None or args.expected_plan_hash is not None or args.execute:
+            parser.error("plan draft : --project-id, --expected-plan-hash et --execute ne sont pas acceptés")
+        return
+    if action == "approve":
+        missing = []
+        if args.project_id is None:
+            missing.append("--project-id")
+        if not args.expected_plan_hash:
+            missing.append("--expected-plan-hash")
+        if missing:
+            parser.error("plan approve : arguments requis manquants : " + ", ".join(missing))
+        if args.execute:
+            parser.error("plan approve : --execute est réservé à `plan sync`")
+    else:
+        if args.project_id is None:
+            parser.error("plan sync : argument requis manquant : --project-id")
+        if args.expected_plan_hash is not None:
+            parser.error("plan sync : --expected-plan-hash est réservé à `plan approve`")
+
+    # Après le draft, la cible GitHub est un contrat durable et hashé. Refuser
+    # tout pseudo-override plutôt que l'ignorer silencieusement.
+    sealed_args = (
+        "name",
+        "problem",
+        "owner",
+        "repo",
+        "labels",
+        "milestone",
+        "board",
+        "deadline_hours",
+        "spec_filename",
+        "base",
+    )
+    supplied = ["--" + name.replace("_", "-") for name in sealed_args if getattr(args, name) is not None]
+    if supplied:
+        parser.error(f"plan {action} : cible scellée du draft ; arguments interdits : " + ", ".join(supplied))
 
 
 def _run_task_command(args: argparse.Namespace) -> int:
@@ -157,7 +244,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "task":
         return _run_task_command(args)
     if args.command == "plan":
-        return asyncio.run(_plan(args))
+        _validate_plan_args(parser, args)
+        if args.plan_action == "draft":
+            return asyncio.run(_plan_draft(args))
+        if args.plan_action == "approve":
+            return _approve_plan(args)
+        return _sync_plan(args)
     # Run par défaut : valider les args requis ici (argparse ne peut pas les
     # conditionner sur l'absence de sous-commande). parser.error lève SystemExit.
     missing = [name for name in _RUN_REQUIRED if getattr(args, name) is None]

@@ -6,8 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from collegue.pilot import PlanResult, format_plan_report, plan_project_from_settings
-from collegue.planner import PlanNotApproved
+from collegue.pilot import (
+    PlanResult,
+    approve_project_plan_from_settings,
+    format_plan_report,
+    plan_project_from_settings,
+    sync_project_plan_from_settings,
+)
 
 # --- doubles du planner (monkeypatchés là où plan_project_from_settings les importe) ---
 
@@ -50,7 +55,16 @@ def _patch_planner(
 
     def _build_preview(manager, project_id):
         order.append("preview")
-        return SimpleNamespace(to_markdown=lambda: "PREVIEW")
+        return SimpleNamespace(
+            to_markdown=lambda: "PREVIEW",
+            plan_hash="a" * 64,
+            tasks=[],
+            task_count=len(tasks if tasks is not None else [object(), object()]),
+        )
+
+    def _current_hash(manager, project_id):
+        calls["current_hash"] = project_id
+        return "a" * 64
 
     def _approve(manager, project_id, **kw):
         order.append("approve")
@@ -77,6 +91,7 @@ def _patch_planner(
         acceptance_fn or _acceptance,
     )
     monkeypatch.setattr("collegue.planner.plan_review.build_plan_preview", _build_preview)
+    monkeypatch.setattr("collegue.planner.plan_review.current_plan_hash", _current_hash)
     monkeypatch.setattr("collegue.planner.plan_review.approve_plan", _approve)
     monkeypatch.setattr("collegue.planner.plan_review.require_approved", _require)
     monkeypatch.setattr("collegue.planner.github_sync.sync_plan", _sync)
@@ -117,38 +132,37 @@ async def test_dry_run_does_not_approve_and_syncs_in_dry_run(monkeypatch):
     assert result.task_count == 2
     assert result.dry_run is True
     assert result.preview_markdown == "PREVIEW"
-    assert "approve" not in calls  # ni approve ni execute → pas d'approbation
-    assert calls["sync"]["dry_run"] is True
-    assert calls["sync"]["labels"] == ["autonome"]  # défaut
-    assert calls["sync"]["milestone_title"] == "proj MVP"  # défaut
-
-
-async def test_execute_sync_with_explicit_approval_creates(monkeypatch):
-    calls = _patch_planner(monkeypatch, sync_issues=[{"task_id": 1, "title": "T1", "issue_number": 101}])
-    result, _ = await _plan(monkeypatch, approve=True, execute_sync=True, labels=["x"], milestone_title="M")
-    assert result.dry_run is False
-    assert calls["approve"][0] == 42  # gate P5 satisfait
-    assert calls["require"] == 42  # re-vérification avant les écritures
-    assert calls["sync"]["dry_run"] is False
-    assert calls["sync"]["require_spec_commit"] is True
-    assert calls["sync"]["labels"] == ["x"]
-    assert calls["sync"]["milestone_title"] == "M"
-    assert result.issues[0]["issue_number"] == 101
-
-
-async def test_execute_sync_never_implicitly_approves(monkeypatch):
-    calls = _patch_planner(monkeypatch)
-    with pytest.raises(PlanNotApproved, match="explicite"):
-        await _plan(monkeypatch, execute_sync=True)
+    assert result.action == "draft"
+    assert result.plan_hash == "a" * 64
     assert "approve" not in calls
-    assert "sync" not in calls
+    assert "sync" not in calls  # un draft ne touche même pas la couche GitHub
+    assert calls["persist"][1]["plan_sync_config"] == {
+        "owner": "o",
+        "repo": "r",
+        "labels": ["autonome"],
+        "milestone_title": "proj MVP",
+        "board_title": None,
+        "spec_filename": "SPEC.md",
+        "base_branch": "main",
+    }
 
 
-async def test_approve_flag_alone_approves_without_execute(monkeypatch):
-    calls = _patch_planner(monkeypatch)
-    result, _ = await _plan(monkeypatch, approve=True)
-    assert "approve" in calls
-    assert calls["sync"]["dry_run"] is True  # approuvé mais pas exécuté → dry-run
+@pytest.mark.parametrize("legacy", [{"approve": True}, {"execute_sync": True}, {"approve": True, "execute_sync": True}])
+async def test_legacy_one_shot_is_rejected_before_ctx_or_state(monkeypatch, legacy):
+    monkeypatch.setattr(
+        "collegue.pilot.runtime._build_ctx",
+        lambda _settings: pytest.fail("le one-shot ne doit pas construire de ctx"),
+    )
+    with pytest.raises(ValueError, match="plan approve"):
+        await plan_project_from_settings(
+            "p",
+            "x",
+            owner="o",
+            repo="r",
+            settings_obj=SimpleNamespace(),
+            manager=object(),
+            **legacy,
+        )
 
 
 async def test_acceptance_artifacts_are_generated_before_preview_and_approval(monkeypatch):
@@ -157,16 +171,13 @@ async def test_acceptance_artifacts_are_generated_before_preview_and_approval(mo
 
     await _plan(
         monkeypatch,
-        approve=True,
         settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True),
     )
 
     assert calls["acceptance"]["tasks"] == tasks
     assert calls["acceptance"]["project_id"] == 42
-    assert calls["approve"][1]["require_acceptance_artifacts"] is True
     assert calls["order"].index("decompose") < calls["order"].index("acceptance")
     assert calls["order"].index("acceptance") < calls["order"].index("preview")
-    assert calls["order"].index("preview") < calls["order"].index("approve")
 
 
 async def test_acceptance_generation_failure_prevents_approval_and_sync(monkeypatch):
@@ -181,8 +192,6 @@ async def test_acceptance_generation_failure_prevents_approval_and_sync(monkeypa
     with pytest.raises(ValueError, match="oracle invalide"):
         await _plan(
             monkeypatch,
-            approve=True,
-            execute_sync=True,
             settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True),
         )
     assert "approve" not in calls
@@ -241,6 +250,135 @@ async def test_injected_ctx_not_closed(monkeypatch):
     assert closed["v"] is False
 
 
+def _stored_manager(*, config=None):
+    project = SimpleNamespace(
+        id=7,
+        name="Durable",
+        plan_sync_config=config,
+    )
+    tasks = [SimpleNamespace(id=11, acceptance="AC", title="T", depends_on=[])]
+    return SimpleNamespace(
+        get_project=lambda project_id: project if project_id == 7 else None,
+        get_tasks=lambda project_id: tasks if project_id == 7 else [],
+    )
+
+
+def _patch_stored_report(monkeypatch):
+    monkeypatch.setattr(
+        "collegue.planner.plan_review.load_plan_snapshot",
+        lambda manager, project_id, **kwargs: SimpleNamespace(
+            project_id=project_id,
+            plan_sync_config=manager.get_project(project_id).plan_sync_config,
+            approved=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "collegue.planner.plan_review.build_plan_preview",
+        lambda manager, project_id: SimpleNamespace(
+            to_markdown=lambda: "STORED PREVIEW",
+            plan_hash="b" * 64,
+            tasks=[{"acceptance": "AC"}],
+            task_count=1,
+        ),
+    )
+    monkeypatch.setattr("collegue.planner.plan_review.current_plan_hash", lambda manager, project_id: "b" * 64)
+
+
+def test_approve_existing_plan_uses_expected_hash_without_ctx_or_github(monkeypatch):
+    manager = _stored_manager(config={})
+    _patch_stored_report(monkeypatch)
+    calls = {}
+
+    def _approve(manager_arg, project_id, **kwargs):
+        calls.update(project_id=project_id, **kwargs)
+        return True
+
+    monkeypatch.setattr("collegue.planner.plan_review.approve_plan", _approve)
+    monkeypatch.setattr(
+        "collegue.pilot.runtime._build_ctx",
+        lambda _settings: pytest.fail("approve ne doit pas construire de contexte LLM"),
+    )
+    monkeypatch.setattr(
+        "collegue.pilot.runtime._build_clients",
+        lambda _token: pytest.fail("approve ne doit pas construire de client GitHub"),
+    )
+
+    result = approve_project_plan_from_settings(
+        7,
+        "a" * 64,
+        settings_obj=SimpleNamespace(),
+        manager=manager,
+    )
+
+    assert calls == {
+        "project_id": 7,
+        "actor": "operator:collegue-cli",
+        "expected_plan_hash": "a" * 64,
+        "require_target": True,
+    }
+    assert result.action == "approve"
+    assert result.plan_hash == "b" * 64
+
+
+@pytest.mark.parametrize("bad_hash", ["", "abc", "A" * 64, "g" * 64, "0" * 63, "0" * 65])
+def test_approve_rejects_malformed_hash_before_opening_state(monkeypatch, bad_hash):
+    monkeypatch.setattr(
+        "collegue.pilot.runtime._settings",
+        lambda: pytest.fail("un hash invalide doit être refusé avant la configuration"),
+    )
+    with pytest.raises(ValueError, match="SHA-256"):
+        approve_project_plan_from_settings(7, bad_hash)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_sync_reloads_persisted_target_without_ctx_or_cli_override(monkeypatch, execute):
+    config = {
+        "owner": "persisted-owner",
+        "repo": "persisted-repo",
+        "labels": ["persisted"],
+        "milestone_title": "Persisted milestone",
+        "board_title": "Persisted board",
+        "spec_filename": "docs/CONTRACT.md",
+        "base_branch": "develop",
+    }
+    manager = _stored_manager(config=config)
+    _patch_stored_report(monkeypatch)
+    calls = {}
+
+    def _sync(manager_arg, project_id, owner, repo, **kwargs):
+        calls.update(project_id=project_id, owner=owner, repo=repo, **kwargs)
+        return SimpleNamespace(issues=[{"task_id": 11, "title": "T", "issue_number": 101 if execute else None}])
+
+    monkeypatch.setattr("collegue.planner.github_sync.sync_plan", _sync)
+    monkeypatch.setattr(
+        "collegue.pilot.runtime._build_ctx",
+        lambda _settings: pytest.fail("sync ne doit pas construire de contexte LLM"),
+    )
+
+    sentinel_clients = object()
+    result = sync_project_plan_from_settings(
+        7,
+        execute=execute,
+        settings_obj=SimpleNamespace(),
+        manager=manager,
+        github_token="token",
+        clients=sentinel_clients,
+    )
+
+    assert calls["owner"] == "persisted-owner"
+    assert calls["repo"] == "persisted-repo"
+    assert calls["labels"] == ["persisted"]
+    assert calls["milestone_title"] == "Persisted milestone"
+    assert calls["board_title"] == "Persisted board"
+    assert calls["spec_filename"] == "docs/CONTRACT.md"
+    assert calls["base_branch"] == "develop"
+    assert calls["dry_run"] is (not execute)
+    assert calls["require_spec_commit"] is execute
+    assert calls["clients"] is sentinel_clients
+    assert result.dry_run is (not execute)
+    assert result.action == "sync"
+
+
 # --- reporting -----------------------------------------------------------------
 
 
@@ -280,6 +418,25 @@ def test_format_plan_report_execute_shows_issue_numbers():
     assert "[#123] task 9: Auth" in report
 
 
+def test_format_stored_plan_report_does_not_invent_spec_counts():
+    result = PlanResult(
+        project_id=9,
+        spec_title="Durable",
+        objectives=0,
+        acceptance_criteria=0,
+        task_count=2,
+        preview_markdown="# Plan durable",
+        dry_run=True,
+        action="approve",
+        spec_counts_available=False,
+    )
+
+    report = format_plan_report(result)
+
+    assert "relu depuis l'état durable" in report
+    assert "0 objectif" not in report
+
+
 # --- CLI -----------------------------------------------------------------------
 
 
@@ -288,8 +445,20 @@ def test_cli_parses_plan_subcommand():
 
     args = build_parser().parse_args(["plan", "--problem", "P", "--owner", "o", "--repo", "r"])
     assert args.command == "plan"
+    assert args.plan_action == "draft"
     assert args.problem == "P" and args.owner == "o" and args.repo == "r"
-    assert args.execute_sync is False  # dry-run par défaut
+    assert args.execute is False
+
+
+def test_cli_parses_approve_and_sync_actions():
+    from collegue.pilot.__main__ import build_parser
+
+    parser = build_parser()
+    approve = parser.parse_args(["plan", "approve", "--project-id", "7", "--expected-plan-hash", "abc"])
+    sync = parser.parse_args(["plan", "sync", "--project-id", "7", "--execute"])
+    assert approve.plan_action == "approve" and approve.project_id == 7
+    assert approve.expected_plan_hash == "abc"
+    assert sync.plan_action == "sync" and sync.execute is True
 
 
 def test_cli_plan_dispatches_and_parses_args(monkeypatch, capsys):
@@ -315,13 +484,52 @@ def test_cli_plan_dispatches_and_parses_args(monkeypatch, capsys):
     monkeypatch.setattr("collegue.pilot.runtime.plan_project_from_settings", _fake_plan)
     monkeypatch.setattr("collegue.pilot.runtime.format_plan_report", lambda r: "REPORT")
 
-    rc = cli.main(
-        ["plan", "--name", "X", "--problem", "P", "--owner", "o", "--repo", "r", "--execute-sync", "--labels", "a, b"]
-    )
+    rc = cli.main(["plan", "--name", "X", "--problem", "P", "--owner", "o", "--repo", "r", "--labels", "a, b"])
     assert rc == 0
     assert captured["name"] == "X" and captured["problem"] == "P"
     assert captured["owner"] == "o" and captured["repo"] == "r"
-    assert captured["execute_sync"] is True
     assert captured["labels"] == ["a", "b"]  # CSV nettoyé
     assert captured["deadline"] is None  # pas de --deadline-hours
     assert "REPORT" in capsys.readouterr().out
+
+
+def test_cli_approve_and_sync_dispatch_without_async_planner(monkeypatch, capsys):
+    import collegue.pilot.__main__ as cli
+
+    calls = []
+    result = PlanResult(7, "X", 0, 0, 0, "", True)
+
+    def _approve(project_id, expected_hash):
+        calls.append(("approve", project_id, expected_hash))
+        return result
+
+    def _sync(project_id, *, execute=False):
+        calls.append(("sync", project_id, execute))
+        return result
+
+    monkeypatch.setattr("collegue.pilot.runtime.approve_project_plan_from_settings", _approve)
+    monkeypatch.setattr("collegue.pilot.runtime.sync_project_plan_from_settings", _sync)
+    monkeypatch.setattr("collegue.pilot.runtime.format_plan_report", lambda r: "REPORT")
+
+    assert cli.main(["plan", "approve", "--project-id", "7", "--expected-plan-hash", "abc"]) == 0
+    assert cli.main(["plan", "sync", "--project-id", "7", "--execute"]) == 0
+    assert calls == [("approve", 7, "abc"), ("sync", 7, True)]
+    assert capsys.readouterr().out.count("REPORT") == 2
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["plan", "approve", "--project-id", "7"], "--expected-plan-hash"),
+        (["plan", "sync"], "--project-id"),
+        (["plan", "sync", "--project-id", "7", "--owner", "override"], "cible scellée"),
+        (["plan", "sync", "--project-id", "7", "--name", "override"], "cible scellée"),
+        (["plan", "--problem", "P", "--owner", "o"], "--repo"),
+    ],
+)
+def test_cli_validates_plan_action_specific_arguments(argv, message, capsys):
+    from collegue.pilot.__main__ import main
+
+    with pytest.raises(SystemExit, match="2"):
+        main(argv)
+    assert message in capsys.readouterr().err

@@ -25,7 +25,17 @@ def db_url(tmp_path):
 def test_state_survives_simulated_restart(db_url):
     # Process 1 : on écrit l'état puis on "ferme" le process.
     mgr1 = ProjectStateManager.from_url(db_url, create=True)
-    pid = mgr1.create_project(name="run-long", spec="construire le moteur", phase="2")
+    plan_sync_config = {
+        "repository": "owner/target",
+        "labels": ["collegue", "build"],
+        "options": {"create_project_board": False},
+    }
+    pid = mgr1.create_project(
+        name="run-long",
+        spec="construire le moteur",
+        phase="2",
+        plan_sync_config=plan_sync_config,
+    )
     t1 = mgr1.add_task(pid, title="t1", status="done", depends_on=[])
     mgr1.add_task(pid, title="t2", status="todo", depends_on=[1])
     acceptance_source = "def test_contract():\n    assert True\n"
@@ -44,6 +54,7 @@ def test_state_survives_simulated_restart(db_url):
     assert snap is not None
     assert snap.project["name"] == "run-long"
     assert snap.project["phase"] == "2"
+    assert snap.project["plan_sync_config"] == plan_sync_config
     assert [t["title"] for t in snap.tasks] == ["t1", "t2"]
     assert [t["status"] for t in snap.tasks] == ["done", "todo"]
     assert [d["summary"] for d in snap.decisions] == ["choisir PostgreSQL"]
@@ -66,7 +77,11 @@ def test_state_survives_simulated_restart(db_url):
 def test_snapshot_is_json_serializable(db_url):
     # Le snapshot doit pouvoir être json.dumps (datetimes en ISO-8601).
     mgr = ProjectStateManager.from_url(db_url, create=True)
-    pid = mgr.create_project(name="p", spec="s")
+    pid = mgr.create_project(
+        name="p",
+        spec="s",
+        plan_sync_config={"repository": "owner/repo", "project_number": None},
+    )
     tid = mgr.add_task(pid, title="t", depends_on=[1])
     mgr.set_acceptance_test_artifact(
         tid,
@@ -80,6 +95,7 @@ def test_snapshot_is_json_serializable(db_url):
     dumped = json.dumps(asdict(snap))  # ne doit pas lever
     assert "cov" in dumped
     assert "acceptance_test_sha256" in dumped
+    assert "plan_sync_config" in dumped
 
 
 def test_load_snapshot_missing_project(db_url):

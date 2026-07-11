@@ -4,7 +4,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from collegue.planner import PlanNotApproved, Spec, SpecSyncError, approve_plan, persist_spec, sync_plan
+from collegue.planner import (
+    PlanNotApproved,
+    Spec,
+    SpecSyncError,
+    SyncTargetMismatch,
+    approve_plan,
+    load_plan_snapshot,
+    normalize_plan_sync_config,
+    persist_spec,
+    sync_plan,
+)
 from collegue.planner.github_sync import SyncClients, SyncError, _default_clients
 from collegue.state import ProjectStateManager
 
@@ -74,7 +84,7 @@ class _FakeFiles:
         self._commit_sha = commit_sha
 
     def get_file_content(self, owner, repo, path, branch=None):
-        self.get_calls.append({"owner": owner, "repo": repo, "path": path})
+        self.get_calls.append({"owner": owner, "repo": repo, "path": path, "branch": branch})
         if self._current_content is None:
             raise RuntimeError("not found")
         return {"content": self._current_content, "sha": "blob-sha"}
@@ -82,7 +92,9 @@ class _FakeFiles:
     def update_file(self, owner, repo, path, message, content, branch=None):
         if self._fail:
             raise RuntimeError("commit refusé")
-        self.calls.append({"owner": owner, "repo": repo, "path": path, "message": message, "content": content})
+        self.calls.append(
+            {"owner": owner, "repo": repo, "path": path, "message": message, "content": content, "branch": branch}
+        )
         return {"commit": {"sha": self._commit_sha} if self._commit_sha else {}}
 
 
@@ -194,12 +206,65 @@ def test_real_sync_minimal_without_milestone_or_board(manager):
     assert clients.projects.added == []  # pas de board demandé
 
 
+def test_explicit_empty_labels_are_not_replaced_by_defaults(manager):
+    pid = _planned(manager, approve=True)
+    clients = _clients()
+
+    result = sync_plan(manager, pid, "o", "r", dry_run=False, labels=[], clients=clients)
+
+    assert clients.labels.ensured == []
+    assert clients.labels.added == []
+    assert all(issue["labels"] == [] for issue in result.issues)
+
+
 def test_dry_run_echoes_milestone_and_board(manager):
     pid = _planned(manager)
     result = sync_plan(
         manager, pid, "o", "r", dry_run=True, milestone_title="Phase 1", board_title="Board", clients=_clients()
     )
     assert result.milestone == "Phase 1" and result.board == "Board"
+
+
+def test_target_aware_sync_refuses_any_override_before_writing(manager):
+    target = normalize_plan_sync_config({"owner": "acme", "repo": "app", "labels": []})
+    pid = persist_spec(
+        manager, name="sealed", spec=Spec(title="S", acceptance_criteria=["AC"]), plan_sync_config=target
+    )
+    manager.add_task(pid, title="A")
+    approve_plan(manager, pid)
+    clients = _clients_with_files()
+
+    with pytest.raises(SyncTargetMismatch):
+        sync_plan(manager, pid, "acme", "other", dry_run=False, labels=[], clients=clients)
+
+    assert clients.files.calls == []
+    assert clients.issues.created == []
+
+
+def test_real_sync_consumes_one_immutable_approved_snapshot(manager):
+    target = normalize_plan_sync_config({"owner": "acme", "repo": "one", "labels": []})
+    pid = persist_spec(
+        manager, name="sealed", spec=Spec(title="Original", acceptance_criteria=["AC"]), plan_sync_config=target
+    )
+    task_id = manager.add_task(pid, title="Tâche originale")
+    approve_plan(manager, pid)
+    snapshot = load_plan_snapshot(manager, pid, require_approval=True, require_target=True)
+
+    # Simule une révision concurrente après le snapshot. La livraison peut encore
+    # envoyer l'ancien contrat approuvé, mais jamais un mélange cible A / contenu B.
+    manager.update_project(
+        pid,
+        spec="# SPEC muté\n",
+        plan_sync_config=normalize_plan_sync_config({"owner": "acme", "repo": "two", "labels": []}),
+    )
+    manager.update_task(task_id, title="Tâche mutée")
+    clients = _clients_with_files()
+
+    sync_plan(manager, pid, "acme", "one", dry_run=False, labels=[], clients=clients, snapshot=snapshot)
+
+    assert clients.files.calls[0]["repo"] == "one"
+    assert "Original" in clients.files.calls[0]["content"]
+    assert clients.issues.created[0]["title"] == "Tâche originale"
 
 
 # --- graphe invalide : aucune écriture (anti drop silencieux d'arête) ----------
@@ -316,6 +381,23 @@ def test_spec_filename_configurable(manager):
     )
     assert result.spec_committed == "docs/SPEC.md"
     assert files.calls[0]["path"] == "docs/SPEC.md"
+
+
+def test_spec_commit_uses_the_approved_base_branch(manager):
+    pid = _planned(manager, approve=True)
+    files = _FakeFiles()
+
+    sync_plan(
+        manager,
+        pid,
+        "o",
+        "r",
+        dry_run=False,
+        clients=_clients_with_files(files),
+        base_branch="develop",
+    )
+
+    assert files.calls[0]["branch"] == "develop"
 
 
 def test_spec_commit_is_best_effort(manager):

@@ -228,3 +228,19 @@ def test_persist_spec_roundtrip(tmp_path):
     assert project.status == sg.PROJECT_STATUS_PLANNED
     assert "## Hypothèses" in project.spec
     assert "- [ ] ac" in project.spec
+
+
+def test_persist_spec_threads_plan_sync_config(tmp_path):
+    mgr = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}", create=True)
+    config = {
+        "owner": "org",
+        "repo": "app",
+        "labels": ["autonome"],
+        "milestone_title": None,
+        "board_title": None,
+        "spec_filename": "SPEC.md",
+    }
+
+    pid = persist_spec(mgr, name="proj", spec=_spec(), plan_sync_config=config)
+
+    assert mgr.get_project(pid).plan_sync_config == config

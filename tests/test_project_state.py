@@ -49,7 +49,25 @@ def test_create_and_read_project(manager):
     assert project.name == "demo"
     assert project.spec == "construire X"
     assert project.status == "active"
+    assert project.plan_sync_config is None
     assert project.created_at is not None  # défaut Python appliqué
+
+
+def test_project_plan_sync_config_crud_roundtrip(manager):
+    config = {
+        "repository": "owner/target",
+        "labels": ["collegue", "build"],
+        "project_number": None,
+        "options": {"create_issues": True},
+    }
+    pid = manager.create_project(name="demo", plan_sync_config=config)
+
+    project = manager.get_project(pid)
+    assert project.plan_sync_config == config
+
+    updated = {"repository": "owner/new-target", "labels": []}
+    assert manager.update_project(pid, plan_sync_config=updated) is True
+    assert manager.get_project(pid).plan_sync_config == updated
 
 
 def test_get_missing_project_returns_none(manager):
@@ -298,6 +316,7 @@ def test_alembic_migration_creates_schema(tmp_path, monkeypatch):
     assert "ck_tasks_acceptance_test_artifact_complete" in task_checks
     project_columns = {column["name"] for column in insp.get_columns("projects")}
     assert "acceptance_tests_required" in project_columns
+    assert "plan_sync_config" in project_columns
 
     # downgrade : retour à un schéma vide (hors table de version Alembic).
     command.downgrade(cfg, "base")
@@ -343,6 +362,33 @@ def test_acceptance_artifact_migration_upgrade_and_downgrade(tmp_path, monkeypat
     assert "acceptance_tests_required" not in {column["name"] for column in downgraded.get_columns("projects")}
 
 
+def test_plan_sync_config_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
+    """0009 ajoute puis retire proprement la configuration JSON du plan."""
+    from alembic.config import Config
+    from sqlalchemy import create_engine, inspect
+
+    from alembic import command
+
+    url = f"sqlite:///{tmp_path / 'plan-sync-config-migration.db'}"
+    monkeypatch.setenv("STATE_DATABASE_URL", url)
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+
+    command.upgrade(cfg, "0008")
+    before = {column["name"] for column in inspect(create_engine(url)).get_columns("projects")}
+    assert "plan_sync_config" not in before
+
+    command.upgrade(cfg, "0009")
+    upgraded = inspect(create_engine(url))
+    columns = {column["name"]: column for column in upgraded.get_columns("projects")}
+    assert "plan_sync_config" in columns
+    assert columns["plan_sync_config"]["nullable"] is True
+
+    command.downgrade(cfg, "0008")
+    downgraded = {column["name"] for column in inspect(create_engine(url)).get_columns("projects")}
+    assert "plan_sync_config" not in downgraded
+
+
 def _migrate_sqlite(tmp_path, monkeypatch, name: str) -> str:
     """Lance la migration Alembic sur un SQLite fichier ; retourne l'URL."""
     from alembic.config import Config
@@ -366,7 +412,8 @@ def test_crud_on_migrated_schema(tmp_path, monkeypatch):
     """
     url = _migrate_sqlite(tmp_path, monkeypatch, "migr.db")
     mgr = ProjectStateManager.from_url(url, create=False)
-    pid = mgr.create_project(name="migr", spec="via migration")
+    plan_sync_config = {"repository": "owner/repo", "labels": ["build"]}
+    pid = mgr.create_project(name="migr", spec="via migration", plan_sync_config=plan_sync_config)
     tid = mgr.add_task(pid, title="t", depends_on=[1])
     source = "def test_migrated_schema():\n    assert True\n"
     assert mgr.set_acceptance_test_artifact(tid, source, {"role": "qa", "schema_version": 1})
@@ -376,6 +423,7 @@ def test_crud_on_migrated_schema(tmp_path, monkeypatch):
 
     project = mgr.get_project(pid)
     assert project.name == "migr"
+    assert project.plan_sync_config == plan_sync_config
     migrated_task = mgr.get_tasks(pid)[0]
     assert migrated_task.id == tid
     assert migrated_task.acceptance_test_source == source

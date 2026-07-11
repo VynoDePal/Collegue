@@ -61,10 +61,12 @@ from collegue.pilot.mcp_tool import (
 from collegue.pilot.resume import load_run_start, persist_run_start
 from collegue.pilot.runtime import (
     PlanResult,
+    approve_project_plan_from_settings,
     format_plan_report,
     format_run_report,
     plan_project_from_settings,
     run_project_from_settings,
+    sync_project_plan_from_settings,
 )
 from collegue.pilot.scheduler import (
     SchedulerError,
@@ -100,6 +102,8 @@ __all__ = [
     "format_run_report",
     # A2 — planification par le produit (sous-commande plan)
     "plan_project_from_settings",
+    "approve_project_plan_from_settings",
+    "sync_project_plan_from_settings",
     "PlanResult",
     "format_plan_report",
     # H4 (Phase 5) — observabilité du run autonome
