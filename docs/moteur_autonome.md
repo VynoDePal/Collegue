@@ -434,20 +434,21 @@ Variables GitHub Actions requises :
 | `INTEGRATION_FIXTURE_ROOT_BRANCH` | Branche racine immuable, par exemple `main`. |
 | `INTEGRATION_FIXTURE_SEED_SHA` | SHA Git complet (40 caractères) du commit seed. |
 | `INTEGRATION_LLM_PROVIDER` / `INTEGRATION_LLM_MODEL` | Endpoint et modèle globaux du nightly. |
-| `INTEGRATION_LLM_PRICE_PROMPT_PER_1M` | Prix USD de secours par million de tokens d'entrée. |
-| `INTEGRATION_LLM_PRICE_COMPLETION_PER_1M` | Prix USD de secours par million de tokens de sortie. |
+| `INTEGRATION_LLM_PRICE_PROMPT_PER_1M` | Prix USD de secours par million de tokens d'entrée (`0` accepté pour un coder Gemma 4 explicitement gratuit). |
+| `INTEGRATION_LLM_PRICE_COMPLETION_PER_1M` | Prix USD de secours par million de tokens de sortie (même règle). |
 
 Les overrides par rôle `INTEGRATION_LLM_{PROVIDER,MODEL}_{CODER,QA,REVIEWER,PLANNER}`
 sont optionnels ; une valeur absente retombe sur le couple global. Le premier
 smoke impose actuellement **Gemini pour tous les rôles** : tout override de
 provider doit être vide ou égal au provider global `gemini`, et chaque modèle
-effectif doit être un nom Gemini non préfixé (`gemini-…`) présent dans la grille
-de prix autoritative de Collègue. Par exemple `gemini-2.5-flash` ou
-`gemini-3-flash-preview`; `openai/...`, `models/...` et un modèle inconnu sont
-refusés avant toute écriture. Cette restriction évite de router la clé vers un
-autre provider et garantit que le plafond USD est calculable. Les prix de secours
-doivent refléter le modèle coder ; au moins l'un des deux doit être strictement
-positif.
+effectif doit être un nom Gemini API non préfixé présent dans la grille de prix
+autoritative de Collègue. Sont notamment acceptés `gemini-2.5-flash`,
+`gemini-3-flash-preview`, `gemma-4-31b-it` et `gemma-4-26b-a4b-it` ; `openai/...`,
+`models/...` et un modèle inconnu sont refusés avant toute écriture. Gemma 4 est
+explicitement tarifé à `0/0` dans la grille (Free Tier Gemini API) : ses deux prix
+de secours peuvent donc rester à zéro. Pour tout autre coder, au moins un prix de
+secours doit être strictement positif. La limite tokens et la deadline restent
+dures même lorsque le plafond USD est, correctement, nul.
 
 Secrets GitHub Actions requis :
 

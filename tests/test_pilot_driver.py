@@ -1924,6 +1924,34 @@ async def test_cost_unknown_event_when_tokens_without_price(repo, manager, monke
     assert len([e for e in audit.events if e.kind == "cost_observed"]) == 2
 
 
+async def test_explicitly_free_coder_keeps_zero_authoritative(repo, manager, monkeypatch):
+    """Gemma 4 Free Tier : tokens comptés, coût nul connu, aucun faux signal."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PROVIDER_CODER", "gemini", raising=False)
+    monkeypatch.setattr(config.settings, "LLM_MODEL_CODER", "gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_UnmappedModelAgent(),
+        audit=audit,
+        require_cost_pricing=True,
+    )
+
+    assert result.stop_reason == "completed"
+    assert audit.cost.usd == 0.0
+    assert audit.cost.tokens == 1_100_000
+    assert not [e for e in audit.events if e.kind in {"cost_unknown", "cost_pricing_unresolved"}]
+
+
 async def test_no_cost_unknown_when_cost_reported(repo, manager):
     """#441 préservé : un coût déclaré par le runner ne déclenche aucun signal."""
     import dataclasses

@@ -30,9 +30,19 @@ _PER_1M = 1_000_000.0
 # Providers locaux : exécution sur la machine → coût nul.
 _LOCAL_PROVIDERS = ("lmstudio", "ollama", "unsloth")
 
+# Modèles distants à coût nul, liés à leur provider. Contrairement aux tarifs
+# payants historiques, un zéro ne doit jamais être réutilisé pour un endpoint
+# homonyme d'un autre provider ni pour un suffixe de modèle inconnu.
+_FREE_REMOTE_MODELS = {"gemini": frozenset({"gemma-4-31b-it", "gemma-4-26b-a4b-it"})}
+
 # Grille par modèle, exprimée en USD / 1M tokens pour rester lisible,
 # convertie en USD / token plus bas.
 _MODEL_PRICES_PER_1M: Dict[str, Tuple[float, float]] = {
+    # Gemma 4 via Gemini API — disponible uniquement sur le Free Tier : le coût
+    # API est explicitement nul. Ces zéros sont autoritaires, contrairement au
+    # repli d'un modèle distant inconnu.
+    "gemma-4-31b-it": (0.0, 0.0),
+    "gemma-4-26b-a4b-it": (0.0, 0.0),
     # Gemini 3.x
     "gemini-3.5-flash": (1.50, 9.00),
     "gemini-3-flash-preview": (1.50, 9.00),
@@ -51,9 +61,9 @@ _MODEL_PRICES_PER_1M: Dict[str, Tuple[float, float]] = {
     "claude-haiku-4": (1.00, 5.00),
 }
 
-# Repli quand le modèle configuré n'est pas dans la table : on reprend les
-# anciens défauts du collecteur (Gemma 4 via Gemini API), volontairement bas
-# pour ne pas surévaluer le coût.
+# Repli historique quand le modèle configuré n'est pas dans la table,
+# volontairement bas pour ne pas surévaluer le coût. Ce repli n'est jamais
+# autoritaire : :func:`has_explicit_pricing` reste faux pour un modèle inconnu.
 _DEFAULT_PER_1M: Tuple[float, float] = (0.15, 0.60)
 
 
@@ -63,6 +73,11 @@ def _normalize(model: str) -> str:
     if name.startswith("models/"):
         name = name[len("models/") :]
     return name
+
+
+def _free_remote_model_is_valid(key: str, provider: Optional[str]) -> bool:
+    provider_key = (provider or "gemini").strip().lower()
+    return key in _FREE_REMOTE_MODELS.get(provider_key, ())
 
 
 def cost_per_token(model: str, provider: Optional[str] = None) -> Tuple[float, float]:
@@ -76,6 +91,8 @@ def cost_per_token(model: str, provider: Optional[str] = None) -> Tuple[float, f
         return 0.0, 0.0
     key = _normalize(model)
     prices = _MODEL_PRICES_PER_1M.get(key)
+    if prices == (0.0, 0.0) and not _free_remote_model_is_valid(key, provider):
+        prices = None
     if prices is None:
         # Correspondance par préfixe pour absorber les suffixes de version/date
         # (``gpt-5.4-mini-2026-01`` → ``gpt-5.4-mini``). On teste les clés de la
@@ -83,6 +100,8 @@ def cost_per_token(model: str, provider: Optional[str] = None) -> Tuple[float, f
         # éviter qu'une clé courte (``gpt-5.4``) ne masque une plus spécifique
         # (``gpt-5.4-mini``) et surfacture.
         for known in sorted(_MODEL_PRICES_PER_1M, key=len, reverse=True):
+            if _MODEL_PRICES_PER_1M[known] == (0.0, 0.0):
+                continue
             if key == known or key.startswith(known + "-"):
                 prices = _MODEL_PRICES_PER_1M[known]
                 break
@@ -96,4 +115,21 @@ def has_explicit_pricing(model: str, provider: Optional[str] = None) -> bool:
     if provider and provider.strip().lower() in _LOCAL_PROVIDERS:
         return True
     key = _normalize(model)
-    return any(key == known or key.startswith(known + "-") for known in _MODEL_PRICES_PER_1M)
+    for known, prices in _MODEL_PRICES_PER_1M.items():
+        if prices == (0.0, 0.0):
+            if key == known and _free_remote_model_is_valid(key, provider):
+                return True
+            continue
+        if key == known or key.startswith(known + "-"):
+            return True
+    return False
+
+
+def is_explicitly_free(model: str, provider: Optional[str] = None) -> bool:
+    """Vrai seulement quand la grille autoritaire fixe les deux prix à zéro.
+
+    Le double contrôle est essentiel : :func:`cost_per_token` retourne aussi un
+    tarif de repli pour les modèles distants inconnus, qui ne doivent jamais être
+    interprétés comme gratuits ni contourner les garde-fous de budget.
+    """
+    return has_explicit_pricing(model, provider=provider) and cost_per_token(model, provider=provider) == (0.0, 0.0)

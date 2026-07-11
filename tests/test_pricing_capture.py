@@ -1,6 +1,6 @@
 """Tests C3 (#337) : tarifs multi-provider + capture du modèle utilisé."""
 
-from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing
+from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing, is_explicitly_free
 from collegue.monitoring.sampling_usage import record_usage, take_usage
 
 _PER_1M = 1_000_000.0
@@ -50,6 +50,26 @@ def test_prefix_requires_separator_boundary():
 def test_gemini_still_priced():
     cin, cout = cost_per_token("gemini-3.5-flash")
     assert abs(cin - 1.50 / _PER_1M) < 1e-12
+
+
+def test_gemma_4_gemini_api_models_are_explicitly_free():
+    for model in ("gemma-4-31b-it", "gemma-4-26b-a4b-it"):
+        assert cost_per_token(model, provider="gemini") == (0.0, 0.0)
+        assert has_explicit_pricing(model, provider="gemini") is True
+        assert is_explicitly_free(model, provider="gemini") is True
+
+
+def test_unknown_remote_model_is_never_explicitly_free():
+    for model in ("gemma-4-inconnu", "gemma-4-31b-it-inconnu"):
+        assert has_explicit_pricing(model, provider="gemini") is False
+        assert is_explicitly_free(model, provider="gemini") is False
+        assert cost_per_token(model, provider="gemini") != (0.0, 0.0)
+
+
+def test_gemma_4_free_price_is_scoped_to_gemini_provider():
+    assert has_explicit_pricing("gemma-4-31b-it", provider="openai") is False
+    assert is_explicitly_free("gemma-4-31b-it", provider="openai") is False
+    assert cost_per_token("gemma-4-31b-it", provider="openai") != (0.0, 0.0)
 
 
 def test_local_provider_is_free():

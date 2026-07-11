@@ -85,8 +85,9 @@ def test_config_is_opt_in_bounded_and_does_not_repr_token(tmp_path):
         ({"GATE_SMOKE_PATHS": "/"}, "exactement /nightly"),
         ({"LLM_PROVIDER": "openai"}, "provider global gemini"),
         ({"LLM_PROVIDER_QA": "openai"}, "LLM_PROVIDER_QA"),
-        ({"LLM_MODEL": "openai/gpt-5.4"}, "modèle Gemini non préfixé"),
-        ({"LLM_MODEL_QA": "models/gemini-2.5-flash"}, "modèle Gemini non préfixé"),
+        ({"LLM_MODEL": "openai/gpt-5.4"}, "modèle Gemini API non préfixé"),
+        ({"LLM_MODEL_QA": "models/gemini-2.5-flash"}, "modèle Gemini API non préfixé"),
+        ({"LLM_MODEL_QA": "gemma-4-inconnu"}, "modèle Gemini API non préfixé"),
         ({"LLM_MODEL_REVIEWER": "gemini-inconnu"}, "tarif explicite"),
         ({"LLM_PRICE_PROMPT_PER_1M": "0", "LLM_PRICE_COMPLETION_PER_1M": "0"}, "prix LLM"),
         ({"MAX_COST_USD": "0"}, "doit être fini"),
@@ -101,6 +102,34 @@ def test_config_is_opt_in_bounded_and_does_not_repr_token(tmp_path):
 def test_config_refuses_unsafe_or_unbounded_modes(tmp_path, override, message):
     with pytest.raises(NightlyE2EError, match=message):
         NightlyConfig.from_env(_env(tmp_path, **override))
+
+
+@pytest.mark.parametrize("model", ["gemma-4-31b-it", "gemma-4-26b-a4b-it"])
+def test_config_accepts_explicitly_free_gemma_4_without_fallback_prices(tmp_path, model):
+    config = NightlyConfig.from_env(
+        _env(
+            tmp_path,
+            LLM_MODEL=model,
+            LLM_PRICE_PROMPT_PER_1M="0",
+            LLM_PRICE_COMPLETION_PER_1M="0",
+        )
+    )
+
+    assert config.repository == "fixture/app"
+
+
+def test_config_accepts_free_coder_override_with_paid_other_roles(tmp_path):
+    config = NightlyConfig.from_env(
+        _env(
+            tmp_path,
+            LLM_MODEL="gemini-2.5-flash",
+            LLM_MODEL_CODER="gemma-4-26b-a4b-it",
+            LLM_PRICE_PROMPT_PER_1M="0",
+            LLM_PRICE_COMPLETION_PER_1M="0",
+        )
+    )
+
+    assert config.repository == "fixture/app"
 
 
 def test_cleanup_config_does_not_require_llm_or_run_policy(tmp_path):

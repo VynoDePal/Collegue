@@ -33,7 +33,11 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
-from collegue.executor.openhands_agent import coder_pricing_resolvable, estimate_cost_usd
+from collegue.executor.openhands_agent import (
+    coder_pricing_is_explicitly_free,
+    coder_pricing_resolvable,
+    estimate_cost_usd,
+)
 from collegue.executor.pipeline import (
     agent_crash_signature,
     execute_issue,
@@ -850,7 +854,8 @@ async def run_project(
         # inconnu — ne pas le re-tarifer au prix de secours (#484), sinon le ledger
         # porte un coût FANTÔME sur un run pourtant gratuit (run v6 : ~$2 fantômes).
         coder_authoritative = bool(getattr(agent_result, "cost_authoritative", False))
-        if coder_tokens and coder_usd <= 0 and not coder_authoritative:
+        coder_explicitly_free = coder_pricing_is_explicitly_free()
+        if coder_tokens and coder_usd <= 0 and not coder_authoritative and not coder_explicitly_free:
             # #484 : modèle non mappé litellm → cost_usd=0 malgré des tokens.
             # Prix de secours configurés (LLM_PRICE_*_PER_1M) : coût estimé ;
             # sinon coût INCONNU — signalé une fois par run/segment au lieu

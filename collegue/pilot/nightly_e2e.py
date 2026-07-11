@@ -41,6 +41,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REPOSITORY_RE = re.compile(r"^([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)/([A-Za-z0-9._-]{1,100})$")
 _RUN_COMPONENT_RE = re.compile(r"^[1-9][0-9]*$")
+_GEMINI_API_MODEL_RE = re.compile(r"^(?:gemini-[a-z0-9][a-z0-9._-]*|gemma-4-(?:31b-it|26b-a4b-it))$")
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FIXTURE_SENTINEL = "COLLEGUE_NIGHTLY_FIXTURE_V1\n"
 _DEFAULT_MARKER_PATH = ".collegue-nightly-fixture"
@@ -127,8 +128,9 @@ def _validate_run_environment(values: Mapping[str, str]) -> None:
     if provider != "gemini":
         raise NightlyE2EError("le premier smoke nightly exige le provider global gemini")
     global_model = _required(values, "LLM_MODEL").lower()
-    from collegue.monitoring.pricing import has_explicit_pricing
+    from collegue.monitoring.pricing import has_explicit_pricing, is_explicitly_free
 
+    effective_models: dict[Optional[str], str] = {}
     for role in (None, "CODER", "QA", "REVIEWER", "PLANNER"):
         suffix = f"_{role}" if role else ""
         label = f"LLM_MODEL{suffix}"
@@ -136,10 +138,11 @@ def _validate_run_environment(values: Mapping[str, str]) -> None:
         # Les noms préfixés ``openai/...``/``models/...`` sont refusés : le coder
         # OpenHands route LiteLLM à partir de ce préfixe et pourrait envoyer la
         # clé Gemini au mauvais provider.
-        if re.fullmatch(r"gemini-[a-z0-9][a-z0-9._-]*", model) is None:
-            raise NightlyE2EError(f"{label} effectif doit être un modèle Gemini non préfixé")
+        if _GEMINI_API_MODEL_RE.fullmatch(model) is None:
+            raise NightlyE2EError(f"{label} effectif doit être un modèle Gemini API non préfixé autorisé")
         if not has_explicit_pricing(model, provider=provider):
             raise NightlyE2EError(f"{label} effectif n'a pas de tarif explicite dans la grille")
+        effective_models[role] = model
         if role:
             role_provider = str(values.get(f"LLM_PROVIDER_{role}", "") or "").strip().lower()
             if role_provider and role_provider != provider:
@@ -154,8 +157,10 @@ def _validate_run_environment(values: Mapping[str, str]) -> None:
         if not math.isfinite(price) or price < 0:
             raise NightlyE2EError(f"{name} doit être un nombre fini positif ou nul")
         prices.append(price)
-    if not any(price > 0 for price in prices):
-        raise NightlyE2EError("au moins un prix LLM doit être strictement positif")
+    if not any(price > 0 for price in prices) and not is_explicitly_free(effective_models["CODER"], provider=provider):
+        raise NightlyE2EError(
+            "au moins un prix LLM doit être strictement positif, sauf pour un modèle coder explicitement gratuit"
+        )
     _required(values, "LLM_API_KEY")
     if not os.path.isabs(os.path.expanduser(_required(values, "COLLEGUE_HOME"))):
         raise NightlyE2EError("COLLEGUE_HOME doit être absolu pour rendre le budget durable")

@@ -240,12 +240,6 @@ jobs:
             echo "::error::Configuration E2E absente : ${missing[*]}"
             exit 1
           fi
-          if ! awk -v prompt="$LLM_PRICE_PROMPT_PER_1M" \
-            -v completion="$LLM_PRICE_COMPLETION_PER_1M" \
-            'BEGIN { exit !((prompt + 0) > 0 || (completion + 0) > 0) }'; then
-            echo "::error::Au moins un prix LLM par million de tokens doit être strictement positif."
-            exit 1
-          fi
           if [[ "${LLM_PROVIDER,,}" != "gemini" ]]; then
             echo "::error::Le premier smoke produit impose LLM_PROVIDER=gemini."
             exit 1
@@ -259,11 +253,21 @@ jobs:
           done
           for name in LLM_MODEL LLM_MODEL_CODER LLM_MODEL_QA LLM_MODEL_REVIEWER LLM_MODEL_PLANNER; do
             value="${!name:-$LLM_MODEL}"
-            if [[ ! "${value,,}" =~ ^gemini-[a-z0-9][a-z0-9._-]*$ ]]; then
-              echo "::error::$name effectif doit être un modèle Gemini non préfixé."
+            if [[ ! "${value,,}" =~ ^gemini-[a-z0-9][a-z0-9._-]*$ \
+              && ! "${value,,}" =~ ^gemma-4-(31b-it|26b-a4b-it)$ ]]; then
+              echo "::error::$name effectif doit être un modèle Gemini API non préfixé autorisé."
               exit 1
             fi
           done
+          coder_model="${LLM_MODEL_CODER:-$LLM_MODEL}"
+          if ! awk -v prompt="$LLM_PRICE_PROMPT_PER_1M" \
+            -v completion="$LLM_PRICE_COMPLETION_PER_1M" \
+            'BEGIN { exit !((prompt + 0) > 0 || (completion + 0) > 0) }'; then
+            if [[ ! "${coder_model,,}" =~ ^gemma-4-(31b-it|26b-a4b-it)$ ]]; then
+              echo "::error::Au moins un prix LLM par million de tokens doit être positif, sauf pour un coder Gemma 4 explicitement gratuit."
+              exit 1
+            fi
+          fi
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
