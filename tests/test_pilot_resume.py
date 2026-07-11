@@ -187,6 +187,34 @@ async def test_phase5_critical_stop_propagates_to_project_result(repo, manager):
     assert result.improvement.stop_reason == result.stop_reason
 
 
+async def test_phase5_remote_recovery_stop_propagates_to_project_result(repo, manager):
+    pid = manager.create_project(name="phase5-recovered")
+    tid = manager.add_task(pid, title="T0")
+    manager.update_task_status(tid, "merged")
+
+    async def stopped(*args, **kwargs):
+        return SimpleNamespace(stop_reason="auto_revert_recovered")
+
+    result = await run_project(
+        pid,
+        repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget([ContinueDecision(action=ACTION_CONTINUE, reason="ok")]),
+        sandbox=_Sandbox(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        dry_run=False,
+        improve=True,
+        run_improvement_fn=stopped,
+        sync_base_fn=lambda _src, _base: True,
+    )
+    assert result.stop_reason == "auto_revert_recovered"
+
+
 async def test_improving_forwards_gate_test_command_as_coverage_command(repo, manager):
     # #573 : le test command du gate (gate_options["test_command"]) doit être transmis à
     # run_improvement comme coverage_command, pour que la Phase 4 mesure avec la VRAIE

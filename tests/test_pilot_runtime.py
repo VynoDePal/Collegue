@@ -168,6 +168,56 @@ async def test_real_run_records_summary_decision(git_repo, manager):
     assert manager.get_tasks(pid)[0].status == "in_review"
 
 
+async def test_phase5_incident_is_global_barrier_before_build_even_without_improve(monkeypatch, git_repo, manager):
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 1)
+    approve_plan(manager, pid)
+    incident = manager.begin_phase5_incident(
+        pid,
+        owner="o",
+        repo="r",
+        base_branch="main",
+        source_pr_number=42,
+        source_head_sha="a" * 40,
+        base_sha_before_merge="b" * 40,
+        merge_method="squash",
+        health_command="pytest -q",
+        revert_enabled=True,
+    )
+    manager.transition_phase5_incident(
+        pid,
+        expected_state=incident.state,
+        expected_revision=incident.revision,
+        expected_source_pr_number=42,
+        expected_source_head_sha="a" * 40,
+        new_state="attention",
+        last_error="opérateur requis",
+    )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("BUILD ne doit pas démarrer avec un incident Phase 5")
+
+    monkeypatch.setattr(runtime, "run_project", forbidden)
+    result = await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        ctx=object(),
+        dry_run=False,
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+        improve=False,
+    )
+    assert result.stop_reason == "phase5_incident_pending" and result.iterations == 0
+    assert manager.get_tasks(pid)[0].status == "todo"
+
+
 async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
     """#441 : en réel, audit persistant + source de coût branchés PAR DÉFAUT — le
     ledger vit (métriques run_cost_usd/run_tokens lues par run_cost_summary) et le
@@ -912,6 +962,54 @@ def test_main_task_command_unknown_task_returns_1(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "_settings", lambda: SimpleNamespace(STATE_DATABASE_URL=url))
     monkeypatch.setattr(runtime, "_build_manager", lambda _s: manager)
     assert cli.main(["task", "reset", "9999", "--message", "x"]) == 1
+
+
+def test_main_phase5_show_and_ack_terminal_incident(monkeypatch, tmp_path):
+    import collegue.pilot.__main__ as cli
+    import collegue.pilot.runtime as runtime
+    from collegue.state import ProjectStateManager
+
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'phase5-cli.db'}", create=True)
+    pid = manager.create_project(name="p")
+    incident = manager.begin_phase5_incident(
+        pid,
+        owner="o",
+        repo="r",
+        base_branch="main",
+        source_pr_number=42,
+        source_head_sha="a" * 40,
+        base_sha_before_merge="b" * 40,
+        merge_method="squash",
+        health_command="pytest -q",
+        revert_enabled=True,
+    )
+    incident = manager.transition_phase5_incident(
+        pid,
+        expected_state=incident.state,
+        expected_revision=incident.revision,
+        expected_source_pr_number=42,
+        expected_source_head_sha="a" * 40,
+        new_state="attention",
+        last_error="inspection requise",
+    )
+    monkeypatch.setattr(runtime, "_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(runtime, "_build_manager", lambda _s: manager)
+
+    assert cli.main(["phase5", "show", "--project-id", str(pid)]) == 0
+    assert (
+        cli.main(
+            [
+                "phase5",
+                "ack",
+                "--project-id",
+                str(pid),
+                "--expected-revision",
+                str(incident.revision),
+            ]
+        )
+        == 0
+    )
+    assert manager.get_phase5_incident(pid) is None
 
 
 # --- CLI main (glue + codes de sortie) ------------------------------------------

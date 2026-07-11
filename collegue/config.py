@@ -298,6 +298,8 @@ class Settings(BaseSettings):
     # (.py, .sh, .yml, migrations, .github, conftest.py…) reste bloqué par une garde
     # dure même s'il est ajouté ici (cf. collegue.pilot.automerge.is_sensitive).
     AUTO_MERGE_PATH_ALLOWLIST: str = "docs/**,**/*.md,**/*.rst"
+    # ``rebase`` est volontairement refusé par la policy : une PR multi-commit
+    # n'aurait pas un SHA unique permettant un rollback atomique prouvable.
     AUTO_MERGE_METHOD: str = "squash"
     # Polling CI borné : au-delà, la PR reste ouverte et Phase 4 s'arrête.
     AUTO_MERGE_CI_TIMEOUT_SECONDS: float = 900.0
@@ -305,10 +307,11 @@ class Settings(BaseSettings):
 
     # ── Auto-revert post-merge (Phase 5, H3) ─────────────────────────────────
     # Filet de sécurité de l'auto-merge : après un auto-merge, si `main` devient
-    # rouge (tests en sandbox), on prépare un revert automatique. N'a d'effet que
+    # rouge (tests en sandbox), on publie une PR restaurant exactement le tree
+    # précédent, puis CI/merge/resync/santé finale sous gardes SHA. N'a d'effet que
     # si AUTO_MERGE_ENABLED. Activé par défaut QUAND l'auto-merge l'est (le mettre
     # à false = renoncer au filet de sécurité, risqué). Fail-closed : santé non
-    # concluante (sandbox indispo) = traité comme rouge → revert.
+    # concluante = rouge ; un revert final encore rouge ne boucle jamais.
     AUTO_REVERT_ENABLED: bool = True
     AUTO_REVERT_HEALTH_COMMAND: str = "pytest -q"
 

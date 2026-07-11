@@ -10,7 +10,7 @@ Organizes GitHub API operations by domain:
 """
 
 from ..clients import GitHubClient
-from .branches import BranchCommands, BranchInfo, CommitInfo
+from .branches import BranchCommands, BranchInfo, CommitInfo, GitCommitInfo
 from .files import FileCommands
 from .issues import IssueCommands, IssueInfo
 from .labels import LabelCommands, LabelInfo
@@ -47,6 +47,7 @@ __all__ = [
     "BranchCommands",
     "BranchInfo",
     "CommitInfo",
+    "GitCommitInfo",
     "FileCommands",
     "WorkflowCommands",
     "WorkflowRun",

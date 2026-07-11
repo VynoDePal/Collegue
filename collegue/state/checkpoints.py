@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from collegue.state.manager import ProjectStateManager
-from collegue.state.models import Checkpoint, Decision, Metric, Project, Task
+from collegue.state.models import Checkpoint, Decision, Metric, Phase5Incident, Project, Task
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -73,6 +73,30 @@ def _checkpoint_to_dict(c: Optional[Checkpoint]) -> Optional[Dict[str, Any]]:
     return {"id": c.id, "iteration": c.iteration, "state_json": c.state_json, "ts": _iso(c.ts)}
 
 
+def _phase5_incident_to_dict(incident: Optional[Phase5Incident]) -> Optional[Dict[str, Any]]:
+    if incident is None:
+        return None
+    return {
+        "state": incident.state,
+        "revision": incident.revision,
+        "owner": incident.owner,
+        "repo": incident.repo,
+        "base_branch": incident.base_branch,
+        "source_pr_number": incident.source_pr_number,
+        "source_head_sha": incident.source_head_sha,
+        "base_sha_before_merge": incident.base_sha_before_merge,
+        "merge_method": incident.merge_method,
+        "merge_sha": incident.merge_sha,
+        "health_command": incident.health_command,
+        "revert_enabled": incident.revert_enabled,
+        "last_error": incident.last_error,
+        "revert_claim_token": incident.revert_claim_token,
+        "revert_claim_expires_at": _iso(incident.revert_claim_expires_at),
+        "created_at": _iso(incident.created_at),
+        "updated_at": _iso(incident.updated_at),
+    }
+
+
 @dataclass
 class ProjectSnapshot:
     """Vue JSON-sérialisable de l'état d'un projet, suffisante pour reprendre un run."""
@@ -82,6 +106,7 @@ class ProjectSnapshot:
     decisions: List[Dict[str, Any]]
     metrics: List[Dict[str, Any]]
     latest_checkpoint: Optional[Dict[str, Any]]
+    phase5_incident: Optional[Dict[str, Any]] = None
 
 
 def load_snapshot(manager: ProjectStateManager, project_id: int) -> Optional[ProjectSnapshot]:
@@ -104,4 +129,5 @@ def load_snapshot(manager: ProjectStateManager, project_id: int) -> Optional[Pro
         decisions=[_decision_to_dict(d) for d in sorted(project.decisions, key=lambda d: d.id)],
         metrics=[_metric_to_dict(m) for m in sorted(project.metrics, key=lambda m: m.id)],
         latest_checkpoint=_checkpoint_to_dict(latest),
+        phase5_incident=_phase5_incident_to_dict(project.phase5_incident),
     )

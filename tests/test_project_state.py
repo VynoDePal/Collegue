@@ -16,6 +16,7 @@ from collegue.state import (
     Checkpoint,
     Decision,
     Metric,
+    Phase5Incident,
     Project,
     ProjectStateManager,
     Task,
@@ -35,7 +36,14 @@ def manager(tmp_path):
 
 
 def test_metadata_declares_all_tables():
-    assert set(Base.metadata.tables) == {"projects", "tasks", "decisions", "metrics", "checkpoints"}
+    assert set(Base.metadata.tables) == {
+        "projects",
+        "tasks",
+        "decisions",
+        "metrics",
+        "checkpoints",
+        "phase5_incidents",
+    }
 
 
 # --- CRUD projet ----------------------------------------------------------------
@@ -281,8 +289,8 @@ def test_no_checkpoint_returns_none(manager):
 
 
 def test_models_importable():
-    # Les 5 modèles sont exportés et distincts.
-    assert {Project, Task, Decision, Metric, Checkpoint}
+    # Les modèles sont exportés et distincts.
+    assert {Project, Task, Decision, Metric, Checkpoint, Phase5Incident}
 
 
 # --- migration Alembic (sur SQLite, prouve AC#1 sans Postgres) -------------------

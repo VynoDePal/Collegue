@@ -60,6 +60,15 @@ from collegue.pilot.mcp_tool import (
     register_pilot_tool,
     run_pilot_tool,
 )
+from collegue.pilot.phase5_resume import Phase5ResumeOutcome, resume_phase5_incident
+from collegue.pilot.remote_revert import (
+    RemoteRevertError,
+    RemoteRevertOutcome,
+    RevertProof,
+    prove_local_revert,
+    publish_and_merge_revert,
+    reconstruct_remote_revert_proof,
+)
 from collegue.pilot.resume import load_run_start, persist_run_start
 from collegue.pilot.runtime import (
     PlanResult,
@@ -134,6 +143,14 @@ __all__ = [
     "GuardOutcome",
     "check_main_health",
     "guard_post_merge",
+    "RevertProof",
+    "RemoteRevertOutcome",
+    "RemoteRevertError",
+    "prove_local_revert",
+    "publish_and_merge_revert",
+    "reconstruct_remote_revert_proof",
+    "Phase5ResumeOutcome",
+    "resume_phase5_incident",
     # H6 (Phase 5) — outil MCP du pilote (auth strict)
     "PilotToolRequest",
     "PilotToolResult",

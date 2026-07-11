@@ -510,10 +510,31 @@ async def run_project_from_settings(
     if not dry_run:
         from collegue.pilot.automerge import RiskPolicy, auto_merge_promotion
         from collegue.pilot.guard import RevertPolicy
+        from collegue.pilot.phase5_resume import resume_phase5_incident
 
         phase5_policy = RiskPolicy.from_settings(settings_obj)
+        revert_policy = RevertPolicy.from_settings(settings_obj)
+
+        async def _phase5_recovery_hook():
+            return await resume_phase5_incident(
+                project_id,
+                manager=manager,
+                clients=clients,
+                owner=owner,
+                repo=repo,
+                base=base,
+                repo_source=repo_source,
+                sandbox=gate_sandbox,
+                audit=audit,
+                ci_timeout_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_TIMEOUT_SECONDS", 900) or 0),
+                ci_poll_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_POLL_SECONDS", 10) or 0),
+                continue_fn=budget.should_continue,
+                sync_base_fn=sync_base_fn,
+                auto_merge_enabled=phase5_policy.enabled,
+            )
+
+        improvement_options["recovery_hook"] = _phase5_recovery_hook
         if phase5_policy.enabled:
-            revert_policy = RevertPolicy.from_settings(settings_obj)
 
             async def _phase5_promotion_hook(pr):
                 return await auto_merge_promotion(
@@ -577,6 +598,20 @@ async def run_project_from_settings(
 
     try:
         from collegue.pilot.driver import STOP_AWAITING_MERGE
+
+        # Barrière globale : un incident Phase 5 précède toute écriture BUILD ou
+        # IMPROVE, même si ce run n'a pas demandé ``--improve`` ou si l'opt-in a
+        # été retiré depuis le crash.
+        if not dry_run:
+            recovery = await _phase5_recovery_hook()
+            if bool(getattr(recovery, "found", False)) and not bool(getattr(recovery, "continue_loop", False)):
+                project = manager.get_project(project_id)
+                return ProjectRunResult(
+                    stop_reason=str(getattr(recovery, "stop_reason", None) or "phase5_incident_pending"),
+                    iterations=0,
+                    processed=[],
+                    project_status=getattr(project, "status", None),
+                )
 
         all_processed: List[Any] = []
         no_merge_streak = 0

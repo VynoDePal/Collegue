@@ -53,6 +53,7 @@ class PRInfo(BaseModel):
     additions: Optional[int] = None
     deletions: Optional[int] = None
     changed_files: Optional[int] = None
+    body: Optional[str] = None
 
 
 class IssueInfo(BaseModel):
@@ -142,6 +143,7 @@ class PRCommands(GitHubClient):
                 additions=pr.get("additions"),
                 deletions=pr.get("deletions"),
                 changed_files=pr.get("changed_files"),
+                body=pr.get("body"),
             )
             for pr in data[:limit]
         ]
@@ -183,6 +185,7 @@ class PRCommands(GitHubClient):
             additions=pr.get("additions"),
             deletions=pr.get("deletions"),
             changed_files=pr.get("changed_files"),
+            body=pr.get("body"),
         )
 
     def get_pr(self, owner: str, repo: str, pr_number: int) -> PRInfo:
@@ -206,6 +209,7 @@ class PRCommands(GitHubClient):
             additions=data.get("additions"),
             deletions=data.get("deletions"),
             changed_files=data.get("changed_files"),
+            body=data.get("body"),
         )
 
     def get_pr_files(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[FileChange]:
@@ -408,6 +412,7 @@ class PRCommands(GitHubClient):
             additions=resp.get("additions"),
             deletions=resp.get("deletions"),
             changed_files=resp.get("changed_files"),
+            body=resp.get("body"),
         )
 
     def merge_pr(
