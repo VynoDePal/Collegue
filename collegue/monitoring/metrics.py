@@ -209,6 +209,7 @@ class MetricsCollector:
         error_type: Optional[str] = None,
         error_message: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        cost_usd: Optional[float] = None,
     ) -> None:
         """Record a single expert execution.
 
@@ -242,7 +243,11 @@ class MetricsCollector:
             # Token/cost tracking
             metrics.total_input_tokens += input_tokens
             metrics.total_output_tokens += output_tokens
-            cost = (input_tokens * self._input_cost_per_token) + (output_tokens * self._output_cost_per_token)
+            cost = (
+                float(cost_usd)
+                if cost_usd is not None
+                else (input_tokens * self._input_cost_per_token) + (output_tokens * self._output_cost_per_token)
+            )
             metrics.total_cost += cost
 
             # Success/failure tracking
@@ -350,12 +355,10 @@ class MetricsCollector:
         avant comparaison — sans eux le plafond $ ne mordait jamais sur la
         dépense coder, pourtant majoritaire. Défaut 0 = comportement inchangé.
 
-        Granularité (limitation connue, C4) : le coût cumulé est mis à jour à la
-        **fin de chaque exécution d'outil** (``record_execution``), pas par appel
-        LLM. Le dépassement est donc détecté entre outils — ce qui borne le
-        runaway « sur des heures » visé par le brief §6. À l'intérieur d'un seul
-        ``agent_execute``, le surcoût est borné par ``max_iterations`` (≤10) ×
-        ``max_tokens``. Un cap par-appel serait un raffinement ultérieur.
+        Granularité : planner/QA débitent maintenant chaque appel et chaque retry
+        immédiatement. Les outils experts historiques restent débités à la fin
+        de leur exécution ; dans ``agent_execute``, le surcoût intra-outil reste
+        borné par ``max_iterations`` (≤10) × ``max_tokens``.
 
         Providers locaux (LM Studio/Ollama/Unsloth) : coût toujours 0 → le cap
         ``MAX_COST_USD`` est inerte ; seul ``MAX_TOKENS_BUDGET`` les protège.

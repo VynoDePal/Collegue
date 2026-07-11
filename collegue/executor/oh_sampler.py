@@ -15,6 +15,25 @@ import os
 import sys
 
 
+def _usage_payload(llm, model: str) -> dict:
+    """Extrait les compteurs SDK hors du texte contrôlé par le modèle."""
+    usage = getattr(getattr(llm, "metrics", None), "accumulated_token_usage", None)
+
+    def value(*names: str) -> int:
+        for name in names:
+            candidate = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            if candidate is not None:
+                return max(0, int(candidate or 0))
+        return 0
+
+    return {
+        "prompt_tokens": value("prompt_tokens", "input_tokens"),
+        "completion_tokens": value("completion_tokens", "output_tokens"),
+        "model": model,
+        "billable": False,
+    }
+
+
 def _extract_text(resp) -> str:
     """Extraction défensive du texte d'un ``LLMResponse`` OpenHands."""
     # 1) LLMResponse.message.content (list[TextContent])
@@ -100,7 +119,10 @@ def main() -> int:
     text = _extract_text(resp)
     if not (text or "").strip():
         text = "".join(chunks)
-    sys.stdout.write("<<<SAMPLE_BEGIN>>>" + text + "<<<SAMPLE_END>>>")
+    usage_json = json.dumps(_usage_payload(llm, model), separators=(",", ":"))
+    sys.stdout.write(
+        "<<<SAMPLE_BEGIN>>>" + text + "<<<SAMPLE_END>>>" + "<<<SAMPLE_USAGE>>>" + usage_json + "<<<SAMPLE_USAGE_END>>>"
+    )
     sys.stdout.flush()
     return 0
 

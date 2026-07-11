@@ -1,6 +1,6 @@
 """Tests C3 (#337) : tarifs multi-provider + capture du modèle utilisé."""
 
-from collegue.monitoring.pricing import cost_per_token
+from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing
 from collegue.monitoring.sampling_usage import record_usage, take_usage
 
 _PER_1M = 1_000_000.0
@@ -73,6 +73,12 @@ def test_remote_provider_does_not_zero_cost():
     assert cin > 0
 
 
+def test_explicit_pricing_distinguishes_authoritative_from_fallback():
+    assert has_explicit_pricing("gpt-5.4-2026-01", provider="openai") is True
+    assert has_explicit_pricing("unknown-model", provider="openai") is False
+    assert has_explicit_pricing("anything", provider="ollama") is True
+
+
 # --- capture du modèle dans l'usage --------------------------------------------
 
 
@@ -95,6 +101,13 @@ def test_take_usage_resets():
     record_usage(1, 1, "m")
     assert take_usage() is not None
     assert take_usage() is None
+
+
+def test_usage_rejects_negative_provider_counters():
+    import pytest
+
+    with pytest.raises(ValueError, match="négatifs"):
+        record_usage(-1, 0, "m")
 
 
 def test_mixed_model_loop_keeps_last_model_sums_tokens():

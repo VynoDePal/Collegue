@@ -45,7 +45,8 @@ from typing import Any, Dict, List, Optional
 DEFAULT_MAX_TOKENS = 8192
 
 # Sortie du sampler d'abonnement (oh_sampler.py) — texte entre marqueurs.
-_SAMPLE_RE = re.compile(r"<<<SAMPLE_BEGIN>>>(.*)<<<SAMPLE_END>>>", re.S)
+_SAMPLE_RE = re.compile(r"<<<SAMPLE_BEGIN>>>(.*?)<<<SAMPLE_END>>>", re.S)
+_SAMPLE_USAGE_RE = re.compile(r"<<<SAMPLE_USAGE>>>(.*?)<<<SAMPLE_USAGE_END>>>", re.S)
 
 
 @dataclass
@@ -343,6 +344,22 @@ class LocalSamplingContext:
         # interprété en aval (reviewer/juge) → fail-closed plutôt que rendre "".
         if not text.strip():
             raise RuntimeError(f"sampler abonnement {model} : réponse vide")
+        usage_match = _SAMPLE_USAGE_RE.search(out or "")
+        if usage_match is not None:
+            try:
+                usage = json.loads(usage_match.group(1))
+                if not isinstance(usage, dict) or usage.get("billable") is not False:
+                    raise ValueError("enveloppe non fiable")
+                prompt_tokens = int(usage["prompt_tokens"])
+                completion_tokens = int(usage["completion_tokens"])
+                usage_model = str(usage["model"] or model)
+                if prompt_tokens < 0 or completion_tokens < 0:
+                    raise ValueError("tokens négatifs")
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"sampler abonnement {model} : enveloppe usage invalide") from exc
+            from collegue.monitoring.sampling_usage import record_usage
+
+            record_usage(prompt_tokens, completion_tokens, usage_model)
         return text
 
     async def _run_sampler(self, argv: List[str], payload: str):
