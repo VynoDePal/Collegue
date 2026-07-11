@@ -119,12 +119,12 @@ def estimate_cost_usd(prompt_tokens: int, completion_tokens: int, settings_obj=N
 
 
 def coder_pricing_resolvable(settings_obj=None) -> bool:
-    """Vrai si un prix de secours coder (``LLM_PRICE_*_PER_1M``) est configuré (#502).
+    """Vrai si le coût coder est résolvable (#502).
 
-    Quand litellm ne mappe pas le modèle coder ET qu'aucun prix n'est configuré,
-    le ledger $ reste à 0 et ``MAX_COST_USD`` est inopérant côté coder (3 runs
-    consécutifs aveugles). Ce prédicat permet de l'AVERTIR au démarrage du run
-    plutôt que de le découvrir en post-mortem. Même robustesse que
+    Un prix de secours positif rend le coût calculable quand LiteLLM ne connaît
+    pas le modèle. Un modèle dont la grille autoritaire fixe explicitement le
+    coût à zéro (Gemma 4 Free Tier) est également résolvable sans prix de
+    secours. Un modèle distant inconnu reste fail-closed. Même robustesse que
     :func:`estimate_cost_usd` (prix absent/non numérique/négatif/non fini → 0).
     """
     if settings_obj is None:
@@ -137,7 +137,22 @@ def coder_pricing_resolvable(settings_obj=None) -> bool:
             return 0.0
         return value if math.isfinite(value) and value > 0 else 0.0
 
-    return _price("LLM_PRICE_PROMPT_PER_1M") > 0 or _price("LLM_PRICE_COMPLETION_PER_1M") > 0
+    return (
+        _price("LLM_PRICE_PROMPT_PER_1M") > 0
+        or _price("LLM_PRICE_COMPLETION_PER_1M") > 0
+        or coder_pricing_is_explicitly_free(settings_obj)
+    )
+
+
+def coder_pricing_is_explicitly_free(settings_obj=None) -> bool:
+    """Vrai si le couple provider/modèle effectif du rôle coder vaut 0 USD."""
+    if settings_obj is None:
+        from collegue.config import settings as settings_obj
+
+    from collegue.monitoring.pricing import is_explicitly_free
+
+    provider, model = resolve_role(LLMRole.CODER, settings_obj)
+    return is_explicitly_free(model, provider=provider)
 
 
 # Politique retries/backoff par défaut du canal coder (#422) — alignée sur les

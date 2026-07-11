@@ -349,11 +349,20 @@ def test_estimate_cost_usd_survives_poisoned_token_counts():
 
 
 def test_coder_pricing_resolvable():
-    """#502 : vrai si un prix de secours coder est configuré (>0)."""
-    from collegue.executor.openhands_agent import coder_pricing_resolvable
+    """#502 : prix de secours positif ou grille explicitement gratuite."""
+    from collegue.executor.openhands_agent import coder_pricing_is_explicitly_free, coder_pricing_resolvable
 
     assert coder_pricing_resolvable(_settings(LLM_PRICE_PROMPT_PER_1M=1.5)) is True
     assert coder_pricing_resolvable(_settings(LLM_PRICE_COMPLETION_PER_1M=9.0)) is True
     assert coder_pricing_resolvable(_settings()) is False
     for bad in (0.0, -3.0, "n/a", float("nan")):
         assert coder_pricing_resolvable(_settings(LLM_PRICE_PROMPT_PER_1M=bad)) is False
+    free = _settings(LLM_MODEL_CODER="gemma-4-31b-it")
+    assert coder_pricing_is_explicitly_free(free) is True
+    assert coder_pricing_resolvable(free) is True
+    unknown = _settings(LLM_MODEL_CODER="gemma-4-inconnu")
+    assert coder_pricing_is_explicitly_free(unknown) is False
+    assert coder_pricing_resolvable(unknown) is False
+    wrong_provider = _settings(LLM_PROVIDER_CODER="openai", LLM_MODEL_CODER="gemma-4-31b-it")
+    assert coder_pricing_is_explicitly_free(wrong_provider) is False
+    assert coder_pricing_resolvable(wrong_provider) is False

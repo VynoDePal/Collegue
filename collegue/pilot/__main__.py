@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from typing import List, Optional
 
 from collegue.pilot.runtime import format_run_report, run_project_from_settings
@@ -93,6 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pour `plan sync` uniquement : commit SPEC + création réelle des issues.",
     )
+    plan_p.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Format de sortie machine/lisible (défaut : text).",
+    )
     # --- args du RUN par défaut (required=False : validés dans main si pas de sous-commande) ---
     parser.add_argument("--project-id", type=int, default=None, help="Id du projet (état durable).")
     parser.add_argument("--repo-source", default=None, help="Dépôt git source (repo-agnostique).")
@@ -110,7 +117,63 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Une fois le MVP construit, enchaîne le moteur d'amélioration (Phase 4) sous le budget restant.",
     )
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Format de sortie machine/lisible (défaut : text).",
+    )
     return parser
+
+
+def _json_output(payload: dict) -> str:
+    """Sérialise un contrat CLI stable sans échapper les libellés Unicode."""
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _plan_json_payload(result) -> dict:
+    """Projection machine stable commune à draft/approve/sync."""
+    return {
+        "project_id": result.project_id,
+        "plan_hash": result.plan_hash,
+        "task_count": result.task_count,
+        "action": result.action,
+        "issues": list(result.issues or []),
+    }
+
+
+def _run_json_payload(result, *, project_id: int) -> dict:
+    """Projection machine stable du RUN, indépendante du rendu texte."""
+    return {
+        "project_id": project_id,
+        "stop_reason": result.stop_reason,
+        "iterations": result.iterations,
+        "opened_prs": list(result.opened_prs),
+        "pending_reviews": list(result.pending_reviews or []),
+        "project_status": result.project_status,
+        "processed": [
+            {
+                "task_id": task.task_id,
+                "title": task.title,
+                "success": task.success,
+                "stage": task.stage,
+                "pr_number": task.pr_number,
+                "acceptance_passed": task.acceptance_passed,
+                "acceptance_error": task.acceptance_error,
+                "acceptance_oracle_sha256": task.acceptance_oracle_sha256,
+            }
+            for task in result.processed
+        ],
+    }
+
+
+def _print_plan_result(result, *, output_format: str) -> None:
+    if output_format == "json":
+        print(_json_output(_plan_json_payload(result)))
+        return
+    from collegue.pilot.runtime import format_plan_report
+
+    print(format_plan_report(result))
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -124,14 +187,17 @@ async def _run(args: argparse.Namespace) -> int:
         max_iterations=args.max_iterations,
         improve=args.improve,
     )
-    print(format_run_report(result, project_id=args.project_id))
+    if args.format == "json":
+        print(_json_output(_run_json_payload(result, project_id=args.project_id)))
+    else:
+        print(format_run_report(result, project_id=args.project_id))
     return 0 if result.stop_reason in _OK_STOPS else 1
 
 
 async def _plan_draft(args: argparse.Namespace) -> int:
     from datetime import datetime, timedelta, timezone
 
-    from collegue.pilot.runtime import format_plan_report, plan_project_from_settings
+    from collegue.pilot.runtime import plan_project_from_settings
 
     deadline = None
     if args.deadline_hours:
@@ -149,23 +215,23 @@ async def _plan_draft(args: argparse.Namespace) -> int:
         spec_filename=args.spec_filename or "SPEC.md",
         base_branch=args.base or "main",
     )
-    print(format_plan_report(result))
+    _print_plan_result(result, output_format=args.format)
     return 0
 
 
 def _approve_plan(args: argparse.Namespace) -> int:
-    from collegue.pilot.runtime import approve_project_plan_from_settings, format_plan_report
+    from collegue.pilot.runtime import approve_project_plan_from_settings
 
     result = approve_project_plan_from_settings(args.project_id, args.expected_plan_hash)
-    print(format_plan_report(result))
+    _print_plan_result(result, output_format=args.format)
     return 0
 
 
 def _sync_plan(args: argparse.Namespace) -> int:
-    from collegue.pilot.runtime import format_plan_report, sync_project_plan_from_settings
+    from collegue.pilot.runtime import sync_project_plan_from_settings
 
     result = sync_project_plan_from_settings(args.project_id, execute=args.execute)
-    print(format_plan_report(result))
+    _print_plan_result(result, output_format=args.format)
     return 0
 
 

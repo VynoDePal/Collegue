@@ -168,6 +168,8 @@ def test_real_sync_creates_linked_issues(manager):
     b_body = clients.issues.created[1]["body"]
     assert f"#{a_number}" in b_body
     assert "## Critère d'acceptation" in b_body
+    assert f";project:{pid};task:" in b_body
+    assert "<!-- collegue-plan:" in b_body
     # labels appliqués à chaque issue
     assert len(clients.labels.added) == 2
     # milestone assigné, ajout au board
@@ -176,6 +178,48 @@ def test_real_sync_creates_linked_issues(manager):
     assert result.milestone == "Phase 1" and result.board == "Board"
     # issue_number persisté sur les tâches (mapping task↔issue)
     assert all(t.issue_number for t in manager.get_tasks(pid))
+
+
+def test_product_client_creates_issue_labels_and_milestone_atomically(manager):
+    class _AtomicIssues(_FakeIssues):
+        def __init__(self):
+            super().__init__()
+            self.atomic = []
+
+        def create_issue_with_metadata(
+            self,
+            owner,
+            repo,
+            title,
+            *,
+            body=None,
+            labels=(),
+            milestone_number=None,
+        ):
+            issue = super().create_issue(owner, repo, title, body)
+            self.atomic.append((issue.number, list(labels), milestone_number))
+            return issue
+
+    pid = _planned(manager, approve=True)
+    issues = _AtomicIssues()
+    labels = _FakeLabels()
+    milestones = _FakeMilestones()
+    clients = SyncClients(issues, labels, milestones, _FakeProjects())
+
+    sync_plan(
+        manager,
+        pid,
+        "o",
+        "r",
+        dry_run=False,
+        labels=["nightly-run"],
+        milestone_title="Nightly",
+        clients=clients,
+    )
+
+    assert issues.atomic == [(101, ["nightly-run"], 7), (102, ["nightly-run"], 7)]
+    assert labels.added == []
+    assert milestones.assigned == []
 
 
 def test_real_sync_journals_decision(manager):

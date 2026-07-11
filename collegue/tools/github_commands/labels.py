@@ -7,6 +7,7 @@ non câblé au runtime tant que la synchronisation du plan (P4) ne l'appelle pas
 """
 
 from typing import List, Optional
+from urllib.parse import quote
 
 from pydantic import BaseModel
 
@@ -69,3 +70,32 @@ class LabelCommands(GitHubClient):
             {"labels": list(labels)},
         )
         return [label["name"] for label in (resp or [])]
+
+    def delete_label(
+        self,
+        owner: str,
+        repo: str,
+        name: str,
+        *,
+        expected_name: str,
+        expected_color: Optional[str] = None,
+        expected_description: Optional[str] = None,
+    ) -> bool:
+        """Supprime un label exact, de façon idempotente et gardée."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        if not isinstance(name, str) or not name or name != expected_name:
+            raise ToolExecutionError("nom de label de cleanup invalide ou inattendu")
+        existing = self._find_label(owner, repo, name)
+        if existing is None:
+            return True
+        if existing.name != expected_name:
+            raise ToolExecutionError(f"label de cleanup inattendu: attendu {expected_name!r}, vu {existing.name!r}")
+        if expected_color is not None and existing.color.lower() != expected_color.lower():
+            raise ToolExecutionError(f"couleur inattendue pour le label de cleanup {name!r}")
+        if expected_description is not None and existing.description != expected_description:
+            raise ToolExecutionError(f"description inattendue pour le label de cleanup {name!r}")
+        self._request_json("DELETE", f"/repos/{owner}/{repo}/labels/{quote(existing.name, safe='')}")
+        if self._find_label(owner, repo, name) is not None:
+            raise ToolExecutionError(f"suppression du label {name!r} non confirmée")
+        return True

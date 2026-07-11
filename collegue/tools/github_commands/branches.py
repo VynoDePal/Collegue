@@ -38,6 +38,7 @@ class GitCommitInfo(BaseModel):
     sha: str
     tree_sha: str
     parents: List[str]
+    message: str
 
 
 class BranchCommands(GitHubClient):
@@ -70,7 +71,12 @@ class BranchCommands(GitHubClient):
             resp = self._api_get(f"/repos/{owner}/{repo}/git/ref/heads/{branch}")
             return resp["object"]["sha"]
         except ToolExecutionError as e:
-            raise ToolExecutionError(f"Source branch '{branch}' not found") from e
+            # Une absence est la seule erreur que les appelants idempotents
+            # peuvent convertir en ``None``. Préserver explicitement le 404 ;
+            # auth, rate-limit, 5xx et pannes réseau doivent rester bloquants.
+            if getattr(e, "status_code", 0) == 404:
+                raise ToolExecutionError(f"Source branch '{branch}' not found", status_code=404) from e
+            raise
 
     def get_branch_sha(self, owner: str, repo: str, branch: str) -> str:
         """SHA courant d'une branche (API publique, fail-closed)."""
@@ -101,7 +107,7 @@ class BranchCommands(GitHubClient):
         return str(sha)
 
     def get_git_commit(self, owner: str, repo: str, sha: str) -> GitCommitInfo:
-        """Lit un objet commit Git et valide strictement son tree et ses parents."""
+        """Lit un objet commit Git et valide strictement tree, parents et message."""
         validate_ref(owner, "owner")
         validate_ref(repo, "repo")
         sha = self._validate_full_sha(sha, "SHA du commit")
@@ -117,7 +123,10 @@ class BranchCommands(GitHubClient):
             self._validate_full_sha(parent.get("sha") if isinstance(parent, dict) else None, "SHA parent")
             for parent in raw_parents
         ]
-        return GitCommitInfo(sha=response_sha, tree_sha=tree_sha, parents=parents)
+        message = data.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise ToolExecutionError("message du commit Git absent ou malformé")
+        return GitCommitInfo(sha=response_sha, tree_sha=tree_sha, parents=parents, message=message)
 
     def _branch_matches_commit_tree(
         self,
@@ -127,12 +136,13 @@ class BranchCommands(GitHubClient):
         *,
         parent_sha: str,
         tree_sha: str,
+        message: str,
     ) -> bool:
         try:
             commit = self.get_git_commit(owner, repo, branch_sha)
         except ToolExecutionError:
             return False
-        return commit.tree_sha == tree_sha and commit.parents == [parent_sha]
+        return commit.tree_sha == tree_sha and commit.parents == [parent_sha] and commit.message == message
 
     def ensure_commit_branch(
         self,
@@ -148,14 +158,15 @@ class BranchCommands(GitHubClient):
 
         Aucun fichier local n'est téléversé : le tree doit déjà appartenir au dépôt.
         Idempotent après crash, sans force-push : une branche existante n'est admise
-        que si son commit possède exactement ``parent_sha`` et ``tree_sha``.
+        que si son commit possède exactement ``parent_sha``, ``tree_sha`` et
+        ``message``.
         """
         validate_ref(owner, "owner")
         validate_ref(repo, "repo")
         self._validate_branch_name(branch)
         parent_sha = self._validate_full_sha(parent_sha, "SHA parent")
         tree_sha = self._validate_full_sha(tree_sha, "SHA tree")
-        if not str(message).strip():
+        if not isinstance(message, str) or not message.strip():
             raise ToolExecutionError("message du commit vide — refus fail-closed")
 
         existing = self._branch_sha_or_none(owner, repo, branch)
@@ -166,14 +177,15 @@ class BranchCommands(GitHubClient):
                 existing,
                 parent_sha=parent_sha,
                 tree_sha=tree_sha,
+                message=message,
             ):
                 return BranchInfo(name=branch, commit_sha=existing, protected=False)
-            raise ToolExecutionError(f"branche {branch!r} déjà présente avec un autre parent/tree — refus")
+            raise ToolExecutionError(f"branche {branch!r} déjà présente avec un autre parent/tree/message — refus")
 
         commit = (
             self._api_post(
                 f"/repos/{owner}/{repo}/git/commits",
-                {"message": str(message), "tree": tree_sha, "parents": [parent_sha]},
+                {"message": message, "tree": tree_sha, "parents": [parent_sha]},
             )
             or {}
         )
@@ -184,8 +196,9 @@ class BranchCommands(GitHubClient):
             commit_sha,
             parent_sha=parent_sha,
             tree_sha=tree_sha,
+            message=message,
         ):
-            raise ToolExecutionError("le commit de branche créé ne correspond pas au parent/tree demandés")
+            raise ToolExecutionError("le commit de branche créé ne correspond pas au parent/tree/message demandés")
         try:
             self._api_post(
                 f"/repos/{owner}/{repo}/git/refs",
@@ -200,6 +213,7 @@ class BranchCommands(GitHubClient):
                 raced,
                 parent_sha=parent_sha,
                 tree_sha=tree_sha,
+                message=message,
             ):
                 raise
             commit_sha = raced
@@ -210,6 +224,7 @@ class BranchCommands(GitHubClient):
             commit_sha,
             parent_sha=parent_sha,
             tree_sha=tree_sha,
+            message=message,
         ):
             raise ToolExecutionError(f"branche {branch!r} mobile ou commit distant non conforme")
         return BranchInfo(name=branch, commit_sha=commit_sha, protected=False)
@@ -226,11 +241,13 @@ class BranchCommands(GitHubClient):
         return BranchInfo(name=branch, commit_sha=resp["object"]["sha"], protected=False)
 
     def _branch_sha_or_none(self, owner: str, repo: str, branch: str) -> Optional[str]:
-        """SHA de la branche, ou None si elle n'existe pas (variante non-levante)."""
+        """SHA de la branche, ou ``None`` uniquement sur un 404 confirmé."""
         try:
             return self._get_branch_sha(owner, repo, branch)
-        except ToolExecutionError:
-            return None
+        except ToolExecutionError as exc:
+            if getattr(exc, "status_code", 0) == 404:
+                return None
+            raise
 
     def ensure_branch(self, owner: str, repo: str, branch: str, from_branch: Optional[str] = None) -> BranchInfo:
         """Retourne la branche existante ou la crée depuis ``from_branch``. Idempotent.
@@ -257,6 +274,7 @@ class BranchCommands(GitHubClient):
         *,
         protect: Iterable[str] = PROTECTED_BRANCHES,
         default_branch: Optional[str] = None,
+        expected_sha: Optional[str] = None,
     ) -> bool:
         """Supprime une branche. **Idempotent** + **refuse les branches protégées**.
 
@@ -271,6 +289,8 @@ class BranchCommands(GitHubClient):
         - Idempotent : si la branche n'existe pas (déjà supprimée), renvoie ``True``
           sans erreur. Gère aussi la **course** (suppression concurrente pendant
           l'appel) en re-vérifiant l'absence avant de propager.
+        - Si ``expected_sha`` est fourni, refuse de supprimer une branche existante
+          dont la tête a bougé depuis son inventaire par le caller.
         """
         validate_ref(owner, "owner")
         validate_ref(repo, "repo")
@@ -298,8 +318,13 @@ class BranchCommands(GitHubClient):
         if default_branch and norm == _norm(default_branch):
             raise ToolExecutionError(f"refus de supprimer la branche par défaut: {branch!r}")
 
-        if self._branch_sha_or_none(owner, repo, branch) is None:
+        current_sha = self._branch_sha_or_none(owner, repo, branch)
+        if current_sha is None:
             return True  # déjà absente → succès idempotent
+        if expected_sha is not None and current_sha != expected_sha:
+            raise ToolExecutionError(
+                f"refus de supprimer la branche {branch!r}: SHA attendu {expected_sha}, vu {current_sha}"
+            )
         try:
             self._request_json("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch}")
         except ToolExecutionError:
@@ -307,4 +332,12 @@ class BranchCommands(GitHubClient):
             if self._branch_sha_or_none(owner, repo, branch) is None:
                 return True
             raise
+        # Un DELETE 2xx ne suffit pas comme preuve pour une opération destructive :
+        # confirmer l'absence distante. Toute lecture autre qu'un 404 reste
+        # bloquante via ``_branch_sha_or_none``.
+        remaining_sha = self._branch_sha_or_none(owner, repo, branch)
+        if remaining_sha is not None:
+            raise ToolExecutionError(
+                f"suppression de la branche {branch!r} non confirmée: tête distante {remaining_sha}"
+            )
         return True

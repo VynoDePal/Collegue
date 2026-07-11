@@ -119,10 +119,19 @@ class MergeResult(BaseModel):
 
 
 class PRCommands(GitHubClient):
-    def list_prs(self, owner: str, repo: str, state: str = "open", limit: int = 30) -> List[PRInfo]:
-        data = self._api_get(
-            f"/repos/{owner}/{repo}/pulls", {"state": state, "per_page": limit, "sort": "updated", "direction": "desc"}
-        )
+    def list_prs(
+        self,
+        owner: str,
+        repo: str,
+        state: str = "open",
+        limit: int = 30,
+        *,
+        base: Optional[str] = None,
+    ) -> List[PRInfo]:
+        params = {"state": state, "per_page": limit, "sort": "updated", "direction": "desc"}
+        if base:
+            params["base"] = base
+        data = self._api_get(f"/repos/{owner}/{repo}/pulls", params)
 
         return [
             PRInfo(
@@ -211,6 +220,80 @@ class PRCommands(GitHubClient):
             changed_files=data.get("changed_files"),
             body=data.get("body"),
         )
+
+    def close_pr(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        expected_head_sha: str,
+        expected_head_branch: str,
+        expected_base_branch: str,
+        body_marker: str,
+    ) -> PRInfo:
+        """Ferme une PR non mergée après validation stricte de son identité.
+
+        Les quatre gardes sont obligatoires : le cleanup ne doit jamais fermer une
+        PR retrouvée seulement par son numéro. Une PR déjà fermée et conforme est
+        un succès idempotent ; une PR mergée est toujours refusée. Après le PATCH,
+        une nouvelle lecture confirme l'état et rejoue toutes les gardes.
+        """
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+            raise ToolExecutionError(f"numéro de PR invalide: {pr_number!r}")
+        guards = {
+            "expected_head_sha": expected_head_sha,
+            "expected_head_branch": expected_head_branch,
+            "expected_base_branch": expected_base_branch,
+            "body_marker": body_marker,
+        }
+        for name, value in guards.items():
+            if not isinstance(value, str) or not value:
+                raise ToolExecutionError(f"garde de fermeture PR absente: {name}")
+
+        def verify(info: PRInfo) -> None:
+            if info.number != pr_number:
+                raise ToolExecutionError(
+                    f"GitHub a retourné la PR #{info.number} au lieu de la PR #{pr_number} — refus"
+                )
+            if info.merged:
+                raise ToolExecutionError(f"PR #{pr_number} déjà mergée — refus de la fermer par cleanup")
+            if info.head_sha != expected_head_sha:
+                raise ToolExecutionError(
+                    f"SHA head inattendu pour la PR #{pr_number}: attendu {expected_head_sha}, vu {info.head_sha}"
+                )
+            if info.head_branch != expected_head_branch:
+                raise ToolExecutionError(
+                    f"branche head inattendue pour la PR #{pr_number}: "
+                    f"attendu {expected_head_branch}, vu {info.head_branch}"
+                )
+            if info.base_branch != expected_base_branch:
+                raise ToolExecutionError(
+                    f"branche base inattendue pour la PR #{pr_number}: "
+                    f"attendu {expected_base_branch}, vu {info.base_branch}"
+                )
+            if body_marker not in (info.body or ""):
+                raise ToolExecutionError(f"marqueur de cleanup absent du corps de la PR #{pr_number}")
+            if info.state not in {"open", "closed"}:
+                raise ToolExecutionError(f"état inattendu pour la PR #{pr_number}: {info.state!r}")
+
+        current = self.get_pr(owner, repo, pr_number)
+        verify(current)
+        if current.state == "closed":
+            return current
+
+        self._request_json(
+            "PATCH",
+            f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            json_data={"state": "closed"},
+        )
+        confirmed = self.get_pr(owner, repo, pr_number)
+        verify(confirmed)
+        if confirmed.state != "closed":
+            raise ToolExecutionError(f"fermeture de la PR #{pr_number} non confirmée par GitHub")
+        return confirmed
 
     def get_pr_files(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[FileChange]:
         """Get files changed in a pull request."""

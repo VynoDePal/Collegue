@@ -1,5 +1,6 @@
 """Tests F4 (#377) : câblage runtime opt-in (entrypoint + assemblage) + reporting."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -263,12 +264,16 @@ def test_coder_sandbox_env_subscription_mode():
     import collegue.pilot.runtime as runtime
 
     settings = SimpleNamespace(
-        CODER_SUBSCRIPTION=True, CODER_SUBSCRIPTION_MODEL="gpt-5.5", CODER_SUBSCRIPTION_FALLBACK="gpt-5.4"
+        CODER_SUBSCRIPTION=True,
+        CODER_SUBSCRIPTION_MODEL="gpt-5.5",
+        CODER_SUBSCRIPTION_FALLBACK="gpt-5.4",
+        LLM_CALL_TIMEOUT=180,
     )
     env = runtime._coder_sandbox_env(settings)
     assert env["LLM_MODEL"] == "gpt-5.5"  # modèle d'abonnement NU (pas de préfixe gemini/)
     assert env["LLM_SUBSCRIPTION"] == "1"
     assert env["OH_FALLBACK_MODELS"] == "gpt-5.4"
+    assert env["OH_LLM_TIMEOUT"] == "180"
     assert env["HOME"] == "/home/sandbox"  # hors /tmp (requis par le montage des creds)
 
 
@@ -279,6 +284,17 @@ def test_coder_sandbox_env_api_key_mode():
     env = runtime._coder_sandbox_env(settings)
     assert env["LLM_MODEL"] == "gemini/gemma-x"  # format LiteLLM
     assert "LLM_SUBSCRIPTION" not in env
+    assert "HOME" not in env  # DockerSandbox conserve son HOME=/tmp écrivable
+    assert "OH_LLM_TIMEOUT" not in env  # 0/absent conserve le défaut sûr du runner
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, float("nan"), float("inf"), "invalide"])
+def test_coder_sandbox_env_ignores_invalid_call_timeout(value):
+    import collegue.pilot.runtime as runtime
+
+    settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_MODEL="gemini-2.5-flash", LLM_CALL_TIMEOUT=value)
+
+    assert "OH_LLM_TIMEOUT" not in runtime._coder_sandbox_env(settings)
 
 
 def test_gate_sandbox_keeps_runtime_resources_without_coder_credentials(tmp_path):
@@ -861,6 +877,7 @@ def test_parser_defaults_dry_run():
     assert ns.base == "main"
     assert ns.execute is False  # dry_run par défaut
     assert ns.max_iterations is None
+    assert ns.format == "text"
 
 
 def test_parser_execute_and_overrides():
@@ -879,11 +896,14 @@ def test_parser_execute_and_overrides():
             "dev",
             "--max-iterations",
             "5",
+            "--format",
+            "json",
         ]
     )
     assert ns.execute is True
     assert ns.base == "dev"
     assert ns.max_iterations == 5
+    assert ns.format == "json"
 
 
 def test_parser_requires_mandatory_args():
@@ -1039,6 +1059,72 @@ def test_main_returns_0_on_completed(monkeypatch, capsys):
 def test_main_returns_1_on_blocked(monkeypatch):
     cli = _patch_run(monkeypatch, ProjectRunResult(stop_reason="blocked", iterations=0, processed=[]))
     assert cli.main(_CLI_ARGS) == 1
+
+
+def test_main_run_json_has_stable_machine_contract(monkeypatch, capsys):
+    result = ProjectRunResult(
+        stop_reason="completed",
+        iterations=2,
+        processed=[
+            TaskOutcome(
+                task_id=5,
+                title="Faire X",
+                success=True,
+                stage="pr",
+                pr_number=42,
+                acceptance_passed=True,
+                acceptance_oracle_sha256="a" * 64,
+            ),
+            TaskOutcome(task_id=6, title="Vérifier Y", success=False, stage="gate", pr_number=None),
+        ],
+        project_status="improving",
+        pending_reviews=[5],
+    )
+    cli = _patch_run(monkeypatch, result)
+
+    assert cli.main([*_CLI_ARGS, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "project_id": 1,
+        "stop_reason": "completed",
+        "iterations": 2,
+        "opened_prs": [42],
+        "pending_reviews": [5],
+        "project_status": "improving",
+        "processed": [
+            {
+                "task_id": 5,
+                "title": "Faire X",
+                "success": True,
+                "stage": "pr",
+                "pr_number": 42,
+                "acceptance_passed": True,
+                "acceptance_error": None,
+                "acceptance_oracle_sha256": "a" * 64,
+            },
+            {
+                "task_id": 6,
+                "title": "Vérifier Y",
+                "success": False,
+                "stage": "gate",
+                "pr_number": None,
+                "acceptance_passed": None,
+                "acceptance_error": None,
+                "acceptance_oracle_sha256": None,
+            },
+        ],
+    }
+
+
+def test_main_run_json_preserves_nonzero_exit_code(monkeypatch, capsys):
+    cli = _patch_run(
+        monkeypatch,
+        ProjectRunResult(stop_reason="awaiting_merge", iterations=1, processed=[], pending_reviews=[7]),
+    )
+
+    assert cli.main([*_CLI_ARGS, "--format", "json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stop_reason"] == "awaiting_merge"
+    assert payload["pending_reviews"] == [7]
 
 
 def test_gate_options_built_from_settings():

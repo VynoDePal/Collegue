@@ -175,7 +175,7 @@ async def test_persisted_acceptance_reaches_enabled_gate(repo, manager):
 
         async def check(self, workspace, diff, issue, ctx, *, sandbox):
             self.called_with = issue.acceptance_criteria
-            return AcceptanceOutcome(passed=True)
+            return AcceptanceOutcome(passed=True, oracle_sha256="c" * 64)
 
     pid = manager.create_project(name="acceptance-wiring")
     manager.add_task(pid, title="API", acceptance="retourne HTTP 200")
@@ -189,6 +189,9 @@ async def test_persisted_acceptance_reaches_enabled_gate(repo, manager):
     )
     assert result.stop_reason == "completed"
     assert checker.called_with == ("retourne HTTP 200",)
+    assert result.processed[0].acceptance_passed is True
+    assert result.processed[0].acceptance_error is None
+    assert result.processed[0].acceptance_oracle_sha256 == "c" * 64
 
 
 # --- bout en bout ---------------------------------------------------------------
@@ -1919,6 +1922,34 @@ async def test_cost_unknown_event_when_tokens_without_price(repo, manager, monke
     assert unknown[0].detail["tokens"] == 1_100_000
     assert "MAX_COST_USD" in unknown[0].detail["reason"]
     assert len([e for e in audit.events if e.kind == "cost_observed"]) == 2
+
+
+async def test_explicitly_free_coder_keeps_zero_authoritative(repo, manager, monkeypatch):
+    """Gemma 4 Free Tier : tokens comptés, coût nul connu, aucun faux signal."""
+    from collegue import config
+    from collegue.pilot.audit import RunAuditLog
+
+    monkeypatch.setattr(config.settings, "LLM_PROVIDER_CODER", "gemini", raising=False)
+    monkeypatch.setattr(config.settings, "LLM_MODEL_CODER", "gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_PROMPT_PER_1M", 0.0, raising=False)
+    monkeypatch.setattr(config.settings, "LLM_PRICE_COMPLETION_PER_1M", 0.0, raising=False)
+    pid = _linear_project(manager, 1)
+    audit = RunAuditLog(pid)
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_UnmappedModelAgent(),
+        audit=audit,
+        require_cost_pricing=True,
+    )
+
+    assert result.stop_reason == "completed"
+    assert audit.cost.usd == 0.0
+    assert audit.cost.tokens == 1_100_000
+    assert not [e for e in audit.events if e.kind in {"cost_unknown", "cost_pricing_unresolved"}]
 
 
 async def test_no_cost_unknown_when_cost_reported(repo, manager):

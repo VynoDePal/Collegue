@@ -12,6 +12,10 @@ from ..clients import GitHubClient
 
 
 class RepoInfo(BaseModel):
+    # Identité GitHub immuable du dépôt. Optionnelle pour conserver la
+    # compatibilité avec les anciens appelants qui construisent ce modèle à la
+    # main, mais toujours renseignée par les lectures API ci-dessous.
+    id: Optional[int] = None
     name: str
     full_name: str
     description: Optional[str] = None
@@ -36,6 +40,7 @@ class RepoCommands(GitHubClient):
 
         return [
             RepoInfo(
+                id=r["id"],
                 name=r["name"],
                 full_name=r["full_name"],
                 description=r.get("description"),
@@ -54,6 +59,7 @@ class RepoCommands(GitHubClient):
     def get_repo(self, owner: str, repo: str) -> RepoInfo:
         data = self._api_get(f"/repos/{owner}/{repo}")
         return RepoInfo(
+            id=data["id"],
             name=data["name"],
             full_name=data["full_name"],
             description=data.get("description"),
