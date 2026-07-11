@@ -64,6 +64,7 @@ ou on refuse) :
 | Garde-fou | Comportement |
 |-----------|--------------|
 | **Merge-bot (phase BUILD)** | Pendant la **construction du MVP**, une tâche réussie est **auto-mergée** (squash) puis le clone local est resynchronisé sur `origin/<base>` avant la tâche suivante (`BUILD_AUTO_MERGE=true` par défaut). Sans lui, avec 1 PR en vol + dépendances strictes, le build se figerait `awaiting_merge` (et des bases périmées créeraient des conflits). C'est le merge humain **simulé** pendant la construction autonome. Mettre `BUILD_AUTO_MERGE=false` ramène tout au merge humain. |
+| **Barrière BUILD → IMPROVE** | Une PR `in_review` ne compte **jamais** comme un MVP intégré. Phase 4 exige toutes les tâches en `merged`/`done`, puis un `git fetch` + `reset --hard origin/<base>` réussi juste avant sa première mesure. Merge final ou resync en échec ⇒ `awaiting_merge` / `repo_sync_failed`, aucune amélioration. |
 | **Merge humain (phase AMÉLIORATION, §6)** | Les PR d'**amélioration** (Phase 4) restent **ouvertes** : elles ne sont **jamais** auto-mergées — relecture/merge par un **humain**. C'est le défaut sûr pour faire évoluer un produit déjà construit. |
 | **`dry_run` par défaut** | Un **run** sans `--execute` va jusqu'aux aperçus de PR sans écriture GitHub/état et sans auto-merge. `plan draft` persiste volontairement son brouillon (SPEC/DAG/oracles/cible) pour permettre validation et reprise ; seul `plan sync --execute` touche GitHub. |
 | **Budget dur** | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` atteints → **auto-pause** (les appels LLM sont stoppés). `COLLEGUE_RUN_DEADLINE_SECONDS` borne la durée mur. |
@@ -82,7 +83,7 @@ ou on refuse) :
 
 ## Amélioration continue (Phase 4)
 
-Une fois le MVP construit (`--improve`), le moteur ne s'arrête pas : il **fait
+Une fois le MVP **mergé et resynchronisé** (`--improve`), le moteur ne s'arrête pas : il **fait
 progresser la qualité du projet généré** en ouvrant des PR d'amélioration, sous le
 budget restant. Le cœur est une **fonction objectif déterministe** — pas un avis de
 LLM — pour qu'une promotion soit reproductible et **sans faux-rejet** :
@@ -271,7 +272,9 @@ sandbox). Le reviewer/juge suit le même chemin quand son modèle n'est pas un
 modèle Gemini (`LLM_MODEL_REVIEWER=gpt-5.4` → échantillonné dans le sandbox).
 Avec `BUILD_AUTO_MERGE=true` (défaut), un seul `--execute` construit **tout le
 MVP** (merge-bot enchaîne les tâches) ; `--improve` ajoute ensuite des PR
-d'amélioration **laissées ouvertes** pour merge humain.
+d'amélioration **laissées ouvertes** pour merge humain. Le handoff est fail-closed :
+la Phase 4 ne démarre qu'après le merge de la dernière PR BUILD et une nouvelle
+vérification de l'alignement du clone sur `origin/<base>`.
 
 ---
 

@@ -43,6 +43,7 @@ Contraintes impératives :
 """
 
 _FENCE_RE = re.compile(r"\A```(?:python|py)?[ \t]*\n(?P<code>.*)\n```[ \t]*\Z", re.DOTALL | re.IGNORECASE)
+_LEADING_THOUGHT_RE = re.compile(r"\A<thought>.*?</thought>", re.DOTALL | re.IGNORECASE)
 _FORBIDDEN_PYTEST_CONTROLS = frozenset({"skip", "skipif", "xfail", "importorskip"})
 
 
@@ -155,10 +156,20 @@ def criteria_text(task: Any) -> str:
 
 
 def normalize_pytest_source(raw: Any) -> str:
-    """Retire un fence externe éventuel puis applique :func:`normalized_text`."""
+    """Isole la réponse finale, retire son fence puis normalise le source.
+
+    Gemini peut exposer une enveloppe ``<thought>…</thought>`` avant sa réponse
+    finale. On ne la retire que lorsqu'elle est complète et strictement en tête ;
+    le reste doit encore être soit un module Python pur, soit un unique fence
+    externe couvrant toute la réponse. Une enveloppe incomplète, du texte après
+    le fence ou plusieurs réponses restent donc rejetés par la validation AST.
+    """
 
     text = "" if raw is None else str(raw)
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    thought = _LEADING_THOUGHT_RE.match(text)
+    if thought is not None:
+        text = text[thought.end() :].strip()
     match = _FENCE_RE.fullmatch(text)
     if match is not None:
         text = match.group("code")

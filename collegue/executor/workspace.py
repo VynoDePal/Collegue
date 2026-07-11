@@ -47,6 +47,30 @@ def branch_for_issue(number: int) -> str:
     return f"{BRANCH_PREFIX}{int(number)}"
 
 
+def resync_repository_base(
+    repo_source: str,
+    base: str,
+    *,
+    runner=None,
+) -> bool:
+    """Réaligne le clone source sur ``origin/<base>`` avant une nouvelle phase.
+
+    La construction autonome merge des PR sur GitHub alors que ``repo_source``
+    reste un clone local. Une phase suivante lancée sans ``fetch`` + ``reset``
+    mesurerait donc une base potentiellement périmée. Le résultat est explicite :
+    ``False`` dès qu'une des deux commandes échoue, afin que l'appelant puisse
+    rester fail-closed (notamment avant la Phase 4).
+
+    ``runner`` est injectable pour tester l'ordre merge → resync → amélioration.
+    """
+    command_runner = runner or LocalCommandRunner()
+    fetched = command_runner.run_command(["git", "fetch", "origin", base], repo_source)
+    if not getattr(fetched, "ok", False):
+        return False
+    reset = command_runner.run_command(["git", "reset", "--hard", f"origin/{base}"], repo_source)
+    return bool(getattr(reset, "ok", False))
+
+
 def prepare_workspace(
     repo_source: str,
     issue: IssueSpec,

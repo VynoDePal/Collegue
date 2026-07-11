@@ -123,9 +123,10 @@ def repo(tmp_path):
 
 
 async def test_improving_mode_chains_run_improvement(repo, manager):
-    # MVP construit (réel) + improve=True → enchaîne run_improvement sous le MÊME budget.
+    # MVP INTÉGRÉ (merged) + improve=True → run_improvement sous le MÊME budget.
     pid = manager.create_project(name="mvp")
-    manager.add_task(pid, title="T0")
+    tid = manager.add_task(pid, title="T0")
+    manager.update_task_status(tid, "merged")
     seen = {}
 
     async def fake_run_improvement(project_id, repo_source, ctx, **kw):
@@ -149,6 +150,7 @@ async def test_improving_mode_chains_run_improvement(repo, manager):
         dry_run=False,
         improve=True,
         run_improvement_fn=fake_run_improvement,
+        sync_base_fn=lambda _src, _base: True,
     )
     assert result.project_status == "improving"
     assert result.improvement is not None and result.improvement.stop_reason == "plateau"
@@ -162,7 +164,8 @@ async def test_improving_forwards_gate_test_command_as_coverage_command(repo, ma
     # commande de test du projet. Sinon measure() lance pytest --cov en dur → tests rouges
     # sur un projet à setup non trivial → garde G2 rejette toute amélioration (improve mort).
     pid = manager.create_project(name="mvp")
-    manager.add_task(pid, title="T0")
+    tid = manager.add_task(pid, title="T0")
+    manager.update_task_status(tid, "merged")
     seen = {}
 
     async def fake_run_improvement(project_id, repo_source, ctx, **kw):
@@ -185,6 +188,7 @@ async def test_improving_forwards_gate_test_command_as_coverage_command(repo, ma
         improve=True,
         gate_options={"test_command": "make check"},
         run_improvement_fn=fake_run_improvement,
+        sync_base_fn=lambda _src, _base: True,
     )
     assert seen["coverage_command"] == "make check"
 
@@ -192,7 +196,8 @@ async def test_improving_forwards_gate_test_command_as_coverage_command(repo, ma
 async def test_improving_not_chained_when_improve_false(repo, manager):
     # improve=False (défaut) → pas d'enchaînement, comportement inchangé.
     pid = manager.create_project(name="noimp")
-    manager.add_task(pid, title="T0")
+    tid = manager.add_task(pid, title="T0")
+    manager.update_task_status(tid, "merged")
 
     async def fake_run_improvement(*a, **k):  # ne doit pas être appelé
         raise AssertionError("run_improvement ne doit pas être enchaîné si improve=False")
@@ -217,11 +222,11 @@ async def test_improving_not_chained_when_improve_false(repo, manager):
 
 
 async def test_improving_chains_on_resumed_completed_mvp(repo, manager):
-    # Reprise d'un MVP DÉJÀ construit (toutes les tâches in_review en DB → processed vide)
-    # : on doit quand même basculer + enchaîner l'amélioration. C'est le cas que H5 vise.
+    # Reprise d'un MVP DÉJÀ intégré (toutes les tâches merged en DB → processed vide)
+    # : on doit quand même basculer + enchaîner l'amélioration.
     pid = manager.create_project(name="resumed")
     tid = manager.add_task(pid, title="T0")
-    manager.update_task_status(tid, "in_review")  # construite lors d'un run précédent
+    manager.update_task_status(tid, "merged")
     seen = {}
 
     async def fake_run_improvement(project_id, repo_source, ctx, **kw):
@@ -243,17 +248,90 @@ async def test_improving_chains_on_resumed_completed_mvp(repo, manager):
         dry_run=False,
         improve=True,
         run_improvement_fn=fake_run_improvement,
+        sync_base_fn=lambda _src, _base: True,
     )
     assert result.iterations == 0  # rien à reconstruire
     assert result.project_status == "improving"
     assert seen.get("called") and result.improvement.stop_reason == "plateau"
 
 
+async def test_improving_is_blocked_until_every_build_pr_is_merged(repo, manager):
+    """#580 : du code validé mais encore ``in_review`` n'est pas un MVP intégré."""
+    pid = manager.create_project(name="pending-merge")
+    tid = manager.add_task(pid, title="T0")
+    manager.update_task_status(tid, "in_review")
+    called = {"improve": False, "sync": False}
+
+    async def fake_run_improvement(*args, **kwargs):
+        called["improve"] = True
+        raise AssertionError("Phase 4 ne doit jamais voir un MVP non mergé")
+
+    def fake_sync(_src, _base):
+        called["sync"] = True
+        return True
+
+    result = await run_project(
+        pid,
+        repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget([ContinueDecision(action=ACTION_CONTINUE, reason="ok")]),
+        sandbox=_Sandbox(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        dry_run=False,
+        improve=True,
+        run_improvement_fn=fake_run_improvement,
+        sync_base_fn=fake_sync,
+    )
+    assert result.improvement is None
+    assert result.pending_reviews == [tid]
+    assert result.project_status is None
+    assert called == {"improve": False, "sync": False}
+
+
+async def test_improving_fails_closed_when_base_resync_fails(repo, manager):
+    """#580 : même avec l'état ``merged``, une base locale non vérifiée bloque Phase 4."""
+    pid = manager.create_project(name="stale-base")
+    tid = manager.add_task(pid, title="T0")
+    manager.update_task_status(tid, "merged")
+    called = {"improve": False}
+
+    async def fake_run_improvement(*args, **kwargs):
+        called["improve"] = True
+        raise AssertionError("Phase 4 ne doit pas partir d'un clone périmé")
+
+    result = await run_project(
+        pid,
+        repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget([ContinueDecision(action=ACTION_CONTINUE, reason="ok")]),
+        sandbox=_Sandbox(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        dry_run=False,
+        improve=True,
+        run_improvement_fn=fake_run_improvement,
+        sync_base_fn=lambda _src, _base: False,
+    )
+    assert result.stop_reason == "repo_sync_failed"
+    assert result.improvement is None and called["improve"] is False
+    assert result.project_status is None
+    assert manager.get_project(pid).status != "improving"
+
+
 async def test_runtime_threads_improve_flag(repo, manager):
     # Le runtime propage `improve`/`run_improvement_fn` jusqu'au driver (sinon mode mort).
     pid = manager.create_project(name="rt2", spec="# SPEC\n")
     tid = manager.add_task(pid, title="T0")
-    manager.update_task_status(tid, "in_review")  # MVP déjà construit
+    manager.update_task_status(tid, "merged")  # MVP déjà intégré
     approve_plan(manager, pid)
     seen = {}
 
@@ -279,6 +357,7 @@ async def test_runtime_threads_improve_flag(repo, manager):
         budget=None,
         improve=True,
         run_improvement_fn=fake_run_improvement,
+        sync_base_fn=lambda _src, _base: True,
     )
     assert seen.get("called")
     assert result.improvement.stop_reason == "plateau"

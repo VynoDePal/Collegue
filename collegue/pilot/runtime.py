@@ -331,12 +331,9 @@ def _resync_repo_source(repo_source: str, base: str, *, git_runner=None) -> bool
     Après un merge sur GitHub, le ``repo_source`` local est PÉRIMÉ ; la tâche
     suivante (qui le clone) ne contiendrait pas le code mergé → conflits. On
     ``fetch`` + ``reset --hard`` pour que la base reparte du MVP en cours."""
-    from collegue.executor.command import LocalCommandRunner
+    from collegue.executor.workspace import resync_repository_base
 
-    runner = git_runner or LocalCommandRunner()
-    fetched = runner.run_command(["git", "fetch", "origin", base], repo_source)
-    reset = runner.run_command(["git", "reset", "--hard", f"origin/{base}"], repo_source)
-    return bool(getattr(fetched, "ok", False) and getattr(reset, "ok", False))
+    return resync_repository_base(repo_source, base, runner=git_runner)
 
 
 async def _merge_in_review_prs(
@@ -414,6 +411,7 @@ async def run_project_from_settings(
     run_improvement_fn=None,
     audit=None,
     cost_source=None,
+    sync_base_fn=None,
 ) -> ProjectRunResult:
     """Assemble les dépendances (depuis la config) et lance ``run_project``.
 
@@ -538,6 +536,9 @@ async def run_project_from_settings(
         cost_source=cost_source,
         # #502 : refus opt-in de démarrer si le prix coder n'est pas résolvable.
         require_cost_pricing=bool(getattr(settings_obj, "REQUIRE_COST_PRICING", False)),
+        # #580 : vérification stricte juste avant Phase 4. Injectable pour les
+        # tests ; le défaut vit dans le driver (fetch + reset origin/<base>).
+        sync_base_fn=sync_base_fn,
     )
 
     try:
@@ -579,6 +580,8 @@ async def run_project_from_settings(
             # complète dès que sa PR est ouverte (plus aucune tâche prête), SANS repasser par
             # `awaiting_merge` → la boucle ci-dessus ne l'aurait pas mergée. On draine les PR
             # in_review résiduelles (travail validé) pour finir le MVP à 100%. Idempotent.
+            tasks_before_final_drain = manager.get_tasks(project_id)
+            had_pending_final_reviews = any(getattr(t, "status", None) == "in_review" for t in tasks_before_final_drain)
             await _merge_in_review_prs(
                 manager,
                 clients,
@@ -588,10 +591,44 @@ async def run_project_from_settings(
                 repo_source=repo_source,
                 base=base,
             )
+            # #580 : le premier ``completed`` peut signifier « dernière PR BUILD
+            # ouverte », pas encore « MVP intégré ». Après le drain final, si tout
+            # est réellement merged/done, une ultime passe sans tâche réalise le
+            # handoff strict (resync vérifié dans le driver) puis Phase 4. Sans
+            # cette passe, --execute --improve s'arrêterait après le merge sans
+            # jamais améliorer dans la même invocation.
+            integrated = manager.get_tasks(project_id)
+            all_integrated = bool(integrated) and all(
+                getattr(t, "status", None) in {"merged", "done"} for t in integrated
+            )
+            if (
+                improve
+                and had_pending_final_reviews
+                and result.stop_reason == "completed"
+                and result.improvement is None
+                and all_integrated
+            ):
+                result = await run_project(project_id, repo_source, ctx, **run_kwargs)
+                all_processed.extend(result.processed)
+
             # Le reporting reflète TOUTES les tâches traitées sur l'ensemble des passes
             # (sinon `processed`/`iterations` ne refléteraient que la dernière passe).
             result.processed = all_processed
             result.iterations = len(all_processed)
+
+        # #580, défense en profondeur : un adaptateur/fake qui rapporterait
+        # ``completed`` alors que l'état durable porte encore des PR BUILD
+        # ouvertes ne doit jamais produire un faux succès. Le vrai driver renvoie
+        # déjà awaiting_merge ; cette relecture couvre le drain final et les
+        # erreurs de merge tardives.
+        fresh_tasks = manager.get_tasks(project_id)
+        pending_review_ids = [t.id for t in fresh_tasks if getattr(t, "status", None) == "in_review"]
+        result.pending_reviews = pending_review_ids
+        if not dry_run and result.stop_reason == "completed" and pending_review_ids:
+            from collegue.pilot.driver import STOP_AWAITING_MERGE
+
+            result.stop_reason = STOP_AWAITING_MERGE
+            result.project_status = None
 
         # Reporting (journal de décisions) — réel uniquement (dry_run n'écrit rien).
         if not dry_run:

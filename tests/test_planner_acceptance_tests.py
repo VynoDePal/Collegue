@@ -65,6 +65,35 @@ def test_text_and_source_normalization_are_deterministic():
     assert at.normalize_pytest_source(f"```python\r\n{VALID_SOURCE}```\r\n") == VALID_SOURCE
 
 
+def test_source_normalization_accepts_one_leading_thought_envelope():
+    raw = (
+        "<thought>Analyse interne avec un exemple ambigu :\n"
+        "```python\nassert True\n```\n"
+        "</thought>"
+        f"```python\r\n{VALID_SOURCE}```\r\n"
+    )
+
+    source = at.normalize_pytest_source(raw)
+
+    assert source == VALID_SOURCE
+    at.validate_pytest_source(source)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        f"<thought>raisonnement non fermé```python\n{VALID_SOURCE}```",
+        f"préface<thought>raisonnement</thought>```python\n{VALID_SOURCE}```",
+        f"<thought>un</thought><thought>deux</thought>```python\n{VALID_SOURCE}```",
+        f"<thought>raisonnement</thought>```python\n{VALID_SOURCE}```\n```python\n{VALID_SOURCE}```",
+        f"<thought>raisonnement</thought>```python\n{VALID_SOURCE}```\nexplication finale",
+    ],
+)
+def test_source_normalization_keeps_ambiguous_thought_responses_invalid(raw):
+    with pytest.raises(ValueError, match="syntaxiquement"):
+        at.validate_pytest_source(at.normalize_pytest_source(raw))
+
+
 def test_sha256_text_hashes_exact_utf8_bytes():
     assert at.sha256_text("é\n") == hashlib.sha256("é\n".encode()).hexdigest()
 
