@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      PR585_HEAD_SHA: 3e3141913948b558cfdfdde7a12589fd1db0bfb3
+      PR585_HEAD_SHA: c0158af3754bfeeddf57b0009560d38f148c16d4
       STATE_DATABASE_URL: sqlite:////tmp/pr585-qa-state.db
       COLLEGUE_HOME: /tmp/pr585-collegue-home
       GATE_ACCEPTANCE_TESTS: "true"
