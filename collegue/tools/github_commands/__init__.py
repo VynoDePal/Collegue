@@ -16,7 +16,16 @@ from .issues import IssueCommands, IssueInfo
 from .labels import LabelCommands, LabelInfo
 from .milestones import MilestoneCommands, MilestoneInfo
 from .projects import ProjectCommands, ProjectInfo
-from .prs import Comment, FileChange, MergeResult, PRCommands, PRInfo, PRNotMergeableError
+from .prs import (
+    Comment,
+    CommitChecks,
+    FileChange,
+    MergeResult,
+    PRCommands,
+    PRFilesSnapshot,
+    PRInfo,
+    PRNotMergeableError,
+)
 from .repos import RepoCommands, RepoInfo
 from .search import SearchCommands, SearchResult
 from .workflows import WorkflowCommands, WorkflowRun
@@ -29,6 +38,8 @@ __all__ = [
     "PRInfo",
     "PRNotMergeableError",
     "FileChange",
+    "PRFilesSnapshot",
+    "CommitChecks",
     "Comment",
     "MergeResult",
     "IssueCommands",

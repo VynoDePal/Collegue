@@ -299,6 +299,9 @@ class Settings(BaseSettings):
     # dure même s'il est ajouté ici (cf. collegue.pilot.automerge.is_sensitive).
     AUTO_MERGE_PATH_ALLOWLIST: str = "docs/**,**/*.md,**/*.rst"
     AUTO_MERGE_METHOD: str = "squash"
+    # Polling CI borné : au-delà, la PR reste ouverte et Phase 4 s'arrête.
+    AUTO_MERGE_CI_TIMEOUT_SECONDS: float = 900.0
+    AUTO_MERGE_CI_POLL_SECONDS: float = 10.0
 
     # ── Auto-revert post-merge (Phase 5, H3) ─────────────────────────────────
     # Filet de sécurité de l'auto-merge : après un auto-merge, si `main` devient

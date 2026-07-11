@@ -9,7 +9,14 @@ branches protégées et fail-closed.
 import pytest
 
 from collegue.tools.base import ToolExecutionError
-from collegue.tools.github_commands import BranchCommands, MergeResult, PRCommands, PRNotMergeableError
+from collegue.tools.github_commands import (
+    BranchCommands,
+    CommitChecks,
+    MergeResult,
+    PRCommands,
+    PRFilesSnapshot,
+    PRNotMergeableError,
+)
 
 
 class _Recorder:
@@ -93,6 +100,41 @@ def test_merge_pr_empty_put_response_is_not_merged():
     pr, _ = _pr_with({"merged": False, "state": "open", "head": {"sha": "h1"}})  # put_payload None → {}
     res = pr.merge_pr("o", "r", 7)
     assert res.merged is False
+
+
+def test_merge_pr_success_without_merge_sha_fails_closed():
+    pr, _ = _pr_with(
+        {"merged": False, "state": "open", "head": {"sha": "h1"}},
+        put_payload={"merged": True, "message": "merged without sha"},
+    )
+    with pytest.raises(ToolExecutionError, match="sans SHA"):
+        pr.merge_pr("o", "r", 7, expected_head_sha="h1")
+
+
+def test_merge_pr_already_merged_still_checks_expected_head():
+    pr, _ = _pr_with({"merged": True, "state": "closed", "head": {"sha": "moved"}, "merge_commit_sha": "merge-sha"})
+    with pytest.raises(ToolExecutionError, match="tête"):
+        pr.merge_pr("o", "r", 7, expected_head_sha="evaluated")
+
+
+def test_merge_pr_checks_expected_base_branch_and_sha():
+    pr, _ = _pr_with(
+        {
+            "merged": False,
+            "state": "open",
+            "head": {"sha": "head"},
+            "base": {"ref": "main", "sha": "new-base"},
+        }
+    )
+    with pytest.raises(ToolExecutionError, match="SHA de base"):
+        pr.merge_pr(
+            "o",
+            "r",
+            7,
+            expected_head_sha="head",
+            expected_base_branch="main",
+            expected_base_sha="evaluated-base",
+        )
 
 
 # --- détection de conflit avant merge (#434) --------------------------------------
@@ -191,8 +233,100 @@ def test_find_pr_by_head_maps_merged_from_merged_at():
 
 
 def test_get_pr_maps_merged_bool():
-    pr, _ = _pr_with(_pr_payload(merged=True))
-    assert pr.get_pr("o", "r", 72).merged is True
+    pr, _ = _pr_with(
+        _pr_payload(
+            merged=True,
+            head={"ref": "collegue/issue-11", "sha": "head-sha"},
+            base={"ref": "main", "sha": "base-sha"},
+            additions=7,
+            deletions=2,
+            changed_files=3,
+            merge_commit_sha="merge-sha",
+        )
+    )
+    info = pr.get_pr("o", "r", 72)
+    assert info.merged is True
+    assert (info.head_sha, info.base_sha, info.additions, info.deletions, info.changed_files) == (
+        "head-sha",
+        "base-sha",
+        7,
+        2,
+        3,
+    )
+
+
+# --- contexte Phase 5 : fichiers/checks exhaustifs ------------------------------
+
+
+def _file(number):
+    return {
+        "filename": f"docs/{number}.md",
+        "status": "modified",
+        "additions": 1,
+        "deletions": 0,
+        "changes": 1,
+    }
+
+
+def test_pr_files_snapshot_paginates_and_proves_completeness():
+    pr = PRCommands(token=None)
+    calls = []
+
+    def fake_get(endpoint, params=None):
+        calls.append((endpoint, params))
+        return [_file(1), _file(2)] if params["page"] == 1 else [_file(3)]
+
+    pr._api_get = fake_get
+    snapshot = pr.get_pr_files_snapshot("o", "r", 7, expected_count=3, page_size=2)
+    assert isinstance(snapshot, PRFilesSnapshot)
+    assert snapshot.complete is True and [item.filename for item in snapshot.files] == [
+        "docs/1.md",
+        "docs/2.md",
+        "docs/3.md",
+    ]
+    assert [params["page"] for _, params in calls] == [1, 2]
+
+
+def test_pr_files_snapshot_fails_closed_on_truncation_or_duplicate():
+    pr = PRCommands(token=None)
+    pr._api_get = lambda endpoint, params=None: [_file(1), _file(1)]
+    duplicate = pr.get_pr_files_snapshot("o", "r", 7, expected_count=2, page_size=2, max_pages=1)
+    assert duplicate.complete is False
+
+    pr._api_get = lambda endpoint, params=None: [_file(1)]
+    truncated = pr.get_pr_files_snapshot("o", "r", 7, expected_count=2, page_size=2, max_pages=1)
+    assert truncated.complete is False
+
+
+def test_commit_checks_aggregate_check_runs_and_latest_legacy_statuses():
+    pr = PRCommands(token=None)
+
+    def fake_get(endpoint, params=None):
+        if endpoint.endswith("/check-runs"):
+            return {
+                "total_count": 2,
+                "check_runs": [
+                    {"name": "tests", "status": "completed", "conclusion": "success"},
+                    {"name": "docker", "status": "in_progress", "conclusion": None},
+                ],
+            }
+        assert endpoint.endswith("/statuses")
+        return [
+            {"context": "legacy", "state": "success"},
+            {"context": "legacy", "state": "failure"},  # ancien verdict ignoré
+        ]
+
+    pr._api_get = fake_get
+    checks = pr.get_commit_checks("o", "r", "sha")
+    assert isinstance(checks, CommitChecks) and checks.complete is True
+    assert checks.states == ["success", "pending", "success"]
+    assert checks.names == ["tests", "docker", "legacy"]
+
+
+def test_commit_checks_malformed_endpoint_is_incomplete():
+    pr = PRCommands(token=None)
+    pr._api_get = lambda endpoint, params=None: {} if endpoint.endswith("/check-runs") else []
+    assert pr.get_commit_checks("o", "r", "sha").complete is False
 
 
 # --- delete_branch --------------------------------------------------------------

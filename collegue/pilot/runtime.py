@@ -504,6 +504,39 @@ async def run_project_from_settings(
     # ne doit pas partir d'une base sans le code mergé de sa dépendance (#411).
     require_merged = True if auto_merge else bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False))
 
+    # Phase 5-A : uniquement pour les promotions Phase 4. OFF/dry-run n'installe
+    # même pas le hook, donc aucun GET GitHub/check/guard supplémentaire.
+    improvement_options: dict = {}
+    if not dry_run:
+        from collegue.pilot.automerge import RiskPolicy, auto_merge_promotion
+        from collegue.pilot.guard import RevertPolicy
+
+        phase5_policy = RiskPolicy.from_settings(settings_obj)
+        if phase5_policy.enabled:
+            revert_policy = RevertPolicy.from_settings(settings_obj)
+
+            async def _phase5_promotion_hook(pr):
+                return await auto_merge_promotion(
+                    pr,
+                    policy=phase5_policy,
+                    revert_policy=revert_policy,
+                    clients=clients,
+                    owner=owner,
+                    repo=repo,
+                    repo_source=repo_source,
+                    base=base,
+                    sandbox=gate_sandbox,
+                    manager=manager,
+                    project_id=project_id,
+                    audit=audit,
+                    ci_timeout_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_TIMEOUT_SECONDS", 900) or 0),
+                    ci_poll_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_POLL_SECONDS", 10) or 0),
+                    sync_base_fn=sync_base_fn,
+                    continue_fn=budget.should_continue,
+                )
+
+            improvement_options["promotion_hook"] = _phase5_promotion_hook
+
     run_kwargs = dict(
         agent=agent,
         owner=owner,
@@ -521,6 +554,7 @@ async def run_project_from_settings(
         # dernier tour, une fois tout mergé. La phase improve n'auto-merge pas ses PR.
         improve=improve,
         run_improvement_fn=run_improvement_fn,
+        improvement_options=improvement_options,
         # Retry au niveau tâche (#420) : le chemin assemblé est résilient par défaut
         # (TASK_MAX_ATTEMPTS=3 en config) ; le module driver isolé reste, lui, à 1.
         max_task_attempts=getattr(settings_obj, "TASK_MAX_ATTEMPTS", 3),

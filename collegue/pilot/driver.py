@@ -522,6 +522,7 @@ async def run_project(
     cost_source: Optional[CostSource] = None,
     improve: bool = False,
     run_improvement_fn=None,
+    improvement_options: Optional[dict] = None,
     max_task_attempts: int = DEFAULT_MAX_TASK_ATTEMPTS,
     retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     sleep_fn=None,
@@ -550,6 +551,8 @@ async def run_project(
     d'amélioration (Phase 4) **sous le budget restant** et attache l'``ImprovementResult``
     à ``result.improvement``. Défaut faux → comportement inchangé.
     ``run_improvement_fn`` : injection de test ; défaut = ``collegue.improve.run_improvement``.
+    ``improvement_options`` : options produit de Phase 4/5 (notamment le hook
+    d'auto-merge). Dictionnaire copié avant usage pour éviter toute mutation du caller.
 
     ``max_task_attempts`` (#420) : tentatives max par tâche. À 1 (défaut du module),
     tout échec est terminal (comportement historique). Au-delà, un échec re-file la
@@ -1152,11 +1155,11 @@ async def run_project(
         # dur — sinon les tests virent au rouge sur un projet à setup non trivial (make,
         # monorepo, service DB) et la garde dure G2 rejette toute amélioration. Symétrie
         # avec ``execute_issue`` qui reçoit déjà ``gate_options``.
-        improve_extra: dict = {}
+        improve_extra: dict = dict(improvement_options or {})
         if gate_options:
             improve_test_command = gate_options.get("test_command")
             if improve_test_command:
-                improve_extra["coverage_command"] = str(improve_test_command)
+                improve_extra.setdefault("coverage_command", str(improve_test_command))
         improvement = await run_imp(
             project_id,
             repo_source,
@@ -1174,6 +1177,11 @@ async def run_project(
             dry_run=dry_run,
             **improve_extra,
         )
+        improvement_stop = str(getattr(improvement, "stop_reason", "") or "")
+        if improvement_stop in {"auto_merge_blocked", "post_merge_guard_failed"}:
+            # Un BUILD réussi ne doit pas masquer un arrêt critique Phase 5 dans
+            # le verdict global ni dans RUN_STOP / le journal opérateur.
+            stop_reason = improvement_stop
 
     # Le motif peut changer pendant la barrière de handoff (#580) : journaliser
     # seulement le verdict FINAL, pas le faux ``completed`` calculé avant resync.
