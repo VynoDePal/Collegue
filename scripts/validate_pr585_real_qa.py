@@ -20,6 +20,22 @@ from collegue.planner.spec_generator import Spec, persist_spec
 from collegue.state import ProjectStateManager
 
 
+class RecordingContext:
+    """Conserve la réponse brute du modèle pour diagnostiquer un rejet fail-closed."""
+
+    def __init__(self, inner: LocalSamplingContext, path: Path) -> None:
+        self._inner = inner
+        self._path = path
+
+    async def sample(self, **kwargs):
+        result = await self._inner.sample(**kwargs)
+        text = str(getattr(result, "text", "") or "")
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(text, encoding="utf-8")
+        self._path.chmod(0o600)
+        return result
+
+
 async def main() -> None:
     manager = ProjectStateManager.from_url(settings.STATE_DATABASE_URL, create=False)
     spec = Spec(
@@ -45,7 +61,8 @@ async def main() -> None:
         depends_on=[],
     )
     task = manager.get_task(task_id)
-    ctx = LocalSamplingContext.from_settings(settings)
+    inner_ctx = LocalSamplingContext.from_settings(settings)
+    ctx = RecordingContext(inner_ctx, Path("qa-validation/pr585-raw-model-response.txt"))
     try:
         await generate_acceptance_tests(
             spec,
@@ -57,7 +74,7 @@ async def main() -> None:
             max_tokens=2048,
         )
     finally:
-        await ctx.aclose()
+        await inner_ctx.aclose()
 
     project = manager.get_project(project_id)
     tasks = manager.get_tasks(project_id)
