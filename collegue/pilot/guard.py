@@ -34,9 +34,10 @@ _SHELL_OPERATORS = (";", "|", "&", "`", "$(", ">", "<", "\n")
 
 @dataclass(frozen=True)
 class RevertPolicy:
-    """Politique d'auto-revert (suit l'auto-merge ; off si l'auto-merge est off)."""
+    """Politique de garde santé et de préparation du revert."""
 
     enabled: bool = False
+    revert_enabled: bool = True
     health_command: str = DEFAULT_HEALTH_COMMAND
 
     @classmethod
@@ -46,7 +47,10 @@ class RevertPolicy:
         auto_merge = bool(getattr(settings, "AUTO_MERGE_ENABLED", False))
         auto_revert = bool(getattr(settings, "AUTO_REVERT_ENABLED", True))
         return cls(
-            enabled=auto_merge and auto_revert,
+            # La santé reste vérifiée dès que l'auto-merge est actif, même si
+            # l'opérateur désactive explicitement la préparation du revert.
+            enabled=auto_merge,
+            revert_enabled=auto_merge and auto_revert,
             health_command=str(
                 getattr(settings, "AUTO_REVERT_HEALTH_COMMAND", DEFAULT_HEALTH_COMMAND) or DEFAULT_HEALTH_COMMAND
             ),
@@ -119,6 +123,12 @@ def check_main_health(
             present = runner.run_command([git_bin, "cat-file", "-e", f"{merge_sha}^{{commit}}"], workspace)
             if not present.ok:
                 return HealthResult(False, "le clone ne contient pas le commit mergé — non concluant")
+            checkout = runner.run_command([git_bin, "checkout", "--detach", merge_sha], workspace)
+            if not checkout.ok:
+                return HealthResult(False, "impossible de positionner la garde sur le commit mergé — non concluant")
+            exact = runner.run_command([git_bin, "rev-parse", "HEAD"], workspace)
+            if not exact.ok or exact.stdout.strip() != merge_sha:
+                return HealthResult(False, "HEAD de la garde différent du commit mergé — non concluant")
         try:
             result = sandbox.run_tests(workspace, command)
         except Exception as exc:  # sandbox indisponible → non concluant → non sain
@@ -170,12 +180,22 @@ def guard_post_merge(
     # ce cas — main rouge ET revert impossible — est le plus critique et doit
     # ESCALADER vers un humain, pas passer pour un succès.
     revert: Optional[RevertResult] = None
-    try:
-        revert = prepare_revert(repo_source, merge_sha, merge_parent=merge_parent, runner=runner, git_bin=git_bin)
-    except RevertError:
-        revert = None
+    command_runner = runner or LocalCommandRunner()
+    source_head = command_runner.run_command([git_bin, "rev-parse", "HEAD"], repo_source)
+    source_is_exact = bool(source_head.ok and source_head.stdout.strip() == merge_sha)
+    if policy.revert_enabled and source_is_exact:
+        try:
+            revert = prepare_revert(
+                repo_source,
+                merge_sha,
+                merge_parent=merge_parent,
+                runner=command_runner,
+                git_bin=git_bin,
+            )
+        except RevertError:
+            revert = None
     reverted = bool(revert and revert.reverted)
-    revert_failed = not reverted
+    revert_failed = bool(policy.revert_enabled and not reverted)
     branch = getattr(revert, "branch", None)
     if revert_failed and revert is not None and getattr(revert, "workspace", None):
         # #466 : un revert en échec (abort, workspace laissé propre) n'a produit
@@ -183,7 +203,13 @@ def guard_post_merge(
         # Un revert RÉUSSI garde le sien : sa branche locale est le livrable
         # (push humain / H3) ; le balayage d'ancienneté le ramassera au-delà.
         cleanup_workspace(revert.workspace)
-    if revert_failed:
+    if not policy.revert_enabled:
+        summary = f"Main rouge après merge {merge_sha[:12]} — revert désactivé, intervention requise ({health.reason})"
+        audit_kind = "auto_revert_disabled"
+    elif not source_is_exact:
+        summary = f"ÉCHEC du revert de {merge_sha[:12]} — source non resynchronisée, intervention requise"
+        audit_kind = "auto_revert_failed"
+    elif revert_failed:
         summary = f"ÉCHEC du revert de {merge_sha[:12]} — intervention humaine requise ({health.reason})"
         audit_kind = "auto_revert_failed"
     else:

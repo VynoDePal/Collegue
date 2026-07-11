@@ -11,10 +11,12 @@ from collegue.pilot.automerge import (
     DEFAULT_PATH_ALLOWLIST,
     AutoMergeDecision,
     RiskPolicy,
+    auto_merge_promotion,
     evaluate_automerge,
     is_sensitive,
     maybe_auto_merge,
 )
+from collegue.tools.github_commands import CommitChecks, FileChange, PRFilesSnapshot, PRInfo
 
 GREEN = ["success", "success"]
 
@@ -188,9 +190,27 @@ class _PRs:
         self.merged_calls = []
 
     def merge_pr(
-        self, owner, repo, number, *, method="squash", commit_title=None, commit_message=None, expected_head_sha=None
+        self,
+        owner,
+        repo,
+        number,
+        *,
+        method="squash",
+        commit_title=None,
+        commit_message=None,
+        expected_head_sha=None,
+        expected_base_branch=None,
+        expected_base_sha=None,
     ):
-        self.merged_calls.append({"number": number, "method": method, "sha": expected_head_sha})
+        self.merged_calls.append(
+            {
+                "number": number,
+                "method": method,
+                "sha": expected_head_sha,
+                "base": expected_base_branch,
+                "base_sha": expected_base_sha,
+            }
+        )
         return SimpleNamespace(merged=True, sha="merged-sha", already_merged=False)
 
 
@@ -264,7 +284,7 @@ def test_maybe_auto_merge_real_calls_merge_pr():
         dry_run=False,
     )
     assert out.merged is True
-    assert prs.merged_calls == [{"number": 42, "method": "squash", "sha": "abc123"}]
+    assert prs.merged_calls == [{"number": 42, "method": "squash", "sha": "abc123", "base": None, "base_sha": None}]
 
 
 def test_evaluate_returns_decision_type():
@@ -306,3 +326,154 @@ def test_maybe_auto_merge_emits_audit_events():
     )
     ev = audit.events[-1]
     assert ev[0] == "automerge_decision" and ev[1]["allowed"] is True and ev[1]["merged"] is True
+
+
+# --- câblage produit Phase 5-A --------------------------------------------------
+
+
+def _phase5_info(*, head_sha="head", base_sha="base", filename="docs/x.md"):
+    return PRInfo(
+        number=42,
+        title="docs",
+        state="open",
+        html_url="https://gh/pr/42",
+        user="bot",
+        base_branch="main",
+        head_branch="improve/docs",
+        head_sha=head_sha,
+        base_sha=base_sha,
+        additions=1,
+        deletions=0,
+        changed_files=1,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+
+
+class _Phase5PRs(_PRs):
+    def __init__(self, *, infos=None, check_states=("success",), filename="docs/x.md"):
+        super().__init__()
+        self.infos = list(infos or [_phase5_info(filename=filename)])
+        self.check_states = list(check_states)
+        self.reads = []
+        self.filename = filename
+
+    def get_pr(self, owner, repo, number):
+        self.reads.append("pr")
+        return self.infos.pop(0) if len(self.infos) > 1 else self.infos[0]
+
+    def get_pr_files_snapshot(self, owner, repo, number, expected_count=None):
+        self.reads.append("files")
+        return PRFilesSnapshot(
+            files=[FileChange(filename=self.filename, status="modified", additions=1, deletions=0, changes=1)],
+            complete=True,
+            expected_count=1,
+        )
+
+    def get_commit_checks(self, owner, repo, sha):
+        self.reads.append(("checks", sha))
+        states = (
+            self.check_states.pop(0)
+            if self.check_states and isinstance(self.check_states[0], (list, tuple))
+            else self.check_states
+        )
+        return CommitChecks(states=list(states), names=["ci"] * len(states), complete=True)
+
+
+async def test_phase5_success_merges_resyncs_then_guards():
+    prs = _Phase5PRs()
+    events = []
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        ci_timeout_seconds=0,
+        sync_base_fn=lambda src, base: events.append(("sync", src, base)) or True,
+        guard_fn=lambda src, sha, **kw: (
+            events.append(("guard", src, sha)) or SimpleNamespace(checked=True, healthy=True, reason="vert")
+        ),
+    )
+    assert out.merged is True and out.continue_loop is True
+    assert prs.merged_calls == [{"number": 42, "method": "squash", "sha": "head", "base": "main", "base_sha": "base"}]
+    assert events == [("sync", "/repo", "main"), ("guard", "/repo", "merged-sha")]
+
+
+async def test_phase5_pending_timeout_leaves_pr_open_and_stops():
+    prs = _Phase5PRs(check_states=("pending",))
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        ci_timeout_seconds=0,
+    )
+    assert out.merged is False and out.continue_loop is False and "délai" in out.reason
+    assert prs.merged_calls == []
+
+
+async def test_phase5_head_move_is_rejected_before_merge():
+    prs = _Phase5PRs(infos=[_phase5_info(), _phase5_info(head_sha="moved")])
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+    )
+    assert out.merged is False and "bougé" in out.reason and prs.merged_calls == []
+
+
+async def test_phase5_guard_red_stops_after_merge():
+    prs = _Phase5PRs()
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        sync_base_fn=lambda src, base: True,
+        guard_fn=lambda *a, **kw: SimpleNamespace(checked=True, healthy=False, reverted=True, reason="rouge"),
+    )
+    assert out.merged is True and out.continue_loop is False
+    assert out.stop_reason == "post_merge_guard_failed"
+
+
+async def test_phase5_off_and_dry_run_perform_no_github_reads():
+    class _NoReads:
+        def get_pr(self, *args, **kwargs):
+            raise AssertionError("aucun GET attendu")
+
+    clients = _clients(_NoReads())
+    for policy, dry_run in ((RiskPolicy(), False), (_policy(), True)):
+        out = await auto_merge_promotion(
+            SimpleNamespace(number=42),
+            policy=policy,
+            revert_policy=SimpleNamespace(enabled=True),
+            clients=clients,
+            owner="o",
+            repo="r",
+            repo_source="/repo",
+            base="main",
+            sandbox=object(),
+            dry_run=dry_run,
+        )
+        assert out.continue_loop is True and out.merged is False

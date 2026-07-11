@@ -20,7 +20,9 @@ from collegue.pilot.audit import (
 from collegue.pilot.automerge import (
     AutoMergeDecision,
     AutoMergeOutcome,
+    PromotionAutoMergeOutcome,
     RiskPolicy,
+    auto_merge_promotion,
     evaluate_automerge,
     is_sensitive,
     maybe_auto_merge,
@@ -121,8 +123,10 @@ __all__ = [
     "RiskPolicy",
     "AutoMergeDecision",
     "AutoMergeOutcome",
+    "PromotionAutoMergeOutcome",
     "evaluate_automerge",
     "maybe_auto_merge",
+    "auto_merge_promotion",
     "is_sensitive",
     # H3 (Phase 5) — garde post-merge (auto-revert)
     "RevertPolicy",

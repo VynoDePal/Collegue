@@ -175,8 +175,10 @@ Stages: `planner` → `pilote` → `executor` → `improve`, on a durable-state
 displayed hash, and only `plan sync --execute` writes to GitHub. The hard budget
 auto-pauses the engine. In a real BUILD, a **merge-bot** auto-merges each task to
 construct the MVP (`BUILD_AUTO_MERGE`, on by default); the **improvement** phase
-leaves its PRs **open for human merge** (§6). Risk-gated auto-merge, auto-revert and
-the pilot MCP tool stay **off by default** and fail-closed. The coder can run via a
+leaves its PRs **open for human merge** (§6) by default. Phase 5 risk-gated
+auto-merge is wired but remains opt-in: complete CI, a stable SHA, base resync and
+post-merge health are mandatory. Auto-revert and the pilot MCP tool stay **off by
+default** and fail-closed. The coder can run via a
 ChatGPT/Codex **subscription** (`$0` API cost).
 
 ```bash

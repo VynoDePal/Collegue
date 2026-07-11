@@ -74,7 +74,7 @@ class _PRs:
         return None
 
     def create_pr(self, owner, repo, title, head, base, body):
-        self.created.append({"head": head, "body": body})
+        self.created.append({"head": head, "base": base, "body": body})
         return SimpleNamespace(number=101, html_url="https://gh/pull/101", head_branch=head)
 
 
@@ -163,6 +163,106 @@ async def test_real_run_promotes_and_persists_metric(git_repo, manager):
     # compteur de round, pas une vraie issue → ne fermerait pas une issue au hasard).
     body = clients.prs.created[0]["body"]
     assert "Closes #" not in body
+
+
+async def test_phase5_hook_runs_immediately_and_auto_merged_round_returns_to_main(git_repo, manager):
+    pid = manager.create_project(name="phase5")
+    clients = _clients()
+    calls = []
+
+    async def hook(pr):
+        calls.append(pr.number)
+        return SimpleNamespace(merged=True, continue_loop=True, stop_reason=None, reason="main verte")
+
+    result = await run_improvement(
+        pid,
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget((CONT, PAUSE)),
+        clients=clients,
+        dry_run=False,
+        measure_fn=_ScriptedMeasure([_metrics(0.5), _metrics(0.7)]),
+        promotion_hook=hook,
+    )
+    assert calls == [101]
+    assert result.promoted[0].auto_merged is True
+    assert result.stop_reason == "paused_budget"
+    assert clients.prs.created[0]["base"] == "main"
+
+
+async def test_phase5_refusal_stops_before_any_child_pr(git_repo, manager):
+    clients = _clients()
+
+    async def hook(pr):
+        return SimpleNamespace(
+            merged=False,
+            continue_loop=False,
+            stop_reason="auto_merge_blocked",
+            reason="CI absente",
+        )
+
+    result = await run_improvement(
+        manager.create_project(name="blocked"),
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=clients,
+        dry_run=False,
+        measure_fn=_ScriptedMeasure([_metrics(0.5), _metrics(0.7), _metrics(0.7), _metrics(0.9)]),
+        promotion_hook=hook,
+    )
+    assert result.stop_reason == "auto_merge_blocked"
+    assert len(clients.prs.created) == 1 and len(result.promoted) == 1
+    assert "CI absente" in result.rejected[-1][1]
+
+
+async def test_phase5_guard_failure_reason_propagates(git_repo, manager):
+    async def hook(pr):
+        return SimpleNamespace(
+            merged=True,
+            continue_loop=False,
+            stop_reason="post_merge_guard_failed",
+            reason="main rouge",
+        )
+
+    result = await run_improvement(
+        manager.create_project(name="red"),
+        git_repo,
+        ctx=None,
+        agent=FakeCodeAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        dry_run=False,
+        measure_fn=_ScriptedMeasure([_metrics(0.5), _metrics(0.7)]),
+        promotion_hook=hook,
+    )
+    assert result.stop_reason == "post_merge_guard_failed"
+    assert result.promoted[0].auto_merged is True
+
+
+async def test_phase5_hook_is_never_called_in_dry_run(git_repo, manager):
+    def forbidden(_pr):
+        raise AssertionError("hook interdit en dry-run")
+
+    result = await _run(
+        git_repo,
+        manager,
+        measure_seq=[_metrics(0.5), _metrics(0.7), _metrics(0.7), _metrics(0.7)],
+        plateau_rounds=1,
+        promotion_hook=forbidden,
+    )
+    assert result.promoted and result.promoted[0].auto_merged is False
 
 
 async def test_importing_improve_stays_light():

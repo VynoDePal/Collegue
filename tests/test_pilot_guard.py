@@ -115,6 +115,23 @@ def test_health_clone_missing_commit_is_failclosed(repo):
     assert res.healthy is False and "ne contient pas" in res.reason
 
 
+def test_health_checks_out_exact_merge_commit_before_tests(repo):
+    src, _ = repo
+    previous = subprocess.run(
+        ["git", "rev-parse", "HEAD^"], cwd=src, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    class _ExactSandbox(_Sandbox):
+        def run_tests(self, workspace, command="pytest -q"):
+            seen = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            assert seen == previous
+            return super().run_tests(workspace, command)
+
+    assert check_main_health(src, sandbox=_ExactSandbox(), merge_sha=previous).healthy is True
+
+
 # --- guard_post_merge -----------------------------------------------------------
 
 
@@ -170,6 +187,25 @@ def test_guard_invalid_sha_escalates_without_raising(repo):
     assert out.revert_failed is True and out.reverted is False
 
 
+def test_guard_red_with_revert_disabled_still_checks_and_escalates(repo):
+    src, sha = repo
+    policy = RevertPolicy(enabled=True, revert_enabled=False, health_command="pytest -q")
+    out = guard_post_merge(src, sha, sandbox=_Sandbox(exit_code=1), policy=policy)
+    assert out.checked is True and out.healthy is False
+    assert out.reverted is False and out.revert_failed is False
+    assert "désactivé" in out.reason
+
+
+def test_guard_refuses_revert_when_source_head_is_not_merged_commit(repo):
+    src, _ = repo
+    previous = subprocess.run(
+        ["git", "rev-parse", "HEAD^"], cwd=src, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    out = guard_post_merge(src, previous, sandbox=_Sandbox(exit_code=1), policy=_policy())
+    assert out.reverted is False and out.revert_failed is True
+    assert "source non resynchronisée" in out.reason
+
+
 # --- RevertPolicy.from_settings -------------------------------------------------
 
 
@@ -185,4 +221,4 @@ def test_policy_on_follows_automerge_by_default():
 
 def test_policy_can_be_disabled_explicitly():
     p = RevertPolicy.from_settings(SimpleNamespace(AUTO_MERGE_ENABLED=True, AUTO_REVERT_ENABLED=False))
-    assert p.enabled is False  # filet désactivé explicitement (risqué)
+    assert p.enabled is True and p.revert_enabled is False  # santé vérifiée, revert désactivé

@@ -14,11 +14,13 @@ l'exécuteur sont importées **paresseusement** pour garder ``collegue.improve``
 léger. Le câblage du **mode `improving`** du pilote (enchaîner build → amélioration)
 est laissé à l'appelant/F4 (optionnel) — ce module fournit l'entrée ``run_improvement``.
 
-Module **isolé** : non câblé au runtime.
+Le runtime l'appelle après le handoff BUILD → IMPROVE et peut lui fournir le hook
+Phase 5 d'auto-merge ; sans ce hook, le comportement reste strictement humain.
 """
 
 from __future__ import annotations
 
+import inspect
 import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -39,6 +41,8 @@ STOP_PLATEAU = "plateau"  # rendements décroissants : les gains plafonnent
 STOP_PAUSED_BUDGET = "paused_budget"
 STOP_DEADLINE = "deadline_reached"
 STOP_SAFETY_CAP = "safety_cap"
+STOP_AUTOMERGE_BLOCKED = "auto_merge_blocked"
+STOP_POST_MERGE_GUARD = "post_merge_guard_failed"
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,7 @@ class PromotedImprovement:
     dimension: str
     delta: float
     pr_number: Optional[int]
+    auto_merged: bool = False
 
 
 @dataclass
@@ -162,6 +167,7 @@ async def run_improvement(
     weights: CompositeWeights = DEFAULT_WEIGHTS,
     coverage_command: str = DEFAULT_COVERAGE_COMMAND,
     measure_fn=measure,
+    promotion_hook=None,
 ) -> ImprovementResult:
     """Fait tourner la boucle d'amélioration jusqu'au plateau ou au budget.
 
@@ -174,6 +180,12 @@ async def run_improvement(
     chaque PR a pour base la branche de la promotion précédente (la 1ʳᵉ sur ``base``),
     pour des diffs incrémentaux mergeables dans l'ordre sans conflit (le compounding
     rendrait sinon les PR cumulatives).
+
+    ``promotion_hook`` (Phase 5, opt-in) est appelé immédiatement après chaque PR
+    réelle. Il doit réaliser la séquence CI → merge → resync → garde. La boucle
+    s'arrête au premier refus : continuer créerait une PR enfant sur une branche
+    non intégrée. Absent (défaut) : comportement historique, PR stackées et merge
+    humain. Jamais appelé en dry-run.
     """
     # Imports paresseux : garder l'import de ``collegue.improve`` léger. ``pilot.budget``
     # est aussi lazy car importer le sous-module déclenche ``pilot/__init__`` (→ driver
@@ -325,17 +337,44 @@ async def run_improvement(
                 # Le numéro est un compteur de round, pas une vraie issue → pas de Closes.
                 closes_issue=False,
             )
+            hook_outcome = None
+            hook_error = None
+            if not dry_run and promotion_hook is not None:
+                if pr.skipped:
+                    # Une PR retrouvée peut avoir été modifiée hors du snapshot de
+                    # ce round : pas d'auto-merge sans preuve d'identité complète.
+                    hook_error = "PR préexistante : auto-merge refusé sans nouvelle preuve de livraison"
+                else:
+                    try:
+                        hook_outcome = promotion_hook(pr)
+                        if inspect.isawaitable(hook_outcome):
+                            hook_outcome = await hook_outcome
+                    except Exception as exc:  # noqa: BLE001 - hook externe fail-closed
+                        hook_error = f"hook Phase 5 en erreur: {exc}"
             if not dry_run:
                 persist(manager, project_id, after)
-                # Stacking (#554) : la PROCHAINE PR se basera sur celle-ci (chaîne de PR
-                # mergeables dans l'ordre). Uniquement en réel (en dry_run aucune branche
-                # n'existe → on garde la base d'origine).
-                last_promoted_branch = pr.head
-            # Compounding (#545) : mémorise le diff promu (corrigé) pour le réappliquer
-            # aux rounds suivants (baseline cumulative) — y compris en dry_run.
-            promoted_diffs.append(final_diff)
-            result.promoted.append(PromotedImprovement(dimension.value, gate.delta, pr.number))
+            auto_merged = bool(getattr(hook_outcome, "merged", False))
+            if auto_merged:
+                # Le hook a resynchronisé repo_source sur main : le diff promu y est
+                # déjà présent. Le réappliquer via compounding le dupliquerait.
+                last_promoted_branch = None
+                promoted_diffs.clear()
+            else:
+                if not dry_run:
+                    # Stacking humain historique (#554).
+                    last_promoted_branch = pr.head
+                promoted_diffs.append(final_diff)
+            result.promoted.append(PromotedImprovement(dimension.value, gate.delta, pr.number, auto_merged))
             plateau = 0
+            if hook_error is not None:
+                result.rejected.append((dimension.value, hook_error))
+                result.stop_reason = STOP_AUTOMERGE_BLOCKED
+                break
+            if hook_outcome is not None and not bool(getattr(hook_outcome, "continue_loop", False)):
+                reason = str(getattr(hook_outcome, "reason", "auto-merge non abouti"))
+                result.rejected.append((dimension.value, reason))
+                result.stop_reason = str(getattr(hook_outcome, "stop_reason", None) or STOP_AUTOMERGE_BLOCKED)
+                break
         else:
             result.rejected.append((dimension.value, gate.reason))
             plateau += 1

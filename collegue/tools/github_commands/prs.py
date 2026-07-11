@@ -45,6 +45,14 @@ class PRInfo(BaseModel):
     # #442 : une PR ``closed`` peut l'être par MERGE ou par simple fermeture —
     # la réconciliation GitHub→état a besoin de distinguer les deux.
     merged: bool = False
+    # Contexte autoritatif requis par l'auto-merge Phase 5. Les endpoints de liste
+    # ne garantissent pas les statistiques, d'où des défauts conservateurs.
+    head_sha: Optional[str] = None
+    base_sha: Optional[str] = None
+    merge_commit_sha: Optional[str] = None
+    additions: Optional[int] = None
+    deletions: Optional[int] = None
+    changed_files: Optional[int] = None
 
 
 class IssueInfo(BaseModel):
@@ -75,6 +83,22 @@ class FileChange(BaseModel):
     deletions: int
     changes: int = 0
     patch: Optional[str] = None
+
+
+class PRFilesSnapshot(BaseModel):
+    """Liste paginée des fichiers d'une PR et preuve de complétude."""
+
+    files: List[FileChange] = []
+    complete: bool = False
+    expected_count: int = 0
+
+
+class CommitChecks(BaseModel):
+    """État agrégé des check-runs et commit statuses d'un SHA."""
+
+    states: List[str] = []
+    names: List[str] = []
+    complete: bool = False
 
 
 class Comment(BaseModel):
@@ -112,6 +136,12 @@ class PRCommands(GitHubClient):
                 updated_at=pr["updated_at"],
                 labels=[l["name"] for l in pr.get("labels", [])],
                 draft=pr.get("draft", False),
+                head_sha=(pr.get("head") or {}).get("sha"),
+                base_sha=(pr.get("base") or {}).get("sha"),
+                merge_commit_sha=pr.get("merge_commit_sha"),
+                additions=pr.get("additions"),
+                deletions=pr.get("deletions"),
+                changed_files=pr.get("changed_files"),
             )
             for pr in data[:limit]
         ]
@@ -147,6 +177,12 @@ class PRCommands(GitHubClient):
             draft=pr.get("draft", False),
             # L'endpoint de liste n'a pas ``merged`` (bool) mais ``merged_at``.
             merged=bool(pr.get("merged") or pr.get("merged_at")),
+            head_sha=(pr.get("head") or {}).get("sha"),
+            base_sha=(pr.get("base") or {}).get("sha"),
+            merge_commit_sha=pr.get("merge_commit_sha"),
+            additions=pr.get("additions"),
+            deletions=pr.get("deletions"),
+            changed_files=pr.get("changed_files"),
         )
 
     def get_pr(self, owner: str, repo: str, pr_number: int) -> PRInfo:
@@ -164,6 +200,12 @@ class PRCommands(GitHubClient):
             labels=[l["name"] for l in data.get("labels", [])],
             draft=data.get("draft", False),
             merged=bool(data.get("merged") or data.get("merged_at")),
+            head_sha=(data.get("head") or {}).get("sha"),
+            base_sha=(data.get("base") or {}).get("sha"),
+            merge_commit_sha=data.get("merge_commit_sha"),
+            additions=data.get("additions"),
+            deletions=data.get("deletions"),
+            changed_files=data.get("changed_files"),
         )
 
     def get_pr_files(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[FileChange]:
@@ -181,6 +223,143 @@ class PRCommands(GitHubClient):
             )
             for f in data[:limit]
         ]
+
+    def get_pr_files_snapshot(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        expected_count: Optional[int] = None,
+        page_size: int = 100,
+        max_pages: int = 30,
+    ) -> PRFilesSnapshot:
+        """Récupère *tous* les fichiers d'une PR ou marque le résultat incomplet.
+
+        L'endpoint GitHub est paginé et plafonné à 100 éléments. L'auto-merge ne
+        doit jamais juger un diff sur sa seule première page : la complétude est
+        prouvée en comparant le nombre reçu à ``changed_files`` de la PR.
+        """
+        page_size = min(100, max(1, int(page_size)))
+        max_pages = max(1, int(max_pages))
+        if expected_count is None:
+            expected_count = self.get_pr(owner, repo, pr_number).changed_files
+        try:
+            expected = int(expected_count)
+        except (TypeError, ValueError):
+            return PRFilesSnapshot(files=[], complete=False, expected_count=0)
+        if expected < 0:
+            return PRFilesSnapshot(files=[], complete=False, expected_count=expected)
+        if expected == 0:
+            return PRFilesSnapshot(files=[], complete=True, expected_count=0)
+
+        files: List[FileChange] = []
+        for page in range(1, max_pages + 1):
+            data = self._api_get(
+                f"/repos/{owner}/{repo}/pulls/{pr_number}/files",
+                {"per_page": page_size, "page": page},
+            )
+            if not isinstance(data, list):
+                return PRFilesSnapshot(files=files, complete=False, expected_count=expected)
+            files.extend(
+                FileChange(
+                    filename=f["filename"],
+                    status=f["status"],
+                    additions=f.get("additions", 0),
+                    deletions=f.get("deletions", 0),
+                    changes=f.get("changes", 0),
+                    patch=f.get("patch", "")[:2000] if f.get("patch") else None,
+                )
+                for f in data
+            )
+            if len(data) < page_size or len(files) >= expected:
+                break
+        names = [item.filename for item in files]
+        stats_valid = all(item.additions >= 0 and item.deletions >= 0 and item.changes >= 0 for item in files)
+        complete = len(files) == expected and len(set(names)) == len(names) and stats_valid
+        return PRFilesSnapshot(files=files, complete=complete, expected_count=expected)
+
+    def get_commit_checks(
+        self,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        *,
+        page_size: int = 100,
+        max_pages: int = 10,
+    ) -> CommitChecks:
+        """Agrège check-runs et commit statuses, avec pagination fail-closed.
+
+        Un check non terminé devient ``pending``. Une réponse partielle ou
+        malformée rend ``complete=False`` ; l'appelant doit alors refuser le merge.
+        """
+        page_size = min(100, max(1, int(page_size)))
+        max_pages = max(1, int(max_pages))
+        states: List[str] = []
+        names: List[str] = []
+
+        seen_runs = 0
+        total_runs: Optional[int] = None
+        checks_complete = False
+        for page in range(1, max_pages + 1):
+            payload = self._api_get(
+                f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+                {"filter": "latest", "per_page": page_size, "page": page},
+            )
+            if not isinstance(payload, dict) or not isinstance(payload.get("check_runs"), list):
+                break
+            if total_runs is None:
+                try:
+                    total_runs = int(payload.get("total_count", len(payload["check_runs"])))
+                except (TypeError, ValueError):
+                    break
+                if total_runs < 0:
+                    break
+            batch = payload["check_runs"]
+            for check in batch:
+                if not isinstance(check, dict):
+                    return CommitChecks(states=states, names=names, complete=False)
+                names.append(str(check.get("name") or "check-run"))
+                status = str(check.get("status") or "").strip().lower()
+                conclusion = str(check.get("conclusion") or "").strip().lower()
+                states.append(conclusion if status == "completed" and conclusion else "pending")
+            seen_runs += len(batch)
+            if seen_runs >= total_runs:
+                checks_complete = seen_runs == total_runs
+                break
+            if len(batch) < page_size:
+                break
+
+        statuses_complete = False
+        seen_contexts = set()
+        for page in range(1, max_pages + 1):
+            payload = self._api_get(
+                f"/repos/{owner}/{repo}/commits/{head_sha}/statuses",
+                {"per_page": page_size, "page": page},
+            )
+            if not isinstance(payload, list):
+                break
+            batch = payload
+            for status in batch:
+                if not isinstance(status, dict):
+                    return CommitChecks(states=states, names=names, complete=False)
+                context = str(status.get("context") or "commit-status")
+                # L'API renvoie du plus récent au plus ancien : ne conserver que
+                # le verdict le plus récent de chaque contexte legacy.
+                if context in seen_contexts:
+                    continue
+                seen_contexts.add(context)
+                names.append(context)
+                states.append(str(status.get("state") or "pending").strip().lower())
+            if len(batch) < page_size:
+                statuses_complete = True
+                break
+
+        return CommitChecks(
+            states=states,
+            names=names,
+            complete=bool(checks_complete and statuses_complete),
+        )
 
     def get_pr_comments(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[Comment]:
         """Get comments on a pull request."""
@@ -223,6 +402,12 @@ class PRCommands(GitHubClient):
             created_at=resp["created_at"],
             updated_at=resp["updated_at"],
             draft=resp.get("draft", False),
+            head_sha=(resp.get("head") or {}).get("sha"),
+            base_sha=(resp.get("base") or {}).get("sha"),
+            merge_commit_sha=resp.get("merge_commit_sha"),
+            additions=resp.get("additions"),
+            deletions=resp.get("deletions"),
+            changed_files=resp.get("changed_files"),
         )
 
     def merge_pr(
@@ -235,6 +420,8 @@ class PRCommands(GitHubClient):
         commit_title: Optional[str] = None,
         commit_message: Optional[str] = None,
         expected_head_sha: Optional[str] = None,
+        expected_base_branch: Optional[str] = None,
+        expected_base_sha: Optional[str] = None,
     ) -> MergeResult:
         """Merge une PR ouverte. **Idempotent** + **garde anti-course**.
 
@@ -259,19 +446,30 @@ class PRCommands(GitHubClient):
             # Réponse vide/partielle : on n'a pas confirmé l'état de la PR → on ne merge
             # pas un état non vu (fail-closed).
             raise ToolExecutionError(f"état de la PR #{pr_number} indisponible — refus de merger (fail-closed)")
-        if current.get("merged"):
-            return MergeResult(
-                merged=True, sha=current.get("merge_commit_sha"), message="PR déjà mergée", already_merged=True
-            )
-        if current.get("state") == "closed":
-            raise ToolExecutionError(f"PR #{pr_number} fermée sans merge — refus de merger")
         head_sha = (current.get("head") or {}).get("sha")
         if expected_head_sha and head_sha != expected_head_sha:
             raise ToolExecutionError(
                 f"la tête de la PR #{pr_number} a bougé (attendu {expected_head_sha}, vu {head_sha}) — "
                 "refus (anti-course)"
             )
-
+        current_base = current.get("base") or {}
+        if expected_base_branch and current_base.get("ref") != expected_base_branch:
+            raise ToolExecutionError(
+                f"la base de la PR #{pr_number} a changé (attendu {expected_base_branch}, "
+                f"vu {current_base.get('ref')}) — refus"
+            )
+        if expected_base_sha and current_base.get("sha") != expected_base_sha:
+            raise ToolExecutionError(
+                f"le SHA de base de la PR #{pr_number} a bougé (attendu {expected_base_sha}, "
+                f"vu {current_base.get('sha')}) — refus"
+            )
+        if current.get("merged"):
+            merge_sha = current.get("merge_commit_sha")
+            if not merge_sha:
+                raise ToolExecutionError(f"PR #{pr_number} déjà mergée sans SHA vérifiable — arrêt fail-closed")
+            return MergeResult(merged=True, sha=merge_sha, message="PR déjà mergée", already_merged=True)
+        if current.get("state") == "closed":
+            raise ToolExecutionError(f"PR #{pr_number} fermée sans merge — refus de merger")
         # #434 : détecter le CONFLIT avant le PUT. GitHub expose ``mergeable``
         # (False = conflit confirmé ; None = calcul en cours → on tente, le PUT
         # tranchera) et ``mergeable_state`` (``dirty`` = conflit). Les autres états
@@ -314,4 +512,8 @@ class PRCommands(GitHubClient):
             raise
         # Un merge réussi renvoie toujours ``{"merged": true, "sha": ...}`` ; l'absence
         # de confirmation = échec (défaut False), jamais un succès supposé (fail-closed).
-        return MergeResult(merged=bool(resp.get("merged", False)), sha=resp.get("sha"), message=resp.get("message", ""))
+        merged = bool(resp.get("merged", False))
+        merge_sha = resp.get("sha")
+        if merged and not merge_sha:
+            raise ToolExecutionError(f"merge de la PR #{pr_number} confirmé sans SHA — arrêt fail-closed")
+        return MergeResult(merged=merged, sha=merge_sha, message=resp.get("message", ""))

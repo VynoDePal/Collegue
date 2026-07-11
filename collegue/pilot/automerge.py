@@ -13,9 +13,12 @@ n'effectue le merge réel (via H1 ``merge_pr``) que sur autorisation explicite.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
+import inspect
+import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from collegue.pilot.audit import AUTOMERGE_DECISION
 
@@ -235,6 +238,18 @@ class AutoMergeOutcome:
     merge_result: Optional[object] = None
 
 
+@dataclass(frozen=True)
+class PromotionAutoMergeOutcome:
+    """Verdict complet Phase 5 pour une promotion de la boucle improve."""
+
+    merged: bool
+    continue_loop: bool
+    stop_reason: Optional[str]
+    reason: str
+    automerge: Optional[AutoMergeOutcome] = None
+    guard: Optional[object] = None
+
+
 def maybe_auto_merge(
     pr: object,
     files_changed: Sequence[str],
@@ -288,7 +303,271 @@ def maybe_auto_merge(
         refused = AutoMergeDecision(False, "SHA de tête inconnu — garde anti-course requise pour l'auto-merge")
         _emit(pr_number=pr_number, allowed=False, merged=False, reason=refused.reason)
         return AutoMergeOutcome(decision=refused, merged=False)
-    result = clients.prs.merge_pr(owner, repo, pr.number, method=policy.method, expected_head_sha=expected)
+    result = clients.prs.merge_pr(
+        owner,
+        repo,
+        pr.number,
+        method=policy.method,
+        expected_head_sha=expected,
+        expected_base_branch=getattr(pr, "base_branch", None),
+        expected_base_sha=getattr(pr, "base_sha", None),
+    )
     merged = bool(getattr(result, "merged", False))
     _emit(pr_number=pr_number, allowed=True, merged=merged, reason=decision.reason)
     return AutoMergeOutcome(decision=decision, merged=merged, merge_result=result)
+
+
+_PENDING_CHECK_STATES = frozenset({"pending", "queued", "in_progress", "requested", "waiting"})
+
+
+async def _sleep(value: float, sleep_fn: Callable[[float], object]) -> None:
+    result = sleep_fn(max(0.0, float(value)))
+    if inspect.isawaitable(result):
+        await result
+
+
+async def auto_merge_promotion(
+    pr: object,
+    *,
+    policy: RiskPolicy,
+    revert_policy: object,
+    clients: object,
+    owner: str,
+    repo: str,
+    repo_source: str,
+    base: str,
+    sandbox: object,
+    manager: object = None,
+    project_id: Optional[int] = None,
+    audit: object = None,
+    dry_run: bool = False,
+    ci_timeout_seconds: float = 900.0,
+    ci_poll_seconds: float = 10.0,
+    sleep_fn: Callable[[float], object] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    sync_base_fn: Optional[Callable[[str, str], bool]] = None,
+    guard_fn: Optional[Callable[..., object]] = None,
+    continue_fn: Optional[Callable[[], object]] = None,
+) -> PromotionAutoMergeOutcome:
+    """Tente l'auto-merge d'une PR Phase 4 puis vérifie la santé de ``main``.
+
+    Le chemin est strictement séquentiel : contexte PR exhaustif, tête immobile,
+    CI complètement verte, merge protégé par SHA, resync de la base, puis garde
+    post-merge. Tout refus laisse la PR ouverte et arrête la boucle d'amélioration
+    afin qu'aucune PR enfant ne soit mergée dans une branche non intégrée.
+
+    Politique off ou dry-run : aucun appel GitHub, aucun effet.
+    """
+
+    def blocked(reason: str, *, stop_reason: str = "auto_merge_blocked", merged: bool = False, **kwargs):
+        if audit is not None:
+            try:
+                audit.record(
+                    AUTOMERGE_DECISION,
+                    pr_number=getattr(pr, "number", None),
+                    allowed=False,
+                    merged=merged,
+                    reason=reason,
+                )
+            except Exception:
+                pass
+        return PromotionAutoMergeOutcome(
+            merged=merged,
+            continue_loop=False,
+            stop_reason=stop_reason,
+            reason=reason,
+            **kwargs,
+        )
+
+    if not policy.enabled:
+        return PromotionAutoMergeOutcome(False, True, None, "auto-merge désactivé")
+    if dry_run:
+        return PromotionAutoMergeOutcome(False, True, None, "dry-run : aucun auto-merge")
+    if not bool(getattr(revert_policy, "enabled", False)):
+        return blocked("garde post-merge désactivée — auto-merge refusé (fail-closed)")
+    number = getattr(pr, "number", None)
+    if number is None:
+        return blocked("numéro de PR absent — contexte invérifiable")
+
+    prs = getattr(clients, "prs", None)
+    if prs is None:
+        return blocked("client GitHub PR absent — contexte invérifiable")
+    try:
+        current = prs.get_pr(owner, repo, int(number))
+    except Exception as exc:  # noqa: BLE001 - frontière réseau fail-closed
+        return blocked(f"lecture de la PR impossible: {exc}")
+    head_sha = getattr(current, "head_sha", None)
+    if not head_sha:
+        return blocked("SHA de tête inconnu — garde anti-course impossible")
+    base_sha = getattr(current, "base_sha", None)
+    if not base_sha:
+        return blocked("SHA de base inconnu — diff non stabilisé")
+    if getattr(current, "state", None) != "open" or bool(getattr(current, "draft", False)):
+        return blocked("PR fermée ou encore en draft — auto-merge interdit")
+    if getattr(current, "base_branch", None) != base:
+        return blocked(f"base de PR inattendue ({getattr(current, 'base_branch', None)!r} != {base!r})")
+    raw_stats = (
+        getattr(current, "additions", None),
+        getattr(current, "deletions", None),
+        getattr(current, "changed_files", None),
+    )
+    if any(value is None for value in raw_stats):
+        return blocked("statistiques de PR absentes — diff invérifiable")
+    try:
+        expected_additions, expected_deletions, expected_files = (int(value) for value in raw_stats)
+    except (TypeError, ValueError):
+        return blocked("statistiques de PR malformées — diff invérifiable")
+    if expected_additions < 0 or expected_deletions < 0 or expected_files < 0:
+        return blocked("statistiques de PR négatives — diff invérifiable")
+
+    try:
+        files_snapshot = prs.get_pr_files_snapshot(
+            owner,
+            repo,
+            int(number),
+            expected_count=expected_files,
+        )
+    except Exception as exc:  # noqa: BLE001 - frontière réseau fail-closed
+        return blocked(f"lecture exhaustive du diff impossible: {exc}")
+    files = list(getattr(files_snapshot, "files", ()) or ())
+    filenames = [str(getattr(item, "filename", "")) for item in files]
+    additions = sum(int(getattr(item, "additions", 0) or 0) for item in files)
+    deletions = sum(int(getattr(item, "deletions", 0) or 0) for item in files)
+    files_complete = bool(getattr(files_snapshot, "complete", False))
+    if additions != expected_additions or deletions != expected_deletions:
+        files_complete = False
+
+    # Évalue d'abord le risque intrinsèque avec une CI fictivement verte. Un diff
+    # code/sensible ne justifie pas d'attendre plusieurs minutes les checks.
+    preflight = evaluate_automerge(
+        filenames,
+        additions=additions,
+        deletions=deletions,
+        checks=[_GREEN],
+        policy=policy,
+        files_complete=files_complete,
+    )
+    if not preflight.allowed:
+        return blocked(preflight.reason)
+
+    deadline = clock() + max(0.0, float(ci_timeout_seconds))
+    checks: Sequence[str] = ()
+    while True:
+        if continue_fn is not None:
+            try:
+                continuation = continue_fn()
+            except Exception as exc:  # noqa: BLE001 - contrôleur indisponible
+                return blocked(f"contrôle budget/deadline impossible: {exc}")
+            if not bool(getattr(continuation, "ok", continuation)):
+                reason = str(getattr(continuation, "reason", "budget ou deadline atteint"))
+                return blocked(f"attente CI interrompue: {reason}")
+        try:
+            observed = prs.get_pr(owner, repo, int(number))
+            if getattr(observed, "head_sha", None) != head_sha:
+                return blocked("la tête de la PR a bougé pendant l'attente CI — refus anti-course")
+            if getattr(observed, "base_sha", None) != base_sha:
+                return blocked("la base de la PR a bougé pendant l'attente CI — diff à réévaluer")
+            observed_stats = (
+                getattr(observed, "additions", None),
+                getattr(observed, "deletions", None),
+                getattr(observed, "changed_files", None),
+            )
+            if observed_stats != raw_stats:
+                return blocked("les statistiques de la PR ont changé pendant l'attente CI")
+            if getattr(observed, "state", None) != "open" or bool(getattr(observed, "draft", False)):
+                return blocked("état de la PR modifié pendant l'attente CI")
+            check_snapshot = prs.get_commit_checks(owner, repo, head_sha)
+        except Exception as exc:  # noqa: BLE001 - frontière réseau fail-closed
+            return blocked(f"lecture des vérifications CI impossible: {exc}")
+        if not bool(getattr(check_snapshot, "complete", False)):
+            return blocked("liste des vérifications CI incomplète — fail-closed")
+        checks = tuple(str(state).strip().lower() for state in (getattr(check_snapshot, "states", ()) or ()))
+        if checks and all(state == _GREEN for state in checks):
+            current = observed
+            break
+        terminal = [state for state in checks if state != _GREEN and state not in _PENDING_CHECK_STATES]
+        if terminal:
+            return blocked(f"CI non verte: {', '.join(terminal[:3])}")
+        if clock() >= deadline:
+            return blocked("délai d'attente CI dépassé (checks absents ou pending)")
+        await _sleep(ci_poll_seconds, sleep_fn)
+
+    try:
+        merge_outcome = maybe_auto_merge(
+            current,
+            filenames,
+            additions=additions,
+            deletions=deletions,
+            checks=checks,
+            policy=policy,
+            clients=clients,
+            owner=owner,
+            repo=repo,
+            dry_run=False,
+            files_complete=files_complete,
+            audit=audit,
+        )
+    except Exception as exc:  # noqa: BLE001 - GitHub refuse : PR laissée à l'humain
+        return blocked(f"merge GitHub refusé: {exc}")
+    if not merge_outcome.merged:
+        return blocked(merge_outcome.decision.reason, automerge=merge_outcome)
+    merge_sha = getattr(merge_outcome.merge_result, "sha", None)
+    if not merge_sha:
+        return blocked(
+            "merge confirmé sans SHA — garde post-merge impossible",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+
+    if sync_base_fn is None:
+        from collegue.executor.workspace import resync_repository_base
+
+        sync_base_fn = resync_repository_base
+    try:
+        synced = bool(sync_base_fn(repo_source, base))
+    except Exception as exc:  # noqa: BLE001 - plomberie git fail-closed
+        return blocked(
+            f"resynchronisation post-merge impossible: {exc}",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    if not synced:
+        return blocked(
+            "resynchronisation post-merge échouée",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+
+    if guard_fn is None:
+        from collegue.pilot.guard import guard_post_merge
+
+        guard_fn = guard_post_merge
+    guard = guard_fn(
+        repo_source,
+        merge_sha,
+        sandbox=sandbox,
+        policy=revert_policy,
+        merge_parent=1 if policy.method == "merge" else None,
+        manager=manager,
+        project_id=project_id,
+        audit=audit,
+    )
+    if not bool(getattr(guard, "checked", False)) or getattr(guard, "healthy", None) is not True:
+        return blocked(
+            getattr(guard, "reason", "santé de main non concluante"),
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+            guard=guard,
+        )
+    return PromotionAutoMergeOutcome(
+        merged=True,
+        continue_loop=True,
+        stop_reason=None,
+        reason="PR auto-mergée, base resynchronisée et main verte",
+        automerge=merge_outcome,
+        guard=guard,
+    )

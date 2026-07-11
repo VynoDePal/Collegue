@@ -65,7 +65,7 @@ ou on refuse) :
 |-----------|--------------|
 | **Merge-bot (phase BUILD)** | Pendant la **construction du MVP**, une tâche réussie est **auto-mergée** (squash) puis le clone local est resynchronisé sur `origin/<base>` avant la tâche suivante (`BUILD_AUTO_MERGE=true` par défaut). Sans lui, avec 1 PR en vol + dépendances strictes, le build se figerait `awaiting_merge` (et des bases périmées créeraient des conflits). C'est le merge humain **simulé** pendant la construction autonome. Mettre `BUILD_AUTO_MERGE=false` ramène tout au merge humain. |
 | **Barrière BUILD → IMPROVE** | Une PR `in_review` ne compte **jamais** comme un MVP intégré. Phase 4 exige toutes les tâches en `merged`/`done`, puis un `git fetch` + `reset --hard origin/<base>` réussi juste avant sa première mesure. Merge final ou resync en échec ⇒ `awaiting_merge` / `repo_sync_failed`, aucune amélioration. |
-| **Merge humain (phase AMÉLIORATION, §6)** | Les PR d'**amélioration** (Phase 4) restent **ouvertes** : elles ne sont **jamais** auto-mergées — relecture/merge par un **humain**. C'est le défaut sûr pour faire évoluer un produit déjà construit. |
+| **Merge humain (phase AMÉLIORATION, §6)** | Par défaut, les PR d'**amélioration** (Phase 4) restent **ouvertes** pour relecture/merge humain. Seul l'opt-in explicite `AUTO_MERGE_ENABLED=true` active la politique Phase 5 ci-dessous. |
 | **`dry_run` par défaut** | Un **run** sans `--execute` va jusqu'aux aperçus de PR sans écriture GitHub/état et sans auto-merge. `plan draft` persiste volontairement son brouillon (SPEC/DAG/oracles/cible) pour permettre validation et reprise ; seul `plan sync --execute` touche GitHub. |
 | **Budget dur** | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` atteints → **auto-pause** (les appels LLM sont stoppés). `COLLEGUE_RUN_DEADLINE_SECONDS` borne la durée mur. |
 | **Gate qualité** | Un diff dont les tests sont rouges, qui retire une exigence, ou qui porte un finding **critical/error** de la revue (sécurité réelle, défaut signalé par le reviewer LLM) **n'ouvre pas / ne merge pas** de PR. Les findings d'heuristiques crues de style/maintenabilité (complexité, duplication, nommage, exception silencieuse) sont **advisory** (informent la PR, ne bloquent pas un code aux tests verts). |
@@ -75,8 +75,8 @@ ou on refuse) :
 | **Validation humaine du plan** | Le produit impose trois processus séparés : `plan draft` affiche le contenu, la cible (dépôt + branche) et son SHA-256 ; `plan approve --expected-plan-hash …` scelle exactement ce snapshot sans LLM/GitHub ; `plan sync` recharge uniquement la cible persistée. SPEC, DAG, oracles, deadline et cible sont hashés. Toute mutation entre les étapes invalide le hash. |
 | **Snapshot d'écriture cohérent** | En sync réelle, cible, SPEC et tâches sont copiés dans une seule transaction verrouillée. Les appels GitHub consomment exclusivement ce snapshot approuvé : une mutation/réapprobation concurrente ne peut pas envoyer le contenu d'une révision vers la cible d'une autre. Après la première issue matérialisée, une révision différente exige une réconciliation explicite des liaisons avant réapprobation. |
 | **SPEC avant issues** | Sur le chemin produit `plan sync --execute`, le DAG est validé intégralement puis GitHub doit confirmer le commit de `SPEC.md` **avant** la première issue. Client absent, erreur API, réponse sans `commit.sha` ou fichier distant divergent = arrêt sans issue. Un SPEC déjà identique est confirmé sans commit vide. |
-| **Auto-merge RISK-GATED (politique, opt-in, distinct)** | Politique séparée du merge-bot ci-dessus : merge **fin** par risque (`AUTO_MERGE_ENABLED=false` par défaut ; activée, n'autoriserait **que** du faible risque : allowlist de chemins **non exécutables**, plafond de LOC, **toutes** les vérifs CI vertes ; garde dure code/exécutable/secret/CI insensible à la casse). ⚠️ **Pas encore câblée dans la boucle du pilote** (le câblage exige une passe CI-aware — suivi). |
-| **Auto-revert (politique)** | Filet prévu de l'auto-merge risk-gated : si `main` devenait rouge après un auto-merge (santé en sandbox), un revert serait préparé (fail-closed : santé non concluante = rouge ; un revert en échec **escalade**). Inactif tant que cette politique n'est pas câblée. |
+| **Auto-merge RISK-GATED (Phase 5, opt-in)** | Politique séparée du merge-bot BUILD, **OFF par défaut**. Après chaque PR Phase 4 : relit SHA/base/stats, pagine tous les fichiers, attend check-runs + statuses sous délai, refuse code/secrets/config/CI ou diff trop grand, puis merge avec `expected_head_sha`. Refus, CI absente/rouge, tête/base mobile ou timeout ⇒ PR laissée ouverte et boucle stoppée, sans PR enfant. |
+| **Garde post-merge / revert préparé** | Après un auto-merge : resync obligatoire de `origin/<base>`, checkout exact du SHA mergé, puis santé en sandbox. Rouge ou non concluant ⇒ boucle stoppée et branche/commit de revert préparé localement si activé. La publication/PR/merge distant de ce revert relève de Phase 5-B ; aucune restauration de GitHub `main` n'est prétendue ici. |
 | **Outil MCP du pilote** | Exposé en MCP **uniquement** si `PILOT_TOOL_ENABLED=true` **et** `OAUTH_ENABLED=true` (sinon **refus de démarrer**). Allowlist d'appelants (sujets OAuth vérifiés, jamais un en-tête client). Jamais auto-découvert. `dry_run` par défaut. |
 
 ---
@@ -272,7 +272,9 @@ sandbox). Le reviewer/juge suit le même chemin quand son modèle n'est pas un
 modèle Gemini (`LLM_MODEL_REVIEWER=gpt-5.4` → échantillonné dans le sandbox).
 Avec `BUILD_AUTO_MERGE=true` (défaut), un seul `--execute` construit **tout le
 MVP** (merge-bot enchaîne les tâches) ; `--improve` ajoute ensuite des PR
-d'amélioration **laissées ouvertes** pour merge humain. Le handoff est fail-closed :
+d'amélioration **laissées ouvertes** pour merge humain par défaut. Avec
+`AUTO_MERGE_ENABLED=true`, seules les promotions Phase 4 faibles risques passent
+le cycle CI → merge SHA-gaté → resync → santé ; tout doute arrête la boucle. Le handoff est fail-closed :
 la Phase 4 ne démarre qu'après le merge de la dernière PR BUILD et une nouvelle
 vérification de l'alignement du clone sur `origin/<base>`.
 
@@ -296,7 +298,7 @@ lit :
 | `TASK_MAX_ATTEMPTS` | Tentatives max par tâche — retry avec backoff sur échec transitoire (`1` = pas de retry). | `3` |
 | `TASK_RETRY_BACKOFF_SECONDS` | Base du backoff linéaire entre tentatives (plafonné à 90 s). | `15` |
 | `DEPS_REQUIRE_MERGED` | Exige le **merge** d'une dépendance avant de débloquer ses dépendants (sinon le démarrage sur PR non mergée est signalé) ; arrêt `awaiting_merge` quand seuls des merges manquent. **Forcé à vrai** quand `BUILD_AUTO_MERGE` est actif. | `false` |
-| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** : auto-merge (squash) de chaque PR de tâche + resync du clone avant la suivante (+ drain de la dernière PR). `false` → tout au merge humain. La phase amélioration n'est **jamais** auto-mergée. | `true` |
+| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** : auto-merge (squash) de chaque PR de tâche + resync du clone avant la suivante (+ drain de la dernière PR). `false` → BUILD au merge humain. Distinct de la politique Phase 5. | `true` |
 | `LLM_CALL_TIMEOUT` | Timeout par appel LLM, secondes (`0` = off). | `0` |
 | `CODER_SUBSCRIPTION` | Code via un **abonnement** ChatGPT/Codex (OpenHands `subscription_login`, coût API `$0`) au lieu d'une clé API. Le **reviewer/juge** suit aussi l'abonnement si son modèle n'est pas un modèle Gemini (échantillonné dans le sandbox). | `false` |
 | `CODER_SUBSCRIPTION_MODEL` | Modèle codeur via l'abonnement. | `gpt-5.5` |
@@ -310,7 +312,9 @@ lit :
 | `AUTO_MERGE_MAX_LOC` | Plafond de lignes nettes pour l'auto-merge. | `50` |
 | `AUTO_MERGE_PATH_ALLOWLIST` | Motifs de chemins **faible risque** (CSV ; `**` = sous-dossiers). | `docs/**,**/*.md,**/*.rst` |
 | `AUTO_MERGE_METHOD` | Méthode de merge : `squash` / `merge` / `rebase`. | `squash` |
-| `AUTO_REVERT_ENABLED` | Filet auto-revert (n'a d'effet que si l'auto-merge est actif). | `true` |
+| `AUTO_MERGE_CI_TIMEOUT_SECONDS` | Attente maximale des checks/statuses par PR Phase 4 ; timeout ⇒ PR humaine + arrêt. | `900` |
+| `AUTO_MERGE_CI_POLL_SECONDS` | Intervalle de relecture du SHA et de la CI. | `10` |
+| `AUTO_REVERT_ENABLED` | Prépare localement un revert si la santé post-merge est rouge. Désactivé, la santé reste vérifiée et la boucle s'arrête quand même. | `true` |
 | `AUTO_REVERT_HEALTH_COMMAND` | Commande de santé exécutée en sandbox sur `main`. | `pytest -q` |
 | `PILOT_TOOL_ENABLED` | Expose le pilote en outil MCP (strict : exige `OAUTH_ENABLED`). | `false` |
 | `PILOT_TOOL_ALLOWED_SUBJECTS` | Allowlist de sujets OAuth autorisés (CSV ; vide = personne). | — |

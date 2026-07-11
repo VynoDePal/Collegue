@@ -154,7 +154,7 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Budget dur du run (auto-pause) | |
 | `COLLEGUE_HOME` | Racine de persistance (budget, métriques, checkpoints) | |
 | `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Codage par **abonnement** ChatGPT/Codex (coût API `$0`) au lieu d'une clé | |
-| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **on** par défaut). L'amélioration reste à merge humain | |
+| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **on** par défaut). Distinct de Phase 5 | |
 | `GATE_ACCEPTANCE_TESTS` | Oracles pytest générés au plan-time par le rôle QA, scellés avec le plan puis rejoués sans LLM (**off** par défaut) | |
 | `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Réseau et ressources du conteneur coder | |
 | `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes risk-gated (opt-in, **off** par défaut) | |
@@ -176,8 +176,10 @@ durable (Postgres/SQLite) et de sandbox Docker.
 le hash affiché, et seul `plan sync --execute` touche GitHub ;
 budget dur auto-pausé. En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
 construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
-laisse ses PR **ouvertes pour merge humain** (§6). L'auto-merge risk-gated,
-l'auto-revert et l'outil MCP du pilote restent **désactivés par défaut** et fail-closed.
+laisse ses PR **ouvertes pour merge humain** (§6) par défaut. L'auto-merge
+risk-gated Phase 5 est réellement câblé mais reste opt-in : CI complète, SHA stable,
+resync et santé de `main` sont obligatoires. L'auto-revert et l'outil MCP du pilote
+restent **désactivés par défaut** et fail-closed.
 Le codeur peut tourner via **abonnement** ChatGPT/Codex (coût API `$0`).
 
 ```bash
