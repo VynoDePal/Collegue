@@ -36,15 +36,12 @@ def test_job_env_does_not_use_runner_context(path: Path) -> None:
             continue
         for name, value in env.items():
             assert "${{ runner." not in str(value), (
-                f"{path}: jobs.{job_id}.env.{name} uses the runner context "
-                "before a runner has been allocated"
+                f"{path}: jobs.{job_id}.env.{name} uses the runner context before a runner has been allocated"
             )
 
 
 def test_nightly_paths_are_exported_from_runner_temp_at_runtime() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "integration-nightly.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (ROOT / ".github" / "workflows" / "integration-nightly.yml").read_text(encoding="utf-8")
 
     assert 'root="$RUNNER_TEMP/collegue-nightly"' in workflow
     assert '} >> "$GITHUB_ENV"' in workflow
