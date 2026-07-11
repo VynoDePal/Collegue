@@ -182,7 +182,9 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
         budget=_Budget(),
         ctx=_Ctx(),
     )
-    assert result.stop_reason == "completed", [task.last_error for task in manager.get_tasks(plan.project_id)]
+    # #580 : sans merge-bot, des PR ouvertes ne constituent pas encore un MVP
+    # intégré. Le runtime produit expose donc explicitement l'attente de merge.
+    assert result.stop_reason == "awaiting_merge"
     assert result.iterations == 2
     # Le handoff fonctionne : le run a repris les tâches planifiées et les a construites.
     assert all(t.status == "in_review" for t in manager.get_tasks(plan.project_id))
@@ -347,6 +349,8 @@ async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(m
         ctx=_Ctx(),
     )
 
-    assert result.stop_reason == "completed", [task.last_error for task in manager.get_tasks(plan.project_id)]
+    # Sans merge-bot, les oracles sont bien rejoués mais les PR BUILD restent
+    # ouvertes : #580 interdit donc de déclarer le MVP intégré.
+    assert result.stop_reason == "awaiting_merge", [task.last_error for task in manager.get_tasks(plan.project_id)]
     acceptance_commands = [command for command in sandbox.commands if "python -I -c" in command]
     assert len(acceptance_commands) == 2
