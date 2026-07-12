@@ -28,6 +28,13 @@ ORACLE_SHA = "e" * 64
 ROOT_TREE_SHA = "1" * 40
 
 
+@pytest.fixture(autouse=True)
+def _disable_real_consistency_waits(monkeypatch):
+    """Les tests pilotent les vues ; ils ne doivent pas attendre le temps mur."""
+
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", lambda _delay: None)
+
+
 def _env(tmp_path, **overrides):
     values = {
         "COLLEGUE_NIGHTLY_E2E": "true",
@@ -625,15 +632,21 @@ def test_cleanup_polls_an_exact_stale_issue_view_without_reclosing(tmp_path, mon
     manifest.issue_numbers = [77]
     _own_run_label(runner, manifest)
     runner._task_correlations = lambda _manifest: {77: 77}
-    indexed_views = iter(([issue], [stale_issue], [stale_issue], [], [], [], [], [], []))
-    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return [stale_issue] if calls in {2, 3} else ([issue] if calls == 1 else [])
+
+    issues.list_issues = list_issues
     sleeps = []
     monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
 
     assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": [77]}
     assert issues.closed == [77]
     assert runner.clients.labels.deleted == [cfg.issue_label]
-    assert sleeps == [0.25, 0.5, 1.0, 2.0, 0.25, 0.5]
+    assert sleeps == [0.25, 0.5, *(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS * 2)]
 
 
 def test_cleanup_accepts_closed_resources_still_returned_by_open_indexes(tmp_path, monkeypatch):
@@ -667,7 +680,7 @@ def test_cleanup_accepts_closed_resources_still_returned_by_open_indexes(tmp_pat
     assert pr.state == "closed" and issue.state == "closed"
     assert prs.closed == [88] and issues.closed == [77]
     assert runner.clients.labels.deleted == [cfg.issue_label]
-    assert sleeps == [0.25, 0.5, 0.25, 0.5]
+    assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS * 2)
 
 
 def test_cleanup_rejects_foreign_pr_created_after_inventory_before_deleting_refs(tmp_path):
@@ -763,7 +776,7 @@ def test_cleanup_rechecks_closed_index_candidate_before_deleting_refs(tmp_path, 
 
     assert branches.deleted == []
     assert runner.clients.labels.deleted == []
-    assert sleeps == [0.25, 0.5, 1.0]
+    assert sleeps == [0.25, *nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS]
 
 
 def test_cleanup_rechecks_pr_reopened_behind_a_closed_index_view(tmp_path):
@@ -819,8 +832,18 @@ def test_cleanup_final_guard_rejects_foreign_issue_created_during_ref_deletion(t
     manifest.issue_numbers = [77]
     _own_run_label(runner, manifest)
     runner._task_correlations = lambda _manifest: {77: 77}
-    indexed_views = iter(([issue], [], [], [], [], [], [foreign_issue]))
-    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [issue]
+        if calls == 12:
+            return [foreign_issue]
+        return []
+
+    issues.list_issues = list_issues
     delete_branch = branches.delete_branch
 
     def delete_then_create_foreign_issue(*args, **kwargs):

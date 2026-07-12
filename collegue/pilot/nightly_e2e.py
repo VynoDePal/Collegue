@@ -50,7 +50,6 @@ _EXEC_MARKER = "<!-- collegue-exec:"
 _TASK_MARKER = "<!-- collegue-task:"
 _NIGHTLY_LABEL_COLOR = "1d76db"
 _GITHUB_CONSISTENCY_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
-_GITHUB_CLEAR_STABILITY_POLLS = 3
 _TASK_DIAGNOSTIC_MAX_CHARS = 1200
 _TASK_DIAGNOSTIC_REDACTION = "[REDACTED]"
 _TASK_DIAGNOSTIC_SECRET_NAMES = ("GITHUB_TOKEN", "LLM_API_KEY", "GEMINI_API_KEY")
@@ -871,9 +870,8 @@ class NightlyE2ERunner:
         cfg = self.config
         expected_prs = {int(number) for number in expected_pr_numbers}
         expected_issues = {int(number) for number in expected_issue_numbers}
-        clear_views = 0
 
-        for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
+        def has_pending_resources() -> bool:
             remaining_prs = self.clients.prs.list_prs(
                 cfg.owner,
                 cfg.repo,
@@ -944,16 +942,24 @@ class NightlyE2ERunner:
                 if getattr(candidate, "state", None) == "open":
                     pending_issues.append(candidate)
 
-            if not pending_prs and not pending_issues:
-                clear_views += 1
-                if clear_views >= _GITHUB_CLEAR_STABILITY_POLLS:
-                    return
-            else:
-                clear_views = 0
-            if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
-                time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
+            return bool(pending_prs or pending_issues)
 
-        raise NightlyE2EError("état final GitHub non convergé avant épuisement du polling borné")
+        # Phase 1 : laisser une ancienne vue ``open`` converger dans le budget
+        # historique. Une convergence tardive ne consomme pas la phase suivante.
+        for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
+            if not has_pending_resources():
+                break
+            if attempt == len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
+                raise NightlyE2EError("état final GitHub non convergé avant épuisement du polling borné")
+            time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
+
+        # Phase 2 : une première absence n'est pas une preuve. Rééchantillonner
+        # pendant toute la fenêtre de cohérence (15,75 s) ; toute réapparition
+        # est fail-closed et conserve les ancres pour une reprise ultérieure.
+        for delay in _GITHUB_CONSISTENCY_BACKOFF_SECONDS:
+            time.sleep(delay)
+            if has_pending_resources():
+                raise NightlyE2EError("état final GitHub instable pendant la fenêtre de confirmation")
 
     def _inspect_draft(self, project_id: int, plan_hash: str) -> tuple[int, str, str]:
         manager = self._manager()
