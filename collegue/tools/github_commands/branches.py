@@ -5,6 +5,7 @@ Handles branch listing, creation, and commit operations.
 """
 
 import re
+import time
 from typing import Iterable, List, Optional
 
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from ._helpers import validate_ref
 # Branches refusées par défaut à la suppression (garde-fou contre la perte de la base).
 PROTECTED_BRANCHES = ("main", "master")
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_DELETE_CONFIRM_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
 
 
 class BranchInfo(BaseModel):
@@ -325,19 +327,29 @@ class BranchCommands(GitHubClient):
             raise ToolExecutionError(
                 f"refus de supprimer la branche {branch!r}: SHA attendu {expected_sha}, vu {current_sha}"
             )
+        delete_error: Optional[ToolExecutionError] = None
         try:
             self._request_json("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch}")
-        except ToolExecutionError:
-            # Course : supprimée entre-temps ? Si oui, succès idempotent ; sinon propage.
-            if self._branch_sha_or_none(owner, repo, branch) is None:
+        except ToolExecutionError as exc:
+            # Une réponse DELETE peut être perdue après application côté GitHub.
+            # Ne jamais réémettre la mutation : la même confirmation bornée
+            # tranche sur l'état autoritatif de la ref.
+            delete_error = exc
+
+        # Un DELETE 2xx ne suffit pas comme preuve pour une opération destructive.
+        # GitHub peut toutefois servir brièvement l'ancien SHA après suppression :
+        # lui seul est retryable. Un autre SHA prouve une course et bloque aussitôt.
+        for attempt in range(len(_DELETE_CONFIRM_BACKOFF_SECONDS) + 1):
+            remaining_sha = self._branch_sha_or_none(owner, repo, branch)
+            if remaining_sha is None:
                 return True
-            raise
-        # Un DELETE 2xx ne suffit pas comme preuve pour une opération destructive :
-        # confirmer l'absence distante. Toute lecture autre qu'un 404 reste
-        # bloquante via ``_branch_sha_or_none``.
-        remaining_sha = self._branch_sha_or_none(owner, repo, branch)
-        if remaining_sha is not None:
-            raise ToolExecutionError(
-                f"suppression de la branche {branch!r} non confirmée: tête distante {remaining_sha}"
-            )
-        return True
+            if remaining_sha != current_sha:
+                raise ToolExecutionError(
+                    f"suppression de la branche {branch!r} ambiguë: tête déplacée de {current_sha} vers {remaining_sha}"
+                )
+            if attempt < len(_DELETE_CONFIRM_BACKOFF_SECONDS):
+                time.sleep(_DELETE_CONFIRM_BACKOFF_SECONDS[attempt])
+
+        if delete_error is not None:
+            raise delete_error
+        raise ToolExecutionError(f"suppression de la branche {branch!r} non confirmée: tête distante {current_sha}")

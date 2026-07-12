@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from collegue.pilot import nightly_e2e as nightly_e2e_module
 from collegue.pilot.nightly_e2e import (
     CommandResult,
     NightlyClients,
@@ -418,6 +419,106 @@ def _own_run_label(runner, manifest):
     runner._create_owned_label(manifest)
     assert manifest.label_creation_started is True
     assert manifest.label_created is True
+
+
+def test_synced_issue_polls_when_label_filter_index_lags(tmp_path, monkeypatch):
+    """Reproduit la frontière REST observée sur le run réel #29209984188."""
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issue = _issue(
+        cfg,
+        number=77,
+        task_id=9,
+        project_id=4,
+        plan_hash="f" * 64,
+    )
+    issues.items[77] = issue
+    indexed_views = iter(([], [], [issue]))
+    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    runner._verify_synced_issue(
+        77,
+        task_id=9,
+        project_id=4,
+        plan_hash="f" * 64,
+    )
+    assert sleeps == [
+        nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS[0],
+        nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS[1],
+    ]
+
+
+def test_synced_issue_fails_closed_when_label_index_never_converges(tmp_path, monkeypatch):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issues.items[77] = _issue(cfg, number=77, task_id=9, project_id=4, plan_hash="f" * 64)
+    issues.list_issues = lambda *args, **kwargs: []
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(NightlyE2EError, match="polling borné"):
+        runner._verify_synced_issue(77, task_id=9, project_id=4, plan_hash="f" * 64)
+
+    assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS)
+
+
+def test_synced_issue_propagates_label_index_api_error_without_retry(tmp_path, monkeypatch):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issues.items[77] = _issue(cfg, number=77, task_id=9, project_id=4, plan_hash="f" * 64)
+    error = ToolExecutionError("GitHub indisponible", status_code=500)
+    issues.list_issues = lambda *args, **kwargs: (_ for _ in ()).throw(error)
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(ToolExecutionError) as caught:
+        runner._verify_synced_issue(77, task_id=9, project_id=4, plan_hash="f" * 64)
+
+    assert caught.value is error
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda issue, _cfg: setattr(issue, "labels", []),
+        lambda issue, _cfg: setattr(issue, "body", "<!-- collegue-task:9 -->"),
+        lambda issue, _cfg: setattr(issue, "state", "closed"),
+    ],
+)
+def test_synced_issue_direct_get_fails_closed_without_exact_identity(tmp_path, mutation):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issue = _issue(cfg, number=77, task_id=9, project_id=4, plan_hash="f" * 64)
+    mutation(issue, cfg)
+    issues.items[77] = issue
+    issues.list_issues = lambda *args, **kwargs: []
+
+    with pytest.raises(NightlyE2EError, match="identité GitHub exacte"):
+        runner._verify_synced_issue(
+            77,
+            task_id=9,
+            project_id=4,
+            plan_hash="f" * 64,
+        )
+
+
+def test_synced_issue_refuses_a_second_issue_exposed_by_run_label(tmp_path):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    primary = _issue(cfg, number=77, task_id=9, project_id=4, plan_hash="f" * 64)
+    duplicate = _issue(cfg, number=78, task_id=9, project_id=4, plan_hash="f" * 64)
+    issues.items.update({77: primary, 78: duplicate})
+
+    with pytest.raises(NightlyE2EError, match="plusieurs issues"):
+        runner._verify_synced_issue(
+            77,
+            task_id=9,
+            project_id=4,
+            plan_hash="f" * 64,
+        )
 
 
 def test_preexisting_run_label_is_never_adopted_or_deleted(tmp_path):
