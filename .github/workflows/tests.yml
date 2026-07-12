@@ -107,6 +107,10 @@ jobs:
           context: .
           file: docker/collegue/Dockerfile
           push: false
+          load: true
+          tags: collegue:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build OpenHands sandbox image
         uses: docker/build-push-action@v5
@@ -121,11 +125,6 @@ jobs:
         run: |
           docker run --rm collegue-sandbox-openhands:pr-check \
             python -c "from openhands.tools.terminal.definition import TerminalAction; assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; assert TerminalAction.model_validate({'command': 'canonical', 'commands': 'ignored'}).command == 'canonical'"
-          push: false
-          load: true
-          tags: collegue:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Smoke test — container starts
         run: |

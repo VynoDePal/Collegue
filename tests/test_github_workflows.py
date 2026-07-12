@@ -52,3 +52,36 @@ def test_nightly_paths_are_exported_from_runner_temp_at_runtime() -> None:
         "SANDBOX_PIP_CACHE_DIR",
     ):
         assert f"printf '{name}=" in workflow
+
+
+def test_docker_build_images_are_loaded_before_smoke_tests() -> None:
+    """Keep build-push options attached to their action, never inside ``run``."""
+
+    workflow = _load_workflow(ROOT / ".github" / "workflows" / "tests.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    docker_job = jobs["docker-build"]
+    assert isinstance(docker_job, dict)
+    steps = docker_job["steps"]
+    assert isinstance(steps, list)
+
+    expected = {
+        "docker/collegue/Dockerfile": "collegue:ci",
+        "docker/sandbox/Dockerfile.openhands": "collegue-sandbox-openhands:pr-check",
+    }
+    for dockerfile, tag in expected.items():
+        step = next(
+            item
+            for item in steps
+            if isinstance(item, dict) and isinstance(item.get("with"), dict) and item["with"].get("file") == dockerfile
+        )
+        options = step["with"]
+        assert options["load"] == "true"
+        assert options["tags"] == tag
+
+    for step in steps:
+        if isinstance(step, dict) and "run" in step:
+            script = str(step["run"])
+            assert "\nload:" not in script
+            assert "\npush:" not in script
+            assert "\ntags:" not in script
