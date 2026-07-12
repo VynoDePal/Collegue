@@ -107,6 +107,21 @@ jobs:
           context: .
           file: docker/collegue/Dockerfile
           push: false
+
+      - name: Build OpenHands sandbox image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/sandbox/Dockerfile.openhands
+          push: false
+          load: true
+          tags: collegue-sandbox-openhands:pr-check
+
+      - name: Verify OpenHands Gemma 4 terminal contract
+        run: |
+          docker run --rm collegue-sandbox-openhands:pr-check \
+            python -c "from openhands.tools.terminal.definition import TerminalAction; assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; assert TerminalAction.model_validate({'command': 'canonical', 'commands': 'ignored'}).command == 'canonical'"
+          push: false
           load: true
           tags: collegue:ci
           cache-from: type=gha
