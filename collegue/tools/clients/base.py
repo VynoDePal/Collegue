@@ -159,7 +159,11 @@ class APIClient(ABC):  # noqa: B024
             self.logger.debug(error_msg)
         else:
             self.logger.error(error_msg)
-        raise APIError(error_msg)
+        # Conserver le statut HTTP final : les couches métier doivent pouvoir
+        # distinguer une absence 404 attendue d'une panne d'auth/rate-limit/5xx.
+        # Le perdre ici transformait notamment les sondes de refs GitHub absentes
+        # en erreurs génériques ``status_code=0``.
+        raise APIError(error_msg, status_code=last_status)
 
     def handle_response(self, response: Any, endpoint: str) -> APIResponse:
         try:
