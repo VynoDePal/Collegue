@@ -31,6 +31,17 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # attendu par openhands 1.7.0 → TypeError à l'import, agent mort-né.
 RUN uv pip install --system "openhands-ai==1.7.0" "lmnr==0.7.52"
 
+# Compatibilité Gemma 4 / OpenHands SDK 1.7.0 : Gemma peut émettre `commands`
+# alors que TerminalAction exige `command`
+# (OpenHands/software-agent-sdk#3741, encore non mergée).
+# Le patch build-time vérifie openhands-ai 1.7.0, ses SDK/tools 1.19.1 et le
+# SHA-256 exact de la source TerminalAction distribuée,
+# puis importe le modèle et teste alias/canonique/priorité. Toute dérive casse le
+# build : aucune modification silencieuse d'une préimage inconnue.
+COPY scripts/patch_openhands_gemma4_terminal.py /opt/patch_openhands_gemma4_terminal.py
+RUN python /opt/patch_openhands_gemma4_terminal.py \
+    && rm /opt/patch_openhands_gemma4_terminal.py
+
 # Runner de tests du gate qualité (pytest) — couche distincte (cache openhands préservé).
 # PIN pytest<9 : pytest 9.0 a retiré `FixtureDef` du namespace top-level, ce qui
 # casse `from pytest import FixtureDef` de pytest-asyncio<0.24 (que les projets
