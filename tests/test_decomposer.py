@@ -124,6 +124,55 @@ async def test_decompose_routes_planner_role(monkeypatch, manager):
     assert ctx.kwargs["model_preferences"] == ["planner-model"]
 
 
+@pytest.mark.asyncio
+async def test_exact_single_task_keeps_route_and_test_in_one_task(manager):
+    pid = _project(manager)
+    ctx = _Ctx(
+        _decomp(
+            [
+                {
+                    "title": "Ajouter la route nightly et son test",
+                    "acceptance": "GET /nightly renvoie 200 et le JSON exact",
+                    "depends_on": [],
+                }
+            ]
+        )
+    )
+
+    tasks = await decompose(
+        "Ajouter GET /nightly et son test",
+        ctx,
+        manager=manager,
+        project_id=pid,
+        exact_task_count=1,
+    )
+
+    assert [task.title for task in tasks] == ["Ajouter la route nightly et son test"]
+    assert "exactement 1 tâche" in ctx.kwargs["messages"]
+    assert "ne les scinde pas" in ctx.kwargs["messages"]
+    assert "EXACTEMENT 1 tâche" in ctx.kwargs["system_prompt"]
+    assert "implémentation et ses tests" in ctx.kwargs["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_exact_single_task_rejects_multi_task_before_any_persistence(manager):
+    pid = _project(manager)
+    ctx = _Ctx(
+        _decomp(
+            [
+                {"title": "Ajouter la route", "depends_on": []},
+                {"title": "Ajouter le test", "depends_on": [0]},
+            ]
+        )
+    )
+
+    with pytest.raises(dec.DecompositionCardinalityError, match="exactement 1"):
+        await decompose("spec", ctx, manager=manager, project_id=pid, exact_task_count=1)
+
+    assert manager.get_tasks(pid) == []
+    assert manager.get_decisions(pid) == []
+
+
 # --- validation du graphe (rien persisté si invalide) ---------------------------
 
 

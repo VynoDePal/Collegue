@@ -25,6 +25,16 @@ from collegue.state.models import Decision, Task
 # hallucinée ne doit pas créer des milliers de lignes (et autant d'issues en P4).
 MAX_TASKS = 200
 
+
+class DecompositionCardinalityError(ValueError):
+    """Le LLM n'a pas respecté une cardinalité explicitement scellée.
+
+    Cette erreur est distincte des sorties momentanément vides/malformées : le
+    runtime ne doit pas dépenser plusieurs appels LLM en retentant un plan qui
+    viole une contrainte déterministe du caller.
+    """
+
+
 DECOMPOSE_SYSTEM_PROMPT = """Tu es un planificateur logiciel senior. À partir d'un SPEC de projet, \
 tu le découpes en tâches exécutables et ordonnées.
 
@@ -50,6 +60,16 @@ class _PlannedTask(BaseModel):
 
 class _Decomposition(BaseModel):
     tasks: List[_PlannedTask] = Field(default_factory=list)
+
+
+def _system_prompt(*, exact_task_count: Optional[int] = None) -> str:
+    if exact_task_count is None:
+        return DECOMPOSE_SYSTEM_PROMPT
+    return (
+        DECOMPOSE_SYSTEM_PROMPT
+        + f"\n- Contrainte prioritaire du caller : retourne EXACTEMENT {exact_task_count} tâche(s) ; "
+        "regroupe l'implémentation et ses tests dans la même tâche."
+    )
 
 
 def _coerce(data: dict) -> _Decomposition:
@@ -102,9 +122,19 @@ def _topo_order(tasks: List[_PlannedTask]) -> List[int]:
     return order
 
 
-def _build_prompt(spec: Any) -> str:
+def _build_prompt(spec: Any, *, exact_task_count: Optional[int] = None) -> str:
     spec_text = spec.to_markdown() if hasattr(spec, "to_markdown") else str(spec)
-    return f"SPEC du projet :\n{spec_text}\n\nDécoupe ce SPEC en tâches (JSON décrit par tes instructions système)."
+    constraint = ""
+    if exact_task_count is not None:
+        constraint = (
+            f"\n\nCONTRAINTE FERME : retourne exactement {exact_task_count} tâche(s). "
+            "Une tâche doit couvrir ensemble l'implémentation et ses tests ; "
+            "ne les scinde pas en tâches distinctes."
+        )
+    return (
+        f"SPEC du projet :\n{spec_text}\n\n"
+        f"Découpe ce SPEC en tâches (JSON décrit par tes instructions système).{constraint}"
+    )
 
 
 async def decompose(
@@ -116,6 +146,7 @@ async def decompose(
     settings_obj: Optional[object] = None,
     temperature: float = 0.2,
     max_tokens: int = 4096,
+    exact_task_count: Optional[int] = None,
 ) -> List[Any]:
     """Décompose ``spec`` en tâches persistées pour ``project_id`` ; retourne les tâches créées.
 
@@ -127,14 +158,21 @@ async def decompose(
     Persistance **atomique** : toutes les tâches + la décision sont écrites dans une
     **seule** transaction — un échec en cours de route ne laisse aucun graphe partiel.
     """
+    if exact_task_count is not None and (
+        not isinstance(exact_task_count, int)
+        or isinstance(exact_task_count, bool)
+        or not 1 <= exact_task_count <= MAX_TASKS
+    ):
+        raise ValueError(f"exact_task_count doit être un entier dans [1, {MAX_TASKS}].")
+
     # Idempotence : ne pas ré-décomposer (un retry dupliquerait le graphe → des
     # issues en double en P4). Le caller doit vider les tâches pour re-planifier.
     if manager.get_tasks(project_id):
         raise ValueError("projet déjà décomposé : vider les tâches existantes avant de redécomposer.")
 
     sample_kwargs = {
-        "messages": _build_prompt(spec),
-        "system_prompt": DECOMPOSE_SYSTEM_PROMPT,
+        "messages": _build_prompt(spec, exact_task_count=exact_task_count),
+        "system_prompt": _system_prompt(exact_task_count=exact_task_count),
         "result_type": _Decomposition,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -155,6 +193,11 @@ async def decompose(
         raise ValueError("Décomposition vide : aucune tâche produite.")
     if len(planned) > MAX_TASKS:
         raise ValueError(f"Décomposition trop grande ({len(planned)} tâches > MAX_TASKS={MAX_TASKS}).")
+    if exact_task_count is not None and len(planned) != exact_task_count:
+        raise DecompositionCardinalityError(
+            "Décomposition refusée avant persistance : "
+            f"{len(planned)} tâche(s) produite(s), exactement {exact_task_count} attendue(s)."
+        )
 
     order = _topo_order(planned)  # valide le graphe (bornes + acyclique) AVANT toute écriture
 

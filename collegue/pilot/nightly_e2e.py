@@ -791,6 +791,8 @@ class NightlyE2ERunner:
                 "SPEC.md",
                 "--deadline-hours",
                 "0.5",
+                "--nightly-exact-task-count",
+                "1",
                 "--format",
                 "json",
             )

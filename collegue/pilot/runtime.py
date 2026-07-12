@@ -793,6 +793,7 @@ async def plan_project_from_settings(
     decompose_max_tokens: int = 16384,
     decompose_attempts: int = 3,
     retry_sleep_seconds: float = 3.0,
+    decompose_exact_task_count: Optional[int] = None,
 ) -> PlanResult:
     """Crée un **draft** durable : problème → SPEC → DAG → aperçu hashé.
 
@@ -840,7 +841,7 @@ async def plan_project_from_settings(
 
     try:
         from collegue.planner.acceptance_tests import generate_acceptance_tests
-        from collegue.planner.decomposer import decompose
+        from collegue.planner.decomposer import DecompositionCardinalityError, decompose
         from collegue.planner.plan_review import build_plan_preview
         from collegue.planner.spec_generator import generate_spec, persist_spec
 
@@ -865,8 +866,14 @@ async def plan_project_from_settings(
                     project_id=project_id,
                     settings_obj=settings_obj,
                     max_tokens=decompose_max_tokens,
+                    exact_task_count=decompose_exact_task_count,
                 )
                 break
+            except DecompositionCardinalityError:
+                # Contrainte ferme (nightly) : un retry consommerait du budget
+                # sans rendre le résultat moins ambigu. Le decomposer garantit
+                # qu'aucune tâche/décision n'a encore été persistée.
+                raise
             except ValueError as exc:  # décomposition vide → aléa du modèle, on retente
                 last_err = exc
                 logger.warning("decompose tentative %d/%d : %s", attempt, attempts, exc)

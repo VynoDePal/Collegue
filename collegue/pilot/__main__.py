@@ -90,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan_p.add_argument("--spec-filename", default=None, help="Chemin du SPEC dans le dépôt cible.")
     plan_p.add_argument("--base", default=None, help="Branche de base scellée (défaut draft : main).")
     plan_p.add_argument(
+        "--nightly-exact-task-count",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    plan_p.add_argument(
         "--execute",
         action="store_true",
         help="Pour `plan sync` uniquement : commit SPEC + création réelle des issues.",
@@ -214,6 +220,7 @@ async def _plan_draft(args: argparse.Namespace) -> int:
         board_title=args.board,
         spec_filename=args.spec_filename or "SPEC.md",
         base_branch=args.base or "main",
+        decompose_exact_task_count=args.nightly_exact_task_count,
     )
     _print_plan_result(result, output_format=args.format)
     return 0
@@ -247,6 +254,8 @@ def _validate_plan_args(parser: argparse.ArgumentParser, args: argparse.Namespac
             )
         if args.project_id is not None or args.expected_plan_hash is not None or args.execute:
             parser.error("plan draft : --project-id, --expected-plan-hash et --execute ne sont pas acceptés")
+        if args.nightly_exact_task_count is not None and args.nightly_exact_task_count != 1:
+            parser.error("plan draft : --nightly-exact-task-count doit valoir 1")
         return
     if action == "approve":
         missing = []
@@ -277,6 +286,7 @@ def _validate_plan_args(parser: argparse.ArgumentParser, args: argparse.Namespac
         "deadline_hours",
         "spec_filename",
         "base",
+        "nightly_exact_task_count",
     )
     supplied = ["--" + name.replace("_", "-") for name in sealed_args if getattr(args, name) is not None]
     if supplied:
