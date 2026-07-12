@@ -141,7 +141,7 @@ jobs:
       - name: Vérifier le runner produit OpenHands SDK
         run: |
           docker run --rm collegue-sandbox-openhands:ci \
-            python -c "from pathlib import Path; from openhands.sdk import Conversation, LLM; from openhands.tools.preset.default import get_default_agent; assert Path('/opt/oh_runner.py').is_file(); print('OpenHands SDK runner OK')"
+            python -c "from pathlib import Path; from openhands.sdk import Conversation, LLM; from openhands.tools.preset.default import get_default_agent; from openhands.tools.terminal.definition import TerminalAction; assert Path('/opt/oh_runner.py').is_file(); assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; print('OpenHands SDK runner + Gemma 4 terminal alias OK')"
 
   product-e2e:
     name: Produit E2E — plan → run → PR → cleanup (#404)
@@ -305,7 +305,7 @@ jobs:
       - name: Vérifier le runner OpenHands SDK embarqué
         run: |
           docker run --rm "$SANDBOX_IMAGE" \
-            python -c "from pathlib import Path; from openhands.sdk import Conversation, LLM; from openhands.tools.preset.default import get_default_agent; assert Path('/opt/oh_runner.py').is_file(); print('OpenHands SDK runner OK')"
+            python -c "from pathlib import Path; from openhands.sdk import Conversation, LLM; from openhands.tools.preset.default import get_default_agent; from openhands.tools.terminal.definition import TerminalAction; assert Path('/opt/oh_runner.py').is_file(); assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; print('OpenHands SDK runner + Gemma 4 terminal alias OK')"
 
       - name: Exécuter le cycle produit réel
         env:

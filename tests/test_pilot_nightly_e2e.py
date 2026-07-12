@@ -614,6 +614,108 @@ def test_cleanup_is_exact_verified_and_idempotent(tmp_path):
     assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": []}
 
 
+def test_cleanup_polls_an_exact_stale_issue_view_without_reclosing(tmp_path, monkeypatch):
+    """Reproduit la vue retardée observée sur le run réel #29210665392."""
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issue = _issue(cfg)
+    stale_issue = _issue(cfg)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    indexed_views = iter(([issue], [stale_issue], [stale_issue], []))
+    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": [77]}
+    assert issues.closed == [77]
+    assert runner.clients.labels.deleted == [cfg.issue_label]
+    assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS[:2])
+
+
+def test_cleanup_fails_closed_when_exact_stale_view_never_converges(tmp_path, monkeypatch):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issue = _issue(cfg)
+    stale_issue = _issue(cfg)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    indexed_views = iter(
+        ([issue], *([[stale_issue]] * (len(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1)))
+    )
+    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(NightlyE2EError, match="état final GitHub non convergé.*polling borné"):
+        runner.cleanup()
+
+    assert issues.closed == [77]
+    assert runner.clients.labels.deleted == []
+    assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS)
+
+
+def test_cleanup_rejects_an_unexpected_final_candidate_without_retry(tmp_path, monkeypatch):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issue = _issue(cfg)
+    foreign_issue = _issue(cfg, number=78)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    indexed_views = iter(([issue], [foreign_issue]))
+    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(NightlyE2EError, match="candidat issue inattendu"):
+        runner.cleanup()
+
+    assert issues.closed == [77]
+    assert runner.clients.labels.deleted == []
+    assert sleeps == []
+
+
+def test_cleanup_propagates_final_index_api_error_without_retry(tmp_path, monkeypatch):
+    runner, _branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    issue = _issue(cfg)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    error = ToolExecutionError("GitHub indisponible", status_code=500)
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [issue]
+        raise error
+
+    issues.list_issues = list_issues
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(ToolExecutionError) as caught:
+        runner.cleanup()
+
+    assert caught.value is error
+    assert issues.closed == [77]
+    assert runner.clients.labels.deleted == []
+    assert sleeps == []
+
+
 def test_cleanup_is_idempotent_when_real_http_boundary_returns_404(tmp_path, monkeypatch):
     runner, branches, _prs, _issues, _files = _runner(tmp_path)
     cfg = runner.config
@@ -1059,6 +1161,86 @@ def test_run_failure_still_invokes_cleanup(tmp_path):
         runner.run()
     assert cfg.base_branch not in branches.refs
     assert branches.refs["main"] == SEED
+
+
+def test_failed_run_contract_reports_only_redacted_durable_agent_error(tmp_path, monkeypatch, capsys):
+    runner, _branches, _prs, _issues, _files = _runner(tmp_path)
+    plan_hash = "f" * 64
+    task = SimpleNamespace(
+        id=3,
+        project_id=9,
+        last_error=(
+            "[agent/agent_error] échec coder: secret-github / secret-llm / secret-gemini\r\n"
+            "::error title=agent::détail sûr"
+        ),
+    )
+    project = SimpleNamespace(approved_plan_hash=plan_hash, tasks=[task])
+    runner._manager = lambda: SimpleNamespace(
+        get_project=lambda project_id: project if project_id == 9 else None,
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-github")
+    monkeypatch.setenv("LLM_API_KEY", "secret-llm")
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-gemini")
+
+    with pytest.raises(NightlyE2EError) as caught:
+        runner._raise_failed_run_contract(project_id=9, plan_hash=plan_hash, task_id=3)
+
+    stderr = capsys.readouterr().err
+    rendered = stderr + str(caught.value)
+    assert "agent_error" in rendered
+    assert rendered.count("[REDACTED]") == 6
+    assert "secret-github" not in rendered
+    assert "secret-llm" not in rendered
+    assert "secret-gemini" not in rendered
+    assert "\n::error" not in rendered
+    assert "\n ::error title=agent::détail sûr" in rendered
+
+
+def test_durable_task_diagnostic_is_strictly_bounded(tmp_path):
+    runner, _branches, _prs, _issues, _files = _runner(tmp_path)
+    plan_hash = "f" * 64
+    task = SimpleNamespace(id=3, project_id=9, last_error="[agent/agent_error] " + "x" * 5000)
+    project = SimpleNamespace(approved_plan_hash=plan_hash, tasks=[task])
+    runner._manager = lambda: SimpleNamespace(
+        get_project=lambda _project_id: project,
+    )
+
+    diagnostic = runner._safe_task_failure_diagnostic(project_id=9, plan_hash=plan_hash, task_id=3)
+
+    assert diagnostic is not None
+    assert len(diagnostic) == nightly_e2e_module._TASK_DIAGNOSTIC_MAX_CHARS
+    assert diagnostic.endswith("…[diagnostic tronqué]")
+    assert "agent_error" in diagnostic
+
+
+@pytest.mark.parametrize(
+    ("project_hash", "task_project_id", "task_result"),
+    [
+        ("e" * 64, 9, "task"),
+        ("f" * 64, 10, "task"),
+        ("f" * 64, 9, None),
+    ],
+)
+def test_failed_run_contract_omits_diagnostic_without_exact_durable_identity(
+    tmp_path,
+    capsys,
+    project_hash,
+    task_project_id,
+    task_result,
+):
+    runner, _branches, _prs, _issues, _files = _runner(tmp_path)
+    expected_hash = "f" * 64
+    task = SimpleNamespace(id=3, project_id=task_project_id, last_error="foreign-agent-error")
+    project = SimpleNamespace(approved_plan_hash=project_hash, tasks=[task] if task_result == "task" else [])
+    runner._manager = lambda: SimpleNamespace(
+        get_project=lambda _project_id: project,
+    )
+
+    with pytest.raises(NightlyE2EError) as caught:
+        runner._raise_failed_run_contract(project_id=9, plan_hash=expected_hash, task_id=3)
+
+    assert str(caught.value) == "le RUN réel n'a pas abouti à une unique PR ouverte et validée"
+    assert "foreign-agent-error" not in capsys.readouterr().err
 
 
 def test_run_accepts_real_http_404_for_absent_base_before_first_mutation(tmp_path, monkeypatch):

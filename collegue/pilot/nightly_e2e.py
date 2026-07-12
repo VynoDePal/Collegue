@@ -50,6 +50,9 @@ _EXEC_MARKER = "<!-- collegue-exec:"
 _TASK_MARKER = "<!-- collegue-task:"
 _NIGHTLY_LABEL_COLOR = "1d76db"
 _GITHUB_CONSISTENCY_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+_TASK_DIAGNOSTIC_MAX_CHARS = 1200
+_TASK_DIAGNOSTIC_REDACTION = "[REDACTED]"
+_TASK_DIAGNOSTIC_SECRET_NAMES = ("GITHUB_TOKEN", "LLM_API_KEY", "GEMINI_API_KEY")
 
 # Contrat volontairement minuscule : un seul changement observable et un seul
 # test. Les chemins font partie du problème car le planner ne voit pas le dépôt.
@@ -613,6 +616,72 @@ class NightlyE2ERunner:
         settings_obj = Settings()
         return ProjectStateManager.from_url(settings_obj.STATE_DATABASE_URL)
 
+    def _safe_task_failure_diagnostic(self, *, project_id: int, plan_hash: str, task_id: int) -> Optional[str]:
+        """Lit le seul ``last_error`` autorisé et le rend sûr pour les logs CI.
+
+        Le diagnostic est purement auxiliaire : au moindre doute sur l'identité
+        durable ``projet + hash approuvé + tâche``, ou si la lecture échoue, il
+        reste absent. On ne cherche jamais une autre tâche par statut/titre et on
+        n'affiche aucun log brut de l'agent.
+        """
+        if (
+            not isinstance(project_id, int)
+            or isinstance(project_id, bool)
+            or project_id <= 0
+            or _SHA256_RE.fullmatch(str(plan_hash or "")) is None
+            or not isinstance(task_id, int)
+            or isinstance(task_id, bool)
+            or task_id <= 0
+        ):
+            return None
+        try:
+            manager = self._manager()
+            project = manager.get_project(project_id)
+        except Exception:  # noqa: BLE001 - diagnostic optionnel, erreur primaire conservée
+            return None
+        if project is None or getattr(project, "approved_plan_hash", None) != plan_hash:
+            return None
+        try:
+            matches = [task for task in project.tasks if getattr(task, "id", None) == task_id]
+        except Exception:  # noqa: BLE001 - relation non chargée/corrompue => absence sûre
+            return None
+        if len(matches) != 1 or getattr(matches[0], "project_id", None) != project_id:
+            return None
+        raw = getattr(matches[0], "last_error", None)
+        if not isinstance(raw, str) or not raw:
+            return None
+
+        # Redacter avant toute troncature évite de conserver le préfixe d'un
+        # secret coupé à la frontière. Le token de config couvre aussi le cas où
+        # os.environ a été modifié après le préflight.
+        secrets = [str(os.environ.get(name, "") or "") for name in _TASK_DIAGNOSTIC_SECRET_NAMES]
+        secrets.append(str(self.config.token or ""))
+        safe = raw
+        for secret in sorted({value for value in secrets if value}, key=len, reverse=True):
+            safe = safe.replace(secret, _TASK_DIAGNOSTIC_REDACTION)
+
+        # ``splitlines`` normalise également CR/CRLF. Une ligne de commande
+        # GitHub Actions ne doit jamais commencer par ``::`` dans stderr.
+        safe = "\n".join((" " + line) if line.startswith("::") else line for line in safe.splitlines())
+        if len(safe) > _TASK_DIAGNOSTIC_MAX_CHARS:
+            marker = "…[diagnostic tronqué]"
+            safe = safe[: _TASK_DIAGNOSTIC_MAX_CHARS - len(marker)] + marker
+        return safe or None
+
+    def _raise_failed_run_contract(self, *, project_id: int, plan_hash: str, task_id: int) -> None:
+        """Échoue le smoke avec, si elle est prouvée, la cause durable sûre."""
+        message = "le RUN réel n'a pas abouti à une unique PR ouverte et validée"
+        diagnostic = self._safe_task_failure_diagnostic(
+            project_id=project_id,
+            plan_hash=plan_hash,
+            task_id=task_id,
+        )
+        if diagnostic is None:
+            raise NightlyE2EError(message)
+        rendered = f"diagnostic tâche durable #{task_id}: {diagnostic}"
+        print(rendered, file=sys.stderr)
+        raise NightlyE2EError(f"{message} — {rendered}")
+
     def _label_owner_description(self) -> str:
         """Marqueur distant compact qui lie le label à ce run exact."""
         cfg = self.config
@@ -735,6 +804,74 @@ class NightlyE2ERunner:
             if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
                 time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
         raise NightlyE2EError("corrélation GitHub non confirmée avant épuisement du polling borné")
+
+    def _wait_for_final_cleanup_state(
+        self,
+        *,
+        expected_pr_numbers: set[int],
+        expected_issue_numbers: set[int],
+        label_remote_present: bool,
+    ) -> None:
+        """Attend la disparition bornée des anciennes vues indexées GitHub.
+
+        Les fermetures ont déjà été confirmées par leurs endpoints individuels.
+        Seule une ancienne vue ``open`` d'une ressource précédemment validée est
+        donc transitoire. Un doublon, une identité étrangère, un état incohérent
+        ou une erreur API reste immédiatement fail-closed. Cette boucle ne
+        réémet aucune mutation distante.
+        """
+        cfg = self.config
+        expected_prs = {int(number) for number in expected_pr_numbers}
+        expected_issues = {int(number) for number in expected_issue_numbers}
+
+        for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
+            remaining_prs = self.clients.prs.list_prs(
+                cfg.owner,
+                cfg.repo,
+                state="open",
+                limit=100,
+                base=cfg.base_branch,
+            )
+            pr_numbers = [int(getattr(pr, "number", 0) or 0) for pr in remaining_prs]
+            if (
+                len(pr_numbers) != len(set(pr_numbers))
+                or any(number not in expected_prs for number in pr_numbers)
+                or any(
+                    getattr(pr, "state", None) != "open" or getattr(pr, "base_branch", None) != cfg.base_branch
+                    for pr in remaining_prs
+                )
+            ):
+                raise NightlyE2EError("candidat PR inattendu pendant la convergence du cleanup")
+
+            remaining_issues = (
+                self.clients.issues.list_issues(
+                    cfg.owner,
+                    cfg.repo,
+                    state="open",
+                    limit=100,
+                    labels=cfg.issue_label,
+                )
+                if label_remote_present
+                else []
+            )
+            issue_numbers = [int(getattr(issue, "number", 0) or 0) for issue in remaining_issues]
+            if (
+                len(issue_numbers) != len(set(issue_numbers))
+                or any(number not in expected_issues for number in issue_numbers)
+                or any(
+                    getattr(issue, "state", None) != "open"
+                    or list(getattr(issue, "labels", ()) or ()).count(cfg.issue_label) != 1
+                    for issue in remaining_issues
+                )
+            ):
+                raise NightlyE2EError("candidat issue inattendu pendant la convergence du cleanup")
+
+            if not remaining_prs and not remaining_issues:
+                return
+            if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
+                time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
+
+        raise NightlyE2EError("état final GitHub non convergé avant épuisement du polling borné")
 
     def _inspect_draft(self, project_id: int, plan_hash: str) -> tuple[int, str, str]:
         manager = self._manager()
@@ -965,7 +1102,11 @@ class NightlyE2ERunner:
                 or processed[0].get("acceptance_oracle_sha256") != oracle_sha256
                 or list(run_payload.get("pending_reviews") or []) != [task_id]
             ):
-                raise NightlyE2EError("le RUN réel n'a pas abouti à une unique PR ouverte et validée")
+                self._raise_failed_run_contract(
+                    project_id=project_id,
+                    plan_hash=plan_hash,
+                    task_id=task_id,
+                )
 
             issue_number = issue_numbers[0]
             pr = self.clients.prs.get_pr(cfg.owner, cfg.repo, opened_prs[0])
@@ -1337,20 +1478,11 @@ class NightlyE2ERunner:
         final_root = self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.root_branch)
         if final_root != manifest.root_sha or current_root != manifest.root_sha:
             raise NightlyE2EError("la branche par défaut de la fixture a bougé pendant le smoke")
-        remaining_prs = self.clients.prs.list_prs(cfg.owner, cfg.repo, state="open", limit=100, base=cfg.base_branch)
-        remaining_issues = (
-            self.clients.issues.list_issues(
-                cfg.owner,
-                cfg.repo,
-                state="open",
-                limit=100,
-                labels=cfg.issue_label,
-            )
-            if label_remote_present
-            else []
+        self._wait_for_final_cleanup_state(
+            expected_pr_numbers=pr_numbers,
+            expected_issue_numbers=issue_numbers,
+            label_remote_present=label_remote_present,
         )
-        if remaining_prs or remaining_issues:
-            raise NightlyE2EError("des PR/issues du run sont encore ouvertes après cleanup")
         if owns_label and not manifest.label_deleted:
             # Relecture juste avant DELETE : un nom identique avec un autre
             # marqueur n'est jamais adopté. Une absence signifie soit que le POST
