@@ -895,7 +895,9 @@ def test_full_driver_uses_four_product_processes_and_cleans(tmp_path):
     assert result["acceptance_oracle_sha256"] == ORACLE_SHA
     product_calls = [argv for argv, _ in calls if argv[1:3] == ["-m", "collegue.pilot"]]
     assert len(product_calls) == 4
-    assert any("draft" in argv for argv in product_calls)
+    draft_call = next(argv for argv in product_calls if "draft" in argv)
+    exact_count_index = draft_call.index("--nightly-exact-task-count")
+    assert draft_call[exact_count_index + 1] == "1"
     assert any("approve" in argv for argv in product_calls)
     assert any("sync" in argv for argv in product_calls)
     assert any("--repo-source" in argv for argv in product_calls)

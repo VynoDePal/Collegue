@@ -205,6 +205,42 @@ async def test_decompose_max_tokens_widened(monkeypatch):
     assert calls["decompose"]["max_tokens"] == 16384
 
 
+async def test_exact_task_count_is_forwarded_to_decomposer(monkeypatch):
+    calls = _patch_planner(monkeypatch, tasks=[object()])
+    result, _ = await _plan(monkeypatch, decompose_exact_task_count=1)
+    assert result.task_count == 1
+    assert calls["decompose"]["exact_task_count"] == 1
+
+
+async def test_cardinality_mismatch_is_not_retried_or_sent_to_qa(monkeypatch):
+    from collegue.planner.decomposer import DecompositionCardinalityError
+
+    attempts = {"decompose": 0, "acceptance": 0}
+
+    async def _multi_task(*args, **kwargs):
+        attempts["decompose"] += 1
+        raise DecompositionCardinalityError("2 tâches, exactement 1 attendue")
+
+    async def _acceptance(*args, **kwargs):
+        attempts["acceptance"] += 1
+
+    calls = _patch_planner(
+        monkeypatch,
+        decompose_fn=_multi_task,
+        acceptance_fn=_acceptance,
+    )
+    with pytest.raises(DecompositionCardinalityError, match="exactement 1"):
+        await _plan(
+            monkeypatch,
+            settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True),
+            decompose_exact_task_count=1,
+            retry_sleep_seconds=0,
+        )
+
+    assert attempts == {"decompose": 1, "acceptance": 0}
+    assert "preview" not in calls["order"]
+
+
 async def test_decompose_retries_on_empty_then_succeeds(monkeypatch):
     attempts = {"n": 0}
 
