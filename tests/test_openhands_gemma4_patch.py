@@ -29,8 +29,8 @@ def _patched_action_type():
     ).decode("utf-8")
     namespace: dict[str, object] = {}
     exec(
-        "from pydantic import BaseModel\n"
-        "class Action(BaseModel):\n    pass\n"
+        "from pydantic import BaseModel, ConfigDict\n"
+        "class Action(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n"
         "class Observation(BaseModel):\n    pass\n"
         "class Text(str):\n    pass\n" + patched,
         namespace,

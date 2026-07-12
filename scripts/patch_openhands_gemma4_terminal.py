@@ -33,10 +33,12 @@ _VALIDATOR_BLOCK = """    @model_validator(mode="before")
     @classmethod
     def _normalize_gemma_terminal_arguments(cls, data: object) -> object:
         # The schema remains canonical. Only normalize Gemma 4's known plural
-        # argument when no canonical value is already present.
-        if not isinstance(data, dict) or "command" in data or "commands" not in data:
+        # argument. If both keys exist, discard the plural alias so strict
+        # extra-field validation still succeeds and the canonical value wins.
+        if not isinstance(data, dict) or "commands" not in data:
             return data
-        normalized = {**data, "command": data["commands"]}
+        normalized = dict(data)
+        normalized.setdefault("command", normalized["commands"])
         normalized.pop("commands", None)
         return normalized
 
