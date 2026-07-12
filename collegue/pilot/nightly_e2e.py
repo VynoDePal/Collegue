@@ -50,6 +50,7 @@ _EXEC_MARKER = "<!-- collegue-exec:"
 _TASK_MARKER = "<!-- collegue-task:"
 _NIGHTLY_LABEL_COLOR = "1d76db"
 _GITHUB_CONSISTENCY_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+_GITHUB_CLEAR_STABILITY_POLLS = 3
 _TASK_DIAGNOSTIC_MAX_CHARS = 1200
 _TASK_DIAGNOSTIC_REDACTION = "[REDACTED]"
 _TASK_DIAGNOSTIC_SECRET_NAMES = ("GITHUB_TOKEN", "LLM_API_KEY", "GEMINI_API_KEY")
@@ -805,6 +806,28 @@ class NightlyE2ERunner:
                 time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
         raise NightlyE2EError("corrélation GitHub non confirmée avant épuisement du polling borné")
 
+    def _assert_canonical_prs_closed(
+        self,
+        *,
+        pr_numbers: set[int],
+        validated_prs: Mapping[int, Any],
+    ) -> None:
+        """Confirme l'état individuel des PR avant une suppression destructive."""
+
+        cfg = self.config
+        for number in sorted(pr_numbers):
+            expected = validated_prs[number]
+            current = self.clients.prs.get_pr(cfg.owner, cfg.repo, number)
+            if (
+                current.number != number
+                or current.state != "closed"
+                or current.merged
+                or current.head_sha != expected.head_sha
+                or current.head_branch != expected.head_branch
+                or current.base_branch != expected.base_branch
+            ):
+                raise NightlyE2EError(f"PR #{number} non fermée ou déplacée ; refs conservées")
+
     def _assert_canonical_issues_closed(
         self,
         *,
@@ -848,6 +871,7 @@ class NightlyE2ERunner:
         cfg = self.config
         expected_prs = {int(number) for number in expected_pr_numbers}
         expected_issues = {int(number) for number in expected_issue_numbers}
+        clear_views = 0
 
         for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
             remaining_prs = self.clients.prs.list_prs(
@@ -921,7 +945,11 @@ class NightlyE2ERunner:
                     pending_issues.append(candidate)
 
             if not pending_prs and not pending_issues:
-                return
+                clear_views += 1
+                if clear_views >= _GITHUB_CLEAR_STABILITY_POLLS:
+                    return
+            else:
+                clear_views = 0
             if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
                 time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
 
@@ -1486,18 +1514,10 @@ class NightlyE2ERunner:
         # Relecture canonique juste avant de supprimer les refs. Contrairement à
         # l'index ``state=open`` éventuellement retardé, l'endpoint individuel
         # doit confirmer que personne n'a rouvert ou mergé la PR entre-temps.
-        for number in sorted(pr_numbers):
-            expected = validated_prs[number]
-            current = self.clients.prs.get_pr(cfg.owner, cfg.repo, number)
-            if (
-                current.number != number
-                or current.state != "closed"
-                or current.merged
-                or current.head_sha != expected.head_sha
-                or current.head_branch != expected.head_branch
-                or current.base_branch != expected.base_branch
-            ):
-                raise NightlyE2EError(f"PR #{number} non fermée ou déplacée ; refs conservées")
+        self._assert_canonical_prs_closed(
+            pr_numbers=pr_numbers,
+            validated_prs=validated_prs,
+        )
 
         # Même relecture autoritative pour les issues avant la convergence
         # indexée et avant toute suppression de ref/label. Elle empêche une vue
@@ -1516,6 +1536,10 @@ class NightlyE2ERunner:
             expected_pr_numbers=pr_numbers,
             expected_issue_numbers=issue_numbers,
             label_remote_present=label_remote_present,
+        )
+        self._assert_canonical_prs_closed(
+            pr_numbers=pr_numbers,
+            validated_prs=validated_prs,
         )
         self._assert_canonical_issues_closed(
             issue_numbers=issue_numbers,
@@ -1574,6 +1598,10 @@ class NightlyE2ERunner:
             expected_pr_numbers=pr_numbers,
             expected_issue_numbers=issue_numbers,
             label_remote_present=label_remote_present,
+        )
+        self._assert_canonical_prs_closed(
+            pr_numbers=pr_numbers,
+            validated_prs=validated_prs,
         )
         self._assert_canonical_issues_closed(
             issue_numbers=issue_numbers,
