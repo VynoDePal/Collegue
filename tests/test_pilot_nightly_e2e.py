@@ -625,7 +625,7 @@ def test_cleanup_polls_an_exact_stale_issue_view_without_reclosing(tmp_path, mon
     manifest.issue_numbers = [77]
     _own_run_label(runner, manifest)
     runner._task_correlations = lambda _manifest: {77: 77}
-    indexed_views = iter(([issue], [stale_issue], [stale_issue], []))
+    indexed_views = iter(([issue], [stale_issue], [stale_issue], [], []))
     issues.list_issues = lambda *args, **kwargs: next(indexed_views)
     sleeps = []
     monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
@@ -725,6 +725,75 @@ def test_cleanup_rejects_issue_reopened_before_canonical_recheck(tmp_path):
 
     assert issues.closed == [77]
     assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+
+
+def test_cleanup_rechecks_closed_index_candidate_before_deleting_refs(tmp_path, monkeypatch):
+    runner, branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    issue = _issue(cfg)
+    stale_closed = _issue(cfg)
+    stale_closed.state = "closed"
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [issue]
+        if calls == 2:
+            issue.state = "open"
+            return [stale_closed]
+        return []
+
+    issues.list_issues = list_issues
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(NightlyE2EError, match="issue #77 non fermée ou déplacée"):
+        runner.cleanup()
+
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+    assert sleeps == [nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS[0]]
+
+
+def test_cleanup_final_guard_rejects_foreign_issue_created_during_ref_deletion(tmp_path):
+    runner, branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    issue = _issue(cfg)
+    foreign_issue = _issue(cfg, number=78)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    indexed_views = iter(([issue], [], [foreign_issue]))
+    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    delete_branch = branches.delete_branch
+
+    def delete_then_create_foreign_issue(*args, **kwargs):
+        result = delete_branch(*args, **kwargs)
+        issues.items[78] = foreign_issue
+        return result
+
+    branches.delete_branch = delete_then_create_foreign_issue
+
+    with pytest.raises(NightlyE2EError, match="candidat issue inattendu"):
+        runner.cleanup()
+
+    assert (cfg.base_branch, BASE_SHA) in branches.deleted
     assert runner.clients.labels.deleted == []
 
 

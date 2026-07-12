@@ -805,6 +805,29 @@ class NightlyE2ERunner:
                 time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
         raise NightlyE2EError("corrélation GitHub non confirmée avant épuisement du polling borné")
 
+    def _assert_canonical_issues_closed(
+        self,
+        *,
+        issue_numbers: set[int],
+        task_by_issue: Mapping[int, int],
+        label_remote_present: bool,
+    ) -> None:
+        """Confirme l'état individuel des issues avant une suppression destructive."""
+
+        cfg = self.config
+        for number in sorted(issue_numbers):
+            task_id = task_by_issue[number]
+            current = self.clients.issues.get_issue(cfg.owner, cfg.repo, number)
+            label_count = list(current.labels or []).count(cfg.issue_label)
+            if (
+                current.number != number
+                or current.state != "closed"
+                or (label_remote_present and label_count != 1)
+                or (not label_remote_present and label_count != 0)
+                or f"<!-- collegue-task:{task_id} -->" not in str(current.body or "")
+            ):
+                raise NightlyE2EError(f"issue #{number} non fermée ou déplacée ; refs conservées")
+
     def _wait_for_final_cleanup_state(
         self,
         *,
@@ -846,7 +869,20 @@ class NightlyE2ERunner:
                 )
             ):
                 raise NightlyE2EError("candidat PR inattendu pendant la convergence du cleanup")
-            pending_prs = [pr for pr in remaining_prs if getattr(pr, "state", None) == "open"]
+            pending_prs = []
+            for pr in remaining_prs:
+                candidate = pr
+                if getattr(pr, "state", None) == "closed":
+                    candidate = self.clients.prs.get_pr(cfg.owner, cfg.repo, int(pr.number))
+                    if (
+                        candidate.number != pr.number
+                        or candidate.state not in {"open", "closed"}
+                        or candidate.merged
+                        or candidate.base_branch != cfg.base_branch
+                    ):
+                        raise NightlyE2EError("candidat PR inattendu pendant la convergence du cleanup")
+                if getattr(candidate, "state", None) == "open":
+                    pending_prs.append(candidate)
 
             remaining_issues = (
                 self.clients.issues.list_issues(
@@ -870,7 +906,19 @@ class NightlyE2ERunner:
                 )
             ):
                 raise NightlyE2EError("candidat issue inattendu pendant la convergence du cleanup")
-            pending_issues = [issue for issue in remaining_issues if getattr(issue, "state", None) == "open"]
+            pending_issues = []
+            for issue in remaining_issues:
+                candidate = issue
+                if getattr(issue, "state", None) == "closed":
+                    candidate = self.clients.issues.get_issue(cfg.owner, cfg.repo, int(issue.number))
+                    if (
+                        candidate.number != issue.number
+                        or candidate.state not in {"open", "closed"}
+                        or list(candidate.labels or []).count(cfg.issue_label) != 1
+                    ):
+                        raise NightlyE2EError("candidat issue inattendu pendant la convergence du cleanup")
+                if getattr(candidate, "state", None) == "open":
+                    pending_issues.append(candidate)
 
             if not pending_prs and not pending_issues:
                 return
@@ -1454,18 +1502,11 @@ class NightlyE2ERunner:
         # Même relecture autoritative pour les issues avant la convergence
         # indexée et avant toute suppression de ref/label. Elle empêche une vue
         # ``closed`` retardée de masquer une réouverture concurrente.
-        for number in sorted(issue_numbers):
-            task_id = task_by_issue[number]
-            current = self.clients.issues.get_issue(cfg.owner, cfg.repo, number)
-            label_count = list(current.labels or []).count(cfg.issue_label)
-            if (
-                current.number != number
-                or current.state != "closed"
-                or (label_remote_present and label_count != 1)
-                or (not label_remote_present and label_count != 0)
-                or f"<!-- collegue-task:{task_id} -->" not in str(current.body or "")
-            ):
-                raise NightlyE2EError(f"issue #{number} non fermée ou déplacée ; refs conservées")
+        self._assert_canonical_issues_closed(
+            issue_numbers=issue_numbers,
+            task_by_issue=task_by_issue,
+            label_remote_present=label_remote_present,
+        )
 
         # La convergence des index doit elle aussi être acquise avant les
         # suppressions destructives. Cela détecte notamment une PR étrangère
@@ -1474,6 +1515,11 @@ class NightlyE2ERunner:
         self._wait_for_final_cleanup_state(
             expected_pr_numbers=pr_numbers,
             expected_issue_numbers=issue_numbers,
+            label_remote_present=label_remote_present,
+        )
+        self._assert_canonical_issues_closed(
+            issue_numbers=issue_numbers,
+            task_by_issue=task_by_issue,
             label_remote_present=label_remote_present,
         )
 
@@ -1522,6 +1568,18 @@ class NightlyE2ERunner:
         final_root = self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.root_branch)
         if final_root != manifest.root_sha or current_root != manifest.root_sha:
             raise NightlyE2EError("la branche par défaut de la fixture a bougé pendant le smoke")
+        # Seconde frontière : une ressource étrangère créée pendant la phase de
+        # suppression des refs doit empêcher la suppression du label/manifeste.
+        self._wait_for_final_cleanup_state(
+            expected_pr_numbers=pr_numbers,
+            expected_issue_numbers=issue_numbers,
+            label_remote_present=label_remote_present,
+        )
+        self._assert_canonical_issues_closed(
+            issue_numbers=issue_numbers,
+            task_by_issue=task_by_issue,
+            label_remote_present=label_remote_present,
+        )
         if owns_label and not manifest.label_deleted:
             # Relecture juste avant DELETE : un nom identique avec un autre
             # marqueur n'est jamais adopté. Une absence signifie soit que le POST
