@@ -10,7 +10,7 @@ Provides standardized:
 from typing import Any, Dict, Optional
 
 from ..base import ToolExecutionError
-from .base import APIClient
+from .base import APIClient, APIError
 
 try:
     import requests
@@ -101,6 +101,13 @@ class GitHubClient(APIClient):
             return response.json()
         except ToolExecutionError:
             raise
+        except APIError as e:
+            # ``_execute_with_retry`` normalise toute erreur finale en APIError.
+            # Réinjecter son statut dans l'exception publique est indispensable
+            # aux opérations idempotentes, qui ne convertissent que le 404 en
+            # « ressource absente » et restent fail-closed pour tous les autres
+            # statuts.
+            raise ToolExecutionError(f"Erreur API GitHub: {e}", status_code=e.status_code) from e
         except Exception as e:
             raise ToolExecutionError(f"Erreur API GitHub: {e}") from e
 

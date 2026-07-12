@@ -39,6 +39,7 @@ def test_expected_404_logs_real_attempt_count_at_debug(caplog):
             client._execute_with_retry(_always_raise(_HTTPError(404, "Ressource introuvable")), "GET contents/x")
     # Compteur RÉEL : le 404 n'est jamais retenté → 1 tentative, pas 4.
     assert "failed after 1 attempt(s)" in str(excinfo.value)
+    assert excinfo.value.status_code == 404
     records = [r for r in caplog.records if "failed after" in r.message]
     assert records and all(r.levelname == "DEBUG" for r in records)
 
@@ -50,6 +51,7 @@ def test_exhausted_retries_log_error_with_real_count(caplog):
             client._execute_with_retry(_always_raise(_HTTPError(503, "Service Unavailable")), "GET ref")
     # 503 retenté jusqu'à épuisement : max_retries + 1 tentatives, en ERROR.
     assert "failed after 4 attempt(s)" in str(excinfo.value)
+    assert excinfo.value.status_code == 503
     records = [r for r in caplog.records if "failed after" in r.message]
     assert records and all(r.levelname == "ERROR" for r in records)
 

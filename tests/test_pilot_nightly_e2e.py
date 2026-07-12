@@ -17,6 +17,7 @@ from collegue.pilot.nightly_e2e import (
     _write_manifest,
 )
 from collegue.tools.base import ToolExecutionError
+from collegue.tools.github_commands import BranchCommands
 
 SEED = "a" * 40
 BASE_SHA = "b" * 40
@@ -385,6 +386,34 @@ def _runner(tmp_path, *, repos=None):
     return NightlyE2ERunner(config, clients=clients), branches, prs, issues, files
 
 
+def _route_missing_refs_through_http_404(monkeypatch, branches):
+    """Reproduit la vraie frontière HTTP GitHub du run #29209532860."""
+    from collegue.tools.clients import github as github_client_module
+
+    calls = []
+
+    class _NotFoundResponse:
+        status_code = 404
+        headers = {}
+        content = b'{"message":"Not Found"}'
+
+    def request(method, url, **kwargs):
+        calls.append((method, url))
+        return _NotFoundResponse()
+
+    monkeypatch.setattr(github_client_module.requests, "request", request)
+    http_branches = BranchCommands(token="test-token", max_retries=0)
+    original = branches.get_branch_sha
+
+    def get_branch_sha(owner, repo, branch):
+        if branch in branches.refs:
+            return original(owner, repo, branch)
+        return http_branches.get_branch_sha(owner, repo, branch)
+
+    branches.get_branch_sha = get_branch_sha
+    return calls
+
+
 def _own_run_label(runner, manifest):
     runner._create_owned_label(manifest)
     assert manifest.label_creation_started is True
@@ -482,6 +511,21 @@ def test_cleanup_is_exact_verified_and_idempotent(tmp_path):
 
     # Relance indépendante du finalizer : aucune ressource, toujours un succès.
     assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": []}
+
+
+def test_cleanup_is_idempotent_when_real_http_boundary_returns_404(tmp_path, monkeypatch):
+    runner, branches, _prs, _issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    calls = _route_missing_refs_through_http_404(monkeypatch, branches)
+
+    assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": []}
+    assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": []}
+    assert branches.refs == {"main": SEED}
+    assert branches.deleted == []
+    assert calls == [
+        ("GET", f"https://api.github.com/repos/fixture/app/git/ref/heads/{cfg.base_branch}"),
+        ("GET", f"https://api.github.com/repos/fixture/app/git/ref/heads/{cfg.base_branch}"),
+    ]
 
 
 def test_cleanup_refuses_a_moved_base_instead_of_deleting_it(tmp_path):
@@ -914,3 +958,28 @@ def test_run_failure_still_invokes_cleanup(tmp_path):
         runner.run()
     assert cfg.base_branch not in branches.refs
     assert branches.refs["main"] == SEED
+
+
+def test_run_accepts_real_http_404_for_absent_base_before_first_mutation(tmp_path, monkeypatch):
+    runner, branches, _prs, _issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    calls = _route_missing_refs_through_http_404(monkeypatch, branches)
+    runner._manager = lambda: SimpleNamespace(list_projects=lambda: [])
+    product_calls = []
+
+    def fail_after_base_creation(argv, *, cwd=None):
+        product_calls.append(list(argv))
+        return CommandResult(2, "", "planner cassé après création de la base")
+
+    runner.command_runner = fail_after_base_creation
+
+    with pytest.raises(NightlyE2EError, match="commande produit échouée"):
+        runner.run()
+
+    # Le 404 de la sonde initiale est bien traité comme « branche absente » :
+    # le run atteint la première commande produit, puis son cleanup retire
+    # exactement la base propriétaire créée entre-temps.
+    assert len(product_calls) == 1
+    assert (cfg.base_branch, BASE_OWNER_SHA) in branches.deleted
+    assert branches.refs == {"main": SEED}
+    assert len(calls) == 1  # sonde HTTP pré-mutation ; le DELETE est simulé par le double
