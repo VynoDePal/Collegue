@@ -805,6 +805,51 @@ class NightlyE2ERunner:
                 time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
         raise NightlyE2EError("corrélation GitHub non confirmée avant épuisement du polling borné")
 
+    def _assert_canonical_prs_closed(
+        self,
+        *,
+        pr_numbers: set[int],
+        validated_prs: Mapping[int, Any],
+    ) -> None:
+        """Confirme l'état individuel des PR avant une suppression destructive."""
+
+        cfg = self.config
+        for number in sorted(pr_numbers):
+            expected = validated_prs[number]
+            current = self.clients.prs.get_pr(cfg.owner, cfg.repo, number)
+            if (
+                current.number != number
+                or current.state != "closed"
+                or current.merged
+                or current.head_sha != expected.head_sha
+                or current.head_branch != expected.head_branch
+                or current.base_branch != expected.base_branch
+            ):
+                raise NightlyE2EError(f"PR #{number} non fermée ou déplacée ; refs conservées")
+
+    def _assert_canonical_issues_closed(
+        self,
+        *,
+        issue_numbers: set[int],
+        task_by_issue: Mapping[int, int],
+        label_remote_present: bool,
+    ) -> None:
+        """Confirme l'état individuel des issues avant une suppression destructive."""
+
+        cfg = self.config
+        for number in sorted(issue_numbers):
+            task_id = task_by_issue[number]
+            current = self.clients.issues.get_issue(cfg.owner, cfg.repo, number)
+            label_count = list(current.labels or []).count(cfg.issue_label)
+            if (
+                current.number != number
+                or current.state != "closed"
+                or (label_remote_present and label_count != 1)
+                or (not label_remote_present and label_count != 0)
+                or f"<!-- collegue-task:{task_id} -->" not in str(current.body or "")
+            ):
+                raise NightlyE2EError(f"issue #{number} non fermée ou déplacée ; refs conservées")
+
     def _wait_for_final_cleanup_state(
         self,
         *,
@@ -815,8 +860,10 @@ class NightlyE2ERunner:
         """Attend la disparition bornée des anciennes vues indexées GitHub.
 
         Les fermetures ont déjà été confirmées par leurs endpoints individuels.
-        Seule une ancienne vue ``open`` d'une ressource précédemment validée est
-        donc transitoire. Un doublon, une identité étrangère, un état incohérent
+        Une ancienne vue indexée peut donc encore inclure une ressource validée,
+        soit avec son ancien état ``open``, soit avec son nouvel état ``closed``
+        malgré le filtre ``state=open``. Le second cas est déjà convergé ; le
+        premier est pollé. Un doublon, une identité étrangère, un état incohérent
         ou une erreur API reste immédiatement fail-closed. Cette boucle ne
         réémet aucune mutation distante.
         """
@@ -824,7 +871,7 @@ class NightlyE2ERunner:
         expected_prs = {int(number) for number in expected_pr_numbers}
         expected_issues = {int(number) for number in expected_issue_numbers}
 
-        for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
+        def has_pending_resources() -> bool:
             remaining_prs = self.clients.prs.list_prs(
                 cfg.owner,
                 cfg.repo,
@@ -837,11 +884,27 @@ class NightlyE2ERunner:
                 len(pr_numbers) != len(set(pr_numbers))
                 or any(number not in expected_prs for number in pr_numbers)
                 or any(
-                    getattr(pr, "state", None) != "open" or getattr(pr, "base_branch", None) != cfg.base_branch
+                    getattr(pr, "state", None) not in {"open", "closed"}
+                    or bool(getattr(pr, "merged", False))
+                    or getattr(pr, "base_branch", None) != cfg.base_branch
                     for pr in remaining_prs
                 )
             ):
                 raise NightlyE2EError("candidat PR inattendu pendant la convergence du cleanup")
+            pending_prs = []
+            for pr in remaining_prs:
+                candidate = pr
+                if getattr(pr, "state", None) == "closed":
+                    candidate = self.clients.prs.get_pr(cfg.owner, cfg.repo, int(pr.number))
+                    if (
+                        candidate.number != pr.number
+                        or candidate.state not in {"open", "closed"}
+                        or candidate.merged
+                        or candidate.base_branch != cfg.base_branch
+                    ):
+                        raise NightlyE2EError("candidat PR inattendu pendant la convergence du cleanup")
+                if getattr(candidate, "state", None) == "open":
+                    pending_prs.append(candidate)
 
             remaining_issues = (
                 self.clients.issues.list_issues(
@@ -859,19 +922,44 @@ class NightlyE2ERunner:
                 len(issue_numbers) != len(set(issue_numbers))
                 or any(number not in expected_issues for number in issue_numbers)
                 or any(
-                    getattr(issue, "state", None) != "open"
+                    getattr(issue, "state", None) not in {"open", "closed"}
                     or list(getattr(issue, "labels", ()) or ()).count(cfg.issue_label) != 1
                     for issue in remaining_issues
                 )
             ):
                 raise NightlyE2EError("candidat issue inattendu pendant la convergence du cleanup")
+            pending_issues = []
+            for issue in remaining_issues:
+                candidate = issue
+                if getattr(issue, "state", None) == "closed":
+                    candidate = self.clients.issues.get_issue(cfg.owner, cfg.repo, int(issue.number))
+                    if (
+                        candidate.number != issue.number
+                        or candidate.state not in {"open", "closed"}
+                        or list(candidate.labels or []).count(cfg.issue_label) != 1
+                    ):
+                        raise NightlyE2EError("candidat issue inattendu pendant la convergence du cleanup")
+                if getattr(candidate, "state", None) == "open":
+                    pending_issues.append(candidate)
 
-            if not remaining_prs and not remaining_issues:
-                return
-            if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
-                time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
+            return bool(pending_prs or pending_issues)
 
-        raise NightlyE2EError("état final GitHub non convergé avant épuisement du polling borné")
+        # Phase 1 : laisser une ancienne vue ``open`` converger dans le budget
+        # historique. Une convergence tardive ne consomme pas la phase suivante.
+        for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
+            if not has_pending_resources():
+                break
+            if attempt == len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
+                raise NightlyE2EError("état final GitHub non convergé avant épuisement du polling borné")
+            time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
+
+        # Phase 2 : une première absence n'est pas une preuve. Rééchantillonner
+        # pendant toute la fenêtre de cohérence (15,75 s) ; toute réapparition
+        # est fail-closed et conserve les ancres pour une reprise ultérieure.
+        for delay in _GITHUB_CONSISTENCY_BACKOFF_SECONDS:
+            time.sleep(delay)
+            if has_pending_resources():
+                raise NightlyE2EError("état final GitHub instable pendant la fenêtre de confirmation")
 
     def _inspect_draft(self, project_id: int, plan_hash: str) -> tuple[int, str, str]:
         manager = self._manager()
@@ -1429,9 +1517,41 @@ class NightlyE2ERunner:
         if close_errors:
             raise NightlyE2EError("fermetures incomplètes, refs conservées: " + " | ".join(close_errors))
 
-        remaining_prs = self.clients.prs.list_prs(cfg.owner, cfg.repo, state="open", limit=100, base=cfg.base_branch)
-        if remaining_prs:
-            raise NightlyE2EError("PR encore ouverte après fermeture ; refs conservées")
+        # Relecture canonique juste avant de supprimer les refs. Contrairement à
+        # l'index ``state=open`` éventuellement retardé, l'endpoint individuel
+        # doit confirmer que personne n'a rouvert ou mergé la PR entre-temps.
+        self._assert_canonical_prs_closed(
+            pr_numbers=pr_numbers,
+            validated_prs=validated_prs,
+        )
+
+        # Même relecture autoritative pour les issues avant la convergence
+        # indexée et avant toute suppression de ref/label. Elle empêche une vue
+        # ``closed`` retardée de masquer une réouverture concurrente.
+        self._assert_canonical_issues_closed(
+            issue_numbers=issue_numbers,
+            task_by_issue=task_by_issue,
+            label_remote_present=label_remote_present,
+        )
+
+        # La convergence des index doit elle aussi être acquise avant les
+        # suppressions destructives. Cela détecte notamment une PR étrangère
+        # ouverte après l'inventaire initial tout en tolérant les objets attendus
+        # déjà hydratés avec leur état canonique ``closed``.
+        self._wait_for_final_cleanup_state(
+            expected_pr_numbers=pr_numbers,
+            expected_issue_numbers=issue_numbers,
+            label_remote_present=label_remote_present,
+        )
+        self._assert_canonical_prs_closed(
+            pr_numbers=pr_numbers,
+            validated_prs=validated_prs,
+        )
+        self._assert_canonical_issues_closed(
+            issue_numbers=issue_numbers,
+            task_by_issue=task_by_issue,
+            label_remote_present=label_remote_present,
+        )
 
         # Phase 4 — refs prouvées seulement. Une issue corrélée ne prouve PAS le
         # SHA de sa branche déterministe : si le crash a précédé create_pr, on
@@ -1478,9 +1598,20 @@ class NightlyE2ERunner:
         final_root = self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.root_branch)
         if final_root != manifest.root_sha or current_root != manifest.root_sha:
             raise NightlyE2EError("la branche par défaut de la fixture a bougé pendant le smoke")
+        # Seconde frontière : une ressource étrangère créée pendant la phase de
+        # suppression des refs doit empêcher la suppression du label/manifeste.
         self._wait_for_final_cleanup_state(
             expected_pr_numbers=pr_numbers,
             expected_issue_numbers=issue_numbers,
+            label_remote_present=label_remote_present,
+        )
+        self._assert_canonical_prs_closed(
+            pr_numbers=pr_numbers,
+            validated_prs=validated_prs,
+        )
+        self._assert_canonical_issues_closed(
+            issue_numbers=issue_numbers,
+            task_by_issue=task_by_issue,
             label_remote_present=label_remote_present,
         )
         if owns_label and not manifest.label_deleted:

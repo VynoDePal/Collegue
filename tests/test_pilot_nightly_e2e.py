@@ -28,6 +28,13 @@ ORACLE_SHA = "e" * 64
 ROOT_TREE_SHA = "1" * 40
 
 
+@pytest.fixture(autouse=True)
+def _disable_real_consistency_waits(monkeypatch):
+    """Les tests pilotent les vues ; ils ne doivent pas attendre le temps mur."""
+
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", lambda _delay: None)
+
+
 def _env(tmp_path, **overrides):
     values = {
         "COLLEGUE_NIGHTLY_E2E": "true",
@@ -625,15 +632,232 @@ def test_cleanup_polls_an_exact_stale_issue_view_without_reclosing(tmp_path, mon
     manifest.issue_numbers = [77]
     _own_run_label(runner, manifest)
     runner._task_correlations = lambda _manifest: {77: 77}
-    indexed_views = iter(([issue], [stale_issue], [stale_issue], []))
-    issues.list_issues = lambda *args, **kwargs: next(indexed_views)
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return [stale_issue] if calls in {2, 3} else ([issue] if calls == 1 else [])
+
+    issues.list_issues = list_issues
     sleeps = []
     monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
 
     assert runner.cleanup() == {"status": "clean", "closed_prs": [], "closed_issues": [77]}
     assert issues.closed == [77]
     assert runner.clients.labels.deleted == [cfg.issue_label]
-    assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS[:2])
+    assert sleeps == [0.25, 0.5, *(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS * 2)]
+
+
+def test_cleanup_accepts_closed_resources_still_returned_by_open_indexes(tmp_path, monkeypatch):
+    """Reproduit le faux négatif observé sur le run réel #29212284046."""
+
+    runner, branches, prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    branches.refs["collegue/issue-77"] = HEAD_SHA
+    pr = _pr(cfg)
+    issue = _issue(cfg)
+    prs.items[88] = pr
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    manifest.pr_numbers = [88]
+    manifest.head_shas = {"collegue/issue-77": HEAD_SHA}
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+
+    # Les objets sont mutés vers ``closed`` par les endpoints individuels, mais
+    # l'index filtré ``state=open`` les renvoie encore une fois.
+    prs.list_prs = lambda *args, **kwargs: [pr]
+    issues.list_issues = lambda *args, **kwargs: [issue]
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    assert runner.cleanup() == {"status": "clean", "closed_prs": [88], "closed_issues": [77]}
+    assert pr.state == "closed" and issue.state == "closed"
+    assert prs.closed == [88] and issues.closed == [77]
+    assert runner.clients.labels.deleted == [cfg.issue_label]
+    assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS * 2)
+
+
+def test_cleanup_rejects_foreign_pr_created_after_inventory_before_deleting_refs(tmp_path):
+    runner, branches, prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    branches.refs["collegue/issue-77"] = HEAD_SHA
+    pr = _pr(cfg)
+    foreign_pr = _pr(cfg, number=89, issue_number=78)
+    issue = _issue(cfg)
+    prs.items[88] = pr
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    manifest.pr_numbers = [88]
+    manifest.head_shas = {"collegue/issue-77": HEAD_SHA}
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    indexed_prs = iter(([pr], [foreign_pr]))
+    prs.list_prs = lambda *args, **kwargs: next(indexed_prs)
+
+    with pytest.raises(NightlyE2EError, match="candidat PR inattendu"):
+        runner.cleanup()
+
+    assert prs.closed == [88] and issues.closed == [77]
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+
+
+def test_cleanup_rejects_issue_reopened_before_canonical_recheck(tmp_path):
+    runner, branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    issue = _issue(cfg)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    close_issue = issues.close_issue
+
+    def close_then_reopen(*args, **kwargs):
+        closed = close_issue(*args, **kwargs)
+        closed.state = "open"
+        return closed
+
+    issues.close_issue = close_then_reopen
+
+    with pytest.raises(NightlyE2EError, match="issue #77 non fermée ou déplacée"):
+        runner.cleanup()
+
+    assert issues.closed == [77]
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+
+
+def test_cleanup_rechecks_closed_index_candidate_before_deleting_refs(tmp_path, monkeypatch):
+    runner, branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    issue = _issue(cfg)
+    stale_closed = _issue(cfg)
+    stale_closed.state = "closed"
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [issue]
+        if calls == 2:
+            issue.state = "open"
+            return [stale_closed]
+        return []
+
+    issues.list_issues = list_issues
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(NightlyE2EError, match="issue #77 non fermée ou déplacée"):
+        runner.cleanup()
+
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+    assert sleeps == [0.25, *nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS]
+
+
+def test_cleanup_rechecks_pr_reopened_behind_a_closed_index_view(tmp_path):
+    runner, branches, prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    branches.refs["collegue/issue-77"] = HEAD_SHA
+    pr = _pr(cfg)
+    stale_closed = _pr(cfg)
+    stale_closed.state = "closed"
+    issue = _issue(cfg)
+    prs.items[88] = pr
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    manifest.pr_numbers = [88]
+    manifest.head_shas = {"collegue/issue-77": HEAD_SHA}
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    calls = 0
+
+    def list_prs(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [pr]
+        if calls == 2:
+            pr.state = "open"
+            return [stale_closed]
+        return []
+
+    prs.list_prs = list_prs
+
+    with pytest.raises(NightlyE2EError, match="PR #88 non fermée ou déplacée"):
+        runner.cleanup()
+
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+
+
+def test_cleanup_final_guard_rejects_foreign_issue_created_during_ref_deletion(tmp_path):
+    runner, branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    issue = _issue(cfg)
+    foreign_issue = _issue(cfg, number=78)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    calls = 0
+
+    def list_issues(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [issue]
+        if calls == 12:
+            return [foreign_issue]
+        return []
+
+    issues.list_issues = list_issues
+    delete_branch = branches.delete_branch
+
+    def delete_then_create_foreign_issue(*args, **kwargs):
+        result = delete_branch(*args, **kwargs)
+        issues.items[78] = foreign_issue
+        return result
+
+    branches.delete_branch = delete_then_create_foreign_issue
+
+    with pytest.raises(NightlyE2EError, match="candidat issue inattendu"):
+        runner.cleanup()
+
+    assert (cfg.base_branch, BASE_SHA) in branches.deleted
+    assert runner.clients.labels.deleted == []
 
 
 def test_cleanup_fails_closed_when_exact_stale_view_never_converges(tmp_path, monkeypatch):
