@@ -1442,13 +1442,40 @@ class NightlyE2ERunner:
             expected = validated_prs[number]
             current = self.clients.prs.get_pr(cfg.owner, cfg.repo, number)
             if (
-                current.state != "closed"
+                current.number != number
+                or current.state != "closed"
                 or current.merged
                 or current.head_sha != expected.head_sha
                 or current.head_branch != expected.head_branch
                 or current.base_branch != expected.base_branch
             ):
                 raise NightlyE2EError(f"PR #{number} non fermée ou déplacée ; refs conservées")
+
+        # Même relecture autoritative pour les issues avant la convergence
+        # indexée et avant toute suppression de ref/label. Elle empêche une vue
+        # ``closed`` retardée de masquer une réouverture concurrente.
+        for number in sorted(issue_numbers):
+            task_id = task_by_issue[number]
+            current = self.clients.issues.get_issue(cfg.owner, cfg.repo, number)
+            label_count = list(current.labels or []).count(cfg.issue_label)
+            if (
+                current.number != number
+                or current.state != "closed"
+                or (label_remote_present and label_count != 1)
+                or (not label_remote_present and label_count != 0)
+                or f"<!-- collegue-task:{task_id} -->" not in str(current.body or "")
+            ):
+                raise NightlyE2EError(f"issue #{number} non fermée ou déplacée ; refs conservées")
+
+        # La convergence des index doit elle aussi être acquise avant les
+        # suppressions destructives. Cela détecte notamment une PR étrangère
+        # ouverte après l'inventaire initial tout en tolérant les objets attendus
+        # déjà hydratés avec leur état canonique ``closed``.
+        self._wait_for_final_cleanup_state(
+            expected_pr_numbers=pr_numbers,
+            expected_issue_numbers=issue_numbers,
+            label_remote_present=label_remote_present,
+        )
 
         # Phase 4 — refs prouvées seulement. Une issue corrélée ne prouve PAS le
         # SHA de sa branche déterministe : si le crash a précédé create_pr, on
@@ -1495,11 +1522,6 @@ class NightlyE2ERunner:
         final_root = self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.root_branch)
         if final_root != manifest.root_sha or current_root != manifest.root_sha:
             raise NightlyE2EError("la branche par défaut de la fixture a bougé pendant le smoke")
-        self._wait_for_final_cleanup_state(
-            expected_pr_numbers=pr_numbers,
-            expected_issue_numbers=issue_numbers,
-            label_remote_present=label_remote_present,
-        )
         if owns_label and not manifest.label_deleted:
             # Relecture juste avant DELETE : un nom identique avec un autre
             # marqueur n'est jamais adopté. Une absence signifie soit que le POST

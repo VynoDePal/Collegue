@@ -670,6 +670,64 @@ def test_cleanup_accepts_closed_resources_still_returned_by_open_indexes(tmp_pat
     assert sleeps == []
 
 
+def test_cleanup_rejects_foreign_pr_created_after_inventory_before_deleting_refs(tmp_path):
+    runner, branches, prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    branches.refs["collegue/issue-77"] = HEAD_SHA
+    pr = _pr(cfg)
+    foreign_pr = _pr(cfg, number=89, issue_number=78)
+    issue = _issue(cfg)
+    prs.items[88] = pr
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    manifest.pr_numbers = [88]
+    manifest.head_shas = {"collegue/issue-77": HEAD_SHA}
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    indexed_prs = iter(([pr], [foreign_pr]))
+    prs.list_prs = lambda *args, **kwargs: next(indexed_prs)
+
+    with pytest.raises(NightlyE2EError, match="candidat PR inattendu"):
+        runner.cleanup()
+
+    assert prs.closed == [88] and issues.closed == [77]
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+
+
+def test_cleanup_rejects_issue_reopened_before_canonical_recheck(tmp_path):
+    runner, branches, _prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    issue = _issue(cfg)
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+    close_issue = issues.close_issue
+
+    def close_then_reopen(*args, **kwargs):
+        closed = close_issue(*args, **kwargs)
+        closed.state = "open"
+        return closed
+
+    issues.close_issue = close_then_reopen
+
+    with pytest.raises(NightlyE2EError, match="issue #77 non fermée ou déplacée"):
+        runner.cleanup()
+
+    assert issues.closed == [77]
+    assert branches.deleted == []
+    assert runner.clients.labels.deleted == []
+
+
 def test_cleanup_fails_closed_when_exact_stale_view_never_converges(tmp_path, monkeypatch):
     runner, _branches, _prs, issues, _files = _runner(tmp_path)
     cfg = runner.config
