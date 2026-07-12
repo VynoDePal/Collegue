@@ -636,6 +636,40 @@ def test_cleanup_polls_an_exact_stale_issue_view_without_reclosing(tmp_path, mon
     assert sleeps == list(nightly_e2e_module._GITHUB_CONSISTENCY_BACKOFF_SECONDS[:2])
 
 
+def test_cleanup_accepts_closed_resources_still_returned_by_open_indexes(tmp_path, monkeypatch):
+    """Reproduit le faux négatif observé sur le run réel #29212284046."""
+
+    runner, branches, prs, issues, _files = _runner(tmp_path)
+    cfg = runner.config
+    branches.refs[cfg.base_branch] = BASE_SHA
+    branches.refs["collegue/issue-77"] = HEAD_SHA
+    pr = _pr(cfg)
+    issue = _issue(cfg)
+    prs.items[88] = pr
+    issues.items[77] = issue
+    manifest = NightlyManifest.for_config(cfg)
+    manifest.base_created = True
+    manifest.base_sha = BASE_SHA
+    manifest.issue_numbers = [77]
+    manifest.pr_numbers = [88]
+    manifest.head_shas = {"collegue/issue-77": HEAD_SHA}
+    _own_run_label(runner, manifest)
+    runner._task_correlations = lambda _manifest: {77: 77}
+
+    # Les objets sont mutés vers ``closed`` par les endpoints individuels, mais
+    # l'index filtré ``state=open`` les renvoie encore une fois.
+    prs.list_prs = lambda *args, **kwargs: [pr]
+    issues.list_issues = lambda *args, **kwargs: [issue]
+    sleeps = []
+    monkeypatch.setattr(nightly_e2e_module.time, "sleep", sleeps.append)
+
+    assert runner.cleanup() == {"status": "clean", "closed_prs": [88], "closed_issues": [77]}
+    assert pr.state == "closed" and issue.state == "closed"
+    assert prs.closed == [88] and issues.closed == [77]
+    assert runner.clients.labels.deleted == [cfg.issue_label]
+    assert sleeps == []
+
+
 def test_cleanup_fails_closed_when_exact_stale_view_never_converges(tmp_path, monkeypatch):
     runner, _branches, _prs, issues, _files = _runner(tmp_path)
     cfg = runner.config

@@ -815,8 +815,10 @@ class NightlyE2ERunner:
         """Attend la disparition bornée des anciennes vues indexées GitHub.
 
         Les fermetures ont déjà été confirmées par leurs endpoints individuels.
-        Seule une ancienne vue ``open`` d'une ressource précédemment validée est
-        donc transitoire. Un doublon, une identité étrangère, un état incohérent
+        Une ancienne vue indexée peut donc encore inclure une ressource validée,
+        soit avec son ancien état ``open``, soit avec son nouvel état ``closed``
+        malgré le filtre ``state=open``. Le second cas est déjà convergé ; le
+        premier est pollé. Un doublon, une identité étrangère, un état incohérent
         ou une erreur API reste immédiatement fail-closed. Cette boucle ne
         réémet aucune mutation distante.
         """
@@ -837,11 +839,14 @@ class NightlyE2ERunner:
                 len(pr_numbers) != len(set(pr_numbers))
                 or any(number not in expected_prs for number in pr_numbers)
                 or any(
-                    getattr(pr, "state", None) != "open" or getattr(pr, "base_branch", None) != cfg.base_branch
+                    getattr(pr, "state", None) not in {"open", "closed"}
+                    or bool(getattr(pr, "merged", False))
+                    or getattr(pr, "base_branch", None) != cfg.base_branch
                     for pr in remaining_prs
                 )
             ):
                 raise NightlyE2EError("candidat PR inattendu pendant la convergence du cleanup")
+            pending_prs = [pr for pr in remaining_prs if getattr(pr, "state", None) == "open"]
 
             remaining_issues = (
                 self.clients.issues.list_issues(
@@ -859,14 +864,15 @@ class NightlyE2ERunner:
                 len(issue_numbers) != len(set(issue_numbers))
                 or any(number not in expected_issues for number in issue_numbers)
                 or any(
-                    getattr(issue, "state", None) != "open"
+                    getattr(issue, "state", None) not in {"open", "closed"}
                     or list(getattr(issue, "labels", ()) or ()).count(cfg.issue_label) != 1
                     for issue in remaining_issues
                 )
             ):
                 raise NightlyE2EError("candidat issue inattendu pendant la convergence du cleanup")
+            pending_issues = [issue for issue in remaining_issues if getattr(issue, "state", None) == "open"]
 
-            if not remaining_prs and not remaining_issues:
+            if not pending_prs and not pending_issues:
                 return
             if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
                 time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
@@ -1429,9 +1435,20 @@ class NightlyE2ERunner:
         if close_errors:
             raise NightlyE2EError("fermetures incomplètes, refs conservées: " + " | ".join(close_errors))
 
-        remaining_prs = self.clients.prs.list_prs(cfg.owner, cfg.repo, state="open", limit=100, base=cfg.base_branch)
-        if remaining_prs:
-            raise NightlyE2EError("PR encore ouverte après fermeture ; refs conservées")
+        # Relecture canonique juste avant de supprimer les refs. Contrairement à
+        # l'index ``state=open`` éventuellement retardé, l'endpoint individuel
+        # doit confirmer que personne n'a rouvert ou mergé la PR entre-temps.
+        for number in sorted(pr_numbers):
+            expected = validated_prs[number]
+            current = self.clients.prs.get_pr(cfg.owner, cfg.repo, number)
+            if (
+                current.state != "closed"
+                or current.merged
+                or current.head_sha != expected.head_sha
+                or current.head_branch != expected.head_branch
+                or current.base_branch != expected.base_branch
+            ):
+                raise NightlyE2EError(f"PR #{number} non fermée ou déplacée ; refs conservées")
 
         # Phase 4 — refs prouvées seulement. Une issue corrélée ne prouve PAS le
         # SHA de sa branche déterministe : si le crash a précédé create_pr, on
