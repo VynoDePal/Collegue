@@ -17,6 +17,7 @@ from collegue.tools.github_commands import (
     PRFilesSnapshot,
     PRNotMergeableError,
 )
+from collegue.tools.github_commands import branches as branches_module
 
 
 class _Recorder:
@@ -416,20 +417,41 @@ def test_delete_branch_propagates_transient_initial_ref_read():
     assert not any(c[0] == "DELETE" for c in rec.calls)
 
 
-def test_delete_branch_confirms_absence_after_successful_delete():
-    br, rec = _branches(["before", None])
+def test_delete_branch_polls_stale_sha_then_confirms_absence(monkeypatch):
+    br, rec = _branches(["before", "before", "before", None])
+    sleeps = []
+    monkeypatch.setattr(branches_module.time, "sleep", sleeps.append)
 
     assert br.delete_branch("o", "r", "feat/x") is True
-    assert any(c[0] == "DELETE" for c in rec.calls)
+    assert [call[0] for call in rec.calls].count("DELETE") == 1
+    assert sleeps == [
+        branches_module._DELETE_CONFIRM_BACKOFF_SECONDS[0],
+        branches_module._DELETE_CONFIRM_BACKOFF_SECONDS[1],
+    ]
 
 
-def test_delete_branch_refuses_unconfirmed_successful_delete():
-    br, rec = _branches(["before", "still-present"])
+def test_delete_branch_refuses_unconfirmed_successful_delete(monkeypatch):
+    br, rec = _branches(["before"] + ["before"] * (len(branches_module._DELETE_CONFIRM_BACKOFF_SECONDS) + 1))
+    sleeps = []
+    monkeypatch.setattr(branches_module.time, "sleep", sleeps.append)
 
     with pytest.raises(ToolExecutionError, match="non confirmée"):
         br.delete_branch("o", "r", "feat/x")
 
-    assert any(c[0] == "DELETE" for c in rec.calls)
+    assert [call[0] for call in rec.calls].count("DELETE") == 1
+    assert sleeps == list(branches_module._DELETE_CONFIRM_BACKOFF_SECONDS)
+
+
+def test_delete_branch_refuses_moved_sha_without_retry(monkeypatch):
+    br, rec = _branches(["before", "moved"])
+    sleeps = []
+    monkeypatch.setattr(branches_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(ToolExecutionError, match="tête déplacée"):
+        br.delete_branch("o", "r", "feat/x")
+
+    assert [call[0] for call in rec.calls].count("DELETE") == 1
+    assert sleeps == []
 
 
 def test_delete_branch_propagates_transient_confirmation_read():
@@ -443,24 +465,63 @@ def test_delete_branch_propagates_transient_confirmation_read():
     assert any(c[0] == "DELETE" for c in rec.calls)
 
 
-def test_delete_branch_propagates_delete_error_when_ref_still_exists():
+def test_delete_branch_error_then_stale_sha_times_out_without_second_delete(monkeypatch):
     error = ToolExecutionError("suppression refusée", status_code=403)
-    br, _ = _branches(["before", "before"])
-    br._request_json = lambda *args, **kwargs: (_ for _ in ()).throw(error)
+    br, rec = _branches(["before"] + ["before"] * (len(branches_module._DELETE_CONFIRM_BACKOFF_SECONDS) + 1))
+    delete_calls = []
+
+    def fail_delete(*args, **kwargs):
+        delete_calls.append((args, kwargs))
+        raise error
+
+    br._request_json = fail_delete
+    sleeps = []
+    monkeypatch.setattr(branches_module.time, "sleep", sleeps.append)
 
     with pytest.raises(ToolExecutionError) as caught:
         br.delete_branch("o", "r", "feat/x")
 
     assert caught.value is error
+    assert len(delete_calls) == 1
+    assert not any(call[0] == "DELETE" for call in rec.calls)
+    assert sleeps == list(branches_module._DELETE_CONFIRM_BACKOFF_SECONDS)
 
 
-def test_delete_branch_accepts_delete_error_only_after_confirmed_absence():
-    br, _ = _branches(["before", None])
-    br._request_json = lambda *args, **kwargs: (_ for _ in ()).throw(
-        ToolExecutionError("réponse DELETE perdue", status_code=500)
-    )
+def test_delete_branch_accepts_lost_delete_response_after_stale_then_404(monkeypatch):
+    br, _ = _branches(["before", "before", None])
+    delete_calls = []
+
+    def lose_response(*args, **kwargs):
+        delete_calls.append((args, kwargs))
+        raise ToolExecutionError("réponse DELETE perdue", status_code=500)
+
+    br._request_json = lose_response
+    sleeps = []
+    monkeypatch.setattr(branches_module.time, "sleep", sleeps.append)
 
     assert br.delete_branch("o", "r", "feat/x") is True
+    assert len(delete_calls) == 1
+    assert sleeps == [branches_module._DELETE_CONFIRM_BACKOFF_SECONDS[0]]
+
+
+def test_delete_branch_error_then_moved_sha_fails_immediately_without_second_delete(monkeypatch):
+    br, _ = _branches(["before", "moved"])
+    error = ToolExecutionError("réponse DELETE perdue", status_code=500)
+    delete_calls = []
+
+    def lose_response(*args, **kwargs):
+        delete_calls.append((args, kwargs))
+        raise error
+
+    br._request_json = lose_response
+    sleeps = []
+    monkeypatch.setattr(branches_module.time, "sleep", sleeps.append)
+
+    with pytest.raises(ToolExecutionError, match="tête déplacée"):
+        br.delete_branch("o", "r", "feat/x")
+
+    assert len(delete_calls) == 1
+    assert sleeps == []
 
 
 def test_delete_branch_expected_sha_allows_exact_head():

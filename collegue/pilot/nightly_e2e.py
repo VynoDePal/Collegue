@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -48,6 +49,7 @@ _DEFAULT_MARKER_PATH = ".collegue-nightly-fixture"
 _EXEC_MARKER = "<!-- collegue-exec:"
 _TASK_MARKER = "<!-- collegue-task:"
 _NIGHTLY_LABEL_COLOR = "1d76db"
+_GITHUB_CONSISTENCY_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
 
 # Contrat volontairement minuscule : un seul changement observable et un seul
 # test. Les chemins font partie du problème car le planner ne voit pas le dépôt.
@@ -681,6 +683,59 @@ class NightlyE2ERunner:
         manifest.label_created = True
         _write_manifest(self.config.manifest_path, manifest)
 
+    def _verify_synced_issue(
+        self,
+        issue_number: int,
+        *,
+        task_id: int,
+        project_id: int,
+        plan_hash: str,
+    ) -> None:
+        """Prouve l'issue du sync par son endpoint individuel autoritatif.
+
+        GitHub peut servir momentanément une vue retardée de
+        ``GET /issues?labels=...`` juste après le ``POST /issues``. Le GET de
+        l'issue connue confirme directement son état, son label et les deux
+        marqueurs durables. La liste filtrée reste une garde contre un doublon,
+        mais son absence transitoire ne transforme plus un succès confirmé en
+        faux échec.
+        """
+        cfg = self.config
+        issue = self.clients.issues.get_issue(cfg.owner, cfg.repo, issue_number)
+        body = str(getattr(issue, "body", "") or "")
+        task_markers = re.findall(r"<!-- collegue-task:([1-9][0-9]*) -->", body)
+        expected_plan_marker = f"<!-- collegue-plan:{plan_hash};project:{int(project_id)};task:{int(task_id)} -->"
+        if (
+            int(getattr(issue, "number", 0) or 0) != int(issue_number)
+            or getattr(issue, "state", None) != "open"
+            or list(getattr(issue, "labels", ()) or ()).count(cfg.issue_label) != 1
+            or task_markers != [str(int(task_id))]
+            or body.count(expected_plan_marker) != 1
+        ):
+            raise NightlyE2EError("issue synchronisée sans identité GitHub exacte du plan/run")
+
+        # Cette vue indexée doit converger elle aussi : elle prouve l'unicité du
+        # label et alimente ensuite le cleanup. Une vue vide est le seul état
+        # transitoire admis ; tout candidat étranger ou toute erreur API bloque
+        # immédiatement.
+        for attempt in range(len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS) + 1):
+            filtered = self.clients.issues.list_issues(
+                cfg.owner,
+                cfg.repo,
+                state="open",
+                limit=100,
+                labels=cfg.issue_label,
+            )
+            numbers = [int(getattr(item, "number", 0) or 0) for item in filtered]
+            foreign_numbers = {number for number in numbers if number != int(issue_number)}
+            if foreign_numbers or (numbers and numbers != [int(issue_number)]):
+                raise NightlyE2EError("corrélation GitHub ambiguë: le label du run désigne plusieurs issues")
+            if numbers == [int(issue_number)]:
+                return
+            if attempt < len(_GITHUB_CONSISTENCY_BACKOFF_SECONDS):
+                time.sleep(_GITHUB_CONSISTENCY_BACKOFF_SECONDS[attempt])
+        raise NightlyE2EError("corrélation GitHub non confirmée avant épuisement du polling borné")
+
     def _inspect_draft(self, project_id: int, plan_hash: str) -> tuple[int, str, str]:
         manager = self._manager()
         project = manager.get_project(project_id)
@@ -851,15 +906,12 @@ class NightlyE2ERunner:
                 or int(issues[0].get("task_id") or 0) != task_id
             ):
                 raise NightlyE2EError("la synchronisation doit créer exactement une issue")
-            remote_issues = self.clients.issues.list_issues(
-                cfg.owner,
-                cfg.repo,
-                state="open",
-                limit=100,
-                labels=cfg.issue_label,
+            self._verify_synced_issue(
+                issue_numbers[0],
+                task_id=task_id,
+                project_id=project_id,
+                plan_hash=plan_hash,
             )
-            if [int(issue.number) for issue in remote_issues] != issue_numbers:
-                raise NightlyE2EError("corrélation GitHub ambiguë: le label du run ne désigne pas une issue unique")
             manifest.issue_numbers = issue_numbers
             manifest.base_sha = self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch)
             if _SHA_RE.fullmatch(str(manifest.base_sha or "")) is None:
