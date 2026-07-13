@@ -128,6 +128,10 @@ def test_task_contract_is_canonical_across_task_and_dependency_order():
         ("import pytest\n@pytest.mark.skipif(True, reason='x')\ndef test_x():\n    assert True\n", "skipif"),
         ("import pytest\ndef test_x():\n    pytest.xfail('x')\n    assert True\n", "xfail"),
         ("import pytest\npytest.importorskip('x')\ndef test_x():\n    assert True\n", "importorskip"),
+        (
+            "from pathlib import Path\ndef test_x():\n    root = Path(__file__).parent\n    assert root.exists()\n",
+            "__file__",
+        ),
     ],
 )
 def test_static_validation_is_fail_closed(source, message):
@@ -225,6 +229,9 @@ async def test_prompt_contains_only_spec_and_plan_contract_metadata():
     assert "diff livré" not in prompt.lower()
     assert "workspace" not in prompt.lower()
     assert "indépendant du codeur" in system
+    assert "Path.cwd()" in system
+    assert "n'utilise jamais __file__" in system
+    assert "sans lien direct" in system
 
 
 @pytest.mark.asyncio

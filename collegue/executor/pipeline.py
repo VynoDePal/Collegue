@@ -367,6 +367,32 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
             "aucun test : " + justification + ". Ajoute une assertion sur la VALEUR/le CALCUL attendu "
             "(pas seulement un code HTTP 200)."
         )[:700]
+    if report is not None and getattr(report, "adequacy_error", None):
+        return (
+            "CONTRÔLE D'ADÉQUATION INDISPONIBLE — le gate fail-closed n'a pas pu confirmer que le diff "
+            "réalise l'issue : " + str(report.adequacy_error)
+        )[:700]
+    if report is not None and (
+        getattr(report, "acceptance_passed", None) is False or getattr(report, "acceptance_error", None)
+    ):
+        # §4.7 : les tests ordinaires peuvent être verts alors que l'oracle QA
+        # indépendant est rouge. Sa sortie est distincte de ``test_output`` ;
+        # sans cette branche, le diagnostic persisté relayait le mauvais succès
+        # pytest et masquait totalement la cause (nightly réel #598).
+        error = str(getattr(report, "acceptance_error", "") or "").strip()
+        output = str(getattr(report, "acceptance_output", "") or "")
+        failures = [
+            line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED ", "ERROR "))
+        ]
+        detail = " ; ".join(failures[:6])
+        if not detail:
+            detail = error or log_tail(filter_pip_noise(output), 500).strip()
+        if not detail:
+            detail = "l'oracle QA a renvoyé un exit code non nul sans diagnostic exploitable"
+        return (
+            "ORACLE D'ACCEPTATION REFUSÉ (§4.7) — les tests du projet peuvent être verts, mais la preuve "
+            "indépendante du contrat a échoué : " + detail
+        )[:700]
     removed = tuple(getattr(report, "requirements_removed", ()) or ()) if report is not None else ()
     if removed:
         # #482 : le motif utile est la liste NOMINATIVE des lignes perdues —
