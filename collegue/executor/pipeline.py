@@ -381,9 +381,7 @@ def failure_feedback(outcome: "ExecutionOutcome") -> str:
         # pytest et masquait totalement la cause (nightly réel #598).
         error = str(getattr(report, "acceptance_error", "") or "").strip()
         output = str(getattr(report, "acceptance_output", "") or "")
-        failures = [
-            line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED ", "ERROR "))
-        ]
+        failures = [line.strip() for line in output.splitlines() if line.strip().startswith(("FAILED ", "ERROR "))]
         detail = " ; ".join(failures[:6])
         if not detail:
             detail = error or log_tail(filter_pip_noise(output), 500).strip()

@@ -243,8 +243,7 @@ def validate_pytest_source(source: str, *, max_source_bytes: int = MAX_SOURCE_BY
         # négatif même lorsque le livrable est conforme (nightly réel #598).
         if isinstance(node, ast.Name) and node.id == "__file__":
             raise ValueError(
-                "source pytest invalide : __file__ est interdit ; "
-                "utiliser Path.cwd() pour localiser le workspace"
+                "source pytest invalide : __file__ est interdit ; utiliser Path.cwd() pour localiser le workspace"
             )
         if isinstance(node, (ast.Attribute, ast.Name)):
             parts = _dotted_name(node)
