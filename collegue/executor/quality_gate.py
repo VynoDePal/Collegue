@@ -1552,6 +1552,7 @@ class AcceptanceOutcome:
     """Verdict des tests d'acceptation §4.7 — exécution OBJECTIVE (exit code pytest)."""
 
     passed: Optional[bool] = None  # None = non évalué (pas de critères / checker absent)
+    exit_code: Optional[int] = None  # code brut du runner ; 1 prouve un test rouge attendu
     output: str = ""
     error: Optional[str] = None  # toute erreur bloque quand le checker est activé
     skipped: bool = False
@@ -1664,15 +1665,45 @@ def _run_acceptance_source(
             oracle_sha256=oracle_sha256,
         )
     output = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
-    # pytest exit 5 = AUCUN test collecté : le contrat n'est pas prouvé.
-    if getattr(res, "exit_code", None) == 5:
+    exit_code = getattr(res, "exit_code", None)
+    if _INSTALL_FAILED_NOTE in output:
         return AcceptanceOutcome(
             passed=False,
+            exit_code=exit_code,
+            error="installation des dépendances échouée avant l'oracle d'acceptation",
+            output=output,
+            oracle_sha256=oracle_sha256,
+        )
+    if exit_code == 0:
+        return AcceptanceOutcome(
+            passed=True,
+            exit_code=0,
+            output=output,
+            oracle_sha256=oracle_sha256,
+        )
+    if exit_code == 1:
+        return AcceptanceOutcome(
+            passed=False,
+            exit_code=1,
+            output=output,
+            oracle_sha256=oracle_sha256,
+        )
+    # pytest exit 5 = AUCUN test collecté : le contrat n'est pas prouvé.
+    if exit_code == 5:
+        return AcceptanceOutcome(
+            passed=False,
+            exit_code=5,
             error="aucun test d'acceptation collecté (oracle inexploitable)",
             output=output,
             oracle_sha256=oracle_sha256,
         )
-    return AcceptanceOutcome(passed=bool(res.ok), output=output, oracle_sha256=oracle_sha256)
+    return AcceptanceOutcome(
+        passed=False,
+        exit_code=exit_code,
+        error=f"runner d'acceptation terminé avec un code d'infrastructure pytest invalide: {exit_code!r}",
+        output=output,
+        oracle_sha256=oracle_sha256,
+    )
 
 
 _STORED_ACCEPTANCE_SCHEMA_VERSION = 1
