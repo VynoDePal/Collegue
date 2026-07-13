@@ -394,6 +394,79 @@ def _runner(tmp_path, *, repos=None):
     return NightlyE2ERunner(config, clients=clients), branches, prs, issues, files
 
 
+def _baseline_outcome(**overrides):
+    values = {
+        "passed": False,
+        "exit_code": 1,
+        "output": "1 failed",
+        "error": None,
+        "skipped": False,
+        "oracle_sha256": ORACLE_SHA,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_baseline_probe_uses_stored_checker_and_gate_sandbox(tmp_path, monkeypatch):
+    from collegue.executor import quality_gate
+    from collegue.pilot import driver, runtime
+
+    runner, _branches, _prs, _issues, _files = _runner(tmp_path)
+    task = SimpleNamespace(id=3, project_id=9, issue_number=77)
+    manager = SimpleNamespace(get_task=lambda task_id: task if task_id == 3 else None)
+    runner._manager = lambda: manager
+    issue = SimpleNamespace(number=77, source_task_id=3)
+    sandbox = object()
+    monkeypatch.setattr(driver, "_issue_from_task", lambda candidate: issue if candidate is task else None)
+    monkeypatch.setattr(runtime, "_build_gate_sandbox", lambda _settings: sandbox)
+    calls = []
+
+    class _Checker:
+        def __init__(self, *, manager, project_id):
+            calls.append(("init", manager, project_id))
+
+        async def check(self, workspace, diff, checked_issue, ctx, *, sandbox):
+            calls.append(("check", workspace, diff, checked_issue, ctx, sandbox))
+            return _baseline_outcome()
+
+    monkeypatch.setattr(quality_gate, "StoredAcceptanceChecker", _Checker)
+
+    outcome = runner._run_baseline_acceptance(str(tmp_path), project_id=9, task_id=3, issue_number=77)
+
+    assert outcome.exit_code == 1
+    assert calls == [
+        ("init", manager, 9),
+        ("check", str(tmp_path), "", issue, None, sandbox),
+    ]
+
+
+def test_baseline_rejection_requires_exact_red_pytest_exit():
+    assert (
+        NightlyE2ERunner._require_baseline_rejection(
+            _baseline_outcome(),
+            oracle_sha256=ORACLE_SHA,
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "message"),
+    [
+        (_baseline_outcome(passed=True, exit_code=0), "accepte la fixture"),
+        (_baseline_outcome(error="docker indisponible", exit_code=None), "erreur"),
+        (_baseline_outcome(exit_code=5), "exit 1"),
+        (_baseline_outcome(exit_code=2), "exit 1"),
+        (_baseline_outcome(skipped=True), "ignoré"),
+        (_baseline_outcome(output=""), "aucune sortie"),
+        (_baseline_outcome(oracle_sha256="f" * 64), "oracle QA approuvé exact"),
+    ],
+)
+def test_baseline_rejection_fails_closed(outcome, message):
+    with pytest.raises(NightlyE2EError, match=message):
+        NightlyE2ERunner._require_baseline_rejection(outcome, oracle_sha256=ORACLE_SHA)
+
+
 def _route_missing_refs_through_http_404(monkeypatch, branches):
     """Reproduit la vraie frontière HTTP GitHub du run #29209532860."""
     from collegue.tools.clients import github as github_client_module
@@ -1356,13 +1429,19 @@ def test_full_driver_uses_four_product_processes_and_cleans(tmp_path):
     runner._inspect_draft = lambda project_id, plan_hash: (3, "# SPEC fixture", ORACLE_SHA)
     runner._task_correlations = lambda _manifest: {77: 3}
     runner._approved_task_ids = lambda _manifest: {3}
+    baseline = tmp_path / "baseline-parent" / "fixture"
     source = tmp_path / "clone-parent" / "fixture"
+    baseline.mkdir(parents=True)
     source.mkdir(parents=True)
-    runner._clone_base = lambda base_sha: str(source)
+    clone_paths = iter((baseline, source))
+    runner._clone_base = lambda base_sha: str(next(clone_paths))
+    runner._run_baseline_acceptance = lambda workspace, project_id, task_id, issue_number: _baseline_outcome()
 
     result = runner.run()
     assert result["status"] == "passed"
     assert result["acceptance_passed"] is True
+    assert result["acceptance_negative_control_exit_code"] == 1
+    assert result["acceptance_rejected_base"] is True
     assert result["acceptance_oracle_sha256"] == ORACLE_SHA
     product_calls = [argv for argv, _ in calls if argv[1:3] == ["-m", "collegue.pilot"]]
     assert len(product_calls) == 4
@@ -1374,6 +1453,8 @@ def test_full_driver_uses_four_product_processes_and_cleans(tmp_path):
     assert any("--repo-source" in argv for argv in product_calls)
     assert branches.refs == {"main": SEED}
     assert prs.items[88].state == "closed" and issues.items[77].state == "closed"
+    assert not baseline.parent.exists()
+    assert not source.parent.exists()
 
 
 def test_run_failure_still_invokes_cleanup(tmp_path):
