@@ -37,6 +37,11 @@ Contraintes impératives :
 - réponds uniquement avec la source Python du module (un fence ```python est toléré) ;
 - définis au moins une fonction ou méthode collectable nommée test_* ;
 - chaque test contient au moins une instruction assert qui vérifie un résultat observable ;
+- vérifie uniquement le critère d'acceptation de la tâche : n'ajoute aucun test
+  d'intégrité, de dépendances ou de non-régression sans lien direct avec ce critère ;
+- le runner crée le module sous un nom aléatoire dans /tmp puis l'exécute avec
+  /workspace comme répertoire courant : utilise Path.cwd() pour trouver le projet
+  et n'utilise jamais __file__ pour en déduire la racine ;
 - n'utilise jamais skip, skipif, xfail ou importorskip ;
 - n'utilise aucun conftest, plugin pytest ou configuration pytest du projet ;
 - ne remplace pas la vérification par une opinion, un commentaire ou un placeholder.
@@ -233,6 +238,13 @@ def validate_pytest_source(source: str, *, max_source_bytes: int = MAX_SOURCE_BY
         raise ValueError("source pytest invalide : aucune fonction test_* collectable")
 
     for node in ast.walk(tree):
+        # L'oracle est matérialisé sous un chemin aléatoire dans /tmp au runtime.
+        # En déduire la racine du projet via ``__file__`` produit donc un faux
+        # négatif même lorsque le livrable est conforme (nightly réel #598).
+        if isinstance(node, ast.Name) and node.id == "__file__":
+            raise ValueError(
+                "source pytest invalide : __file__ est interdit ; utiliser Path.cwd() pour localiser le workspace"
+            )
         if isinstance(node, (ast.Attribute, ast.Name)):
             parts = _dotted_name(node)
             if any(part.lower() in _FORBIDDEN_PYTEST_CONTROLS for part in parts):

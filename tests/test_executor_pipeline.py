@@ -1293,6 +1293,85 @@ def test_failure_feedback_names_uncovered_criterion():
     assert len(feedback) <= 700
 
 
+def test_failure_feedback_reports_independent_acceptance_failure_before_green_tests():
+    """§4.7 : la sortie de l'oracle est la cause, pas le pytest projet vert."""
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    outcome = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(success=True, logs="journal"),
+            changed=True,
+            diff="",
+            files_changed=("app/main.py",),
+            success=True,
+        ),
+        quality_report=QualityReport(
+            tests_passed=True,
+            test_exit_code=0,
+            test_output="2 passed in 0.45s",
+            review_summary="",
+            review_findings=(),
+            review_blocking=False,
+            passed=False,
+            adequacy_implemented=True,
+            acceptance_passed=False,
+            acceptance_output=(
+                "1 passed, 1 failed\n"
+                "FAILED /tmp/collegue_acceptance_x.py::test_dependency_files_integrity - assert False\n"
+            ),
+        ),
+        reason="gate_failed",
+    )
+
+    feedback = failure_feedback(outcome)
+
+    assert "ORACLE D'ACCEPTATION REFUSÉ" in feedback
+    assert "test_dependency_files_integrity" in feedback
+    assert "2 passed in 0.45s" not in feedback
+    assert len(feedback) <= 700
+
+
+def test_failure_feedback_reports_acceptance_execution_error():
+    from collegue.executor import AgentResult, QualityReport, Workspace
+    from collegue.executor.pipeline import ExecutionOutcome, failure_feedback
+    from collegue.executor.runner import ExecutionResult
+
+    outcome = ExecutionOutcome(
+        success=False,
+        stage="gate",
+        workspace=Workspace(path="/w", branch="b", base_commit="c"),
+        execution=ExecutionResult(
+            agent_result=AgentResult(success=True, logs="journal"),
+            changed=True,
+            diff="",
+            files_changed=("app/main.py",),
+            success=True,
+        ),
+        quality_report=QualityReport(
+            tests_passed=True,
+            test_exit_code=0,
+            test_output="2 passed in 0.45s",
+            review_summary="",
+            review_findings=(),
+            review_blocking=False,
+            passed=False,
+            adequacy_implemented=True,
+            acceptance_error="oracle plan-time invalide",
+        ),
+        reason="gate_failed",
+    )
+
+    feedback = failure_feedback(outcome)
+
+    assert "oracle plan-time invalide" in feedback
+    assert "2 passed" not in feedback
+
+
 async def test_requirements_regeneration_stops_at_gate(repo):
     """#482 bout en bout : l'agent régénère requirements.txt en perdant une ligne
     de la base → gate rouge, aucune PR."""
