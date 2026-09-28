@@ -107,11 +107,14 @@ Changement de comportement volontaire :
 
 ## Limites explicites (non couvert par ce lot)
 
-- `improve/metrics.py` (hors périmètre A) exécute `ruff --fix`/`ruff format`
-  (`autofix_lint`) et éventuellement `pip-audit -r requirements.txt` **sur l'hôte**
-  dans le workspace : un symlink `x.py` → fichier hôte serait réécrit par
-  `ruff --fix`, et `pip-audit` peut construire des sdists. À traiter séparément
-  (rapport A → C).
+- `improve/metrics.py` (hors périmètre A, NON corrigé) : **vérifié** —
+  `autofix_lint` passe des chemins issus de `files_changed` à `ruff --fix` après un
+  simple `os.path.isfile` : un symlink `x.py` → fichier hôte est suivi et le fichier
+  HORS workspace est réécrit (reproduction :
+  `evidence/w1-a-finding-autofix-symlink.txt`). **À vérifier** (non exécuté ici, il
+  faudrait du réseau) : `_default_dep_audit` lance `pip-audit -r requirements.txt` sur
+  l'hôte, dont la résolution pip peut construire des sdists ou suivre des URL VCS
+  choisies par l'agent. Correctif proposé dans le rapport A.
 - `repo_source` (checkout utilisateur : `resync_repository_base`,
   `git rev-parse HEAD` de la garde) reste traité comme dépôt de confiance avec le
   runner local : sa config est celle de l'utilisateur (credentials, LFS…) et ne
