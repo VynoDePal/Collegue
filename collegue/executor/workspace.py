@@ -159,6 +159,16 @@ def trusted_base(workspace: Workspace | str, *, git_bin: str = "git") -> str:
     return managed_repo(workspace, git_bin=git_bin).head()
 
 
+def refresh_agent_view(workspace: Workspace | str, *, git_bin: str = "git") -> bool:
+    """Régénère la copie jetable ``<workspace>/.git`` depuis le contrôle (best-effort).
+
+    À appeler UNE fois après une cascade de :func:`apply_seed_diff`/:func:`advance_base`
+    passés en ``refresh_view=False`` (avant que l'agent ne tourne : l'hôte n'écrit
+    jamais dans le workspace après l'exécution du code non fiable).
+    """
+    return managed_repo(workspace, git_bin=git_bin).refresh_agent_view()
+
+
 def advance_base(
     workspace: Workspace | str,
     message: str,
@@ -166,13 +176,16 @@ def advance_base(
     git_bin: str = "git",
     email: str = "collegue-bot@users.noreply.github.com",
     name: str = "Collègue Bot",
+    refresh_view: bool = True,
 ) -> bool:
     """Commite l'état courant dans le contrôle : il devient la nouvelle base fiable.
 
     Utilisé par le compounding (#545) pour que ``capture_diff`` ne renvoie que les
     changements du round courant. ``False`` si rien n'a pu être commité.
     """
-    return managed_repo(workspace, git_bin=git_bin).commit_all(message, email=email, name=name)
+    return managed_repo(workspace, git_bin=git_bin).commit_all(
+        message, email=email, name=name, refresh_view=refresh_view
+    )
 
 
 def cleanup_workspace(workspace_or_path) -> None:
@@ -253,7 +266,7 @@ def sweep_stale_temp_clones(
     return removed
 
 
-def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") -> bool:
+def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git", refresh_view: bool = True) -> bool:
     """Ré-applique le diff d'une tentative précédente sur un clone neuf (#436).
 
     **Best-effort** : un diff qui ne s'applique plus (conflit réel, diff
@@ -276,4 +289,4 @@ def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") ->
     """
     if not (diff or "").strip():
         return False
-    return managed_repo(workspace, git_bin=git_bin).apply_seed(diff)
+    return managed_repo(workspace, git_bin=git_bin).apply_seed(diff, refresh_view=refresh_view)

@@ -453,16 +453,19 @@ class TrustedGit:
 
     # -- seed / compounding / nettoyage ----------------------------------------------
 
-    def apply_seed(self, diff: str) -> bool:
+    def apply_seed(self, diff: str, *, refresh_view: bool = True) -> bool:
         """Réapplique ``diff`` en 3-way ; sur échec, restaure un arbre propre (``False``).
 
         Le patch arrive sur stdin (aucun fichier temporaire) ; ``git apply`` refuse
-        de lui-même les chemins ``.git/`` et les traversées.
+        de lui-même les chemins ``.git/`` et les traversées. ``refresh_view=False``
+        laisse à l'appelant le soin de régénérer la copie jetable de l'agent (une
+        seule fois pour une cascade de seeds).
         """
         payload = (diff if diff.endswith("\n") else diff + "\n").encode("utf-8")
         result = self.run("apply", "-3", "--whitespace=nowarn", "-", stdin=payload)
         if result.ok:
-            self.refresh_agent_view()
+            if refresh_view:
+                self.refresh_agent_view()
             return True
         logger.warning(
             "seed_diff inapplicable sur %s (conflit réel avec le main avancé ?)"
@@ -479,7 +482,7 @@ class TrustedGit:
         self.run("reset", "--hard", "--quiet")
         self.run("clean", "-fdq")
 
-    def commit_all(self, message: str, *, email: str, name: str) -> bool:
+    def commit_all(self, message: str, *, email: str, name: str, refresh_view: bool = True) -> bool:
         """Stage tout et COMMITE dans le répertoire de contrôle : nouvelle base fiable.
 
         Sert au compounding (#545) : ``HEAD`` reflète l'état cumulé, donc la capture
@@ -501,7 +504,8 @@ class TrustedGit:
         )
         if not result.ok:
             return False
-        self.refresh_agent_view()
+        if refresh_view:
+            self.refresh_agent_view()
         return True
 
     def refresh_agent_view(self) -> bool:

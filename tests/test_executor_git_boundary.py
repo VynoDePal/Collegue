@@ -1147,3 +1147,72 @@ def test_real_managed_workspace_mounts_alone_and_never_with_its_control(source, 
         from collegue.executor.workspace import cleanup_workspace
 
         cleanup_workspace(ws)
+
+
+# --- cas limites du workspace ---------------------------------------------------------------
+
+
+def test_nested_repository_reached_through_a_gitfile_to_a_hostile_repo_fails_closed(
+    source, tmp_path, witness, evil_repo
+):
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+    nested = Path(ws.path) / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    (nested / ".git").write_text(f"gitdir: {evil_repo}/.git\n")
+    (nested / "code.py").write_text("x = 1\n")
+
+    try:
+        _diff, files = capture_diff(ws)
+    except WorkspaceError:
+        pass  # fail-closed : dépôt imbriqué détecté
+    else:
+        # ou traité comme de simples fichiers (le .git imbriqué est ignoré) — jamais interrogé
+        assert files == ("vendor/lib/code.py",)
+    assert not witness.exists()
+
+
+def test_special_files_do_not_block_or_pollute_the_capture(source, tmp_path):
+    import socket
+
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+    os.mkfifo(Path(ws.path) / "pipe")
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind(str(Path(ws.path) / "sock"))
+        (Path(ws.path) / "ok.txt").write_text("ok\n")
+        _diff, files = capture_diff(ws)
+    finally:
+        sock.close()
+    assert files == ("ok.txt",)
+
+
+def test_source_with_an_untouched_submodule_entry_still_captures(source, tmp_path):
+    sub = Path(_make_repo(tmp_path / "sub", {"x.txt": "x\n"}))
+    sub_sha = _git(sub, "rev-parse", "HEAD").stdout.strip()
+    _git(source, "update-index", "--add", "--cacheinfo", f"160000,{sub_sha},vendor/sub")
+    _git(source, "commit", "-q", "-m", "gitlink")
+
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+    (Path(ws.path) / "new.txt").write_text("n\n")
+
+    _diff, files = capture_diff(ws)
+
+    assert files == ("new.txt",)  # le gitlink de la base, non modifié, n'est pas un « dépôt imbriqué »
+
+
+def test_seed_cascade_refreshes_the_agent_view_once_and_stays_consistent(source, tmp_path):
+    from collegue.executor.workspace import advance_base, refresh_agent_view
+
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+    (Path(ws.path) / "a.py").write_text("A = 1\n")
+    diff, _ = capture_diff(ws)
+    fresh = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "fresh"))
+
+    assert apply_seed_diff(fresh, diff, refresh_view=False) is True
+    assert advance_base(fresh, "seed", refresh_view=False) is True
+    # vue de l'agent volontairement laissée périmée entre les deux appels…
+    assert _git(fresh.path, "log", "--oneline").stdout.count("\n") == 1
+    # …puis régénérée une fois : l'agent voit l'état cumulé, arbre propre.
+    assert refresh_agent_view(fresh) is True
+    assert _git(fresh.path, "log", "--oneline").stdout.count("\n") == 2
+    assert _git(fresh.path, "status", "--porcelain").stdout.strip() == ""

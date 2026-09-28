@@ -132,11 +132,11 @@ def _seed_promoted_diffs(workspace, diffs, *, git_bin: str = "git") -> int:
     Renvoie le nombre de diffs effectivement intégrés (commités). Un workspace non géré
     lève ``WorkspaceError`` (fail-closed).
     """
-    from collegue.executor.workspace import advance_base, apply_seed_diff
+    from collegue.executor.workspace import advance_base, apply_seed_diff, refresh_agent_view
 
     applied = 0
     for index, diff in enumerate(diffs):
-        if not apply_seed_diff(workspace, diff, git_bin=git_bin):
+        if not apply_seed_diff(workspace, diff, git_bin=git_bin, refresh_view=False):
             continue
         if advance_base(
             workspace,
@@ -144,8 +144,12 @@ def _seed_promoted_diffs(workspace, diffs, *, git_bin: str = "git") -> int:
             git_bin=git_bin,
             email="improve@collegue.local",
             name="collegue-improve",
+            refresh_view=False,
         ):
             applied += 1
+    if applied:
+        # une seule régénération de la copie jetable de l'agent pour toute la cascade
+        refresh_agent_view(workspace, git_bin=git_bin)
     return applied
 
 
