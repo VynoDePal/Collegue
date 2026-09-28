@@ -361,3 +361,47 @@ def test_build_argv_subscription_auth_validated(tmp_path):
     sb = DockerSandbox(image="img", subscription_auth_dir="/bad:path", env={"HOME": "/home/sandbox"})
     with pytest.raises(ValueError):
         sb._build_run_argv("x", str(tmp_path))
+
+
+# --- frontière Git : le répertoire de contrôle n'est jamais monté -----------------
+
+
+def _managed_layout(tmp_path):
+    """Layout d'un workspace géré : ``workspace`` + son contrôle Git frère (marqueur)."""
+    parent = tmp_path / "collegue-exec-x"
+    workspace = parent / "workspace"
+    workspace.mkdir(parents=True)
+    control = parent / "workspace.control"
+    control.mkdir()
+    (control / ".collegue-git-control").write_text(str(workspace) + "\n")
+    (control / "config").write_text("[core]\n\tbare = false\n")
+    return parent, workspace, control
+
+
+def test_sandbox_refuses_to_mount_the_parent_holding_git_control(tmp_path):
+    parent, _workspace, _control = _managed_layout(tmp_path)
+    with pytest.raises(ValueError, match="contrôle"):
+        DockerSandbox(image="img")._validate_workspace(str(parent))
+
+
+def test_sandbox_refuses_to_mount_the_git_control_dir_itself(tmp_path):
+    _parent, _workspace, control = _managed_layout(tmp_path)
+    with pytest.raises(ValueError, match="contrôle"):
+        DockerSandbox(image="img")._validate_workspace(str(control))
+
+
+def test_sandbox_mounts_only_the_workspace_of_a_managed_layout(tmp_path):
+    _parent, workspace, control = _managed_layout(tmp_path)
+    sb = DockerSandbox(image="img")
+    ws = sb._validate_workspace(str(workspace))
+    argv = sb._build_run_argv("echo hi", ws)
+    assert _mounts(argv) == [f"{workspace}:/workspace"]
+    assert str(control) not in " ".join(argv)
+
+
+def test_run_command_never_launches_docker_for_a_workspace_holding_git_control(tmp_path, monkeypatch):
+    parent, _workspace, _control = _managed_layout(tmp_path)
+    monkeypatch.setattr(ex.subprocess, "run", lambda *a, **k: pytest.fail("docker ne doit pas être lancé"))
+    monkeypatch.setattr(ex.os, "getuid", lambda: 1000)
+    with pytest.raises(ValueError, match="contrôle"):
+        DockerSandbox(image="img").run_command("echo hi", str(parent))

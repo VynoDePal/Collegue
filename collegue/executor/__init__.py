@@ -13,6 +13,7 @@ reste donc importable partout sans installer OpenHands.
 
 from collegue.executor.agent import AgentResult, CodeAgent, FakeCodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner, LocalCommandRunner
+from collegue.executor.git_boundary import HardenedGitRunner, TrustedGit
 from collegue.executor.openhands_agent import OpenHandsAgent
 from collegue.executor.openhands_sdk_agent import OHSdkAgent
 from collegue.executor.pipeline import ExecutionOutcome, execute_issue
@@ -64,9 +65,11 @@ from collegue.executor.runner import ExecutionResult, run_issue
 from collegue.executor.workspace import (
     Workspace,
     WorkspaceError,
+    advance_base,
     branch_for_issue,
     cleanup_workspace,
     prepare_workspace,
+    trusted_base,
 )
 
 __all__ = [
@@ -80,11 +83,15 @@ __all__ = [
     # E2 — workspace + exécution
     "CommandRunner",
     "LocalCommandRunner",
+    "HardenedGitRunner",
+    "TrustedGit",
     "Workspace",
     "WorkspaceError",
     "branch_for_issue",
     "prepare_workspace",
     "cleanup_workspace",
+    "advance_base",
+    "trusted_base",
     "ExecutionResult",
     "run_issue",
     # E3 — gate qualité

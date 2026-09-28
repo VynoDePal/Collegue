@@ -112,43 +112,39 @@ def _seed_promoted_diffs(workspace, diffs, *, git_bin: str = "git") -> int:
     """Réapplique ET COMMITE les diffs déjà promus sur le clone neuf (#545, Étape 2).
 
     Levier 2 du redesign : ``apply_seed_diff`` (git apply -3) réapplique chaque diff
-    promu ; ici on le **commite** pour que ``HEAD`` reflète l'état cumulé. Sans commit,
-    le diff capturé du round courant (``git diff`` vs HEAD, cf. ``capture_diff``)
-    ré-embarquerait les changements déjà promus → double-comptage au round suivant.
-    Après commit, la mesure baseline porte sur le projet **cumulé amélioré** : le score
-    monte round après round et le proposeur (métrique-driven) passe à la dimension
-    suivante car la métrique d'une dimension réglée redevient bonne sur l'état cumulé.
-    ``execution.diff`` ne contient alors que les nouveaux changements du round.
+    promu ; ici on le **commite** pour que la base de comparaison reflète l'état
+    cumulé. Sans commit, le diff capturé du round courant (vs base, cf.
+    ``capture_diff``) ré-embarquerait les changements déjà promus → double-comptage au
+    round suivant. Après commit, la mesure baseline porte sur le projet **cumulé
+    amélioré** : le score monte round après round et le proposeur (métrique-driven) passe
+    à la dimension suivante car la métrique d'une dimension réglée redevient bonne sur
+    l'état cumulé. ``execution.diff`` ne contient alors que les nouveaux changements du
+    round.
+
+    **Frontière Git (vague 1)** : le seed ET le commit passent par les métadonnées de
+    contrôle du workspace (``<workspace>.control``, hors montage) — jamais par son
+    ``.git`` que l'agent/les tests ont pu écrire. La nouvelle base fiable est le
+    ``HEAD`` de CONTRÔLE (``advance_base``) ; ni hook, ni config, ni filtre du workspace
+    ne s'exécute pendant le compounding.
 
     Best-effort : un diff inapplicable (conflit, base déplacée) est **sauté** —
     ``apply_seed_diff`` restaure alors un arbre propre — plutôt que d'échouer le run.
-    Renvoie le nombre de diffs effectivement intégrés (commités).
+    Renvoie le nombre de diffs effectivement intégrés (commités). Un workspace non géré
+    lève ``WorkspaceError`` (fail-closed).
     """
-    from collegue.executor.command import LocalCommandRunner
-    from collegue.executor.workspace import apply_seed_diff
+    from collegue.executor.workspace import advance_base, apply_seed_diff
 
-    runner = LocalCommandRunner()
     applied = 0
     for index, diff in enumerate(diffs):
         if not apply_seed_diff(workspace, diff, git_bin=git_bin):
             continue
-        if not runner.run_command([git_bin, "add", "-A"], workspace.path).ok:
-            continue
-        commit = runner.run_command(
-            [
-                git_bin,
-                "-c",
-                "user.email=improve@collegue.local",
-                "-c",
-                "user.name=collegue-improve",
-                "commit",
-                "-q",
-                "-m",
-                f"compounding: amélioration promue #{index + 1}",
-            ],
-            workspace.path,
-        )
-        if commit.ok:
+        if advance_base(
+            workspace,
+            f"compounding: amélioration promue #{index + 1}",
+            git_bin=git_bin,
+            email="improve@collegue.local",
+            name="collegue-improve",
+        ):
             applied += 1
     return applied
 
@@ -189,6 +185,11 @@ async def run_improvement(
     chaque PR a pour base la branche de la promotion précédente (la 1ʳᵉ sur ``base``),
     pour des diffs incrémentaux mergeables dans l'ordre sans conflit (le compounding
     rendrait sinon les PR cumulatives).
+
+    ``runner`` : réservé aux fixtures non gérées — les workspaces de cette boucle sont
+    GÉRÉS (frontière Git : métadonnées de contrôle hors montage, cf.
+    ``collegue.executor.git_boundary``), sur lesquels un runner injecté est refusé ;
+    en production il reste ``None``.
 
     ``recovery_hook`` est appelé avant le premier round réel et doit réconcilier
     tout incident Phase 5 durable. ``promotion_hook`` (Phase 5, opt-in) est appelé immédiatement après chaque PR

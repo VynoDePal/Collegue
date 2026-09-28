@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from collegue.executor.command import LocalCommandRunner
+from collegue.executor.git_boundary import HardenedGitRunner
 from collegue.executor.revert import REVERT_BRANCH_PREFIX, revert_pr_preview
 from collegue.executor.workspace import cleanup_workspace
 
@@ -96,7 +97,9 @@ def prove_local_revert(
         raise RemoteRevertError(f"branche de revert inattendue: {branch!r} != {expected_branch!r}")
     if not os.path.isdir(os.path.join(workspace, ".git")):
         raise RemoteRevertError("workspace de revert absent ou non git")
-    command_runner = runner or LocalCommandRunner()
+    # Frontière Git (vague 1) : le workspace de revert est un clone créé par l'hôte ; sa preuve
+    # locale passe par le runner durci (env reconstruit, config/redirections refusées).
+    command_runner = runner or HardenedGitRunner()
 
     def git(*args: str) -> str:
         result = command_runner.run_command([git_bin, *args], workspace)

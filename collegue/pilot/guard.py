@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from collegue.executor.command import CommandRunner, LocalCommandRunner
+from collegue.executor.git_boundary import HardenedGitRunner
 from collegue.executor.revert import RevertError, RevertResult, prepare_revert
 from collegue.executor.workspace import cleanup_workspace
 
@@ -108,7 +109,10 @@ def check_main_health(
     ``merge_sha`` (on testerait le mauvais arbre), et **sortie sans test exécuté**
     (exit 0 trompeur : « collected 0 items »…). Le clone est toujours nettoyé.
     """
-    runner = runner or LocalCommandRunner()
+    # Frontière Git (vague 1) : le clone de santé est créé par l'hôte puis MONTÉ en RW
+    # dans le sandbox — les commandes git hôte (avant le montage) passent par le runner
+    # durci, jamais par un LocalCommandRunner implicite.
+    runner = runner or HardenedGitRunner()
     if not command or any(op in command for op in _SHELL_OPERATORS):
         return HealthResult(False, "commande de santé non sûre (opérateurs shell) — non concluant")
     try:
@@ -181,6 +185,9 @@ def guard_post_merge(
     # ce cas — main rouge ET revert impossible — est le plus critique et doit
     # ESCALADER vers un humain, pas passer pour un succès.
     revert: Optional[RevertResult] = None
+    # ``repo_source`` est le checkout de l'utilisateur (lecture de HEAD seulement) ; le clone de
+    # revert, lui, est créé par l'hôte : ``prepare_revert`` reçoit ``runner`` tel quel (None →
+    # runner durci par défaut), jamais le runner local implicite.
     command_runner = runner or LocalCommandRunner()
     source_head = command_runner.run_command([git_bin, "rev-parse", "HEAD"], repo_source)
     source_is_exact = bool(source_head.ok and source_head.stdout.strip() == merge_sha)
@@ -190,7 +197,7 @@ def guard_post_merge(
                 repo_source,
                 merge_sha,
                 merge_parent=merge_parent,
-                runner=command_runner,
+                runner=runner,
                 git_bin=git_bin,
             )
         except RevertError:

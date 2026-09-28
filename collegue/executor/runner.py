@@ -3,9 +3,15 @@
 Fait tourner le :class:`~collegue.executor.agent.CodeAgent` sur un
 :class:`~collegue.executor.workspace.Workspace`, puis capture le **diff
 autoritatif** via git (l'``AgentResult.files_changed`` auto-déclaré ne fait pas
-foi). Le diff est lu via un :class:`~collegue.executor.command.CommandRunner` :
-``LocalCommandRunner`` en CI, ``DockerSandbox`` en ``integration`` (git dans le
-conteneur). La sortie est bornée par le plafond du runner (anti-OOM).
+foi).
+
+**Frontière Git (vague 1).** Le workspace est écrit par du code non fiable (agent,
+tests) : la capture ne lit JAMAIS son ``.git``. Par défaut (``runner=None``) elle
+passe par :class:`~collegue.executor.git_boundary.TrustedGit` — ``GIT_DIR`` du
+répertoire de contrôle hors montage, index privé, base = ``HEAD`` de contrôle — et
+échoue en fail-closed sur un workspace non géré. Un ``runner`` injecté n'est admis
+que pour une fixture de confiance (workspace NON géré, tests) ; il est refusé sur
+un workspace géré, où il contournerait la frontière.
 """
 
 from __future__ import annotations
@@ -14,7 +20,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from collegue.executor.agent import AgentResult, CodeAgent, IssueSpec
-from collegue.executor.command import CommandRunner, LocalCommandRunner
+from collegue.executor.command import CommandRunner
+from collegue.executor.git_boundary import TrustedGit
 from collegue.executor.workspace import Workspace, WorkspaceError
 
 TASK_STATUS_IN_PROGRESS = "in_progress"
@@ -48,12 +55,14 @@ def run_issue(
 
     Un diff vide (agent no-op) n'est **pas** une erreur : ``changed=False`` et
     ``success=False`` sans exception. En revanche une erreur git de bas niveau
-    (workspace cassé) lève :class:`WorkspaceError`.
+    (workspace cassé, non géré, frontière Git violée) lève :class:`WorkspaceError` —
+    avant même de lancer l'agent (coûteux) quand la capture serait de toute façon
+    refusée.
     """
-    runner = runner or LocalCommandRunner()
-
     if manager is not None and task_id is not None:
         manager.update_task_status(task_id, TASK_STATUS_IN_PROGRESS)
+
+    _capture_backend(workspace, runner, git_bin)  # fail-closed AVANT l'agent
 
     agent_result = agent.implement_issue(workspace.path, issue)
 
@@ -66,6 +75,30 @@ def run_issue(
         files_changed=files_changed,
         success=bool(agent_result.success and changed),
     )
+
+
+def _capture_backend(workspace: Workspace, runner: Optional[CommandRunner], git_bin: str) -> Optional[TrustedGit]:
+    """Choisit le moteur de capture ; ``None`` = fixture de confiance via ``runner`` explicite.
+
+    - workspace géré + ``runner=None`` → :class:`TrustedGit` (production) ;
+    - workspace géré + ``runner`` injecté → refus (il contournerait la frontière) ;
+    - workspace non géré + ``runner`` explicite → fixture de confiance (historique) ;
+    - workspace non géré + ``runner=None`` → refus : jamais de repli silencieux sur le
+      ``.git`` d'un dossier dont rien ne garantit qu'il n'est pas hostile.
+    """
+    repo = TrustedGit.locate(workspace.path, git_bin=git_bin)
+    if repo is not None:
+        if runner is not None:
+            raise WorkspaceError(
+                "runner injecté refusé sur un workspace géré : la capture doit passer par la frontière Git "
+                "(git_boundary.TrustedGit) ; les runners injectés sont réservés aux fixtures non gérées"
+            )
+        return repo
+    if runner is None:
+        raise WorkspaceError(
+            f"workspace non géré (aucun répertoire de contrôle Git) : {workspace.path} — capture refusée (fail-closed)"
+        )
+    return None
 
 
 def capture_diff(
@@ -95,8 +128,18 @@ def capture_diff(
     n'embarque pas son payload → le réensemencement du retry échoue précisément
     sur les tâches frontend. ``--full-index`` (#479) : lignes index complètes —
     le 3-way du retry retrouve les blobs de base sans ambiguïté d'abréviation.
+
+    **Frontière Git** : sur un workspace géré (cas de production), le stage se fait
+    dans l'index PRIVÉ du répertoire de contrôle et la comparaison porte sur SON
+    ``HEAD`` (base fiable) — ni ``.git``, ni ``HEAD``, ni config, ni hooks du
+    workspace ne sont lus. Un ``runner`` explicite (fixture non gérée) reste
+    supporté ; voir :func:`_capture_backend`.
     """
-    runner = runner or LocalCommandRunner()
+    repo = _capture_backend(workspace, runner, git_bin)
+    if repo is not None:
+        return repo.capture(paths)
+    if runner is None:  # inatteignable : _capture_backend a déjà refusé (garde de typage)
+        raise WorkspaceError("capture sans runner ni répertoire de contrôle refusée")
     add_argv = [git_bin, "add", "-A"]
     if paths:
         add_argv += ["--", *paths]

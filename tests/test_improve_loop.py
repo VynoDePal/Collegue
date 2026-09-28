@@ -397,29 +397,34 @@ def test_seed_promoted_diffs_reapplies_and_commits(git_repo):
 def test_seed_promoted_diffs_applies_two_in_cascade(git_repo):
     # Deux diffs promus successifs (diff2 capturé SUR base+diff1) réappliqués en
     # cascade sur un clone neuf → les deux fichiers présents (3-way en série).
+    #
+    # Frontière Git (vague 1) : la base avance par ``advance_base`` (commit dans le
+    # contrôle de confiance), plus par un commit dans le ``.git`` du workspace que
+    # l'agent/les tests peuvent écrire. Le « clone neuf » est un vrai second workspace.
     from collegue.executor.agent import IssueSpec
     from collegue.executor.runner import capture_diff
-    from collegue.executor.workspace import prepare_workspace
+    from collegue.executor.workspace import advance_base, prepare_workspace
     from collegue.improve.loop import _seed_promoted_diffs
 
     ws = prepare_workspace(git_repo, IssueSpec(number=3, title="t"))
     with open(os.path.join(ws.path, "a.py"), "w") as fh:
         fh.write("A = 1\n")
     diff1, _ = capture_diff(ws)
-    _git(ws.path, "-c", "user.email=t@e.x", "-c", "user.name=t", "commit", "-q", "-m", "a")
+    assert advance_base(ws, "a")
     with open(os.path.join(ws.path, "b.py"), "w") as fh:
         fh.write("B = 2\n")
-    diff2, _ = capture_diff(ws)  # capturé contre base+diff1 (b.py seul)
-    # remet à l'état vierge (clone neuf) : ni a.py ni b.py
-    _git(ws.path, "reset", "--hard", "HEAD~1")
-    _git(ws.path, "clean", "-fdq")
-    assert not os.path.exists(os.path.join(ws.path, "a.py"))
-    assert not os.path.exists(os.path.join(ws.path, "b.py"))
+    diff2, files2 = capture_diff(ws)  # capturé contre base+diff1 (b.py seul)
+    assert files2 == ("b.py",)
+    assert "a.py" not in diff2
 
-    applied = _seed_promoted_diffs(ws, [diff1, diff2])
+    fresh = prepare_workspace(git_repo, IssueSpec(number=4, title="t"))  # clone neuf : ni a.py ni b.py
+    assert not os.path.exists(os.path.join(fresh.path, "a.py"))
+    assert not os.path.exists(os.path.join(fresh.path, "b.py"))
+
+    applied = _seed_promoted_diffs(fresh, [diff1, diff2])
     assert applied == 2
-    assert os.path.exists(os.path.join(ws.path, "a.py"))
-    assert os.path.exists(os.path.join(ws.path, "b.py"))
+    assert os.path.exists(os.path.join(fresh.path, "a.py"))
+    assert os.path.exists(os.path.join(fresh.path, "b.py"))
 
 
 def test_seed_promoted_diffs_skips_inapplicable(git_repo):

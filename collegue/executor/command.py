@@ -4,11 +4,15 @@ Deux backends partagent une même interface (:class:`CommandRunner`) — un
 ``run_command(cmd, workspace) -> SandboxResult`` :
 
 - :class:`~collegue.sandbox.executor.DockerSandbox` (C8) : exécution **isolée**,
-  pour le code non fiable (agent OpenHands, suite de tests) et, en
-  ``integration``, la plomberie git sur un dépôt potentiellement hostile.
+  pour le code non fiable (agent OpenHands, suite de tests).
 - :class:`LocalCommandRunner` : exécution **locale** (hôte), **sans isolation**,
-  réservée à la CI sans Docker pour de la **plomberie git sur un dépôt de
-  confiance / fixture**. Jamais pour exécuter du code non fiable.
+  réservée à de la **plomberie git sur une fixture / un checkout de confiance**
+  (tests, ``repo_source`` de l'utilisateur). Jamais pour exécuter du code non
+  fiable, et **jamais le défaut de production d'un workspace** : un workspace
+  écrit par l'agent ou par les tests passe par la frontière Git
+  (:mod:`collegue.executor.git_boundary`), qui ne lit ni son ``.git``, ni sa
+  config, ni ses hooks. Les clones que l'hôte crée lui-même (revert, santé de
+  ``main``) utilisent :class:`~collegue.executor.git_boundary.HardenedGitRunner`.
 
 ``DockerSandbox`` satisfait déjà ce protocole — on réutilise donc le même
 :class:`SandboxResult` ici, et l'exécuteur (E2+) est paramétré par le runner.
@@ -41,9 +45,11 @@ class CommandRunner(Protocol):
 class LocalCommandRunner:
     """Exécute des commandes EN LOCAL (hôte), sans aucune isolation.
 
-    Destiné à la **plomberie git** (clone, diff…) sur un dépôt de confiance en CI,
-    là où Docker n'est pas disponible. **Ne jamais** y exécuter du code non fiable
-    (agent, tests) : utiliser le :class:`DockerSandbox`.
+    Destiné à la **plomberie git** sur un dépôt de CONFIANCE (fixture de test,
+    checkout de l'utilisateur). **Ne jamais** y exécuter du code non fiable (agent,
+    tests : :class:`DockerSandbox`) ni l'employer sur un workspace que ce code a
+    écrit : son ``.git`` (config, hooks, fsmonitor, filtres…) s'exécuterait sur
+    l'hôte. Voir :mod:`collegue.executor.git_boundary`.
 
     La sortie est **bornée** (écrite sur disque puis relue avec un plafond), comme
     le sandbox, pour qu'une sortie pathologique ne fasse pas exploser la mémoire.

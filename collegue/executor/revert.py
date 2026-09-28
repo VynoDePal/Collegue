@@ -6,8 +6,13 @@ déjà mergé sur ``main``, produit un commit d'annulation sur une branche dédi
 en H1). Le push de la branche + l'ouverture de la PR de revert relèvent de H3 /
 ``integration``.
 
-Plomberie git **locale** sur un dépôt de confiance (clone d'un ``repo_source``),
-comme :mod:`collegue.executor.workspace`. Jamais d'exécution de code non fiable ici.
+Plomberie git **locale** sur un clone que l'HÔTE vient de créer (clone d'un
+``repo_source``), jamais monté dans un conteneur. Jamais d'exécution de code non
+fiable ici. **Frontière Git (vague 1)** : par défaut les commandes passent par
+:class:`~collegue.executor.git_boundary.HardenedGitRunner` (env reconstruit, hooks/
+fsmonitor/filtres neutralisés, ``.git`` gitfile/symlink et config hors liste blanche
+refusés ; un workspace GÉRÉ bascule sur son répertoire de contrôle) — plus de
+``LocalCommandRunner`` implicite.
 """
 
 from __future__ import annotations
@@ -19,7 +24,8 @@ import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
-from collegue.executor.command import CommandRunner, LocalCommandRunner
+from collegue.executor.command import CommandRunner
+from collegue.executor.git_boundary import HardenedGitRunner
 
 # SHA git (court ou complet). Validé avant d'être passé à ``git`` (défense en
 # profondeur : l'argv n'est pas un shell, mais on refuse tout ce qui n'est pas un SHA).
@@ -67,7 +73,7 @@ def revert_commit(
     le caller (H3) décide ; on ne laisse jamais un état conflictuel exploitable.
     """
     _validate_sha(sha)
-    runner = runner or LocalCommandRunner()
+    runner = runner or HardenedGitRunner()
 
     # Identité fournie en ``-c`` (éphémère, pas de config persistante) : le revert
     # crée un commit, et un workspace cloné en CI/Docker peut n'avoir AUCUNE identité
@@ -108,7 +114,7 @@ def prepare_revert(
     l'ouverture de la PR de revert = H3 / ``integration``).
     """
     _validate_sha(sha)
-    runner = runner or LocalCommandRunner()
+    runner = runner or HardenedGitRunner()
     source = os.path.realpath(os.path.abspath(repo_source))
     if not os.path.isdir(os.path.join(source, ".git")):
         raise RevertError(f"repo_source n'est pas un dépôt git: {repo_source}")
