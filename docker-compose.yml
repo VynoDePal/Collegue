@@ -1,3 +1,17 @@
+# Publication des ports sur l'HÔTE
+# --------------------------------
+# Profil local par défaut : tous les ports sont publiés sur le LOOPBACK (127.0.0.1) via
+# COLLEGUE_PUBLISH_HOST. Le serveur MCP n'a pas d'authentification tant que OAUTH_ENABLED
+# est false : il ne doit pas être joignable depuis le réseau par simple `docker compose up`.
+#
+# Les conteneurs continuent d'écouter sur 0.0.0.0 EN INTERNE (MCP_HOST, entrypoint.sh,
+# --server.address) : c'est nécessaire pour que le mapping de ports Docker fonctionne ; seule
+# la publication hôte est restreinte.
+#
+# Exposition distante : ACTE EXPLICITE. Définir COLLEGUE_PUBLISH_HOST=0.0.0.0 (ou l'IP d'une
+# interface précise) dans .env, ET activer OAuth (OAUTH_ENABLED=true + OAUTH_JWKS_URI/OAUTH_PUBLIC_KEY
+# + OAUTH_ISSUER). Avec OAUTH_ENABLED=true, un OAuth inutilisable interdit le démarrage
+# (jamais de repli silencieux sans auth). Un reverse proxy TLS reste recommandé devant.
 services:
   collegue-app:
     build:
@@ -7,13 +21,16 @@ services:
     restart: always
     # Exposer directement le port MCP pour contourner Traefik (version incompatible)
     ports:
-      - "4121:4121"
-      - "4122:4122"
+      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:4121:4121"
+      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:4122:4122"
     environment:
       PYTHONUNBUFFERED: 1
       PORT: 4121
       MCP_TRANSPORT: http
+      # Écoute INTERNE au conteneur ; la publication hôte est régie par COLLEGUE_PUBLISH_HOST.
       MCP_HOST: 0.0.0.0
+      # Transmis à l'application pour qu'elle avertisse d'une exposition distante sans OAuth.
+      COLLEGUE_PUBLISH_HOST: ${COLLEGUE_PUBLISH_HOST:-127.0.0.1}
       SENTRY_DSN: ${SENTRY_DSN}
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
     env_file:
@@ -47,7 +64,7 @@ services:
     image: collegue-app:latest
     restart: always
     ports:
-      - "4125:4125"
+      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:4125:4125"
     environment:
       PYTHONUNBUFFERED: 1
     env_file:
@@ -76,7 +93,7 @@ services:
     env_file:
       - .env
     ports:
-      - "4123:8080"
+      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:4123:8080"
 
   nginx:
     build:
@@ -84,7 +101,7 @@ services:
       dockerfile: docker/nginx/Dockerfile
     restart: always
     ports:
-      - "8088:80"
+      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:8088:80"
     volumes:
       - nginx_logs:/var/log/nginx
     depends_on:

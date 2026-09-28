@@ -12,6 +12,7 @@ from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
 
 from collegue.config import settings
+from collegue.core.server_auth import build_auth_provider
 
 logger = logging.getLogger(__name__)
 
@@ -26,32 +27,10 @@ if settings.SENTRY_DSN:
     )
     logger.info(f"Sentry initialisé avec OTEL (env: {settings.SENTRY_ENVIRONMENT})")
 
-auth_provider = None
-if settings.OAUTH_ENABLED:
-    try:
-        from fastmcp.server.auth.providers.jwt import JWTVerifier
-    except ImportError:
-        JWTVerifier = None
-        logger.warning("JWTVerifier non disponible - FastMCP >= 2.14 requis")
-
-    if JWTVerifier is not None:
-        try:
-            if settings.OAUTH_JWKS_URI:
-                auth_provider = JWTVerifier(
-                    jwks_uri=settings.OAUTH_JWKS_URI, issuer=settings.OAUTH_ISSUER, audience=settings.OAUTH_AUDIENCE
-                )
-                logger.info(f"Auth OAuth configurée avec JWKS: {settings.OAUTH_JWKS_URI}")
-
-            elif settings.OAUTH_PUBLIC_KEY:
-                auth_provider = JWTVerifier(
-                    public_key=settings.OAUTH_PUBLIC_KEY, issuer=settings.OAUTH_ISSUER, audience=settings.OAUTH_AUDIENCE
-                )
-                logger.info("Auth OAuth configurée avec clé publique")
-            else:
-                logger.warning("OAuth activé mais ni JWKS_URI ni PUBLIC_KEY configurés")
-        except Exception as e:
-            logger.error(f"Erreur lors de la configuration OAuth: {e}")
-            auth_provider = None
+# Fail-closed : OAUTH_ENABLED=true impose une authentification effective. Si elle ne peut pas
+# être construite, OAuthConfigurationError se propage et interdit le démarrage (jamais de
+# repli silencieux sur auth=None). Le mode local sans auth n'existe que via OAUTH_ENABLED=false.
+auth_provider = build_auth_provider(settings)
 
 
 @lifespan
