@@ -60,20 +60,30 @@ def build_auth_provider(cfg: Any) -> Optional[Any]:
             "refus de démarrer sans l'authentification demandée."
         ) from exc
 
-    if cfg.OAUTH_JWKS_URI:
-        key_material = {"jwks_uri": cfg.OAUTH_JWKS_URI}
-        source = f"JWKS {cfg.OAUTH_JWKS_URI}"
-    elif cfg.OAUTH_PUBLIC_KEY:
-        key_material = {"public_key": cfg.OAUTH_PUBLIC_KEY}
+    # Valeurs vides ou blanches = absentes : jamais de vérificateur construit sur un matériel inutilisable.
+    jwks_uri = (cfg.OAUTH_JWKS_URI or "").strip()
+    public_key = (cfg.OAUTH_PUBLIC_KEY or "").strip()
+    issuer = (cfg.OAUTH_ISSUER or "").strip()
+
+    if jwks_uri:
+        key_material = {"jwks_uri": jwks_uri}
+        source = f"JWKS {jwks_uri}"
+    elif public_key:
+        key_material = {"public_key": public_key}
         source = "clé publique"
     else:
         raise OAuthConfigurationError(
             "OAUTH_ENABLED=true mais ni OAUTH_JWKS_URI ni OAUTH_PUBLIC_KEY n'est configuré : "
             "refus de démarrer sans l'authentification demandée."
         )
+    if not issuer:
+        # Sans issuer, tout émetteur signant avec la clé serait accepté.
+        raise OAuthConfigurationError(
+            "OAUTH_ENABLED=true mais OAUTH_ISSUER n'est pas configuré : refus de démarrer sans l'authentification demandée."
+        )
 
     try:
-        provider = JWTVerifier(**key_material, issuer=cfg.OAUTH_ISSUER, audience=cfg.OAUTH_AUDIENCE)
+        provider = JWTVerifier(**key_material, issuer=issuer, audience=cfg.OAUTH_AUDIENCE)
     except Exception as exc:
         raise OAuthConfigurationError(
             f"OAUTH_ENABLED=true mais l'initialisation de JWTVerifier a échoué ({type(exc).__name__}: {exc}) : "

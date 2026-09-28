@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_MARKER = "__APP_RESULT__"
+CONSTRUCTED_MARKER = "__FASTMCP_CONSTRUCTED__"
 
 # Piloté par argv[1] : « inject » simule une panne du chemin JWT AVANT l'import de
 # l'application, « probe » envoie une requête MCP sans jeton pour observer si
@@ -35,6 +36,20 @@ import sys
 
 inject = sys.argv[1]
 probe = sys.argv[2] == "probe"
+
+# Espion : signale sur stderr toute construction de l'application FastMCP. Un démarrage refusé
+# doit échouer AVANT de construire (donc de pouvoir servir) une application anonyme.
+import fastmcp
+
+_original_init = fastmcp.FastMCP.__init__
+
+
+def _spy_init(self, *args, **kwargs):
+    print("__FASTMCP_CONSTRUCTED__", file=sys.stderr)
+    return _original_init(self, *args, **kwargs)
+
+
+fastmcp.FastMCP.__init__ = _spy_init
 
 if inject == "jwt-import-absent":
     # Une entrée None dans sys.modules fait échouer `from ... import ...` en ImportError.
@@ -129,6 +144,7 @@ def test_local_mode_starts_explicitly_without_auth() -> None:
     assert completed.returncode == 0, completed.stderr[-2000:]
     assert result is not None
     assert result["auth"] is None
+    assert CONSTRUCTED_MARKER in completed.stderr  # l'espion fonctionne
     # Sans OAuth, aucune barrière d'authentification : la requête n'est pas rejetée en 401.
     assert result["status"] not in (401, 403)
 
@@ -164,6 +180,7 @@ def test_oauth_enabled_but_jwt_constructor_fails_blocks_startup() -> None:
     assert completed.returncode != 0
     assert "OAuthConfigurationError" in completed.stderr
     assert "OAUTH_ENABLED" in completed.stderr
+    assert CONSTRUCTED_MARKER not in completed.stderr, "aucune application anonyme ne doit être construite"
 
 
 def test_oauth_enabled_but_jwt_verifier_import_absent_blocks_startup() -> None:
@@ -173,16 +190,25 @@ def test_oauth_enabled_but_jwt_verifier_import_absent_blocks_startup() -> None:
     assert completed.returncode != 0
     assert "OAuthConfigurationError" in completed.stderr
     assert "OAUTH_ENABLED" in completed.stderr
+    assert CONSTRUCTED_MARKER not in completed.stderr, "aucune application anonyme ne doit être construite"
 
 
-def test_oauth_enabled_without_key_material_blocks_startup() -> None:
+@pytest.mark.parametrize(
+    "key_env",
+    [{}, {"OAUTH_JWKS_URI": "", "OAUTH_PUBLIC_KEY": ""}, {"OAUTH_PUBLIC_KEY": "   "}],
+    ids=["absent", "empty", "blank"],
+)
+def test_oauth_enabled_without_key_material_blocks_startup(key_env: dict[str, str]) -> None:
+    """Troisième chemin permissif : OAUTH_ENABLED=true sans JWKS_URI ni PUBLIC_KEY."""
+
     completed, result = _run_app(
-        oauth_env={"OAUTH_ENABLED": "true", "OAUTH_ISSUER": "https://idp.example.invalid/realms/test"}
+        oauth_env={"OAUTH_ENABLED": "true", "OAUTH_ISSUER": "https://idp.example.invalid/realms/test", **key_env}
     )
 
     assert result is None
     assert completed.returncode != 0
     assert "OAUTH_JWKS_URI" in completed.stderr
+    assert CONSTRUCTED_MARKER not in completed.stderr, "aucune application anonyme ne doit être construite"
 
 
 def test_jwt_failures_do_not_affect_local_mode() -> None:

@@ -151,14 +151,58 @@ class TestDockerComposeHealthcheckIntegration:
 
 COMPOSE_PATH = Path(__file__).resolve().parents[1] / "docker-compose.yml"
 PUBLISH_VAR = "COLLEGUE_PUBLISH_HOST"
-LOOPBACK_PORT = re.compile(r"^\$\{" + PUBLISH_VAR + r":-127\.0\.0\.1\}:\d+:\d+$")
+# Surface MCP (OAuth-protégée quand activée) : MCP direct, health, et nginx qui ne proxifie que /mcp/,
+# /_health et /.well-known/. Le dashboard (sans authentification) et Keycloak (start-dev) ont chacun
+# leur variable : exposer le MCP ne doit jamais ouvrir ces deux-là.
+EXPECTED_BINDINGS = {
+    "collegue-app": ("COLLEGUE_PUBLISH_HOST", {4121, 4122}),
+    "nginx": ("COLLEGUE_PUBLISH_HOST", {8088}),
+    "collegue-dashboard": ("COLLEGUE_DASHBOARD_PUBLISH_HOST", {4125}),
+    "keycloak": ("COLLEGUE_KEYCLOAK_PUBLISH_HOST", {4123}),
+}
+LOOPBACK_PORT = re.compile(r"^\$\{(COLLEGUE_[A-Z_]*PUBLISH_HOST):-127\.0\.0\.1\}:(\d+):\d+$")
 _INTERPOLATION = re.compile(r"\$\{(\w+):-([^}]*)\}")
 
 
+def _compose() -> dict:
+    return yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+
+
 def _published_ports() -> dict[str, list[str]]:
-    services = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))["services"]
+    services = _compose()["services"]
     return {
         name: [str(p) for p in service.get("ports", [])] for name, service in services.items() if "ports" in service
+    }
+
+
+def _docker_compose_available() -> bool:
+    return (
+        shutil.which("docker") is not None
+        and subprocess.run(["docker", "compose", "version"], capture_output=True).returncode == 0
+    )
+
+
+def _rendered_host_ips(tmp_path: Path, **env_overrides: str) -> dict[int, str | None]:
+    """{port publié: host_ip} d'après `docker compose config` (résolution réelle des variables)."""
+
+    shutil.copy(COMPOSE_PATH, tmp_path / "docker-compose.yml")
+    (tmp_path / ".env").write_text("", encoding="utf-8")  # env_file requis, contenu vide
+    env = {key: value for key, value in os.environ.items() if "PUBLISH_HOST" not in key}
+    env.update(env_overrides)
+    completed = subprocess.run(
+        ["docker", "compose", "config", "--format", "json"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    rendered = json.loads(completed.stdout)
+    return {
+        int(port["published"]): port.get("host_ip")
+        for service in rendered["services"].values()
+        for port in service.get("ports", [])
     }
 
 
@@ -166,31 +210,44 @@ class TestComposePublishesOnLoopbackByDefault:
     """Profil local : aucun port hôte n'est joignable depuis le réseau sans choix explicite.
 
     Le conteneur continue d'écouter sur 0.0.0.0 EN INTERNE (entrypoint.sh, MCP_HOST) ; seule la
-    PUBLICATION hôte est restreinte, via COLLEGUE_PUBLISH_HOST (défaut 127.0.0.1).
+    PUBLICATION hôte est restreinte, via des variables COLLEGUE_*_PUBLISH_HOST (défaut 127.0.0.1).
     """
 
-    def test_every_published_port_is_bound_to_the_publish_host_variable(self):
+    def test_the_five_known_host_publications_are_all_covered(self):
+        published = {int(LOOPBACK_PORT.match(m).group(2)) for mappings in _published_ports().values() for m in mappings}
+
+        assert published == {4121, 4122, 4123, 4125, 8088}
+
+    def test_every_published_port_defaults_to_loopback_through_its_variable(self):
         ports = _published_ports()
 
-        assert set(ports) >= {"collegue-app", "collegue-dashboard", "keycloak", "nginx"}
+        assert set(ports) == set(EXPECTED_BINDINGS)
         for service, mappings in ports.items():
-            assert mappings, service
+            variable, expected_ports = EXPECTED_BINDINGS[service]
+            bound = set()
             for mapping in mappings:
-                assert LOOPBACK_PORT.match(mapping), (
-                    f"{service}: le port '{mapping}' doit être publié via ${{{PUBLISH_VAR}:-127.0.0.1}}:hôte:conteneur"
-                )
+                match = LOOPBACK_PORT.match(mapping)
+                assert match, f"{service}: '{mapping}' doit être publié via ${{COLLEGUE_*_PUBLISH_HOST:-127.0.0.1}}"
+                assert match.group(1) == variable, (service, mapping)
+                bound.add(int(match.group(2)))
+            assert bound == expected_ports, service
 
     def test_default_resolution_is_loopback_and_override_is_possible(self):
         def resolve(mapping: str, env: dict[str, str]) -> str:
             return _INTERPOLATION.sub(lambda m: env.get(m.group(1), m.group(2)), mapping)
 
         for service, mappings in _published_ports().items():
+            variable, _ = EXPECTED_BINDINGS[service]
             for mapping in mappings:
                 assert resolve(mapping, {}).startswith("127.0.0.1:"), (service, mapping)
-                assert resolve(mapping, {PUBLISH_VAR: "0.0.0.0"}).startswith("0.0.0.0:"), (service, mapping)
+                assert resolve(mapping, {variable: "0.0.0.0"}).startswith("0.0.0.0:"), (service, mapping)
+
+    def test_no_service_bypasses_port_publication_with_host_networking(self):
+        for name, service in _compose()["services"].items():
+            assert service.get("network_mode") != "host", name
 
     def test_container_still_listens_on_all_interfaces_internally(self):
-        compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+        compose = _compose()
         environment = compose["services"]["collegue-app"]["environment"]
         dashboard_command = compose["services"]["collegue-dashboard"]["command"]
 
@@ -198,44 +255,63 @@ class TestComposePublishesOnLoopbackByDefault:
         assert "--server.address=0.0.0.0" in dashboard_command
 
     def test_publish_host_is_forwarded_to_the_app_for_exposure_warnings(self):
-        compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
-        environment = compose["services"]["collegue-app"]["environment"]
+        environment = _compose()["services"]["collegue-app"]["environment"]
 
         assert environment[PUBLISH_VAR] == "${" + PUBLISH_VAR + ":-127.0.0.1}"
 
-    def test_remote_exposure_is_documented_next_to_the_ports(self):
+    def test_remote_exposure_with_oauth_is_documented_next_to_the_ports(self):
         text = COMPOSE_PATH.read_text(encoding="utf-8")
 
-        assert PUBLISH_VAR in text
+        for variable in ("COLLEGUE_PUBLISH_HOST", "COLLEGUE_DASHBOARD_PUBLISH_HOST", "COLLEGUE_KEYCLOAK_PUBLISH_HOST"):
+            assert variable in text
         assert "OAUTH_ENABLED=true" in text
+        assert "OAUTH_ISSUER" in text
+
+    def test_healthcheck_requires_the_mcp_server_not_only_the_health_server(self):
+        """Le health server seul ne suffit pas à déclarer le conteneur sain."""
+
+        healthcheck = _compose()["services"]["collegue-app"]["healthcheck"]
+        command = " ".join(str(item) for item in healthcheck["test"])
+
+        assert ":4122/_health" in command
+        # Même critère que l'entrypoint (2xx/4xx = à l'écoute), testé dans test_entrypoint_lifecycle.py.
+        assert "entrypoint.sh mcp-ready" in command
 
     @pytest.mark.skipif(
-        shutil.which("docker") is None
-        or subprocess.run(["docker", "compose", "version"], capture_output=True).returncode != 0,
+        not _docker_compose_available(),
         reason="docker compose indisponible : la résolution réelle est couverte par le test d'interpolation ci-dessus",
     )
-    @pytest.mark.parametrize(("publish_host", "expected"), [(None, "127.0.0.1"), ("0.0.0.0", "0.0.0.0")])
-    def test_docker_compose_config_resolves_host_ip(self, tmp_path, publish_host, expected):
-        shutil.copy(COMPOSE_PATH, tmp_path / "docker-compose.yml")
-        (tmp_path / ".env").write_text("", encoding="utf-8")  # env_file requis, contenu vide
-        env = {key: value for key, value in os.environ.items() if key != PUBLISH_VAR}
-        if publish_host is not None:
-            env[PUBLISH_VAR] = publish_host
+    def test_docker_compose_config_defaults_to_loopback_everywhere(self, tmp_path):
+        host_ips = _rendered_host_ips(tmp_path)
 
-        completed = subprocess.run(
-            ["docker", "compose", "config", "--format", "json"],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        assert host_ips == {
+            4121: "127.0.0.1",
+            4122: "127.0.0.1",
+            4123: "127.0.0.1",
+            4125: "127.0.0.1",
+            8088: "127.0.0.1",
+        }
 
-        assert completed.returncode == 0, completed.stderr
-        rendered = json.loads(completed.stdout)
-        for name, service in rendered["services"].items():
-            for port in service.get("ports", []):
-                assert port.get("host_ip") == expected, (name, port)
+    @pytest.mark.skipif(not _docker_compose_available(), reason="docker compose indisponible")
+    def test_docker_compose_config_remote_exposure_of_the_mcp_surface_keeps_the_rest_local(self, tmp_path):
+        host_ips = _rendered_host_ips(tmp_path, COLLEGUE_PUBLISH_HOST="0.0.0.0")
+
+        assert host_ips == {4121: "0.0.0.0", 4122: "0.0.0.0", 8088: "0.0.0.0", 4123: "127.0.0.1", 4125: "127.0.0.1"}
+
+    @pytest.mark.skipif(not _docker_compose_available(), reason="docker compose indisponible")
+    @pytest.mark.parametrize(
+        ("variable", "port"),
+        [("COLLEGUE_DASHBOARD_PUBLISH_HOST", 4125), ("COLLEGUE_KEYCLOAK_PUBLISH_HOST", 4123)],
+    )
+    def test_docker_compose_config_dashboard_and_keycloak_need_their_own_explicit_opt_in(
+        self, tmp_path, variable, port
+    ):
+        host_ips = _rendered_host_ips(tmp_path, **{variable: "0.0.0.0"})
+
+        assert host_ips[port] == "0.0.0.0"
+        assert {p: ip for p, ip in host_ips.items() if p != port} == {
+            p: "127.0.0.1" for p in (4121, 4122, 4123, 4125, 8088) if p != port
+        }
 
 
 if __name__ == "__main__":

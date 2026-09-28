@@ -375,11 +375,14 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_oauth_config(self) -> "Settings":
         if self.OAUTH_ENABLED:
-            if not self.OAUTH_JWKS_URI and not self.OAUTH_PUBLIC_KEY:
+            # Une valeur vide ou blanche équivaut à une valeur absente (fail-closed au démarrage).
+            jwks_uri = (self.OAUTH_JWKS_URI or "").strip()
+            public_key = (self.OAUTH_PUBLIC_KEY or "").strip()
+            if not jwks_uri and not public_key:
                 raise ValueError("OAUTH_ENABLED est true mais ni OAUTH_JWKS_URI ni OAUTH_PUBLIC_KEY n'est configuré.")
-            if self.OAUTH_JWKS_URI and not self.OAUTH_JWKS_URI.startswith("http"):
+            if jwks_uri and not jwks_uri.startswith("http"):
                 raise ValueError(f"OAUTH_JWKS_URI doit être une URL HTTP/HTTPS valide. Reçu: {self.OAUTH_JWKS_URI}")
-            if not self.OAUTH_ISSUER:
+            if not (self.OAUTH_ISSUER or "").strip():
                 raise ValueError("OAUTH_ISSUER est requis lorsque OAUTH_ENABLED est true.")
         return self
 

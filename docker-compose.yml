@@ -1,17 +1,31 @@
 # Publication des ports sur l'HÔTE
 # --------------------------------
-# Profil local par défaut : tous les ports sont publiés sur le LOOPBACK (127.0.0.1) via
-# COLLEGUE_PUBLISH_HOST. Le serveur MCP n'a pas d'authentification tant que OAUTH_ENABLED
-# est false : il ne doit pas être joignable depuis le réseau par simple `docker compose up`.
+# Profil local par défaut : TOUTES les publications hôte (4121, 4122, 4123, 4125, 8088) sont
+# liées au LOOPBACK (127.0.0.1). Sans OAuth (OAUTH_ENABLED=false) le serveur MCP n'a aucune
+# authentification : il ne doit pas être joignable depuis le réseau par simple `docker compose up`.
 #
 # Les conteneurs continuent d'écouter sur 0.0.0.0 EN INTERNE (MCP_HOST, entrypoint.sh,
-# --server.address) : c'est nécessaire pour que le mapping de ports Docker fonctionne ; seule
+# --server.address) : c'est nécessaire au mapping de ports Docker et au réseau Compose ; seule
 # la publication hôte est restreinte.
 #
-# Exposition distante : ACTE EXPLICITE. Définir COLLEGUE_PUBLISH_HOST=0.0.0.0 (ou l'IP d'une
-# interface précise) dans .env, ET activer OAuth (OAUTH_ENABLED=true + OAUTH_JWKS_URI/OAUTH_PUBLIC_KEY
-# + OAUTH_ISSUER). Avec OAUTH_ENABLED=true, un OAuth inutilisable interdit le démarrage
-# (jamais de repli silencieux sans auth). Un reverse proxy TLS reste recommandé devant.
+# Trois variables INDÉPENDANTES (défaut 127.0.0.1), pour n'ouvrir que ce qui est voulu :
+#   COLLEGUE_PUBLISH_HOST            surface MCP : 4121 (MCP), 4122 (health, well-known OAuth),
+#                                    8088 (nginx : proxifie uniquement /mcp/, /_health, /.well-known/)
+#   COLLEGUE_DASHBOARD_PUBLISH_HOST  4125 (dashboard Streamlit : AUCUNE authentification)
+#   COLLEGUE_KEYCLOAK_PUBLISH_HOST   4123 (Keycloak en start-dev : ne pas exposer tel quel)
+# Exposer le MCP n'ouvre donc jamais le dashboard ni Keycloak.
+#
+# Demander une exposition distante du MCP, AVEC OAuth (dans .env) :
+#   COLLEGUE_PUBLISH_HOST=0.0.0.0        # ou l'IP d'une interface précise
+#   OAUTH_ENABLED=true
+#   OAUTH_ISSUER=https://idp.example.com/realms/collegue
+#   OAUTH_JWKS_URI=https://idp.example.com/realms/collegue/protocol/openid-connect/certs
+#   OAUTH_AUDIENCE=collegue              # facultatif
+# Avec OAUTH_ENABLED=true, un OAuth inutilisable (JWTVerifier absent, constructeur en erreur,
+# ni OAUTH_JWKS_URI ni OAUTH_PUBLIC_KEY, OAUTH_ISSUER vide) fait SORTIR le conteneur en code
+# non nul : jamais de repli silencieux sans auth. Vérifier ensuite : `docker compose config`
+# (host_ip) puis une requête MCP sans jeton doit répondre 401. Un reverse proxy TLS reste
+# recommandé devant le service.
 services:
   collegue-app:
     build:
@@ -46,7 +60,9 @@ services:
       restart_policy:
         condition: on-failure
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4122/_health"]
+      # Sain = health server (4122) ET serveur MCP (4121) à l'écoute : le health server seul ne
+      # suffit pas. `mcp-ready` (entrypoint.sh) applique le critère de l'attente de démarrage.
+      test: ["CMD-SHELL", "curl -f http://localhost:4122/_health >/dev/null && ./entrypoint.sh mcp-ready"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -64,7 +80,7 @@ services:
     image: collegue-app:latest
     restart: always
     ports:
-      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:4125:4125"
+      - "${COLLEGUE_DASHBOARD_PUBLISH_HOST:-127.0.0.1}:4125:4125"
     environment:
       PYTHONUNBUFFERED: 1
     env_file:
@@ -93,7 +109,7 @@ services:
     env_file:
       - .env
     ports:
-      - "${COLLEGUE_PUBLISH_HOST:-127.0.0.1}:4123:8080"
+      - "${COLLEGUE_KEYCLOAK_PUBLISH_HOST:-127.0.0.1}:4123:8080"
 
   nginx:
     build:

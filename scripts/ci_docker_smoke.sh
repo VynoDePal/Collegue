@@ -9,6 +9,9 @@
 # loopback DU conteneur (aucun port publié, aucun conflit sur le runner) :
 #   - health : GET  :4122/_health            -> {"status":"ok"}
 #   - MCP    : POST :4121/mcp/ (initialize)  -> HTTP 200 + résultat JSON-RPC
+#   - healthcheck : la commande EXACTE du healthcheck de docker-compose.yml, exécutée dans le
+#     conteneur (health server ET `entrypoint.sh mcp-ready`) — un test garantit qu'elle est
+#     identique à celle du Compose.
 #
 # L'attente est bornée. Le script échoue si le conteneur sort (quel que soit son code),
 # si la santé est invalide ou si le délai est dépassé. Les journaux du conteneur sont
@@ -48,6 +51,8 @@ fi
 
 HEALTH_URL="http://127.0.0.1:4122/_health"
 MCP_URL="http://127.0.0.1:4121/mcp/"
+# Doit rester identique au healthcheck de collegue-app dans docker-compose.yml (test dédié).
+HEALTHCHECK_CMD='curl -f http://localhost:4122/_health >/dev/null && ./entrypoint.sh mcp-ready'
 INIT_PAYLOAD='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"0"}}}'
 
 mkdir -p "$LOG_DIR" || {
@@ -91,6 +96,10 @@ probe_mcp() {
   [[ "$code" == "200" && "$body" == *'"result"'* ]]
 }
 
+probe_compose_healthcheck() {
+  docker exec "$NAME" sh -c "$HEALTHCHECK_CMD" >/dev/null 2>&1
+}
+
 # Écrit « running exit_code oom » dans les variables globales ; échoue si le conteneur a disparu.
 container_state() {
   local state
@@ -125,11 +134,11 @@ while :; do
     echo "::error::Le conteneur s'est arrêté avant d'être prêt (exit code: $exit_code, OOMKilled: $oom)"
     exit 11
   fi
-  if probe_health && probe_mcp; then
+  if probe_health && probe_mcp && probe_compose_healthcheck; then
     break
   fi
   if ((SECONDS >= deadline)); then
-    echo "::error::Service non prêt après ${TIMEOUT}s (santé ${HEALTH_URL} et MCP ${MCP_URL} attendus)"
+    echo "::error::Service non prêt après ${TIMEOUT}s (santé ${HEALTH_URL}, MCP ${MCP_URL} et healthcheck Compose attendus)"
     exit 12
   fi
   sleep "$INTERVAL"
@@ -142,5 +151,5 @@ if ! container_state || [[ "$running" != "true" ]]; then
   exit 13
 fi
 
-echo "Service prêt : santé OK et MCP initialize HTTP 200 après ${SECONDS}s"
+echo "Service prêt : santé OK, MCP initialize HTTP 200 et healthcheck Compose OK après ${SECONDS}s"
 exit 0

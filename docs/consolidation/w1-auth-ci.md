@@ -6,51 +6,94 @@ référence pour la relecture et pour les opérateurs.
 ## 1. OAuth : démarrage fail-closed
 
 **Contrat** : `OAUTH_ENABLED=true` est une exigence. Si l'authentification demandée ne peut
-pas être établie, `collegue.app` **ne démarre pas** (l'import lève `OAuthConfigurationError`,
-sous-classe de `RuntimeError`). Il n'existe plus de repli silencieux sur `auth=None`.
+pas être établie, `collegue.app` **ne démarre pas** : l'import lève `OAuthConfigurationError`
+(sous-classe de `RuntimeError`) **avant** de construire l'application FastMCP, donc avant de
+pouvoir servir quoi que ce soit d'anonyme (un test espionne la construction de `FastMCP`).
 
 | Situation | Avant | Maintenant |
 |---|---|---|
-| `OAUTH_ENABLED=true`, constructeur `JWTVerifier` en erreur | erreur journalisée, serveur **sans auth** | démarrage refusé (`OAuthConfigurationError`, cause chaînée) |
-| `OAUTH_ENABLED=true`, `JWTVerifier` non importable | avertissement, serveur **sans auth** | démarrage refusé |
-| `OAUTH_ENABLED=true`, ni `OAUTH_JWKS_URI` ni `OAUTH_PUBLIC_KEY` | avertissement, serveur **sans auth** | démarrage refusé (aussi refusé plus tôt par la validation de `Settings`) |
-| `OAUTH_ENABLED=true`, configuration valide (JWKS ou clé publique) | auth active | inchangé : requêtes sans jeton → `401` + `WWW-Authenticate: Bearer` |
+| `JWTVerifier` non importable | avertissement, serveur **sans auth** | démarrage refusé |
+| constructeur `JWTVerifier` en erreur | erreur journalisée, serveur **sans auth** | démarrage refusé (cause chaînée) |
+| `OAUTH_ENABLED=true`, ni `OAUTH_JWKS_URI` ni `OAUTH_PUBLIC_KEY` | avertissement, serveur **sans auth** | démarrage refusé (déjà par la validation de `Settings`, puis par le constructeur) |
+| valeurs vides ou blanches (`OAUTH_JWKS_URI`, `OAUTH_PUBLIC_KEY`, `OAUTH_ISSUER`) | clé blanche acceptée | traitées comme absentes → démarrage refusé |
+| `OAUTH_ISSUER` absent | refusé par `Settings` | refusé aussi par le constructeur (défense en profondeur) |
+| configuration valide (JWKS ou clé publique) | auth active | inchangé : requêtes sans jeton → `401` + `WWW-Authenticate: Bearer` |
 | `OAUTH_ENABLED=false` (défaut) | pas d'auth | inchangé, mais **explicite** : journal « mode local explicite, SANS authentification » |
 
 Implémentation : `collegue/core/server_auth.py` (`build_auth_provider(settings)`), appelé une
-seule fois à l'import de `collegue/app.py`. Aucun effet de bord à l'import du module
-lui-même (testable sans démarrer l'application).
-
-Dans Docker, le conteneur sort avec un code non nul (`entrypoint.sh` propage le statut de
-`fastmcp run`) ; avec `restart: always`, Compose relance en boucle : c'est voulu, un service
-sans authentification ne doit pas répondre.
+seule fois à l'import de `collegue/app.py`.
 
 Avertissement d'exposition : en mode local, si `HOST` ou `COLLEGUE_PUBLISH_HOST` n'est pas
 une adresse loopback, un `WARNING` rappelle qu'OAuth doit être activé avant toute exposition
 distante. Ce n'est **pas** un refus (décision de politique laissée au manager).
 
-## 2. Profil réseau local
+## 2. `entrypoint.sh` (mode HTTP) : le statut du conteneur est fidèle
 
-- `docker-compose.yml` publie **tous** les ports hôte (`4121`, `4122`, `4125`, `4123`, `8088`)
-  sur `${COLLEGUE_PUBLISH_HOST:-127.0.0.1}`. Vérifié avec `docker compose config` :
-  `host_ip: 127.0.0.1` par défaut.
-- Les conteneurs écoutent toujours sur `0.0.0.0` **en interne** (`MCP_HOST`, `entrypoint.sh`,
-  `--server.address`) : nécessaire au mapping de ports Docker. Le fonctionnement
-  intra-conteneur (healthcheck sur `localhost:4122`, réseau Compose) est inchangé.
-- `Settings.HOST` vaut désormais `127.0.0.1` par défaut : `python collegue/app.py` n'écoute
-  plus sur toutes les interfaces sans choix explicite.
+| Événement | Comportement |
+|---|---|
+| `fastmcp run` sort avec le code N avant d'être prêt (dont OAuth fail-closed) | le conteneur sort avec **N** ; jamais converti en 0 par le nettoyage ; health server arrêté |
+| `fastmcp run` sort avec 0 avant d'être prêt | échec (code 1) |
+| MCP vivant mais qui ne répond pas dans `MCP_READY_ATTEMPTS` | échec (code 1), aucune bannière de succès |
+| health server qui ne devient pas prêt / sort au démarrage | échec ; son code est propagé ; le MCP n'est pas lancé |
+| health server qui meurt en service | échec (son code, ou 1), le MCP est arrêté |
+| MCP qui sort seul après avoir été prêt | son code exact est restitué ; health server arrêté |
+| SIGTERM / SIGINT (`docker stop`) | arrêt propre, code 0, **aucun** processus fils ne survit |
 
-### Exposition distante explicite
+- « Prêt » = le **health server ET le MCP** répondent. Le MCP est prêt quand une requête
+  `initialize` reçoit un code HTTP **2xx ou 4xx** (un `401` est la réponse normale d'un MCP
+  protégé par OAuth) ; `000` (rien à l'écoute) et `5xx` ne le sont pas. La bannière
+  « All services started successfully! » n'apparaît qu'à ce moment.
+- Réglages : `COLLEGUE_APP_DIR` (`/app`), `READY_POLL_INTERVAL` (1 s), `HEALTH_READY_ATTEMPTS`
+  (30), `MCP_READY_ATTEMPTS` (120).
+- Sous-commande `./entrypoint.sh mcp-ready` : ne démarre rien, code 0 si le MCP répond selon le
+  critère ci-dessus, 1 sinon. Elle est utilisée par le healthcheck Compose.
+- Le mode `stdio` est inchangé (`exec fastmcp run … --transport stdio`).
 
-1. `COLLEGUE_PUBLISH_HOST=0.0.0.0` (ou l'IP d'une interface précise) dans `.env`.
-2. **OAuth obligatoire** : `OAUTH_ENABLED=true`, `OAUTH_ISSUER` et `OAUTH_JWKS_URI` (ou
-   `OAUTH_PUBLIC_KEY`). Voir `.env.example`.
-3. Un reverse proxy TLS devant le service reste recommandé ; Keycloak en `start-dev` ne doit
-   pas être exposé tel quel.
+## 3. Profil réseau local
 
+Toutes les publications hôte du Compose (**4121, 4122, 4123, 4125, 8088**) sont liées au
+loopback par défaut. Trois variables **indépendantes** (défaut `127.0.0.1`) évitent qu'ouvrir
+le MCP ouvre aussi ce qui n'a pas d'authentification :
+
+| Variable | Ports | Remarque |
+|---|---|---|
+| `COLLEGUE_PUBLISH_HOST` | 4121 (MCP), 4122 (health, well-known OAuth), 8088 (nginx : proxifie seulement `/mcp/`, `/_health`, `/.well-known/`) | surface MCP |
+| `COLLEGUE_DASHBOARD_PUBLISH_HOST` | 4125 | dashboard Streamlit, **aucune authentification** |
+| `COLLEGUE_KEYCLOAK_PUBLISH_HOST` | 4123 | Keycloak en `start-dev`, à ne pas exposer tel quel |
+
+Les conteneurs écoutent toujours sur `0.0.0.0` **en interne** (`MCP_HOST`, `entrypoint.sh`,
+`--server.address`) : le réseau Compose et le mapping de ports fonctionnent comme avant.
+`Settings.HOST` vaut `127.0.0.1` par défaut pour `python collegue/app.py`.
+
+Le healthcheck de `collegue-app` exige le health server **et** `entrypoint.sh mcp-ready` : le
+health server seul ne rend plus le conteneur « sain » (`nginx` et le dashboard attendent donc
+le MCP via `depends_on: service_healthy`).
+
+### Demander une exposition distante du MCP, avec OAuth
+
+Dans `.env` :
+
+```
+COLLEGUE_PUBLISH_HOST=0.0.0.0          # ou l'IP d'une interface précise
+OAUTH_ENABLED=true
+OAUTH_ISSUER=https://idp.example.com/realms/collegue
+OAUTH_JWKS_URI=https://idp.example.com/realms/collegue/protocol/openid-connect/certs
+OAUTH_AUDIENCE=collegue                # facultatif
+```
+
+Puis vérifier :
+
+1. `docker compose config` → `host_ip: 0.0.0.0` pour 4121/4122/8088 seulement (dashboard et
+   Keycloak restent sur `127.0.0.1` tant que leur propre variable n'est pas posée) ;
+2. `docker compose up -d` → le conteneur reste sain ; si OAuth est inutilisable il **sort en
+   code non nul** (voir `docker compose logs collegue-app`, `OAuthConfigurationError`) ;
+3. une requête MCP sans jeton doit répondre `401`.
+
+`/_health` et `/.well-known/oauth-protected-resource` (port 4122, aussi via nginx) restent non
+authentifiés par conception (statut et découverte OAuth). Un reverse proxy TLS reste recommandé.
 Pour `python collegue/app.py` hors Docker : `HOST=0.0.0.0`, mêmes exigences.
 
-## 3. CI nightly (`integration-nightly.yml`)
+## 4. CI nightly (`integration-nightly.yml`)
 
 **Défaut corrigé** : `pytest … | tee` sous `bash -e` sans `pipefail` renvoyait le statut de
 `tee` (0). Le run 34577743360 était `success` avec `1 failed, 7 passed, 7 skipped`.
@@ -63,7 +106,7 @@ Pour `python collegue/app.py` hors Docker : `HOST=0.0.0.0`, mêmes exigences.
   erreur, **aucun test exécuté** (tout skippé), ou étape pytest non `success`. Les tests
   skippés sont listés avec leur raison dans le résumé du run et signalés comme *non exécutés*.
 - Rapport et journal sont téléversés `if: always()` (même en échec).
-- Nouveau job « Statut du produit E2E (jamais vert par skip) » : `product-e2e` est un opt-in
+- Job « Statut du produit E2E (jamais vert par skip) » : `product-e2e` est un opt-in
   (`vars.INTEGRATION_E2E_ENABLED`). Quand il est ignoré, le résumé et une annotation
   `::warning::` annoncent **NON EXÉCUTÉ — ce nightly ne prouve PAS le cycle produit**.
   `failure`, `cancelled` ou une valeur inconnue font échouer le job.
@@ -71,7 +114,7 @@ Pour `python collegue/app.py` hors Docker : `HOST=0.0.0.0`, mêmes exigences.
 Le test nightly réel qui attend 2 délégations et en obtient 3 n'a **pas** été modifié : le
 défaut corrigé ici est le statut CI, pas l'assertion. Il est désormais rendu visible.
 
-## 4. Smoke Docker (`tests.yml`, job « Docker build »)
+## 5. Smoke Docker (`tests.yml`, job « Docker build »)
 
 **Défaut corrigé** : `docker run … &` + `sleep 5` + `docker logs || true` + `docker stop || true`
 était vert quoi qu'il arrive. Le log du run 29215033828 (main `51ab3fc`) s'arrête sur
@@ -85,7 +128,9 @@ de validation.
   clé factice (ce provider ne valide rien à distance au démarrage ; garde-fou :
   `test_anthropic_startup_validation_makes_no_network_call`) → aucun appel LLM/API possible ;
 - sonde via `docker exec … curl` sur le loopback du conteneur : santé `:4122/_health`
-  (`{"status":"ok"}`) **et** MCP `initialize` sur `:4121/mcp/` (HTTP 200 + résultat) ;
+  (`{"status":"ok"}`), MCP `initialize` sur `:4121/mcp/` (HTTP 200 + résultat) **et** la
+  commande exacte du healthcheck Compose (un test garantit qu'elle est identique à celle de
+  `docker-compose.yml`) ;
 - attente bornée (`SMOKE_TIMEOUT_SECONDS`, 120 s ; `SMOKE_POLL_INTERVAL_SECONDS`, 2 s) ;
 - échoue si le conteneur **sort** (même avec le code 0), si la santé est invalide, si le délai
   est dépassé, ou si le conteneur meurt juste après être devenu prêt ;
@@ -105,34 +150,33 @@ de validation.
 | 13 | mort juste après être devenu prêt |
 
 Le smoke vérifie le profil **local** (OAuth désactivé). Avec OAuth activé, `initialize` sans
-jeton répond `401` et la sonde le déclare non prêt : c'est attendu, un smoke OAuth exigerait un
-jeton de test.
+jeton répond `401` : c'est « prêt » pour l'entrypoint et le healthcheck, mais pas pour la sonde
+stricte du smoke (HTTP 200) ; un smoke OAuth exigerait un jeton de test.
 
 Les noms des checks requis sont inchangés : `Ruff`, `Pytest (Python 3.11)`,
 `Pytest (Python 3.12)`, `Dependency audit`, `Docker build` (garde-fou :
 `test_required_pull_request_check_names_are_unchanged`).
 
-## 5. Tests
+## 6. Tests
 
 | Fichier | Couvre |
 |---|---|
-| `tests/test_app_oauth_fail_closed.py` | démarrage réel (sous-processus) : local, OAuth JWKS/clé publique (401 sans jeton), constructeur en erreur, import absent, matériel de clé manquant |
-| `tests/test_server_auth.py` | `build_auth_provider`, loopback, avertissements d'exposition, `HOST`/`COLLEGUE_PUBLISH_HOST` |
-| `tests/test_docker_compose_config.py` | publication loopback (statique, interpolation, `docker compose config` réel) |
-| `tests/test_ci_nightly_pipeline.py` | exécute l'étape pytest du workflow contre un faux `pytest` (codes 1/2/3/5), bilan JUnit, statut E2E |
-| `tests/test_ci_docker_smoke.py` | script de smoke contre un `docker` factice : succès, crash, jamais prêt, MCP indisponible, mort après prêt, `docker run` KO, nettoyage, logs |
+| `tests/test_app_oauth_fail_closed.py` | démarrage réel (sous-processus) : local, OAuth JWKS/clé publique (401 sans jeton), constructeur en erreur, import absent, clé absente/vide/blanche ; jamais de `FastMCP` construit sur un refus |
+| `tests/test_server_auth.py` | `build_auth_provider`, valeurs blanches, issuer, loopback, avertissements d'exposition |
+| `tests/test_entrypoint_lifecycle.py` | `entrypoint.sh` avec faux `fastmcp`/health/`curl` : codes exacts, jamais « prêt » à tort, timeouts, mort du health server, SIGTERM, aucun processus survivant, `mcp-ready`, stdio |
+| `tests/test_docker_compose_config.py` | cinq publications en loopback, variables séparées, `docker compose config` réel, healthcheck MCP |
+| `tests/test_ci_nightly_pipeline.py` | étape pytest du workflow contre un faux `pytest` (codes 1/2/3/5), bilan JUnit, statut E2E |
+| `tests/test_ci_docker_smoke.py` | script de smoke contre un `docker` factice : succès, crash, jamais prêt, MCP/healthcheck indisponible, mort après prêt, `docker run` KO, nettoyage, logs |
 
-## 6. Limites connues
+## 7. Limites connues
 
 - `OAUTH_REQUIRED_SCOPES` et `OAUTH_ALGORITHM` sont lus par `Settings` mais **non transmis** à
   `JWTVerifier` (`required_scopes`, `algorithm`) : les scopes configurés ne sont pas imposés.
-  Comportement inchangé (hors périmètre de cette vague, imposer les scopes peut verrouiller des
-  déploiements existants) ; à décider.
-- `entrypoint.sh` affiche « All services started successfully! » même si le MCP est déjà mort, et
-  ne tue pas le health server dans ce cas (sans conséquence dans un conteneur : le PID 1 sort).
-  Le code de sortie, lui, est bien non nul. Fichier hors périmètre B.
+  Comportement inchangé (imposer les scopes peut verrouiller des déploiements existants) ; à décider.
 - Le smoke n'a pas été exécuté sur une vraie image dans cette vague (pas de build Docker
   local) : la preuve réelle sera le job « Docker build » de la CI distante. Il a été exécuté
   contre le vrai `entrypoint.sh` et le vrai serveur via un shim `docker` (voir le rapport).
 - `E2E produit` reste opt-in : tant que `INTEGRATION_E2E_ENABLED` n'est pas `true`, le nightly ne
   prouve pas le cycle produit (explicitement annoncé, mais le run reste vert).
+- `tests/test_entrypoint.py::TestHealthServer` lance un health server sur le port 4122 de l'hôte :
+  des exécutions parallèles de la suite complète peuvent se marcher dessus.

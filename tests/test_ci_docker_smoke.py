@@ -65,6 +65,12 @@ case "$1" in
     ;;
   exec)
     case "$*" in
+      *mcp-ready*)
+        # Commande du healthcheck Compose exécutée dans le conteneur.
+        [ "$scenario" = "healthcheck-fails" ] && exit 1
+        [ -f "$state/ready" ] || exit 1
+        exit 0
+        ;;
       *:4122/*)
         n=$(bump health_n)
         case "$scenario" in
@@ -188,6 +194,34 @@ def test_success_requires_health_and_mcp_readiness_then_cleans_up(stub) -> None:
     assert "STUB-CONTAINER-STDERR" in log
     assert not (state / "container").exists()
     assert any(call.startswith("rm ") and CONTAINER in call for call in calls)
+
+
+def test_success_also_runs_the_compose_healthcheck_command_inside_the_container(stub) -> None:
+    env, state, _ = stub
+
+    completed = _run_script(env, STUB_SCENARIO="success")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert any(call.startswith("exec ") and "entrypoint.sh mcp-ready" in call for call in _calls(state))
+
+
+def test_failing_compose_healthcheck_means_not_ready(stub) -> None:
+    """Santé et MCP répondent mais la commande de healthcheck du Compose échoue : pas prêt."""
+
+    env, state, _ = stub
+
+    completed = _run_script(env, STUB_SCENARIO="healthcheck-fails")
+
+    assert completed.returncode == EXIT_NOT_READY, completed.stdout + completed.stderr
+    assert not (state / "container").exists()
+
+
+def test_smoke_runs_exactly_the_healthcheck_command_declared_in_compose() -> None:
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    declared = compose["services"]["collegue-app"]["healthcheck"]["test"]
+
+    assert declared[0] == "CMD-SHELL"
+    assert declared[1] in SMOKE_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_container_is_started_without_network_and_without_auto_removal(stub) -> None:

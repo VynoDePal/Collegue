@@ -119,6 +119,36 @@ def test_missing_key_material_blocks_startup(recording_verifier) -> None:
     assert recording_verifier.calls == []
 
 
+def test_missing_issuer_blocks_startup(recording_verifier) -> None:
+    """Défense en profondeur : sans issuer, n'importe quel émetteur signant avec la clé serait accepté."""
+
+    with pytest.raises(OAuthConfigurationError, match="OAUTH_ISSUER"):
+        build_auth_provider(_cfg(OAUTH_ISSUER=None))
+
+    assert recording_verifier.calls == []
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n"])
+def test_blank_key_material_counts_as_missing(recording_verifier, blank: str) -> None:
+    with pytest.raises(OAuthConfigurationError, match="OAUTH_JWKS_URI"):
+        build_auth_provider(_cfg(OAUTH_JWKS_URI=blank, OAUTH_PUBLIC_KEY=blank))
+
+    assert recording_verifier.calls == []
+
+
+def test_blank_jwks_falls_back_to_a_real_public_key(recording_verifier) -> None:
+    build_auth_provider(_cfg(OAUTH_JWKS_URI="  ", OAUTH_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----"))
+
+    assert set(recording_verifier.calls[0]) == {"public_key", "issuer", "audience"}
+
+
+def test_blank_issuer_blocks_startup(recording_verifier) -> None:
+    with pytest.raises(OAuthConfigurationError, match="OAUTH_ISSUER"):
+        build_auth_provider(_cfg(OAUTH_ISSUER="   "))
+
+    assert recording_verifier.calls == []
+
+
 def test_configuration_error_is_a_runtime_error() -> None:
     assert issubclass(OAuthConfigurationError, RuntimeError)
 
