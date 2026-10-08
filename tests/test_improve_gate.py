@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from collegue.improve import ProjectQualityMetrics, composite_score, evaluate
 
 
@@ -16,6 +18,8 @@ def _m(
     tests=True,
     measured=True,
     quality_measured=True,
+    review_blocking=False,
+    review_error="",
 ):
     return ProjectQualityMetrics(
         coverage_pct=coverage,
@@ -30,6 +34,9 @@ def _m(
         complexity_bad_blocks=complexity,
         quality_measured=quality_measured,
         dep_vulns=dep_vulns,
+        review_measured=not review_error,
+        review_blocking=review_blocking,
+        review_error=review_error,
     )
 
 
@@ -44,12 +51,59 @@ def test_accept_on_real_gain_without_regression():
     assert d.delta > 0
 
 
-def test_accept_gain_from_security_when_coverage_unmeasurable_both_sides():
-    # Projet sans couverture mesurable (both False) : le gain vient de la baisse sécu.
+def test_coverage_unmeasurable_both_sides_is_refused_by_default():
+    # Vague 3 : la couverture est une mesure INDISPENSABLE. Sans elle, le composite ne mesure plus que du bruit.
     before = _m(coverage=0.0, security_weighted=5.0, measured=False)
     after = _m(coverage=0.0, security_weighted=2.0, measured=False)
     d = evaluate(before, after)
+    assert d.accepted is False
+    assert "indispensable" in d.reason
+
+
+def test_there_is_no_waiver_for_the_coverage_measure_or_a_coverage_drop():
+    """Pas de dérogation : ni `coverage_required=False`, ni `coverage_slack` (le manager a supprimé ces voies)."""
+    import inspect
+
+    parameters = inspect.signature(evaluate).parameters
+    assert "coverage_required" not in parameters and "coverage_slack" not in parameters
+    unmeasured = (_m(coverage=0.0, security_weighted=5.0, measured=False), _m(coverage=0.0, measured=False))
+    for forbidden in ({"coverage_required": False}, {"coverage_slack": 5.0}):
+        with pytest.raises(TypeError):
+            evaluate(*unmeasured, **forbidden)
+
+
+def test_benign_coverage_80_to_90_is_accepted():
+    d = evaluate(_m(coverage=80.0), _m(coverage=90.0))
     assert d.accepted is True
+
+
+def test_coverage_drop_90_to_80_is_refused_even_when_lint_improves():
+    # Le composite (couverture 1.0/pt normalisé, lint 0.02/violation) accepterait : 20 violations de lint
+    # rachètent 10 pts de couverture. La contrainte de non-régression de couverture l'interdit.
+    before = _m(coverage=90.0, lint=20)
+    after = _m(coverage=80.0, lint=0)
+    assert after.composite > before.composite  # le score seul promouvrait (reproduction du défaut)
+    d = evaluate(before, after)
+    assert d.accepted is False
+    assert "couverture" in d.reason
+
+
+def test_any_coverage_drop_is_refused_without_tolerance():
+    for drop in (0.5, 2.0, 10.0):
+        d = evaluate(_m(coverage=90.0, lint=40), _m(coverage=90.0 - drop, lint=0))
+        assert d.accepted is False and "couverture" in d.reason, drop
+
+
+def test_blocking_review_vetoes_even_with_a_high_score():
+    d = evaluate(_m(coverage=40.0), _m(coverage=95.0, review_blocking=True))
+    assert d.accepted is False
+    assert "revue bloquante" in d.reason
+
+
+def test_review_failure_is_not_a_clean_review():
+    d = evaluate(_m(coverage=40.0), _m(coverage=95.0, review_error="reviewer indisponible"))
+    assert d.accepted is False
+    assert "revue indisponible" in d.reason
 
 
 # --- rejets fail-closed ---------------------------------------------------------
@@ -65,7 +119,7 @@ def test_reject_on_security_regression():
     # Même avec un gain de couverture, une sécu pondérée qui empire = rejet dur.
     d = evaluate(_m(security_weighted=1.0, coverage=70.0), _m(security_weighted=2.0, coverage=90.0))
     assert d.accepted is False
-    assert "sécu" in d.reason
+    assert "scan de secrets" in d.reason
 
 
 def test_reject_on_quality_measurability_flip():
@@ -144,7 +198,7 @@ def test_reject_on_coverage_measurability_flip():
     after = _m(coverage=90.0, measured=True)
     d = evaluate(before, after)
     assert d.accepted is False
-    assert "mesurabilité" in d.reason
+    assert "indispensable" in d.reason  # la couverture est une mesure indispensable : refus net, sans dérogation
 
 
 # --- min_gain -------------------------------------------------------------------

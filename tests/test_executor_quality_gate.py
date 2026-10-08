@@ -463,6 +463,156 @@ def test_smoke_probe_red_when_server_exits():
     assert "premier plan" in proc.stdout
 
 
+# --- nettoyage du GROUPE de processus de la sonde (aucun serveur enfant orphelin) ----------------------------
+
+
+def _pid_alive(pid):
+    """Vivant = présent ET non zombie (un zombie orphelin n'exécute plus rien)."""
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            state = handle.read().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state != "Z"
+
+
+def _server_with_children(tmp_path, *, behaviour="ok", port):
+    """Écrit un ``serve.py`` qui lance 2 ENFANTS dormants (leurs pid → fichier) puis sert HTTP selon ``behaviour``."""
+    pidfile = tmp_path / "pids.txt"
+    script = tmp_path / "serve.py"
+    script.write_text(
+        "import http.server, os, subprocess, sys, time\n"
+        "kids = [subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)']) for _ in range(2)]\n"
+        f"open({str(pidfile)!r}, 'w').write(' '.join(str(k.pid) for k in kids) + ' ' + str(os.getpid()))\n"
+        f"mode = {behaviour!r}\n"
+        "class H(http.server.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(500 if mode == 'error' else 200); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *a): pass\n"
+        "if mode == 'silent':\n"
+        "    time.sleep(600)\n"
+        f"http.server.HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n",
+        encoding="utf-8",
+    )
+    return script, pidfile
+
+
+def _recorded_pids(pidfile, wait=10.0):
+    import time
+
+    end = time.time() + wait
+    while time.time() < end:
+        if pidfile.exists() and pidfile.read_text().strip():
+            return [int(p) for p in pidfile.read_text().split()]
+        time.sleep(0.05)
+    raise AssertionError("le serveur de test n'a pas démarré")
+
+
+def _assert_all_dead(pids, wait=5.0):
+    import time
+
+    end = time.time() + wait
+    while time.time() < end and any(_pid_alive(p) for p in pids):
+        time.sleep(0.05)
+    alive = [p for p in pids if _pid_alive(p)]
+    for pid in alive:  # ne jamais laisser le test lui-même fuir un processus
+        import os
+        import signal
+
+        os.kill(pid, signal.SIGKILL)
+    assert alive == [], f"processus enfants encore vivants après la sonde : {alive}"
+
+
+def test_smoke_probe_leaves_no_child_after_success(tmp_path):
+    import sys
+
+    port = _free_port()
+    script, pidfile = _server_with_children(tmp_path, behaviour="ok", port=port)
+    proc = _run_probe(f"{sys.executable} {script}", port=port)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    _assert_all_dead(_recorded_pids(pidfile))
+
+
+def test_smoke_probe_leaves_no_child_after_failure(tmp_path):
+    import sys
+
+    port = _free_port()
+    script, pidfile = _server_with_children(tmp_path, behaviour="error", port=port)
+    proc = _run_probe(f"{sys.executable} {script}", port=port)
+    assert proc.returncode == 1 and "-> 500" in proc.stdout
+    _assert_all_dead(_recorded_pids(pidfile))
+
+
+def test_smoke_probe_leaves_no_child_after_timeout(tmp_path):
+    import sys
+
+    port = _free_port()
+    script, pidfile = _server_with_children(tmp_path, behaviour="silent", port=port)
+    proc = _run_probe(f"{sys.executable} {script}", port=port, timeout=2.0)
+    assert proc.returncode == 1 and "sans réponse" in proc.stdout
+    _assert_all_dead(_recorded_pids(pidfile))
+
+
+def test_smoke_probe_leaves_no_child_when_the_shell_exits_but_its_children_live(tmp_path):
+    """Le shell se termine (code 0) en laissant un enfant : « premier plan » violé ET aucun orphelin."""
+    pidfile = tmp_path / "pids.txt"
+    proc = _run_probe(f"sh -c 'sleep 600 & echo $! > {pidfile}; exit 0'", timeout=2.0)
+    assert proc.returncode == 1 and "premier plan" in proc.stdout
+    _assert_all_dead(_recorded_pids(pidfile))
+
+
+def test_smoke_probe_cleans_its_group_when_it_receives_sigterm(tmp_path):
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    from collegue.executor.quality_gate import _smoke_probe_script
+
+    port = _free_port()
+    script, pidfile = _server_with_children(tmp_path, behaviour="silent", port=port)
+    probe = subprocess.Popen(
+        [sys.executable, "-"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    probe.stdin.write(_smoke_probe_script(f"{sys.executable} {script}", ("/",), 60.0, port=port, origin=""))
+    probe.stdin.close()
+    pids = _recorded_pids(pidfile)
+    os.kill(probe.pid, signal.SIGTERM)  # le délai du conteneur
+    assert probe.wait(timeout=20) == 143
+    _assert_all_dead(pids)
+
+
+def test_smoke_probe_only_stops_the_group_it_created(tmp_path):
+    """Un processus étranger au groupe de la sonde survit : on ne tue jamais autre chose que son groupe."""
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    try:
+        port = _free_port()
+        script, pidfile = _server_with_children(tmp_path, behaviour="ok", port=port)
+        proc = _run_probe(f"{sys.executable} {script}", port=port)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        _assert_all_dead(_recorded_pids(pidfile))
+        assert _pid_alive(bystander.pid)
+    finally:
+        os.kill(bystander.pid, signal.SIGKILL)
+        bystander.wait()
+
+
 async def test_gate_smoke_run_appended_last(tmp_path):
     """#458 : la passe smoke-run est enchaînée fail-closed EN DERNIER (le heredoc
     clôt la commande), après les autres passes."""

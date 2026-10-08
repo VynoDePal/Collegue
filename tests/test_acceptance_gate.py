@@ -12,17 +12,18 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from oracle_sandbox import LocalOracleSandbox
 
 from collegue.executor import FakeReviewer, IssueSpec, run_quality_gate
 from collegue.executor.quality_gate import (
     AcceptanceOutcome,
     LLMAcceptanceChecker,
     StoredAcceptanceChecker,
-    _normalized_plan_text,
     _strip_code_fences,
-    _task_contract_sha256,
     _text_sha256,
 )
+from collegue.planner.acceptance_tests import normalize_plan_text as _normalized_plan_text
+from collegue.planner.acceptance_tests import task_contract_sha256 as _task_contract_sha256
 from collegue.sandbox import SandboxResult
 
 ISSUE_AC = IssueSpec(number=5, title="T", acceptance_criteria=("La TVA est calculée à 0.01 près",))
@@ -134,13 +135,13 @@ async def test_uses_isolated_random_temp_file_and_passes_on_green(tmp_path):
         assert "TVA" in prompt
         return "```python\ndef test_ok():\n    assert True\n```"
 
-    sb = _green()
+    sb = LocalOracleSandbox()  # exécute RÉELLEMENT le lanceur d'oracle et son rapport complet
     out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sb)
     assert out.passed is True
     assert list(tmp_path.iterdir()) == []  # aucun chemin du dépôt n'est créé/écrasé
     command = sb.commands[0]
     assert "python -I -c" in command  # pytest importé avant d'exposer le workspace
-    assert "tempfile.mkstemp" in command and 'dir="/tmp"' in command
+    assert "tempfile.mkstemp" in command and "dir=TMP" in command
     assert "os.unlink(path)" in command  # nettoyage explicite même si pytest lève
     assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" in command
     assert "PYTEST_ADDOPTS=" in command and "PYTHONPATH=" in command
@@ -152,8 +153,10 @@ async def test_fails_on_red(tmp_path):
     async def _gen(prompt, system):
         return "def test_no():\n    assert False\n"
 
-    out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=_red())
-    assert out.passed is False  # verdict OBJECTIF = exit code pytest
+    out = await LLMAcceptanceChecker(sample_fn=_gen).check(
+        str(tmp_path), DIFF, ISSUE_AC, None, sandbox=LocalOracleSandbox()
+    )
+    assert out.passed is False and out.error is None  # verdict OBJECTIF : assertion en échec en phase call
 
 
 async def test_exit5_no_tests_collected_is_failure(tmp_path):
@@ -161,10 +164,11 @@ async def test_exit5_no_tests_collected_is_failure(tmp_path):
     async def _gen(prompt, system):
         return "# rien de testable\nx = 1\n"
 
-    sb = _Sandbox(SandboxResult(exit_code=5, stdout="no tests ran", stderr=""))
-    out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sb)
+    out = await LLMAcceptanceChecker(sample_fn=_gen).check(
+        str(tmp_path), DIFF, ISSUE_AC, None, sandbox=LocalOracleSandbox()
+    )
     assert out.passed is False
-    assert out.error and "collecté" in out.error
+    assert out.error and "aucun test" in out.error
 
 
 async def test_generation_error_is_reported_for_fail_closed_gate(tmp_path):
@@ -201,7 +205,9 @@ async def test_default_sampler_uses_ctx_reviewer_role_and_settings(tmp_path):
         MAX_TOKENS=321,
     )
     ctx = _Ctx()
-    out = await LLMAcceptanceChecker(settings_obj=settings).check(str(tmp_path), DIFF, ISSUE_AC, ctx, sandbox=_green())
+    out = await LLMAcceptanceChecker(settings_obj=settings).check(
+        str(tmp_path), DIFF, ISSUE_AC, ctx, sandbox=LocalOracleSandbox()
+    )
     assert out.passed is True
     assert ctx.kwargs["model_preferences"] == ["reviewer-model"]
     assert ctx.kwargs["temperature"] == 0.2
@@ -227,7 +233,7 @@ async def test_stored_checker_runs_exact_approved_source_without_llm(tmp_path):
         async def sample(self, **kwargs):
             raise AssertionError("le gate stocké ne doit jamais appeler un LLM")
 
-    sandbox = _green()
+    sandbox = LocalOracleSandbox()
     out = await checker.check(str(tmp_path), "diff hostile ignoré", issue, _NoSampling(), sandbox=sandbox)
 
     assert out.passed is True and out.error is None

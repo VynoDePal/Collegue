@@ -499,10 +499,17 @@ class _HostileGateSandbox:
         return self._results.pop(0) if len(self._results) > 1 else self._results[0]
 
 
-async def test_pipeline_with_hostile_agent_and_hostile_tests_recaptures_safely(source, witness, evil_repo):
+async def test_pipeline_with_hostile_agent_and_hostile_tests_recaptures_safely(source, witness, evil_repo, tmp_path):
+    from github_fakes import FakeRemote
+
+    from collegue.state import ProjectStateManager
+
     red = SandboxResult(exit_code=2, stdout="E   ModuleNotFoundError: No module named 'httpx'\n", stderr="")
     green = SandboxResult(exit_code=0, stdout="2 passed", stderr="")
-    clients = PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
+    remote = FakeRemote(tmp_path, source)
+    clients = remote.clients()
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}", create=True)
+    project_id = manager.create_project(name="hostile-delivery")
     agent = HostileAgent(
         HOSTILE_PLANTS["fsmonitor-relatif-sonde-audit"],
         witness,
@@ -521,6 +528,8 @@ async def test_pipeline_with_hostile_agent_and_hostile_tests_recaptures_safely(s
         sandbox=_HostileGateSandbox(witness, evil_repo, [red, green]),
         reviewer=FakeReviewer(),
         clients=clients,
+        manager=manager,
+        project_id=project_id,
     )
 
     assert not witness.exists()
@@ -529,6 +538,9 @@ async def test_pipeline_with_hostile_agent_and_hostile_tests_recaptures_safely(s
     assert set(outcome.execution.files_changed) == {"requirements.txt", "app.py"}
     assert "artefact.js" not in outcome.execution.diff
     assert clients.prs.created  # la PR part, avec le correctif
+    # l'arbre publié est l'arbre testé : ni artefact du gate, ni plantation hostile
+    assert remote.tree_of(remote.branch_sha(outcome.pr.head)) == outcome.tested_content.tree_sha
+    assert not any(path.startswith("node_modules") for path in remote.files_at(outcome.pr.head))
 
 
 async def test_pipeline_retry_seed_with_hostile_workspace_keeps_the_seed(source, witness, evil_repo):
@@ -627,6 +639,7 @@ def _metrics(composite):
         composite=composite,
         coverage_measured=True,
         review_score=0.7,
+        review_measured=True,  # une mesure réelle avec reviewer rend un verdict de revue (vague 3)
     )
 
 
@@ -1177,11 +1190,16 @@ def test_special_files_do_not_block_or_pollute_the_capture(source, tmp_path):
     ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
     os.mkfifo(Path(ws.path) / "pipe")
     sock = socket.socket(socket.AF_UNIX)
+    previous = os.getcwd()
     try:
-        sock.bind(str(Path(ws.path) / "sock"))
+        # chemin relatif : un TMPDIR long dépasserait la limite sun_path (108) d'un socket AF_UNIX
+        os.chdir(ws.path)
+        sock.bind("sock")
+        os.chdir(previous)
         (Path(ws.path) / "ok.txt").write_text("ok\n")
         _diff, files = capture_diff(ws)
     finally:
+        os.chdir(previous)
         sock.close()
     assert files == ("ok.txt",)
 
@@ -1346,7 +1364,6 @@ _HOST_PROCESS_INVENTORY = {
     "collegue/executor/git_boundary.py": "la frontière elle-même (env durci, GIT_DIR de contrôle)",
     "collegue/executor/command.py": "LocalCommandRunner : refuse les workspaces gérés (git_control_reason)",
     "collegue/sandbox/executor.py": "docker run/kill/version : l'isolation elle-même",
-    "collegue/executor/quality_gate.py": "uniquement dans des gabarits de script (chaînes) exécutés DANS le sandbox",
     "collegue/improve/metrics.py": "ruff sur chemins CONFINÉS (workspace_file) ; audit de dépendances en sandbox",
     "collegue/pilot/nightly_e2e.py": "clone public neuf d'une fixture + sous-process CLI produit ; jamais un workspace",
     "collegue/autonomous/proactive_monitor.py": "ChangeDetector sur repo_path configuré par l'opérateur ; jamais un workspace",
