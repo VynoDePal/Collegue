@@ -388,10 +388,11 @@ async def test_real_delegation_engine_evaluation():
     }
 
     tasks = await engine.evaluate_delegations("code_refactoring", refactoring_result)
-    assert len(tasks) == 2
-    targets = {t.target_tool for t in tasks}
-    assert "code_documentation" in targets
-    assert "test_generation" in targets
+    # Contrat déterministe (matrice de create_default_delegation_engine) : un refactoring
+    # avec changements délègue à EXACTEMENT ces trois cibles, une seule fois chacune.
+    # code_review (revue qualité, Phase 3) en fait partie : ne pas revenir à « 2 ».
+    assert [t.target_tool for t in tasks] == ["code_documentation", "test_generation", "code_review"]
+    assert {t.target_tool for t in tasks} == {"code_documentation", "test_generation", "code_review"}
 
     # Vérifier les paramètres générés
     doc_task = next(t for t in tasks if t.target_tool == "code_documentation")
@@ -401,6 +402,10 @@ async def test_real_delegation_engine_evaluation():
     test_task = next(t for t in tasks if t.target_tool == "test_generation")
     assert test_task.params["code"] == refactoring_result["refactored_code"]
     assert test_task.params["test_framework"] == "pytest"
+
+    review_task = next(t for t in tasks if t.target_tool == "code_review")
+    assert review_task.params["code"] == refactoring_result["refactored_code"]
+    assert review_task.params["language"] == "python"
 
 
 def test_empty_code_delegation_builders():
