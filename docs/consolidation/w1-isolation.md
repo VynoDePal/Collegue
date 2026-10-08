@@ -38,8 +38,8 @@ Le workspace est monté en lecture-écriture dans le conteneur où tournent l'ag
    `.collegue-git-control` apparié au chemin réel du workspace) et matérialise le
    workspace sur `collegue/issue-N` depuis ce contrôle. Le contrôle contient la
    config, les refs, l'index et le `HEAD` = **base de livraison**. Il n'est jamais
-   monté : `DockerSandbox._validate_workspace` refuse tout montage qui contient le
-   marqueur (montage du parent `collegue-exec-*` ou du contrôle lui-même).
+   monté : `DockerSandbox` refuse tout bind mount qui l'expose, à toute profondeur
+   (workspace, cache pip, creds d'abonnement — voir « Garantie des montages »).
 2. **Une seule porte.** Toute opération git hôte sur un workspace passe par
    `TrustedGit` : `GIT_DIR` = contrôle, `GIT_WORK_TREE` = workspace, environnement
    **reconstruit de zéro** (HOME vide, ni config système/globale, aucun `GIT_*`
@@ -142,6 +142,42 @@ invalide/tronqué/incomplet ou dépendance ignorée (`skip_reason`) ⇒ `dep_aud
 `composite=-inf` (le gate rejette avant comme après) — jamais « 0 vulnérabilité ». `dep_vulns_fn` injecté reste
 prioritaire (une valeur négative ou une exception ⇒ même refus). **Prérequis opérationnel** : l'image sandbox doit
 embarquer `pip-audit` ; sinon l'audit activé refuse la mesure (voir limites).
+
+## Garantie des montages (suivi W1)
+
+`git_control_exposure(path)` (`collegue/sandbox/executor.py`) est appliqué aux **trois** sources de `-v` :
+le workspace (`_validate_workspace`), `pip_cache_dir` et `subscription_auth_dir` (`_build_run_argv`). Ces deux
+derniers sont des réglages d'opérateur, donc des chemins d'entrée. Le refus est levé (`ValueError`) avant toute
+construction d'argv : aucune commande Docker n'est émise.
+
+Un chemin est accepté seulement si, après `realpath` (alias, symlinks, `..`, chemin relatif), aucun répertoire
+portant le marqueur `.collegue-git-control` n'est :
+
+1. le chemin lui-même, ou **l'un de ses ancêtres** (monter l'intérieur d'un contrôle en exposerait une partie) ;
+2. **contenu dans le chemin, à toute profondeur** ≤ 64 (ancêtre lointain du contrôle : `deep/project/workspace.control`).
+
+Propriétés :
+
+- **Parcours borné et sans lien** : itératif, `scandir(follow_symlinks=False)` — ni boucle, ni lien vers l'hôte
+  suivi ; ≤ 250 000 répertoires et profondeur ≤ 64 (`GIT_CONTROL_SCAN_MAX_DIRS/_DEPTH`).
+- **Fail-closed** : erreur de lecture (permission, disparition), dépassement de borne, `OSError` ⇒ refus
+  (« vérification impossible »). Jamais d'autorisation par défaut. Un arbre énorme est refusé plutôt que parcouru
+  sans limite : l'opérateur doit alors monter un répertoire plus petit.
+- **Sans état en mémoire** : la décision ne dépend que du marqueur sur disque ; elle vaut donc après reprise du
+  processus et pour chaque appel de `run_command`.
+- **Compatibilité** : un chemin absent (workspace ou cache à créer) est accepté — seuls ses ancêtres existants
+  sont examinés. Les répertoires ordinaires (frères d'un contrôle compris) sont acceptés.
+- **Dispense de parcours pour le workspace géré authentique** : si `<ws>.control` existe (répertoire réel, marqueur
+  réel) et que le marqueur désigne exactement `realpath(ws)`, le montage est le répertoire de travail lui-même ; son
+  contrôle est un frère, hors de l'arbre. L'arbre écrit par l'agent n'est pas parcouru (coût nul sur `node_modules`),
+  et l'agent ne peut pas empêcher le montage en piégeant l'arbre. Le marqueur vit dans le contrôle, que l'agent
+  ne peut pas atteindre.
+- **Faux positif assumé** : un marqueur planté par l'agent dans un arbre non géré fait refuser ce montage ; il ne
+  peut jamais autoriser quoi que ce soit.
+
+Limite : le test porte sur le disque au moment de la construction de l'argv ; un contrôle créé *après* par un autre
+processus entre la vérification et `docker run` n'est pas couvert (course locale, hors modèle de menace : seul l'hôte
+écrit des contrôles).
 
 ## Limites explicites (non couvert par ce lot)
 

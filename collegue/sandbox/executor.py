@@ -52,10 +52,15 @@ SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
 # ``collegue.executor.git_boundary``). Ce répertoire — hooks/config/refs/index,
 # référence de base HEAD — est l'AUTORITÉ des opérations Git hôte ; il ne doit
 # JAMAIS être monté dans un conteneur (l'agent et les tests y écriraient). Le
-# sandbox refuse donc tout montage qui l'inclut (cf. _validate_workspace).
+# sandbox refuse donc tout montage qui l'expose, à toute profondeur (cf. git_control_exposure).
 GIT_CONTROL_MARKER = ".collegue-git-control"
 # Le répertoire de contrôle d'un workspace ``/x/workspace`` est ``/x/workspace.control``.
 GIT_CONTROL_SUFFIX = ".control"
+
+# Bornes du parcours qui vérifie qu'un montage n'expose aucun répertoire de contrôle (voir
+# ``git_control_exposure``). Au-delà, le montage est REFUSÉ (fail-closed), jamais autorisé.
+GIT_CONTROL_SCAN_MAX_DIRS = 250_000
+GIT_CONTROL_SCAN_MAX_DEPTH = 64
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
@@ -86,26 +91,85 @@ def git_control_reason(path: str) -> Optional[str]:
     return None
 
 
-def _git_control_within(path: str) -> Optional[str]:
-    """Chemin d'un répertoire de contrôle Git contenu dans ``path`` (ou ``path`` lui-même).
-
-    Fail-closed : ``path`` est refusé s'il porte le marqueur de contrôle, ou si
-    l'un de ses enfants DIRECTS le porte (cas d'un montage du parent
-    ``collegue-exec-*`` qui contiendrait ``workspace`` ET son répertoire de
-    contrôle). Un dépôt de travail ordinaire n'est pas concerné.
-    """
-    if os.path.lexists(os.path.join(path, GIT_CONTROL_MARKER)):
-        return path
+def _is_paired_managed_workspace(real: str) -> bool:
+    """Vrai si ``real`` est un workspace GÉRÉ authentique : son contrôle frère existe (répertoire
+    réel, marqueur réel) et le marqueur désigne exactement ce chemin. Le marqueur vit dans le
+    contrôle, hors de tout montage : l'agent ne peut ni le forger ni le déplacer."""
+    control = real + GIT_CONTROL_SUFFIX
+    marker = os.path.join(control, GIT_CONTROL_MARKER)
     try:
-        with os.scandir(path) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False) and os.path.lexists(
-                    os.path.join(entry.path, GIT_CONTROL_MARKER)
-                ):
-                    return entry.path
+        if os.path.islink(control) or not os.path.isdir(control) or os.path.islink(marker):
+            return False
+        with open(marker, encoding="utf-8") as handle:
+            return handle.read().strip() == real
     except OSError:
+        return False
+
+
+def git_control_exposure(path: str) -> Optional[str]:
+    """Raison pour laquelle monter ``path`` exposerait un répertoire de contrôle Git, ou ``None``.
+
+    Garantie (valable pour TOUT bind mount : workspace, cache pip, creds d'abonnement) — un
+    chemin est accepté seulement si, après canonicalisation (``realpath`` : alias, liens,
+    ``..``, chemin relatif), AUCUN répertoire portant le marqueur de contrôle n'est :
+
+    * ``path`` lui-même, ni l'un de ses ancêtres (monter l'intérieur d'un contrôle en exposerait
+      une partie) ;
+    * contenu dans ``path`` à une profondeur quelconque ≤ ``GIT_CONTROL_SCAN_MAX_DEPTH``.
+
+    Le parcours est itératif, ne suit AUCUN lien symbolique (ni boucle, ni lien vers l'hôte), et
+    borné (``GIT_CONTROL_SCAN_MAX_DIRS`` répertoires, profondeur maximale). Toute erreur de
+    lecture, tout dépassement de borne, ⇒ REFUS (« vérification impossible »), jamais une
+    autorisation. L'état vit sur le disque (marqueur) : le contrôle reste valable après reprise
+    du processus. Un chemin absent est accepté (rien à exposer ; sa création reste légitime),
+    seuls ses ancêtres existants sont examinés. Un marqueur planté par l'agent dans un arbre non
+    géré provoque un refus (faux positif assumé) et ne peut jamais autoriser quoi que ce soit.
+
+    Dispense de parcours : un workspace géré authentique (contrôle frère apparié, voir
+    ``_is_paired_managed_workspace``) est le répertoire de travail lui-même ; son contrôle est
+    un frère, hors de l'arbre — inutile de parcourir ce que l'agent a écrit (et l'agent ne peut
+    pas bloquer le montage en piégeant l'arbre).
+    """
+    try:
+        real = os.path.realpath(os.path.abspath(os.fspath(path)))
+        current = real
+        while True:  # soi-même et tous les ancêtres
+            if os.path.lexists(os.path.join(current, GIT_CONTROL_MARKER)):
+                return f"{current} est (ou contient en ancêtre) un répertoire de contrôle Git"
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        if not os.path.isdir(real) or _is_paired_managed_workspace(real):
+            return None
+        stack = [(real, 0)]
+        visited = 0
+        while stack:
+            directory, depth = stack.pop()
+            visited += 1
+            if visited > GIT_CONTROL_SCAN_MAX_DIRS:
+                return f"vérification impossible : plus de {GIT_CONTROL_SCAN_MAX_DIRS} répertoires sous {real}"
+            if depth > GIT_CONTROL_SCAN_MAX_DEPTH:
+                return f"vérification impossible : profondeur > {GIT_CONTROL_SCAN_MAX_DEPTH} sous {real}"
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.name == GIT_CONTROL_MARKER:
+                        return f"{directory} est un répertoire de contrôle Git contenu dans le montage"
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((entry.path, depth + 1))
         return None
-    return None
+    except (OSError, ValueError) as exc:
+        return f"vérification impossible ({type(exc).__name__}: {exc})"
+
+
+def _refuse_if_git_control_exposed(path: str, label: str) -> None:
+    reason = git_control_exposure(path)
+    if reason is not None:
+        raise ValueError(
+            f"{label} refusé : montage exposant les métadonnées Git de contrôle ({reason}) — "
+            "monter uniquement le répertoire de travail ou un répertoire ordinaire, jamais un ancêtre "
+            "ni le répertoire de contrôle"
+        )
 
 
 @dataclass
@@ -208,12 +272,7 @@ class DockerSandbox:
             root = os.path.realpath(os.path.abspath(self.workspace_root))
             if os.path.commonpath([ws, root]) != root:
                 raise ValueError(f"workspace hors du répertoire autorisé {root}: {ws}")
-        control = _git_control_within(ws)
-        if control is not None:
-            raise ValueError(
-                f"workspace refusé : il contient les métadonnées Git de contrôle ({control}) — "
-                "monter uniquement le répertoire de travail, jamais son parent ni le répertoire de contrôle"
-            )
+        _refuse_if_git_control_exposed(ws, "workspace")
         return ws
 
     def _build_run_argv(self, cmd: Union[str, List[str]], workspace: str, name: Optional[str] = None) -> List[str]:
@@ -252,6 +311,7 @@ class DockerSandbox:
             cache = os.path.realpath(os.path.abspath(self.pip_cache_dir))
             if ":" in cache or cache == os.path.sep:
                 raise ValueError(f"pip_cache_dir invalide (':' ou racine): {cache}")
+            _refuse_if_git_control_exposed(cache, "pip_cache_dir")
             argv += ["-v", f"{cache}:{SANDBOX_PIP_CACHE_MOUNT}", "-e", f"PIP_CACHE_DIR={SANDBOX_PIP_CACHE_MOUNT}"]
         # Creds d'abonnement (Codex/ChatGPT) : montage RW, cible fixe (HOME du worker).
         # Même validation que le cache pip ; hors confinement workspace_root (les creds
@@ -260,6 +320,7 @@ class DockerSandbox:
             auth = os.path.realpath(os.path.abspath(self.subscription_auth_dir))
             if ":" in auth or auth == os.path.sep:
                 raise ValueError(f"subscription_auth_dir invalide (':' ou racine): {auth}")
+            _refuse_if_git_control_exposed(auth, "subscription_auth_dir")
             # Cible = $HOME/.openhands du worker. HOME effectif = override ``env['HOME']``
             # (sinon le défaut /tmp injecté plus bas). Les creds NE peuvent PAS vivre sous
             # /tmp (le ``--tmpfs /tmp`` masquerait le bind) → fail-loud, sinon le montage
