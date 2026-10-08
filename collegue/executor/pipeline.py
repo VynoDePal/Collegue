@@ -26,14 +26,35 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Tuple
 
 from collegue.executor.agent import AgentResult, CodeAgent, IssueSpec
 from collegue.executor.command import CommandRunner
+from collegue.executor.contracts import (
+    ContractError,
+    fresh_preimage_workspace,
+    has_sealed_contracts,
+    load_delivered_contracts,
+    project_requires_contracts,
+)
+from collegue.executor.delivery_proof import (
+    PHASE_BUILD,
+    DeliveryProof,
+    DeliveryProofError,
+    DeliveryRemoteError,
+    ProofDraft,
+    TestedContent,
+    describe_refusal,
+    seal_tested_content,
+    verify_tested_content,
+)
 from collegue.executor.pr import (
     DeliveryDriftError,
+    DeliverySnapshot,
     PrClients,
     PrResult,
+    assert_deliverable,
+    assert_representable,
     capture_delivery_snapshot,
     open_pr,
     verify_delivery_snapshot,
@@ -474,6 +495,118 @@ class ExecutionOutcome:
     final_status: Optional[str] = None  # statut de tâche effectivement écrit (None si dry_run / pas de manager)
     reason: Optional[str] = None  # raison d'échec (no_op | agent_error | gate_failed | engine_error), None si succès
     error: Optional[str] = None  # exception d'infrastructure interceptée (#435), None sinon
+    # Vague 3 : preuve de livraison liée à la tête distante vérifiée et PERSISTÉE (None en dry-run / échec). La source
+    # d'autorité reste l'état durable (``load_delivery_proof``) ; cette référence n'est qu'une commodité.
+    proof: Optional[DeliveryProof] = None
+    tested_content: Optional[TestedContent] = None
+
+
+def expected_contract_task_ids(manager, project_id, issue: IssueSpec) -> Tuple[bool, frozenset, str]:
+    """Contrats que la preuve BUILD doit avoir rejoués d'après l'ÉTAT DURABLE : ``(exigés, ids de tâches, motif)``.
+
+    Exigés dès que ``Project.acceptance_tests_required`` ou qu'une tâche livrée porte un oracle ; les ids sont le
+    contrat COURANT (``issue.source_task_id``) et TOUS les contrats déjà livrés. Un état illisible ou un contrat livré
+    invérifiable donne ``(True, ∅, motif)`` : l'exigence reste, la preuve sera refusée. L'état prévaut sur le booléen
+    du rapport du gate et sur la présence d'un checker : un défaut de câblage est refusé, pas deviné.
+    """
+    if manager is None or project_id is None:
+        return False, frozenset(), ""
+    try:
+        required = project_requires_contracts(manager, project_id) or has_sealed_contracts(manager, project_id)
+        if not required:
+            return False, frozenset(), ""
+        current = getattr(issue, "source_task_id", None)
+        delivered = load_delivered_contracts(manager, project_id, exclude_task_id=current)
+    except ContractError as exc:
+        return True, frozenset(), str(exc)
+    ids = {c.task_id for c in delivered}
+    if isinstance(current, int) and not isinstance(current, bool):
+        ids.add(current)
+    return True, frozenset(ids), ""
+
+
+def _contracts_verdict(
+    report: QualityReport, *, expected_ids: frozenset = frozenset(), state_error: str = ""
+) -> Tuple[bool, str]:
+    """Verdict « contrats scellés » d'après les preuves structurées du gate (jamais un simple booléen)."""
+    if state_error:
+        return False, f"contrats exigés mais invérifiables dans l'état durable : {state_error}"
+    if report.acceptance_passed is not True or report.acceptance_error:
+        return False, str(report.acceptance_error or "contrats d'acceptation en échec")
+    evidence = tuple(report.acceptance_evidence)
+    if not evidence:
+        return False, "aucune preuve d'oracle (contrats scellés exigés)"
+    current = [e for e in evidence if e.role == "current"]
+    if len(current) != 1:
+        return False, "le contrat courant n'a pas été rejoué exactement une fois"
+    if current[0].expected_preimage != "red-assertion":
+        return False, "preuve négative non exigée/absente pour le contrat courant"
+    failing = [e for e in evidence if not e.passed]
+    if failing:
+        return False, f"contrat {failing[0].role} de la tâche {failing[0].task_id} : {failing[0].reason}"
+    missing = sorted(expected_ids - {e.task_id for e in evidence})
+    if missing:
+        return False, f"contrat(s) des tâches {missing} exigés par l'état durable mais non rejoués par le gate"
+    return True, f"{len(evidence)} contrat(s) rejoué(s), même SHA-256 sur la préimage (rouge) et le candidat (vert)"
+
+
+def draft_from_report(
+    report: QualityReport,
+    content: TestedContent,
+    snapshot: DeliverySnapshot,
+    *,
+    phase: str = PHASE_BUILD,
+    state_contracts: Tuple[bool, frozenset, str] = (False, frozenset(), ""),
+) -> ProofDraft:
+    """Verdicts de la preuve de livraison BUILD d'après le rapport du gate (contrainte requise ⇒ verdict requis).
+
+    ``state_contracts`` (``expected_contract_task_ids``) : l'exigence de contrats vient de l'ÉTAT durable ; elle
+    prévaut sur ``report.contracts_required`` (un gate sans checker câblé ne peut pas produire une preuve sans contrats).
+    """
+    state_required, expected_ids, state_error = state_contracts
+    draft = ProofDraft(
+        phase=phase,
+        content=content,
+        contracts_required=bool(getattr(report, "contracts_required", False)) or state_required,
+        delivered_paths=snapshot.paths,
+    )
+    draft.add(
+        "content_integrity", True, "arbre Git complet inchangé depuis le scellement, résidus non livrables retirés"
+    )
+    draft.add("tests", bool(report.tests_passed), f"code de sortie {report.test_exit_code}")
+    review_ok = not report.review_blocking and not report.review_error
+    review_reason = report.review_error or ("revue bloquante" if report.review_blocking else "revue non bloquante")
+    draft.add("review", review_ok, str(review_reason))
+    if report.adequacy_implemented is not None or report.adequacy_error:
+        adequacy_ok = report.adequacy_implemented is not False and not report.adequacy_error
+        draft.add("adequacy", adequacy_ok, report.adequacy_error or report.adequacy_justification or "")
+    if draft.contracts_required:
+        draft.oracles.extend(report.acceptance_evidence)
+        ok, reason = _contracts_verdict(report, expected_ids=expected_ids, state_error=state_error)
+        if state_required and not getattr(report, "contracts_required", False):
+            ok, reason = (
+                False,
+                "le projet exige des contrats scellés mais le gate n'en a rejoué aucun (checker non câblé)",
+            )
+        draft.add("contracts", ok, reason)
+    elif report.acceptance_passed is not None or report.acceptance_error:
+        draft.add(
+            "acceptance",
+            report.acceptance_passed is True and not report.acceptance_error,
+            str(report.acceptance_error or ""),
+        )
+    draft.add("gate", bool(report.passed), "verdict global du gate qualité")
+    return draft
+
+
+def _refusal_text(exc: Exception) -> str:
+    """Motif d'un refus de publication, sans doubler le préfixe déjà porté par le message."""
+    text = str(exc)
+    return text if text.startswith("LIVRAISON REFUSÉE") else f"LIVRAISON REFUSÉE : {text}"
+
+
+def _proof_refusal(draft: ProofDraft) -> str:
+    return describe_refusal(draft)
 
 
 def _set_status(manager, task_id, status: str, *, enabled: bool) -> Optional[str]:
@@ -575,9 +708,35 @@ async def execute_issue(
             diff=execution.diff,
         )
 
-        # E3 : gate qualité (fail-closed).
+        # Vague 3 : (1) tout format NON représentable (binaire, lien) est refusé AVANT les contrôles ; (2) le contenu
+        # testé est figé (arbre Git complet) et les résidus non livrables (fichiers ignorés/untracked que des tests
+        # pourraient exploiter sans qu'ils soient livrés) sont retirés — les contrôles tournent sur ce que la
+        # livraison contient réellement.
         stage = STAGE_GATE
+        try:
+            assert_deliverable(delivery_snapshot)
+            content = seal_tested_content(workspace.path)
+            assert_representable(content)
+        except DeliveryProofError as exc:
+            return ExecutionOutcome(
+                success=False,
+                stage=STAGE_GATE,
+                workspace=workspace,
+                execution=execution,
+                final_status=final_status,
+                reason=REASON_GATE_FAILED,
+                error=str(exc),
+            )
+
+        # E3 : gate qualité (fail-closed).
         gate_kwargs = dict(gate_options or {})
+        checker = gate_kwargs.get("acceptance_checker")
+        if checker is not None and hasattr(checker, "bind_preimage"):
+            # Preuve négative du contrat courant : même oracle (SHA-256) sur la préimage connue = clone neuf à la base
+            # testée (jamais le workspace de l'agent).
+            gate_kwargs["acceptance_checker"] = checker.bind_preimage(
+                lambda: fresh_preimage_workspace(repo_source, issue, content.base_sha)
+            )
         report = await run_quality_gate(
             workspace.path,
             execution.diff,
@@ -604,6 +763,7 @@ async def execute_issue(
                     delivery_snapshot,
                     ignored_paths=("requirements.txt",),
                 )
+                verify_tested_content(workspace.path, content, allowed_paths=("requirements.txt",))
             except DeliveryDriftError as exc:
                 return ExecutionOutcome(
                     success=False,
@@ -624,6 +784,23 @@ async def execute_issue(
                 execution.files_changed,
                 diff=execution.diff,
             )
+            try:
+                assert_deliverable(delivery_snapshot)
+                # Nouvel arbre testé : seuls les chemins de la remédiation entrent dans l'index de contrôle ; les
+                # sorties écrites par le gate (node_modules, bases du smoke…) restent hors arbre et sont purgées.
+                content = seal_tested_content(workspace.path, only_paths=("requirements.txt",))
+                assert_representable(content)
+            except DeliveryProofError as exc:
+                return ExecutionOutcome(
+                    success=False,
+                    stage=STAGE_GATE,
+                    workspace=workspace,
+                    execution=execution,
+                    quality_report=report,
+                    final_status=final_status,
+                    reason=REASON_GATE_FAILED,
+                    error=str(exc),
+                )
 
             # #582 : le premier reviewer/checker a vu l'ancien diff. Si le gate
             # était vert, rejouer le gate COMPLET sur le diff réellement livrable
@@ -654,6 +831,9 @@ async def execute_issue(
 
         try:
             verify_delivery_snapshot(workspace, delivery_snapshot)
+            # Arbre COMPLET (fichiers de base compris, pas seulement le diff) : un test/une fixture qui modifie un
+            # fichier suivi après le début du gate INVALIDE la preuve au lieu de certifier le contenu antérieur.
+            verify_tested_content(workspace.path, content)
         except DeliveryDriftError as exc:
             # Le gate a exécuté du code non fiable en RW. Même avec un verdict
             # vert, une mutation post-snapshot invalide le contrat testé/revu.
@@ -668,22 +848,62 @@ async def execute_issue(
                 error=f"INTÉGRITÉ DU LIVRABLE REFUSÉE : {exc}",
             )
 
+        draft = draft_from_report(
+            report,
+            content,
+            delivery_snapshot,
+            # Aperçu (dry_run) : aucune lecture d'état (le pilote garantit qu'un dry-run ne relit jamais la base) ; la
+            # livraison RÉELLE applique l'exigence de contrats de l'état durable avant toute publication.
+            state_contracts=(
+                (False, frozenset(), "") if dry_run else expected_contract_task_ids(manager, project_id, issue)
+            ),
+        )
+        if not draft.passed:
+            return ExecutionOutcome(
+                success=False,
+                stage=STAGE_GATE,
+                workspace=workspace,
+                execution=execution,
+                quality_report=report,
+                final_status=final_status,
+                reason=REASON_GATE_FAILED,
+                error=_proof_refusal(draft),
+            )
+
         # E4 : ouverture de PR (dry_run respecté).
         stage = STAGE_PR
-        pr = open_pr(
-            workspace,
-            report,
-            issue,
-            owner,
-            repo,
-            files_changed=execution.files_changed,
-            snapshot=delivery_snapshot,
-            base=base,
-            clients=clients,
-            dry_run=dry_run,
-            manager=manager,
-            project_id=project_id,
-        )
+        try:
+            pr = open_pr(
+                workspace,
+                report,
+                issue,
+                owner,
+                repo,
+                files_changed=execution.files_changed,
+                snapshot=delivery_snapshot,
+                base=base,
+                clients=clients,
+                dry_run=dry_run,
+                manager=manager,
+                project_id=project_id,
+                draft=draft,
+            )
+        except DeliveryRemoteError:
+            raise  # distant illisible : panne d'infrastructure retentable (barrière #435), pas un défaut du code livré
+        except DeliveryProofError as exc:
+            # Refus de PUBLICATION (base déplacée, arbre distant différent, PR existante de révision différente,
+            # preuve non persistable) : ce n'est pas une panne d'infrastructure, c'est un refus explicite.
+            return ExecutionOutcome(
+                success=False,
+                stage=STAGE_PR,
+                workspace=workspace,
+                execution=execution,
+                quality_report=report,
+                final_status=final_status,
+                reason=REASON_GATE_FAILED,
+                error=_refusal_text(exc),
+                tested_content=content,
+            )
         final_status = _set_status(manager, task_id, TASK_STATUS_IN_REVIEW, enabled=persist) or final_status
     except Exception as exc:  # barrière volontairement large (#435) — fail-closed, retentable
         error = f"{type(exc).__name__}: {exc}"
@@ -721,4 +941,6 @@ async def execute_issue(
         quality_report=report,
         pr=pr,
         final_status=final_status,
+        proof=pr.proof,
+        tested_content=content,
     )

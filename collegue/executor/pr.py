@@ -11,7 +11,15 @@ Réutilise les commandes GitHub existantes (``BranchCommands`` / ``FileCommands`
 retourne sans recréer ; un marqueur ``<!-- collegue-exec:<N> -->`` trace l'origine.
 
 Limite (MVP) : les fichiers sont poussés via la Contents API en **texte UTF-8**
-(stack cible web Python+JS/TS) ; les fichiers binaires ne sont pas supportés.
+(stack cible web Python+JS/TS). Depuis la vague 3, tout format NON représentable (binaire, lien
+symbolique, mode exécutable perdu, sous-module) est REFUSÉ avant publication — jamais sauté avec un simple
+avertissement : annoncer un candidat complet en omettant un fichier requis est interdit.
+
+**Preuve de livraison (vague 3)** : en mode réel, ``open_pr`` exige le contenu testé (``ProofDraft``). Il vérifie la
+base distante (même arbre que la base testée), publie, lit l'objet commit distant de la tête et exige que son ARBRE
+soit exactement l'arbre testé (fichier omis, suppression en trop, mode perdu ⇒ refus), puis lie et PERSISTE la preuve
+(:mod:`collegue.executor.delivery_proof`) sur ``head_sha``. Une PR préexistante de même nom de branche n'est
+réutilisée que si sa tête a ce même arbre.
 """
 
 from __future__ import annotations
@@ -22,6 +30,19 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
+from collegue.executor.delivery_proof import (
+    DeliveryDriftError,
+    DeliveryProof,
+    DeliveryProofError,
+    DeliveryRemoteError,
+    ProofDraft,
+    TestedContent,
+    describe_refusal,
+    persist_or_reuse_delivery_proof,
+    seal_proof,
+    verify_remote_base,
+    verify_remote_head,
+)
 from collegue.executor.quality_gate import QualityReport
 from collegue.executor.workspace import Workspace
 from collegue.textnorm import inline
@@ -116,8 +137,36 @@ class DeliverySnapshot:
         return tuple(item.path for item in self.files if item.operation == DELIVERY_SKIP_SYMLINK)
 
 
-class DeliveryDriftError(RuntimeError):
-    """Le workspace vivant ne correspond plus au snapshot autorisé."""
+class DeliveryRefusedError(DeliveryProofError):
+    """Livraison refusée AVANT publication : format non représentable ou contenu non vérifiable."""
+
+
+def assert_deliverable(snapshot: "DeliverySnapshot") -> None:
+    """Refuse tout chemin que la Contents API ne sait pas pousser fidèlement (binaire, lien symbolique).
+
+    Omettre un tel fichier ferait annoncer un candidat COMPLET alors que la livraison ne le contient pas : refus
+    explicite, avec la liste des chemins, plutôt qu'un simple avertissement dans le corps de la PR.
+    """
+    skipped = snapshot.skipped_binaries + snapshot.skipped_symlinks
+    if skipped:
+        raise DeliveryRefusedError(
+            "LIVRAISON REFUSÉE — format non pris en charge par la publication (binaire ou lien symbolique) : "
+            + ", ".join(skipped[:10])
+            + ". Remplace-les par des fichiers texte UTF-8 ou retire-les du livrable."
+        )
+
+
+def assert_representable(content: TestedContent) -> None:
+    """Refuse un contenu testé dont un mode Git (exécutable, lien, sous-module) ne peut pas être publié.
+
+    La Contents API écrit un fichier NEUF en 100644 : le bit exécutable d'un script neuf serait perdu en silence et
+    l'arbre publié ne serait plus l'arbre testé. Refus explicite, avant toute écriture distante.
+    """
+    if content.special_modes:
+        raise DeliveryRefusedError(
+            "LIVRAISON REFUSÉE — mode Git non représentable par la publication (fichier exécutable, lien ou sous-module "
+            "neuf/modifié) : " + ", ".join(content.special_modes[:10]) + ". Retire le bit exécutable (chmod 644)."
+        )
 
 
 def _sha256(data: bytes) -> str:
@@ -205,8 +254,11 @@ class PrResult:
     number: Optional[int] = None
     html_url: Optional[str] = None
     skipped: bool = False  # PR déjà existante (idempotence)
-    skipped_binaries: Tuple[str, ...] = ()  # fichiers binaires non poussés (cf. #410)
-    skipped_symlinks: Tuple[str, ...] = ()  # liens symboliques non poussés (cf. #423)
+    skipped_binaries: Tuple[str, ...] = ()  # (aperçu dry-run uniquement) binaires que la publication refuserait
+    skipped_symlinks: Tuple[str, ...] = ()  # (aperçu dry-run uniquement) liens que la publication refuserait
+    # Vague 3 : preuve immuable liée à la tête distante VÉRIFIÉE et persistée (None en dry-run ou sans vérification).
+    proof: Optional[DeliveryProof] = None
+    head_sha: Optional[str] = None
 
 
 def build_pr_body(
@@ -215,6 +267,8 @@ def build_pr_body(
     *,
     closes_issue: bool = True,
     diff_sha256: Optional[str] = None,
+    tree_sha: Optional[str] = None,
+    base_tree_sha: Optional[str] = None,
 ) -> str:
     """Corps de PR : contexte issue + rapport qualité (fencé) + ``Closes`` + marqueur.
 
@@ -237,6 +291,11 @@ def build_pr_body(
     lines.append(exec_marker(issue.number))
     if diff_sha256 is not None:
         lines.append(diff_sha256_marker(diff_sha256))
+    # Traçabilité humaine UNIQUEMENT : l'autorité est la preuve persistée (journal de décisions), jamais ce texte.
+    if tree_sha is not None:
+        lines.append(f"<!-- collegue-tree-sha:{tree_sha} -->")
+    if base_tree_sha is not None:
+        lines.append(f"<!-- collegue-base-tree-sha:{base_tree_sha} -->")
     return "\n".join(lines)
 
 
@@ -256,14 +315,22 @@ def open_pr(
     manager: Optional[object] = None,
     project_id: Optional[int] = None,
     closes_issue: bool = True,
+    draft: Optional[ProofDraft] = None,
 ) -> PrResult:
     """Ouvre (ou prévisualise) la PR de l'issue.
 
     ``dry_run=True`` (défaut) : renvoie un aperçu fidèle (titre/head/base/corps)
-    **sans aucune écriture**. Sinon : idempotence (PR ouverte existante retournée),
-    création de branche, commit des fichiers (suppression incluse), ouverture de PR,
-    et journalisation du numéro de PR si ``manager``+``project_id`` sont fournis.
+    **sans aucune écriture**. Sinon : vérification de la base distante, création de branche, commit des
+    fichiers (suppression incluse), **vérification de l'objet commit distant** (arbre == arbre testé), ouverture de
+    PR, liaison et persistance de la PR/preuve, et journalisation du numéro de PR si ``manager``+``project_id``.
     ``closes_issue=False`` n'ajoute pas ``Closes #N`` (numéro ≠ vraie issue, ex. G4).
+
+    ``draft`` (vague 3) : contenu testé + verdicts + oracles de l'exécution (:class:`ProofDraft`). OBLIGATOIRE en
+    mode réel, sans aucune dérogation : une publication réelle exige un brouillon de preuve qui PASSE, un ``manager`` et
+    un ``project_id`` (la preuve est persistée hors du workspace), un dépôt distant relu et un arbre publié identique à
+    l'arbre testé. Lève
+    :class:`~collegue.executor.delivery_proof.DeliveryProofError` (et sous-classes) pour tout refus : binaire/lien non
+    représentable, base déplacée, arbre publié différent, PR préexistante de contenu différent, preuve non persistable.
     """
     # Compatibilité des appelants historiques : sans manifeste explicite, on
     # capture UNE fois, avant tout appel réseau. Le reste de la fonction ne lit
@@ -274,6 +341,22 @@ def open_pr(
     elif files_changed and tuple(_safe_rel_path(path) for path in files_changed) != snapshot.paths:
         raise ValueError("files_changed ne correspond pas au snapshot de livraison")
 
+    verify = not dry_run
+    content = draft.content if draft is not None else None
+    if verify:
+        assert_deliverable(snapshot)  # binaire/lien : refus explicite, jamais un simple avertissement
+        if draft is None or content is None:
+            raise DeliveryRefusedError(
+                "LIVRAISON REFUSÉE — aucun contenu testé fourni : la PR ne peut pas être liée à une preuve"
+            )
+        assert_representable(content)
+        if not draft.passed:
+            raise DeliveryRefusedError(describe_refusal(draft))
+        if manager is None or project_id is None:
+            raise DeliveryRefusedError(
+                "LIVRAISON REFUSÉE — manager et project_id requis : la preuve doit être persistée hors du workspace"
+            )
+
     head = workspace.branch
     title = f"{inline(issue.title)} (issue #{int(issue.number)})"
     body = build_pr_body(
@@ -281,6 +364,8 @@ def open_pr(
         issue,
         closes_issue=closes_issue,
         diff_sha256=snapshot.diff_sha256,
+        tree_sha=None if content is None else content.tree_sha,
+        base_tree_sha=None if content is None else content.base_tree_sha,
     )
 
     skipped_binaries = snapshot.skipped_binaries
@@ -295,12 +380,55 @@ def open_pr(
         )
 
     if dry_run:
-        return PrResult(dry_run=True, title=title, head=head, base=base, body=body)
+        return PrResult(
+            dry_run=True,
+            title=title,
+            head=head,
+            base=base,
+            body=body,
+            skipped_binaries=skipped_binaries,
+            skipped_symlinks=skipped_symlinks,
+        )
 
     clients = clients or _default_clients()
 
+    remote_base = None
+    if verify:
+        # AVANT toute écriture : la base distante doit avoir l'arbre de la base sur laquelle les contrôles ont tourné.
+        remote_base = verify_remote_base(clients.branches, owner, repo, base, content)
+
     existing = clients.prs.find_pr_by_head(owner, repo, head, base=base)
     if existing is not None:
+        proof = None
+        existing_head = None
+        if verify:
+            number = getattr(existing, "number", None)
+            existing_head = getattr(existing, "head_sha", None)
+            if existing_head is None and number is not None:
+                existing_head = getattr(clients.prs.get_pr(owner, repo, number), "head_sha", None)
+            if not existing_head or number is None:
+                raise DeliveryRefusedError(
+                    "LIVRAISON REFUSÉE — la PR existante ne donne pas sa tête : contenu invérifiable"
+                )
+            # Une PR de même nom de branche mais de révision différente n'est JAMAIS présentée comme la livraison.
+            verify_remote_head(
+                clients.branches,
+                owner,
+                repo,
+                head_sha=str(existing_head),
+                content=content,
+                remote_base_sha=remote_base.sha,
+            )
+            proof = seal_proof(
+                draft,
+                owner=owner,
+                repo=repo,
+                project_id=int(project_id),
+                pr_number=int(number),
+                head_sha=str(existing_head),
+                base_sha=remote_base.sha,
+            )
+            proof = persist_or_reuse_delivery_proof(manager, proof)
         return PrResult(
             dry_run=False,
             title=title,
@@ -310,6 +438,8 @@ def open_pr(
             number=getattr(existing, "number", None),
             html_url=getattr(existing, "html_url", None),
             skipped=True,
+            proof=proof,
+            head_sha=None if existing_head is None else str(existing_head),
         )
 
     clients.branches.ensure_branch(owner, repo, head, from_branch=base)
@@ -321,9 +451,47 @@ def open_pr(
         elif item.operation == DELIVERY_DELETE:
             clients.files.delete_file(owner, repo, item.path, message, branch=head)
 
+    head_sha = None
+    if verify:
+        try:
+            head_sha = str(clients.branches.get_branch_sha(owner, repo, head))
+        except Exception as exc:  # noqa: BLE001 - tête distante illisible = refus
+            raise DeliveryRemoteError(f"tête distante '{head}' illisible: {exc}") from exc
+        verify_remote_head(
+            clients.branches, owner, repo, head_sha=head_sha, content=content, remote_base_sha=remote_base.sha
+        )
+
     pr = clients.prs.create_pr(owner, repo, title, head, base, body)
     number = getattr(pr, "number", None)
     html_url = getattr(pr, "html_url", None)
+
+    proof = None
+    if verify:
+        if number is None:
+            raise DeliveryProofError("la PR créée ne porte pas de numéro : preuve non liable")
+        info = clients.prs.get_pr(owner, repo, number)
+        observed_head = getattr(info, "head_sha", None)
+        if observed_head != head_sha:
+            raise DeliveryDriftError(
+                f"la PR #{number} observe une tête ({str(observed_head)[:12]}) différente de celle vérifiée "
+                f"({head_sha[:12]}) : la branche a bougé pendant la publication"
+            )
+        observed_base = getattr(info, "base_sha", None)
+        if observed_base is not None and observed_base != remote_base.sha:
+            raise DeliveryDriftError(
+                f"la PR #{number} observe une base ({str(observed_base)[:12]}) différente de la base vérifiée "
+                f"({remote_base.sha[:12]}) : la base a bougé pendant la publication"
+            )
+        proof = seal_proof(
+            draft,
+            owner=owner,
+            repo=repo,
+            project_id=int(project_id),
+            pr_number=int(number),
+            head_sha=head_sha,
+            base_sha=remote_base.sha,
+        )
+        proof = persist_or_reuse_delivery_proof(manager, proof)
 
     if manager is not None and project_id is not None and number is not None:
         manager.record_decision(
@@ -340,8 +508,8 @@ def open_pr(
         body=body,
         number=number,
         html_url=html_url,
-        skipped_binaries=skipped_binaries,
-        skipped_symlinks=skipped_symlinks,
+        proof=proof,
+        head_sha=head_sha,
     )
 
 

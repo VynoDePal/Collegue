@@ -22,19 +22,32 @@ qu'il ne puisse pas forger de fausse bannière/section (cf. P5).
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
 import json
 import os
 import re
 import shlex
 import sys
 from dataclasses import dataclass, replace
-from datetime import datetime
 from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from collegue.executor.agent import IssueSpec
+from collegue.executor.contracts import (
+    ContractError,
+    PreimageProvider,
+    load_current_contract,
+    load_delivered_contracts,
+    replay_contracts,
+)
+from collegue.executor.delivery_proof import OracleEvidence, OracleRun
+from collegue.executor.oracle import (
+    STATUS_GREEN,
+    STATUS_RED_ASSERTION,
+    collect_oracle_report,
+    judge_oracle_run,
+    new_nonce,
+    oracle_pytest_command,
+)
 from collegue.sandbox.executor import DockerSandbox
 from collegue.sandbox.paths import is_confined_file, workspace_file
 from collegue.textnorm import inline
@@ -146,7 +159,7 @@ _ASGI_APP_CANDIDATES = (
 # ou méthode — l'app A répondu), imprime la queue du log serveur en cas d'échec.
 # %%-formaté (pas f-string) : le code python embarqué garde ses accolades.
 _SMOKE_PROBE_TEMPLATE = """\
-import subprocess, sys, time, urllib.error, urllib.request
+import os, signal, subprocess, sys, time, urllib.error, urllib.request
 
 command = %(command)r
 paths = %(paths)r  # paires (méthode, chemin) — cf. _smoke_probe_script (#483)
@@ -154,74 +167,115 @@ payload = %(payload)r
 timeout = %(timeout)r
 origin = %(origin)r  # #503 : origine cross-origin (vide = contrôle CORS désactivé)
 log = open("/tmp/.collegue_smoke.log", "w+", encoding="utf-8", errors="replace")
-proc = subprocess.Popen(command, shell=True, stdout=log, stderr=subprocess.STDOUT)
-base = "http://127.0.0.1:%(port)d"
-deadline = time.time() + timeout
-verdicts = []
-for method, path in paths:
-    status = None
-    acao = None  # Access-Control-Allow-Origin renvoyé (#503)
-    attempted = False
-    # Au moins UNE tentative par chemin, même si le précédent a épuisé le délai
-    # (sinon : faux rouge « sans réponse » sur un chemin jamais contacté).
-    while not attempted or time.time() < deadline:
-        attempted = True
-        if proc.poll() is not None:
-            break  # le serveur est mort avant de répondre
-        try:
-            data = payload if method not in ("GET", "HEAD") else None
-            headers = {"Origin": origin} if origin else {}
-            if data is not None:
-                headers["Content-Type"] = "application/json"
-            req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-            resp = urllib.request.urlopen(req, timeout=2)
-            status = resp.status
-            acao = resp.headers.get("Access-Control-Allow-Origin")
-            break
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            acao = exc.headers.get("Access-Control-Allow-Origin") if exc.headers else None
-            break
-        except Exception:
-            time.sleep(0.5)
-    verdicts.append((method, path, status, acao))
-time.sleep(0.3)  # resserre la fenêtre « répond une fois puis meurt »
-
-
-def _cors_ok(status, acao):
-    # #503 : CORS contrôlé seulement quand l'app A répondu et a ACCEPTÉ la requête
-    # (status < 400). Un 4xx de contrat est déjà signalé par le status ; un 401
-    # protégé n'a pas à exposer CORS. « * » ou écho exact de l'origine = OK.
-    if not origin or status is None or status >= 400:
-        return True
-    return acao in ("*", origin)
-
-
-cors_failures = [(m, p) for m, p, s, a in verdicts if not _cors_ok(s, a)]
-ok = (
-    proc.poll() is None
-    and all(s is not None and s < 500 for _m, _p, s, _a in verdicts)
-    and not cors_failures
+# Le serveur démarre dans SON PROPRE groupe de processus (nouvelle session) : le shell ET tous ses enfants
+# (serve.py, uvicorn, workers…) forment un groupe que la sonde — et seulement elle — arrête à CHAQUE sortie.
+# Sans cela, proc.terminate() ne tuait que le shell et laissait les serveurs enfants vivants.
+proc = subprocess.Popen(
+    command, shell=True, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
 )
-for method, path, status, acao in verdicts:
-    print("[gate] smoke run", method, path, "->", status if status is not None else "sans réponse")
-for method, path in cors_failures:
-    print(
-        "[gate] smoke run CORS ABSENT", method, path, "— l'origine", origin,
-        "n'est pas autorisée (Access-Control-Allow-Origin) ; l'UI serait bloquée au premier fetch (#503)",
+
+
+def _stop_group(grace=3.0):
+    # Ne vise QUE le groupe créé par cette sonde (pgid == pid du shell) : jamais un autre processus.
+    deadline_stop = time.time() + grace
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    while time.time() < deadline_stop:
+        proc.poll()  # récolte le shell (sinon le zombie maintient le groupe « vivant »)
+        try:
+            os.killpg(proc.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return
+        time.sleep(0.05)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
+# Un SIGTERM reçu (délai global du conteneur…) passe par le finally ci-dessous.
+signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(143))
+exit_code = 1
+try:
+    base = "http://127.0.0.1:%(port)d"
+    deadline = time.time() + timeout
+    verdicts = []
+    for method, path in paths:
+        status = None
+        acao = None  # Access-Control-Allow-Origin renvoyé (#503)
+        attempted = False
+        # Au moins UNE tentative par chemin, même si le précédent a épuisé le délai
+        # (sinon : faux rouge « sans réponse » sur un chemin jamais contacté).
+        while not attempted or time.time() < deadline:
+            attempted = True
+            if proc.poll() is not None:
+                break  # le serveur est mort avant de répondre
+            try:
+                data = payload if method not in ("GET", "HEAD") else None
+                headers = {"Origin": origin} if origin else {}
+                if data is not None:
+                    headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+                resp = urllib.request.urlopen(req, timeout=2)
+                status = resp.status
+                acao = resp.headers.get("Access-Control-Allow-Origin")
+                break
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+                acao = exc.headers.get("Access-Control-Allow-Origin") if exc.headers else None
+                break
+            except Exception:
+                time.sleep(0.5)
+        verdicts.append((method, path, status, acao))
+    time.sleep(0.3)  # resserre la fenêtre « répond une fois puis meurt »
+
+
+    def _cors_ok(status, acao):
+        # #503 : CORS contrôlé seulement quand l'app A répondu et a ACCEPTÉ la requête
+        # (status < 400). Un 4xx de contrat est déjà signalé par le status ; un 401
+        # protégé n'a pas à exposer CORS. « * » ou écho exact de l'origine = OK.
+        if not origin or status is None or status >= 400:
+            return True
+        return acao in ("*", origin)
+
+
+    cors_failures = [(m, p) for m, p, s, a in verdicts if not _cors_ok(s, a)]
+    ok = (
+        proc.poll() is None
+        and all(s is not None and s < 500 for _m, _p, s, _a in verdicts)
+        and not cors_failures
     )
-if proc.poll() is not None:
-    print(
-        "[gate] smoke run : le processus serveur s'est terminé (code", str(proc.poll()) + ")",
-        "— la commande de démarrage doit rester au premier plan",
-    )
-if not ok:
-    log.flush()
-    log.seek(0)
-    print("[gate] smoke run ÉCHEC — queue du log serveur :")
-    print(log.read()[-4000:])
-proc.terminate()
-sys.exit(0 if ok else 1)
+    for method, path, status, acao in verdicts:
+        print("[gate] smoke run", method, path, "->", status if status is not None else "sans réponse")
+    for method, path in cors_failures:
+        print(
+            "[gate] smoke run CORS ABSENT", method, path, "— l'origine", origin,
+            "n'est pas autorisée (Access-Control-Allow-Origin) ; l'UI serait bloquée au premier fetch (#503)",
+        )
+    if proc.poll() is not None:
+        print(
+            "[gate] smoke run : le processus serveur s'est terminé (code", str(proc.poll()) + ")",
+            "— la commande de démarrage doit rester au premier plan",
+        )
+    if not ok:
+        log.flush()
+        log.seek(0)
+        print("[gate] smoke run ÉCHEC — queue du log serveur :")
+        print(log.read()[-4000:])
+    exit_code = 0 if ok else 1
+finally:
+    _stop_group()
+    try:
+        log.close()
+    except Exception:
+        pass
+sys.exit(exit_code)
 """
 
 
@@ -948,6 +1002,9 @@ class QualityReport:
     # après avoir rechargé et vérifié l'artefact durable exact ; ``None`` pour
     # les checkers historiques/dynamiques qui ne peuvent pas fournir cette preuve.
     acceptance_oracle_sha256: Optional[str] = None
+    # Vague 3 : preuves structurées des contrats rejoués (courant + livrés) et exigence de contrats scellés.
+    acceptance_evidence: Tuple[OracleEvidence, ...] = ()
+    contracts_required: bool = False
 
     def to_markdown(self) -> str:
         """Rapport Markdown pour le corps de PR (texte de revue fencé, anti-injection)."""
@@ -1572,6 +1629,9 @@ class AcceptanceOutcome:
     error: Optional[str] = None  # toute erreur bloque quand le checker est activé
     skipped: bool = False
     oracle_sha256: Optional[str] = None
+    # Vague 3 : preuves structurées par contrat (SHA-256, verdicts préimage/candidat) quand le checker les produit.
+    evidence: Tuple[OracleEvidence, ...] = ()
+    run: Optional[OracleRun] = None
 
 
 @runtime_checkable
@@ -1602,58 +1662,15 @@ def _strip_code_fences(text: str) -> str:
     return (stripped + "\n") if stripped else ""
 
 
-def _acceptance_pytest_command(code: str) -> str:
-    """Commande pytest isolée pour un module QA non fiable.
+def _acceptance_pytest_command(code: str, *, nonce: Optional[str] = None) -> str:
+    """Commande pytest isolée pour UN module QA non fiable (voir :mod:`collegue.executor.oracle`).
 
-    Le module est transporté en base64 puis créé **dans le tmpfs du conteneur**
-    avec :func:`tempfile.mkstemp` (nom imprévisible, création exclusive). Il ne
-    touche donc jamais un chemin du dépôt choisi par le codeur et il est supprimé
-    dans un ``finally``. ``pytest`` est importé sous ``python -I`` *avant* que le
-    workspace soit ajouté à ``sys.path`` : un ``pytest.py`` livré par le diff ne
-    peut pas détourner le runner. Les conftest, plugins tiers et configurations
-    du projet sont également neutralisés ; le code du projet reste importable via
-    ``/workspace`` et ``/workspace/src``.
+    Le module est transporté en base64 puis créé **dans le tmpfs du conteneur** (nom imprévisible, création
+    exclusive), jamais dans un chemin du dépôt choisi par le codeur, et supprimé dans un ``finally``. ``pytest`` est
+    importé sous ``python -I`` *avant* l'ajout du projet à ``sys.path`` ; conftest, plugins et configuration du projet
+    sont neutralisés. La commande émet en plus un RAPPORT complet (phase par phase) que l'hôte juge.
     """
-    payload = base64.b64encode(code.encode("utf-8")).decode("ascii")
-    launcher = f"""\
-import base64
-import os
-import site
-import sys
-import tempfile
-
-import pytest
-
-user_site = site.getusersitepackages()
-project_paths = [path for path in ("/workspace", "/workspace/src", user_site) if path]
-# pytest est déjà importé depuis l'image sous -I : on peut maintenant préfixer
-# les dépendances installées --user et le projet sans permettre un pytest.py local.
-sys.path[:0] = [path for path in project_paths if path not in sys.path]
-os.chdir("/workspace")
-fd, path = tempfile.mkstemp(prefix="collegue_acceptance_", suffix=".py", dir="/tmp")
-exit_code = 1
-try:
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(base64.b64decode({payload!r}))
-    exit_code = pytest.main([
-        "--noconftest",
-        "-c", "/dev/null",
-        "--rootdir=/tmp",
-        "-q",
-        path,
-    ])
-finally:
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
-raise SystemExit(exit_code)
-"""
-    return (
-        f"{_PYTEST_WIDE_COLUMNS} PYTHONPATH= PYTEST_ADDOPTS= "
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTEST_PLUGINS= "
-        f"python -I -c {shlex.quote(launcher)}"
-    )
+    return oracle_pytest_command([("oracle", code)], nonce or new_nonce(), wide_columns=_PYTEST_WIDE_COLUMNS)
 
 
 def _run_acceptance_source(
@@ -1663,14 +1680,15 @@ def _run_acceptance_source(
     sandbox,
     oracle_sha256: Optional[str] = None,
 ) -> AcceptanceOutcome:
-    """Lance un source QA déjà déterminé avec l'oracle pytest isolé commun.
+    """Lance UN source QA déjà déterminé avec le lanceur d'oracle commun et juge son rapport COMPLET.
 
-    Cette fonction ne génère rien et ne lit aucun diff. Elle est partagée par le
-    checker historique et le checker plan-time afin que les mêmes protections
-    (tmpfs aléatoire, ``python -I``, plugins/config projet neutralisés) s'appliquent.
+    Ne génère rien et ne lit aucun diff. ``passed=True`` exige au moins un test RÉELLEMENT exécuté (phase call),
+    tous réussis, sans skip/xfail/xpass ni erreur de collecte ; une assertion en échec donne ``passed=False`` ;
+    tout le reste (zéro test, collecte, import, skip, sortie prématurée, délai) est une ERREUR bloquante avec son motif.
     """
     prelude = deps_install_prelude(workspace)
-    pytest_cmd = _acceptance_pytest_command(source)
+    nonce = new_nonce()
+    pytest_cmd = _acceptance_pytest_command(source, nonce=nonce)
     command = f"({prelude}) && {pytest_cmd}" if prelude else pytest_cmd
     try:
         res = sandbox.run_tests(workspace, command)
@@ -1679,186 +1697,123 @@ def _run_acceptance_source(
             error=f"exécution de l'oracle d'acceptation impossible : {exc}",
             oracle_sha256=oracle_sha256,
         )
-    output = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
-    # pytest exit 5 = AUCUN test collecté : le contrat n'est pas prouvé.
-    if getattr(res, "exit_code", None) == 5:
-        return AcceptanceOutcome(
-            passed=False,
-            error="aucun test d'acceptation collecté (oracle inexploitable)",
-            output=output,
-            oracle_sha256=oracle_sha256,
-        )
-    return AcceptanceOutcome(passed=bool(res.ok), output=output, oracle_sha256=oracle_sha256)
+    raw = "\n".join(part for part in (res.stdout, res.stderr) if part).strip()
+    from collegue.executor.contracts import _strip_report
 
-
-_STORED_ACCEPTANCE_SCHEMA_VERSION = 1
-_STORED_ACCEPTANCE_GENERATOR = "collegue.planner.acceptance_tests"
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-
-
-def _normalized_plan_text(value) -> str:
-    """Normalisation textuelle utilisée par les empreintes du planner §4.7."""
-    from collegue.planner.acceptance_tests import normalize_plan_text
-
-    return normalize_plan_text(value)
+    output = _strip_report(raw)
+    report, problem = collect_oracle_report(
+        raw,
+        nonce,
+        exit_code=getattr(res, "exit_code", None),
+        timed_out=bool(getattr(res, "timed_out", False)),
+    )
+    run = judge_oracle_run(report, "oracle", phase="candidate", problem=problem)
+    if run.status == STATUS_GREEN:
+        return AcceptanceOutcome(passed=True, output=output, oracle_sha256=oracle_sha256, run=run)
+    if run.status == STATUS_RED_ASSERTION:
+        return AcceptanceOutcome(passed=False, output=output, oracle_sha256=oracle_sha256, run=run)
+    return AcceptanceOutcome(
+        passed=False,
+        error=f"oracle d'acceptation inexploitable : {run.reason}",
+        output=output,
+        oracle_sha256=oracle_sha256,
+        run=run,
+    )
 
 
 def _text_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _valid_sha256(value) -> bool:
-    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
-
-
-def _task_contract_sha256(project_id: int, task) -> str:
-    """Empreinte canonique de l'identité/contrat de tâche utilisée au plan-time."""
-    from collegue.planner.acceptance_tests import task_contract_sha256
-
-    return task_contract_sha256(project_id, task)
-
-
 class StoredAcceptanceChecker:
-    """Exécute l'oracle QA immuable produit avant le code et approuvé avec le plan.
+    """Rejoue les contrats SCELLÉS (état durable, hors workspace) : courant + déjà livrés, avec preuve négative.
 
-    Le checker ne reçoit jamais le source via :class:`IssueSpec` : il ne transporte
-    qu'un ``source_task_id`` opaque, puis recharge l'artefact depuis l'état durable
-    **après** l'exécution du codeur. Avant tout pytest, il exige un plan toujours
-    approuvé et vérifie provenance, empreintes du contrat et SHA-256 exact du source.
-    Aucun appel LLM ni aucune lecture du ``diff`` n'existe sur ce chemin.
+    Le checker ne reçoit jamais le source via :class:`IssueSpec` : il ne transporte qu'un ``source_task_id`` opaque,
+    puis recharge les artefacts depuis l'état durable **après** l'exécution du codeur. Avant tout pytest il exige un
+    plan toujours approuvé et vérifie provenance, empreintes du contrat et SHA-256 exact de CHAQUE source
+    (:mod:`collegue.executor.contracts`). Les tests modifiés ou ajoutés par l'agent dans le workspace ne remplacent
+    jamais un contrat. Aucun appel LLM ni lecture du ``diff`` sur ce chemin.
+
+    - contrat COURANT : rouge par assertion sur la PRÉIMAGE (même SHA-256) puis vert sur le candidat — la préimage
+      vient de ``preimage`` (voir :meth:`bind_preimage`, fournie par le pipeline) ;
+    - contrats DÉJÀ LIVRÉS (``done``/``merged``) : verts sur le candidat (non-régression ; baseline non exigée rouge).
     """
 
-    def __init__(self, *, manager, project_id: int, approval_check=None):
+    sealed_contracts = True
+
+    def __init__(
+        self,
+        *,
+        manager,
+        project_id: int,
+        approval_check=None,
+        preimage: Optional[PreimageProvider] = None,
+        include_delivered: bool = True,
+    ):
         self._manager = manager
         self._project_id = int(project_id)
         self._approval_check = approval_check
+        self._preimage = preimage
+        self._include_delivered = include_delivered
 
-    def _require_approved(self) -> Optional[str]:
-        try:
-            checker = self._approval_check
-            if checker is None:
-                from collegue.planner.plan_review import require_approved
-
-                checker = require_approved
-            checker(self._manager, self._project_id)
-        except Exception as exc:  # noqa: BLE001 - tout doute sur l'approbation bloque
-            return f"plan non approuvé ou modifié depuis son approbation : {exc}"
-        return None
-
-    def _load_and_verify(self, issue: IssueSpec) -> tuple[Optional[str], Optional[str]]:
-        approval_error = self._require_approved()
-        if approval_error:
-            return None, approval_error
-
-        task_id = getattr(issue, "source_task_id", None)
-        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
-            return None, "source_task_id absent ou invalide : oracle plan-time introuvable"
-
-        try:
-            task = self._manager.get_task(task_id)
-            project = self._manager.get_project(self._project_id)
-            tasks = self._manager.get_tasks(self._project_id)
-        except Exception as exc:  # noqa: BLE001 - état durable indisponible = fail-closed
-            return None, f"lecture de l'oracle plan-time impossible : {exc}"
-        if task is None or project is None:
-            return None, "tâche ou projet de l'oracle plan-time introuvable"
-        if int(getattr(task, "project_id", -1)) != self._project_id:
-            return None, "l'oracle référencé appartient à un autre projet"
-
-        expected_criterion = inline(getattr(task, "acceptance", "") or "")
-        actual_criteria = tuple(inline(value) for value in issue.acceptance_criteria if inline(value))
-        expected_criteria = (expected_criterion,) if expected_criterion else ()
-        if actual_criteria != expected_criteria:
-            return None, "critères de l'issue différents du contrat QA persisté"
-        if inline(issue.title) != inline(getattr(task, "title", "") or ""):
-            return None, "titre de l'issue différent du contrat QA persisté"
-
-        source = getattr(task, "acceptance_test_source", None)
-        stored_sha256 = getattr(task, "acceptance_test_sha256", None)
-        provenance = getattr(task, "acceptance_test_provenance", None)
-        if not isinstance(source, str) or not source.strip():
-            return None, "source de l'oracle d'acceptation absent"
-        if not _valid_sha256(stored_sha256):
-            return None, "SHA-256 de l'oracle d'acceptation absent ou invalide"
-        actual_sha256 = _text_sha256(source)
-        if not hmac.compare_digest(stored_sha256, actual_sha256):
-            return None, "SHA-256 de l'oracle d'acceptation incohérent"
-        if not isinstance(provenance, dict):
-            return None, "provenance de l'oracle d'acceptation absente ou invalide"
-
-        if provenance.get("schema_version") != _STORED_ACCEPTANCE_SCHEMA_VERSION:
-            return None, "version de provenance de l'oracle non supportée"
-        if provenance.get("generator") != _STORED_ACCEPTANCE_GENERATOR:
-            return None, "générateur de provenance de l'oracle non autorisé"
-        if provenance.get("role") != "qa":
-            return None, "rôle de provenance de l'oracle non indépendant du codeur"
-        if provenance.get("runner") != "pytest":
-            return None, "runner de l'oracle d'acceptation non supporté"
-        for field in ("requested_provider", "requested_model"):
-            if not isinstance(provenance.get(field), str) or not provenance[field].strip():
-                return None, f"provenance de l'oracle incomplète : {field} absent"
-        for field in ("prompt_sha256", "spec_sha256", "criteria_sha256", "contract_sha256"):
-            if not _valid_sha256(provenance.get(field)):
-                return None, f"provenance de l'oracle incomplète : {field} invalide"
-
-        try:
-            from collegue.planner.acceptance_tests import (
-                acceptance_prompt_sha256,
-                criteria_text,
-                sha256_text,
-                spec_text,
-                task_contract_sha256,
-                validate_pytest_source,
-            )
-
-            # Défense au moment du verdict : même une source+SHA remplacés puis
-            # ré-approuvés ne peuvent transformer l'oracle en `skip`/`xfail`, en
-            # module sans test ou en tautologie `assert True` qui sortirait à 0.
-            validate_pytest_source(source)
-            expected_spec_sha = sha256_text(spec_text(getattr(project, "spec", "") or ""))
-            expected_criteria_sha = sha256_text(criteria_text(task))
-            expected_contract_sha = task_contract_sha256(self._project_id, task)
-            expected_prompt_sha = acceptance_prompt_sha256(
-                getattr(project, "spec", "") or "",
-                task,
-                tasks,
-                self._project_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - oracle/provenance douteux = fail-closed
-            return None, f"oracle ou empreintes de provenance invérifiables : {exc}"
-        for field, expected, label in (
-            ("spec_sha256", expected_spec_sha, "SPEC"),
-            ("criteria_sha256", expected_criteria_sha, "critères"),
-            ("contract_sha256", expected_contract_sha, "contrat de tâche"),
-            ("prompt_sha256", expected_prompt_sha, "prompt QA"),
-        ):
-            if not hmac.compare_digest(provenance[field], expected):
-                return None, f"empreinte {label} de l'oracle d'acceptation incohérente"
-
-        generated_at = provenance.get("generated_at")
-        if not isinstance(generated_at, str) or not generated_at.endswith("Z"):
-            return None, "horodatage de provenance de l'oracle absent ou invalide"
-        try:
-            parsed_at = datetime.fromisoformat(generated_at[:-1] + "+00:00")
-        except ValueError:
-            return None, "horodatage de provenance de l'oracle absent ou invalide"
-        if parsed_at.utcoffset() is None:
-            return None, "horodatage de provenance de l'oracle doit être UTC"
-
-        return source, None
+    def bind_preimage(self, provider: PreimageProvider) -> "StoredAcceptanceChecker":
+        """Copie liée à un fournisseur de préimage : la preuve négative devient EXIGÉE."""
+        return StoredAcceptanceChecker(
+            manager=self._manager,
+            project_id=self._project_id,
+            approval_check=self._approval_check,
+            preimage=provider,
+            include_delivered=self._include_delivered,
+        )
 
     async def check(self, workspace: str, diff: str, issue: IssueSpec, ctx, *, sandbox) -> AcceptanceOutcome:
         del diff, ctx  # preuve structurelle : aucun code livré ne nourrit l'oracle.
         if issue is None or not issue.acceptance_criteria:
             return AcceptanceOutcome(error="issue ou critères absents : oracle plan-time invérifiable")
-        source, error = self._load_and_verify(issue)
-        if error is not None or source is None:
-            return AcceptanceOutcome(error=error or "oracle plan-time invalide")
-        return _run_acceptance_source(
-            workspace,
-            source,
-            sandbox=sandbox,
-            oracle_sha256=_text_sha256(source),
+        try:
+            current = load_current_contract(self._manager, self._project_id, issue, approval_check=self._approval_check)
+            delivered = (
+                load_delivered_contracts(
+                    self._manager,
+                    self._project_id,
+                    exclude_task_id=current.task_id,
+                    approval_check=self._approval_check,
+                )
+                if self._include_delivered
+                else ()
+            )
+        except ContractError as exc:
+            return AcceptanceOutcome(error=str(exc))
+        try:
+            result = replay_contracts(
+                workspace,
+                current=current,
+                delivered=delivered,
+                sandbox=sandbox,
+                preimage=self._preimage,
+                require_negative=self._preimage is not None,
+            )
+        except ContractError as exc:
+            return AcceptanceOutcome(error=str(exc), oracle_sha256=current.source_sha256)
+        if result.ok:
+            return AcceptanceOutcome(
+                passed=True,
+                output=result.output,
+                oracle_sha256=current.source_sha256,
+                evidence=result.evidence,
+            )
+        failing = next((e for e in result.evidence if not e.passed), None)
+        assertion_red = (
+            failing is not None and failing.candidate is not None and failing.candidate.status == STATUS_RED_ASSERTION
+        )
+        # Une assertion qui échoue sur le candidat est un rouge FONCTIONNEL (feedback de retry) ; tout le reste
+        # (préimage, zéro test, skip, rapport incomplet, contrat invérifiable) est une erreur bloquante.
+        return AcceptanceOutcome(
+            passed=False,
+            output=result.output,
+            error=None if assertion_red else result.reason,
+            oracle_sha256=current.source_sha256,
+            evidence=result.evidence,
         )
 
 
@@ -2223,6 +2178,7 @@ async def run_quality_gate(
     acceptance_output = ""
     acceptance_error: Optional[str] = None
     acceptance_oracle_sha256: Optional[str] = None
+    acceptance_evidence: Tuple[OracleEvidence, ...] = ()
     acceptance_required = acceptance_checker is not None
     if acceptance_required and would_pass:
         if issue is None:
@@ -2236,6 +2192,7 @@ async def run_quality_gate(
                 acceptance_output = acc.output
                 acceptance_error = acc.error
                 acceptance_oracle_sha256 = acc.oracle_sha256
+                acceptance_evidence = tuple(getattr(acc, "evidence", ()) or ())
                 if acc.skipped:
                     acceptance_passed = None
                     acceptance_error = acceptance_error or "contrôle d'acceptation ignoré sans verdict"
@@ -2290,6 +2247,8 @@ async def run_quality_gate(
         acceptance_output=acceptance_output,
         acceptance_error=acceptance_error,
         acceptance_oracle_sha256=acceptance_oracle_sha256,
+        acceptance_evidence=acceptance_evidence,
+        contracts_required=bool(getattr(acceptance_checker, "sealed_contracts", False)),
     )
 
 

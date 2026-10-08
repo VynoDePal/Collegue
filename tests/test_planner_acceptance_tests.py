@@ -399,3 +399,31 @@ async def test_empty_dag_and_missing_manager_contract_fail_closed():
 def test_public_export_is_available():
     assert generate_acceptance_tests is at.generate_acceptance_tests
     assert LLMRole.QA.value == "qa"
+
+
+# --- prompt QA v2 (vague 3) : échec par ASSERTION avant l'implémentation ---------------------------------
+
+
+def test_current_prompt_requires_an_assertion_failure_on_the_preimage():
+    prompt = at.ACCEPTANCE_TEST_SYSTEM_PROMPT
+    assert "ÉCHEC PAR ASSERTION AVANT L'IMPLÉMENTATION" in prompt
+    assert "ImportError" in prompt and "find_spec" in prompt
+    assert "réussir tel quel" in prompt
+    assert at.ACCEPTANCE_TEST_SYSTEM_PROMPT not in at.LEGACY_SYSTEM_PROMPTS
+
+
+def test_legacy_prompt_hash_stays_verifiable_for_already_sealed_oracles():
+    """Un oracle scellé avant la v2 porte l'empreinte du prompt v1 : elle doit rester reconnue (texte figé)."""
+    task = _task(1)
+    # Empreinte du prompt v1 pour ce contrat, calculée sur le texte du commit de base 58355a4.
+    legacy_system_sha = "2de0b089452eea56da991a6545fe7798d4c7907448501ca29a0da4b51c96c3ee"
+    assert at.sha256_text(at.normalize_plan_text(at.LEGACY_SYSTEM_PROMPTS[0])) == legacy_system_sha
+    known = at.known_acceptance_prompt_sha256(_spec(), task, [task], 1)
+    current = at.acceptance_prompt_sha256(_spec(), task, [task], 1)
+    legacy = at.prompt_sha256(at.acceptance_prompt(_spec(), task, [task], 1), system_prompt=at.LEGACY_SYSTEM_PROMPTS[0])
+    assert known == (current, legacy) and current != legacy
+
+
+def test_unknown_prompt_hash_is_not_accepted_by_known_versions():
+    task = _task(1)
+    assert "0" * 64 not in at.known_acceptance_prompt_sha256(_spec(), task, [task], 1)

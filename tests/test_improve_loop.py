@@ -17,7 +17,19 @@ CONT = ContinueDecision(action=ACTION_CONTINUE, reason="ok")
 PAUSE = ContinueDecision(action=ACTION_PAUSED_BUDGET, reason="budget")
 
 
-def _metrics(composite, *, tests=True, security=0, security_weighted=0.0, measured=True, coverage=80.0, review=0.7):
+def _metrics(
+    composite,
+    *,
+    tests=True,
+    security=0,
+    security_weighted=0.0,
+    measured=True,
+    coverage=80.0,
+    review=0.7,
+    review_measured=True,
+    review_blocking=False,
+):
+    # Une mesure RÉELLE avec reviewer renseigne le verdict de revue (vague 3) : le script le reproduit fidèlement.
     return ProjectQualityMetrics(
         coverage_pct=coverage,
         security_findings=security,
@@ -26,6 +38,8 @@ def _metrics(composite, *, tests=True, security=0, security_weighted=0.0, measur
         composite=composite,
         coverage_measured=measured,
         review_score=review,
+        review_measured=review_measured,
+        review_blocking=review_blocking,
     )
 
 
@@ -53,35 +67,31 @@ class _ScriptedMeasure:
         return m
 
 
-class _Branches:
-    def ensure_branch(self, owner, repo, branch, from_branch=None):
-        return SimpleNamespace(name=branch)
+_REMOTE_STATE = {}
 
 
-class _Files:
-    def update_file(self, owner, repo, path, message, content, branch=None):
-        return {}
-
-    def delete_file(self, owner, repo, path, message, branch=None):
-        return {}
-
-
-class _PRs:
-    def __init__(self):
-        self.created = []
-
-    def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
-        return None
-
-    def create_pr(self, owner, repo, title, head, base, body):
-        self.created.append({"head": head, "base": base, "body": body})
-        return SimpleNamespace(number=101, html_url="https://gh/pull/101", head_branch=head)
+@pytest.fixture(autouse=True)
+def _reset_remote_state():
+    _REMOTE_STATE.clear()
+    yield
+    _REMOTE_STATE.clear()
 
 
 def _clients():
-    from collegue.executor import PrClients
+    """Clients GitHub FIDÈLES : vrai dépôt Git distant cloné depuis la source du test (arbres calculés par git)."""
+    from github_fakes import FakeRemote
 
-    return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
+    if "source" not in _REMOTE_STATE:  # test sans dépôt source : rien n'atteindra jamais GitHub
+        from collegue.executor import PrClients
+
+        return PrClients(branches=None, files=None, prs=None)
+    _REMOTE_STATE["count"] = _REMOTE_STATE.get("count", 0) + 1
+    root = _REMOTE_STATE["root"] / f"remote-{_REMOTE_STATE['count']}"
+    root.mkdir()
+    remote = FakeRemote(root, _REMOTE_STATE["source"])
+    clients = remote.clients()
+    clients.remote = remote
+    return clients
 
 
 def _git(cwd, *args):
@@ -98,6 +108,7 @@ def git_repo(tmp_path):
     (src / "existing.txt").write_text("original\n")
     _git(src, "add", "-A")
     _git(src, "commit", "-q", "-m", "init")
+    _REMOTE_STATE.update(source=str(src), root=tmp_path, count=0)
     return str(src)
 
 
@@ -519,7 +530,6 @@ async def test_autofix_lint_cleans_promoted_diff_end_to_end(git_repo, manager):
 async def test_execute_mode_stacks_prs_on_previous_branch(git_repo, manager):
     # En --execute (#554), la PR du round N se base sur la branche de la promotion N-1
     # (la 1ʳᵉ sur `main`) → diffs incrémentaux, mergeables dans l'ordre, pas de conflit.
-    from collegue.executor import PrClients
     from collegue.executor.agent import AgentResult
 
     class _CounterAgent:
@@ -533,17 +543,8 @@ async def test_execute_mode_stacks_prs_on_previous_branch(git_repo, manager):
                 fh.write(f"VALUE_{self.n} = {self.n}\n")  # fichier unique → diff à chaque round
             return AgentResult(success=True, files_changed=(rel,), summary="feat", logs="ok")
 
-    created = []
-
-    class _PRsRec:
-        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
-            return None
-
-        def create_pr(self, owner, repo, title, head, base, body):
-            created.append({"head": head, "base": base})
-            return SimpleNamespace(number=100 + len(created), html_url="https://gh", head_branch=head)
-
-    clients = PrClients(branches=_Branches(), files=_Files(), prs=_PRsRec())
+    clients = _clients()
+    created = clients.prs.created
     seq = [_metrics(0.5), _metrics(0.7), _metrics(0.7), _metrics(0.9), _metrics(0.9), _metrics(0.9)]
     result = await run_improvement(
         manager.create_project(name="stack"),
@@ -563,6 +564,15 @@ async def test_execute_mode_stacks_prs_on_previous_branch(git_repo, manager):
     assert len(created) >= 2
     assert created[0]["base"] == "main"  # 1ʳᵉ PR : base = main
     assert created[1]["base"] == created[0]["head"]  # 2ᵉ PR : stackée sur la 1ʳᵉ
+    # Vague 3 : chaque PR est livrée avec sa preuve, liée à la tête DISTANTE vérifiée (arbre publié == arbre testé),
+    # et la 2ᵉ preuve a pour base la tête de la 1ʳᵉ (empilement vérifié, pas supposé).
+    remote = clients.remote
+    first, second = result.promoted[0], result.promoted[1]
+    assert first.proof is not None and second.proof is not None
+    assert remote.tree_of(first.head_sha) == first.proof.tree_sha
+    assert remote.tree_of(second.head_sha) == second.proof.tree_sha
+    assert second.proof.base_sha == first.head_sha
+    assert second.proof.base_tree_sha == first.proof.tree_sha
 
 
 async def test_unreliable_baseline_skips_agent_round(git_repo, manager):
@@ -634,7 +644,8 @@ def _install_fake_ruff(tmp_path, monkeypatch):
 
     script = tmp_path / "fake-ruff"
     script.write_text(
-        '#!/bin/sh\nfor a in "$@"; do case "$a" in *.py) printf "# ruff-touched\\n" >> "$a";; esac; done\n'
+        '#!/bin/sh\nfor a in "$@"; do case "$a" in *.py) printf "# ruff-touched\\n" >> "$a"; '
+        f'printf "%s\\n" "$a" >> "{tmp_path}/ruff-calls.log";; esac; done\n'
     )
     script.chmod(0o755)
     monkeypatch.setattr(metrics_mod, "_find_ruff", lambda: str(script))
@@ -690,9 +701,14 @@ async def test_loop_agent_symlink_never_makes_the_host_rewrite_an_outside_file(
     )
 
     assert outside.read_text() == "import os\nSECRET=1\n"  # fichier hôte intact
-    assert len(result.promoted) == 1
-    assert "# ruff-touched" in after_diffs[0]  # le fichier légitime, lui, a bien été traité
-    assert "SECRET" not in after_diffs[0]  # et rien du contenu hôte n'entre dans le diff mesuré/livré
+    # L'auto-fix n'a traité que le fichier légitime (jamais le lien ni sa cible hors workspace)...
+    touched = (tmp_path / "ruff-calls.log").read_text().splitlines()
+    assert touched and all(path.endswith("feature.py") for path in touched)
+    # ... et le lien symbolique rend la livraison non représentable : refus explicite AVANT toute mesure, rien de
+    # l'hôte n'entre dans un diff mesuré ou livré (avant la vague 3, le lien était omis en silence).
+    assert result.promoted == []
+    assert after_diffs == []
+    assert any("escape.py" in reason for _dim, reason in result.rejected)
 
 
 def _commit_requirements(git_repo, text="click==8.1.7\n"):
@@ -780,6 +796,8 @@ async def test_loop_refuses_to_improve_when_the_dep_audit_is_unavailable(git_rep
 
 
 async def test_loop_promotes_normally_when_the_dep_audit_is_valid(git_repo, manager):
+    from collegue.executor import FakeReviewer
+
     _commit_requirements(git_repo)
     agent = _CountingAgent(files={"feature.py": "VALUE = 1\n"})
     sandbox = _CoverageAuditSandbox(
@@ -803,6 +821,7 @@ async def test_loop_promotes_normally_when_the_dep_audit_is_valid(git_repo, mana
         sandbox=sandbox,
         dry_run=True,
         plateau_rounds=1,
+        reviewer=FakeReviewer(),
         measure_fn=_audit_measure(),
     )
 

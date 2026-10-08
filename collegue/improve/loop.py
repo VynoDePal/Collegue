@@ -5,7 +5,7 @@ Après le MVP, fait tourner : **mesurer (G1) → proposer (G3) → générer un 
 budget-temps (F2), et **s'arrête sur rendements décroissants** (les gains
 plafonnent) ou au budget.
 
-Gate **AVANT la PR** : un diff qui régresse (tests/sécu) ou n'améliore pas le score
+Gate **AVANT la PR** : un diff qui régresse (tests/revue/couverture/scan de secrets/contrats) ou n'améliore pas le score
 n'ouvre **pas** de PR (« rollback » = abandon avant promotion). Le merge des PR
 d'amélioration reste **humain** (§6). ``dry_run`` par défaut (aucune écriture).
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from collegue.improve.gate import DEFAULT_MIN_GAIN, evaluate
 from collegue.improve.metrics import (
@@ -62,6 +62,9 @@ class PromotedImprovement:
     pr_number: Optional[int]
     auto_merged: bool = False
     reverted: bool = False
+    # Vague 3 : preuve de livraison persistée (None en dry-run) et tête distante vérifiée de la PR.
+    proof: Optional[Any] = None
+    head_sha: Optional[str] = None
 
 
 @dataclass
@@ -92,7 +95,7 @@ def _improvement_quality_report(dimension, before, after, delta):
         f"Amélioration « {dimension} » : score composite {before.composite:.3f} → "
         f"{after.composite:.3f} (Δ{delta:+.3f}). "
         f"Couverture {before.coverage_pct:.0f}% → {after.coverage_pct:.0f}% ; "
-        f"sécu pondérée {before.security_weighted:.1f} → {after.security_weighted:.1f} ; "
+        f"scan statique de secrets (regex) pondéré {before.security_weighted:.1f} → {after.security_weighted:.1f} ; "
         f"lint {before.lint_violations} → {after.lint_violations} ; "
         f"complexité {before.complexity_bad_blocks} → {after.complexity_bad_blocks} ; "
         f"vulns deps {before.dep_vulns} → {after.dep_vulns} ; "
@@ -196,6 +199,13 @@ async def _run_improvement_impl(
     ``collegue.executor.git_boundary``), sur lesquels un runner injecté est refusé ;
     en production il reste ``None``.
 
+    **Contraintes bloquantes (vague 3), sans dérogation** — le score composite ne rachète jamais : tests verts, revue
+    rendue ET non bloquante, couverture mesurée avant/après et sans baisse, scan statique de secrets non aggravé, TOUS
+    les contrats d'acceptation scellés des tâches déjà livrées toujours verts (exigés dès que l'état durable les demande
+    ou qu'une tâche livrée en porte), et contenu testé == contenu publié (arbre Git scellé, binaire/lien/mode refusés,
+    dérive détectée). Une PR réelle n'est ouverte qu'avec une preuve de livraison vérifiée contre l'arbre distant,
+    persistée dans le journal de décisions (``load_delivery_proof``).
+
     ``recovery_hook`` est appelé avant le premier round réel et doit réconcilier
     tout incident Phase 5 durable. ``promotion_hook`` (Phase 5, opt-in) est appelé immédiatement après chaque PR
     réelle. Il doit réaliser la séquence CI → merge → resync → garde. La boucle
@@ -207,13 +217,26 @@ async def _run_improvement_impl(
     # est aussi lazy car importer le sous-module déclenche ``pilot/__init__`` (→ driver
     # → exécuteur) — on ne veut pas tirer tout ça au simple import du package improve.
     from collegue.executor.agent import IssueSpec
+    from collegue.executor.delivery_proof import (
+        DeliveryProofError,
+        seal_tested_content,
+        verify_tested_content,
+    )
     from collegue.executor.pr import (
         DeliveryDriftError,
+        assert_deliverable,
+        assert_representable,
         capture_delivery_snapshot,
         verify_delivery_snapshot,
     )
     from collegue.executor.runner import capture_diff, run_issue
     from collegue.executor.workspace import prepare_workspace
+    from collegue.improve.promotion import (
+        NO_CONTRACTS,
+        build_improvement_draft,
+        promotion_refusal,
+        replay_delivered_contracts,
+    )
     from collegue.pilot.budget import ACTION_PAUSED_BUDGET, BudgetTimeController
 
     budget = budget or BudgetTimeController()
@@ -285,7 +308,7 @@ async def _run_improvement_impl(
                 workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights, **measure_extra
             )
 
-            # Baseline non fiable (composite non fini, ex. scan sécu en échec → inf) :
+            # Baseline non fiable (composite non fini, ex. scan de secrets en échec → inf) :
             # round à vide. On NE lance PAS l'agent (coûteux) pour rien et on n'enregistre
             # pas de score fantôme (inf) ; fail-closed — rien ne sera promu (#541).
             if not math.isfinite(before.composite):
@@ -327,6 +350,22 @@ async def _run_improvement_impl(
                 diff=final_diff,
             )
 
+            # Vague 3 : (1) tout format que la publication ne sait pas pousser fidèlement (binaire, lien) est refusé
+            # AVANT la mesure ; (2) le contenu qui va être mesuré ET livré est figé (arbre Git complet) et les résidus
+            # non livrables sont retirés : les tests ne peuvent pas réussir grâce à un fichier qui ne sera pas livré.
+            try:
+                assert_deliverable(delivery_snapshot)
+                content = seal_tested_content(workspace.path)
+                assert_representable(content)
+            except DeliveryProofError as exc:
+                history.append(AttemptRecord(dimension, improved=False))
+                result.rejected.append((dimension.value, f"livraison non représentable : {exc}"))
+                plateau += 1
+                if plateau >= plateau_rounds:
+                    result.stop_reason = STOP_PLATEAU
+                    break
+                continue
+
             after = await measure_fn(
                 workspace.path,
                 ctx,
@@ -336,8 +375,15 @@ async def _run_improvement_impl(
                 weights=weights,
                 **measure_extra,
             )
+            # Non-régression des contrats livrés : sources relues dans l'ÉTAT durable (jamais le workspace), rejouées
+            # sur le candidat. Un seul contrat cassé, absent ou invérifiable refuse la promotion.
+            contracts = NO_CONTRACTS
+            if getattr(after, "tests_passed", False):
+                contracts = replay_delivered_contracts(workspace.path, manager, project_id, sandbox=sandbox)
             try:
                 verify_delivery_snapshot(workspace, delivery_snapshot)
+                # Arbre COMPLET : une mesure/un contrat qui modifie un fichier suivi invalide la preuve.
+                verify_tested_content(workspace.path, content)
             except DeliveryDriftError as exc:
                 # #582 : measure_fn exécute du code projet en RW. Une mesure verte
                 # portant sur des octets différents du snapshot livrable est invalide.
@@ -350,36 +396,51 @@ async def _run_improvement_impl(
                 continue
             result.final_score = after.composite
             gate = evaluate(before, after, min_gain=min_gain)
-            history.append(AttemptRecord(dimension, improved=gate.accepted))
+            draft = build_improvement_draft(content, delivery_snapshot.paths, before, after, gate, contracts)
+            promotable = gate.accepted and draft.passed
+            history.append(AttemptRecord(dimension, improved=promotable))
 
-            if gate.accepted:
+            if promotable:
                 report = _improvement_quality_report(dimension.value, before, after, gate.delta)
                 from collegue.executor.pr import open_pr
 
-                pr = open_pr(
-                    workspace,
-                    report,
-                    improvement,
-                    owner,
-                    repo,
-                    files_changed=final_files,
-                    snapshot=delivery_snapshot,
-                    # Stacking (#554) : base = branche de la promotion précédente si elle
-                    # existe (mode --execute), sinon la base d'origine. → diff de PR propre.
-                    base=(last_promoted_branch or base),
-                    clients=clients,
-                    dry_run=dry_run,
-                    manager=manager,
-                    project_id=project_id,
-                    # Le numéro est un compteur de round, pas une vraie issue → pas de Closes.
-                    closes_issue=False,
-                )
+                try:
+                    pr = open_pr(
+                        workspace,
+                        report,
+                        improvement,
+                        owner,
+                        repo,
+                        files_changed=final_files,
+                        snapshot=delivery_snapshot,
+                        # Stacking (#554) : base = branche de la promotion précédente si elle
+                        # existe (mode --execute), sinon la base d'origine. → diff de PR propre.
+                        base=(last_promoted_branch or base),
+                        clients=clients,
+                        dry_run=dry_run,
+                        manager=manager,
+                        project_id=project_id,
+                        # Le numéro est un compteur de round, pas une vraie issue → pas de Closes.
+                        closes_issue=False,
+                        draft=draft,
+                    )
+                except DeliveryProofError as exc:
+                    # Publication refusée (base déplacée, arbre distant ≠ arbre testé, PR préexistante d'une autre
+                    # révision, preuve non persistable…) : AUCUNE promotion, le diff est jeté.
+                    history[-1] = AttemptRecord(dimension, improved=False)
+                    result.rejected.append((dimension.value, f"livraison refusée : {exc}"))
+                    plateau += 1
+                    if plateau >= plateau_rounds:
+                        result.stop_reason = STOP_PLATEAU
+                        break
+                    continue
                 hook_outcome = None
                 hook_error = None
                 if not dry_run and promotion_hook is not None:
-                    if pr.skipped:
-                        # Une PR retrouvée peut avoir été modifiée hors du snapshot de
-                        # ce round : pas d'auto-merge sans preuve d'identité complète.
+                    if pr.skipped and pr.proof is None:
+                        # Une PR retrouvée peut avoir été modifiée hors du snapshot de ce round : pas d'auto-merge
+                        # sans preuve d'identité complète. Depuis la vague 3, une PR retrouvée dont la tête a été
+                        # RE-VÉRIFIÉE contre l'arbre testé porte sa preuve (``pr.proof``) et peut être fusionnée.
                         hook_error = "PR préexistante : auto-merge refusé sans nouvelle preuve de livraison"
                     else:
                         try:
@@ -414,7 +475,15 @@ async def _run_improvement_impl(
                         last_promoted_branch = pr.head
                     promoted_diffs.append(final_diff)
                 result.promoted.append(
-                    PromotedImprovement(dimension.value, gate.delta, pr.number, auto_merged, reverted=auto_reverted)
+                    PromotedImprovement(
+                        dimension.value,
+                        gate.delta,
+                        pr.number,
+                        auto_merged,
+                        reverted=auto_reverted,
+                        proof=pr.proof,
+                        head_sha=pr.head_sha,
+                    )
                 )
                 plateau = 0
                 if hook_error is not None:
@@ -427,7 +496,7 @@ async def _run_improvement_impl(
                     result.stop_reason = str(getattr(hook_outcome, "stop_reason", None) or STOP_AUTOMERGE_BLOCKED)
                     break
             else:
-                result.rejected.append((dimension.value, gate.reason))
+                result.rejected.append((dimension.value, promotion_refusal(gate, draft)))
                 plateau += 1
                 if plateau >= plateau_rounds:
                     result.stop_reason = STOP_PLATEAU

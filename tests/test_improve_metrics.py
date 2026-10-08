@@ -281,6 +281,58 @@ async def test_measure_without_reviewer_is_deterministic():
     assert m.composite == pytest.approx(0.9)
 
 
+async def test_measure_exposes_the_review_verdict_as_a_veto_not_as_a_score():
+    """Vague 3 : hors composite, mais le verdict BLOQUANT (ou la panne) du reviewer est tracé pour le gate."""
+    from collegue.executor.quality_gate import ReviewFindingLite
+
+    common = dict(
+        ctx=None, sandbox=_Sandbox(), diff="d", security_scan_fn=_scan(0, 0.0), quality_scan_fn=_quality(0, 0)
+    )
+    clean = await measure("/ws", reviewer=FakeReviewer(), **common)
+    assert (clean.review_measured, clean.review_blocking, clean.review_error) == (True, False, "")
+
+    blocking = await measure(
+        "/ws",
+        reviewer=FakeReviewer(blocking=True, findings=[ReviewFindingLite("security", "critical", "RCE")]),
+        **common,
+    )
+    assert (blocking.review_measured, blocking.review_blocking) == (True, True)
+    assert blocking.composite == clean.composite  # le veto n'altère pas le score : il le rend sans effet
+
+    class _Broken:
+        async def review(self, diff, ctx, *, issue=None):
+            raise RuntimeError("reviewer indisponible")
+
+    failed = await measure("/ws", reviewer=_Broken(), **common)
+    assert failed.review_measured is False and "indisponible" in failed.review_error
+
+    absent = await measure("/ws", **common)
+    assert (absent.review_measured, absent.review_blocking, absent.review_error) == (False, False, "")
+
+
+async def test_measure_does_not_swallow_cancellation_or_budget_stops_from_the_reviewer():
+    class _Cancelled:
+        async def review(self, diff, ctx, *, issue=None):
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        await measure(
+            "/ws",
+            ctx=None,
+            sandbox=_Sandbox(),
+            reviewer=_Cancelled(),
+            diff="d",
+            security_scan_fn=_scan(0, 0.0),
+            quality_scan_fn=_quality(0, 0),
+        )
+
+
+def test_secret_scan_scope_is_named_precisely():
+    from collegue.improve.metrics import SECRET_SCAN_SCOPE
+
+    assert "scan statique de secrets" in SECRET_SCAN_SCOPE and "regex" in SECRET_SCAN_SCOPE
+
+
 async def test_measure_doc_coverage_informative(tmp_path):
     # doc_coverage est calculée (informative) mais N'ENTRE PAS dans le composite.
     base = await measure(

@@ -29,7 +29,11 @@ RUNNER_NAME = "pytest"
 MAX_SOURCE_BYTES = 64 * 1024
 DEFAULT_MAX_TOKENS = 8192
 
-ACCEPTANCE_TEST_SYSTEM_PROMPT = """Tu es un ingénieur QA indépendant du codeur.
+# Versions antérieures du prompt système. Un oracle déjà scellé porte l'empreinte du prompt qui l'a produit : sa
+# provenance reste vérifiable tant que cette empreinte correspond à UNE version connue. Les nouveaux oracles utilisent
+# toujours la version courante. Ne jamais modifier un texte historique (l'empreinte changerait) : en ajouter un.
+LEGACY_SYSTEM_PROMPTS = (
+    """Tu es un ingénieur QA indépendant du codeur.
 À partir du SPEC et du contrat de tâche fournis, écris un module pytest exécutable
 qui vérifie objectivement le critère d'acceptation de CETTE tâche.
 
@@ -45,6 +49,33 @@ Contraintes impératives :
 - n'utilise jamais skip, skipif, xfail ou importorskip ;
 - n'utilise aucun conftest, plugin pytest ou configuration pytest du projet ;
 - ne remplace pas la vérification par une opinion, un commentaire ou un placeholder.
+""",
+)
+
+ACCEPTANCE_TEST_SYSTEM_PROMPT = """Tu es un ingénieur QA indépendant du codeur.
+À partir du SPEC et du contrat de tâche fournis, écris un module pytest exécutable
+qui vérifie objectivement le critère d'acceptation de CETTE tâche.
+
+Contraintes impératives :
+- réponds uniquement avec la source Python du module (un fence ```python est toléré) ;
+- définis au moins une fonction ou méthode collectable nommée test_* ;
+- chaque test contient au moins une instruction assert qui vérifie un résultat observable ;
+- vérifie uniquement le critère d'acceptation de la tâche : n'ajoute aucun test
+  d'intégrité, de dépendances ou de non-régression sans lien direct avec ce critère ;
+- le runner crée le module sous un nom aléatoire dans /tmp puis l'exécute avec
+  /workspace comme répertoire courant : utilise Path.cwd() pour trouver le projet
+  et n'utilise jamais __file__ pour en déduire la racine ;
+- n'utilise jamais skip, skipif, xfail ou importorskip ;
+- n'utilise aucun conftest, plugin pytest ou configuration pytest du projet ;
+- ne remplace pas la vérification par une opinion, un commentaire ou un placeholder ;
+- ÉCHEC PAR ASSERTION AVANT L'IMPLÉMENTATION : sur le dépôt tel qu'il est AVANT la tâche, ce module doit échouer
+  par une instruction assert de ton test, jamais par une erreur d'import, de collecte, de configuration ou une
+  exception (ImportError, ModuleNotFoundError, AttributeError, FileNotFoundError, KeyError…). N'écris donc aucun
+  import du code à produire en tête de module : localise-le dans le test et affirme sa présence, p. ex.
+  `spec = importlib.util.find_spec("app.service"); assert spec is not None, "app.service est absent"`, puis
+  importe-le seulement ensuite, ou vérifie un fichier via Path.cwd() avec `assert chemin.is_file(), "..."` avant de
+  le lire. Chaque assert porte un message qui nomme le comportement exigé par le critère ;
+- le même module doit réussir tel quel une fois la tâche correctement implémentée.
 """
 
 _FENCE_RE = re.compile(r"\A```(?:python|py)?[ \t]*\n(?P<code>.*)\n```[ \t]*\Z", re.DOTALL | re.IGNORECASE)
@@ -280,17 +311,26 @@ def acceptance_prompt(spec: Any, task: Any, tasks: Iterable[Any], project_id: in
 build_acceptance_prompt = acceptance_prompt
 
 
-def prompt_sha256(prompt: str) -> str:
-    """Empreinte du prompt complet (système + utilisateur) réellement envoyé."""
+def prompt_sha256(prompt: str, *, system_prompt: Optional[str] = None) -> str:
+    """Empreinte du prompt complet (système + utilisateur) réellement envoyé (prompt système courant par défaut)."""
 
-    payload = {"system": normalize_plan_text(ACCEPTANCE_TEST_SYSTEM_PROMPT), "user": prompt}
+    system = ACCEPTANCE_TEST_SYSTEM_PROMPT if system_prompt is None else system_prompt
+    payload = {"system": normalize_plan_text(system), "user": prompt}
     return sha256_text(_canonical_json(payload))
 
 
 def acceptance_prompt_sha256(spec: Any, task: Any, tasks: Iterable[Any], project_id: int) -> str:
-    """Recalcule l'empreinte de prompt depuis l'état durable du plan."""
+    """Recalcule l'empreinte de prompt (version COURANTE) depuis l'état durable du plan."""
 
     return prompt_sha256(acceptance_prompt(spec, task, tasks, project_id))
+
+
+def known_acceptance_prompt_sha256(spec: Any, task: Any, tasks: Iterable[Any], project_id: int) -> tuple:
+    """Empreintes acceptables pour la provenance d'un oracle scellé : version courante puis versions historiques."""
+
+    prompt = acceptance_prompt(spec, task, tasks, project_id)
+    systems = (ACCEPTANCE_TEST_SYSTEM_PROMPT, *LEGACY_SYSTEM_PROMPTS)
+    return tuple(prompt_sha256(prompt, system_prompt=system) for system in systems)
 
 
 def _generated_at(clock: Callable[[], datetime]) -> str:
@@ -432,6 +472,7 @@ async def generate_acceptance_tests(
 
 __all__ = [
     "ACCEPTANCE_TEST_SYSTEM_PROMPT",
+    "LEGACY_SYSTEM_PROMPTS",
     "DEFAULT_MAX_TOKENS",
     "GENERATOR_NAME",
     "MAX_SOURCE_BYTES",
@@ -439,6 +480,7 @@ __all__ = [
     "RUNNER_NAME",
     "acceptance_prompt",
     "acceptance_prompt_sha256",
+    "known_acceptance_prompt_sha256",
     "build_acceptance_prompt",
     "contract_payload",
     "criteria_text",
