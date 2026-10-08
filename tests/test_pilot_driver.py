@@ -2227,6 +2227,8 @@ async def test_coder_spend_enforces_max_cost(repo, manager):
     from collegue.pilot.budget import BudgetTimeController
 
     class _UsageAgent:
+        budget_enforcement = "test-double"  # double déterministe : n'émet aucun appel réel
+
         def __init__(self):
             self._ok = FakeCodeAgent()
 

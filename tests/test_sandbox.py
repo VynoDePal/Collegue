@@ -405,3 +405,64 @@ def test_run_command_never_launches_docker_for_a_workspace_holding_git_control(t
     monkeypatch.setattr(ex.os, "getuid", lambda: 1000)
     with pytest.raises(ValueError, match="contrôle"):
         DockerSandbox(image="img").run_command("echo hi", str(parent))
+
+
+# --- échéance d'allocation budgétaire (vague 2) : le conteneur s'auto-limite ----------------------------------
+
+
+def _capture_run(monkeypatch, *, exit_code=0, raise_timeout=False):
+    seen = {"runs": [], "kills": []}
+
+    def fake_run(argv, **kwargs):
+        if argv[1:2] == ["kill"]:
+            seen["kills"].append(argv[-1])
+            return _Proc(0)
+        seen["runs"].append({"argv": list(argv), "timeout": kwargs.get("timeout")})
+        if raise_timeout:
+            raise ex.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        return _Proc(exit_code)
+
+    monkeypatch.setattr(ex.subprocess, "run", fake_run)
+    monkeypatch.setattr(ex.os, "getuid", lambda: 1000)
+    return seen
+
+
+def test_an_explicit_deadline_makes_the_container_limit_itself(monkeypatch, tmp_path):
+    seen = _capture_run(monkeypatch)
+    sandbox = DockerSandbox(image="img", timeout=2400)
+
+    sandbox.run_command(["python", "/opt/oh_runner.py", "-t", "x"], str(tmp_path), timeout=90)
+
+    (run,) = seen["runs"]
+    argv = run["argv"]
+    tail = argv[argv.index("img") + 1 :]
+    # coreutils timeout DANS le conteneur : indépendant du client docker (s'il meurt, le conteneur s'arrête seul)
+    assert tail[:4] == ["timeout", "--signal=TERM", "--kill-after=15", "90"]
+    assert tail[4:] == ["python", "/opt/oh_runner.py", "-t", "x"]
+    assert run["timeout"] == 90 + ex.SELF_LIMIT_KILL_AFTER + ex.SELF_LIMIT_HOST_MARGIN  # filet hôte, plus long
+
+
+def test_without_a_deadline_the_command_and_host_timeout_are_unchanged(monkeypatch, tmp_path):
+    seen = _capture_run(monkeypatch)
+    DockerSandbox(image="img", timeout=2400).run_command(["python", "x.py"], str(tmp_path))
+    (run,) = seen["runs"]
+    assert run["argv"][run["argv"].index("img") + 1 :] == ["python", "x.py"] and run["timeout"] == 2400
+
+
+def test_the_container_self_limit_exit_is_reported_as_a_timeout(monkeypatch, tmp_path):
+    _capture_run(monkeypatch, exit_code=124)  # code de coreutils timeout
+    result = DockerSandbox(image="img").run_command("sleep 999", str(tmp_path), timeout=30)
+    assert result.timed_out is True and ex.TIMEOUT_NOTE in result.stderr
+
+
+def test_a_host_side_timeout_under_a_deadline_still_kills_the_container_by_name(monkeypatch, tmp_path):
+    seen = _capture_run(monkeypatch, raise_timeout=True)
+    result = DockerSandbox(image="img").run_command(["python", "x.py"], str(tmp_path), timeout=10)
+    assert result.timed_out is True and len(seen["kills"]) == 1 and seen["kills"][0].startswith("collegue-sbx-")
+
+
+def test_a_non_positive_deadline_falls_back_to_the_sandbox_default(monkeypatch, tmp_path):
+    seen = _capture_run(monkeypatch)
+    DockerSandbox(image="img", timeout=77).run_command(["python", "x.py"], str(tmp_path), timeout=0)
+    (run,) = seen["runs"]
+    assert "timeout" not in run["argv"][run["argv"].index("img") + 1 :][:1] and run["timeout"] == 77

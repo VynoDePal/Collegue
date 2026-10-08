@@ -23,6 +23,19 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+# Plafond de sortie appliqué quand l'appelant n'en fournit aucun (sortie bornée ⇒ coût borné).
+DEFAULT_BOUNDED_MAX_TOKENS = 4096
+
+
+def _usage_of(resp):
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None
+    prompt, completion = getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None)
+    if not isinstance(prompt, int) or not isinstance(completion, int) or prompt < 0 or completion < 0:
+        return None
+    return prompt, completion, str(getattr(resp, "model", "") or "")
+
 
 def _make_handler_class():
     """Construit la classe handler (import paresseux de fastmcp/openai)."""
@@ -38,13 +51,40 @@ def _make_handler_class():
             inner = self.client.chat.completions.create
 
             async def _create(*a, **kw):
-                # Garde budget dur (C4) : stoppe l'appel AVANT toute dépense si le
-                # plafond $/tokens cumulé est atteint. Chokepoint universel — tous
-                # les ctx.sample() transitent ici. No-op si plafonds désactivés.
-                from collegue.monitoring.metrics import enforce_budget
+                from collegue.core.llm.budget_guard import TRANSPORT_HTTP, current_binding, guarded_call
 
-                enforce_budget()
-                response = await inner(*a, **kw)
+                binding = current_binding()
+                if binding is not None:
+                    # Registre durable lié (moteur autonome) : réservation AVANT chaque tentative, pas de
+                    # retry interne du SDK (max_retries=0), règlement avec l'usage réel.
+                    # La sortie DOIT être bornée par un max_tokens réellement transmis : sans lui elle ne l'est pas.
+                    if not kw.get("max_tokens"):
+                        kw["max_tokens"] = DEFAULT_BOUNDED_MAX_TOKENS
+                    once = self.client.with_options(max_retries=0) if hasattr(self.client, "with_options") else None
+                    target = once.chat.completions.create if once is not None else inner
+
+                    async def _emit():
+                        return await target(*a, **kw)
+
+                    response = await guarded_call(
+                        _emit,
+                        binding=binding,
+                        model=str(kw.get("model") or self.default_model or ""),
+                        messages=kw.get("messages"),
+                        tools=kw.get("tools"),
+                        max_tokens=int(kw["max_tokens"]),
+                        transport=TRANSPORT_HTTP,
+                        usage_of=_usage_of,
+                        max_attempts=3,  # = les 2 retries par défaut du SDK, désormais réservés un à un
+                        endpoint=str(getattr(self.client, "base_url", None) or "") or None,
+                    )
+                else:
+                    # Garde budget dur historique (C4, MetricsCollector) : NON couverte par la garantie
+                    # stricte du registre durable (serveur MCP sans projet). No-op si plafonds désactivés.
+                    from collegue.monitoring.metrics import enforce_budget
+
+                    enforce_budget()
+                    response = await inner(*a, **kw)
                 usage = getattr(response, "usage", None)
                 if usage is not None:
                     record_usage(

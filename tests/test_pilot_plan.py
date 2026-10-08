@@ -17,6 +17,9 @@ from collegue.pilot import (
 
 # --- doubles du planner (monkeypatchés là où plan_project_from_settings les importe) ---
 
+# Double déterministe sans registre budgétaire : capacité DÉCLARÉE (sinon le mode strict refuse un manager sans registre).
+_MANAGER_DOUBLE = SimpleNamespace(budget_enforcement="test-double")
+
 
 def _spec(title="T", objectives=("o1",), criteria=("c1", "c2")):
     return SimpleNamespace(title=title, objectives=list(objectives), acceptance_criteria=list(criteria))
@@ -113,7 +116,7 @@ async def _plan(monkeypatch, **kwargs):
         repo="r",
         ctx=_Ctx(),
         settings_obj=SimpleNamespace(),
-        manager=object(),
+        manager=_MANAGER_DOUBLE,
     )
     defaults.update(kwargs)
     result = await plan_project_from_settings(**defaults)
@@ -161,7 +164,7 @@ async def test_legacy_one_shot_is_rejected_before_ctx_or_state(monkeypatch, lega
             owner="o",
             repo="r",
             settings_obj=SimpleNamespace(),
-            manager=object(),
+            manager=_MANAGER_DOUBLE,
             **legacy,
         )
 
@@ -276,7 +279,7 @@ async def test_owned_ctx_is_closed(monkeypatch):
     monkeypatch.setattr("collegue.pilot.runtime._build_ctx", lambda _s: _Ctx())
     # ctx non fourni → assemblé puis fermé
     await plan_project_from_settings(
-        name="p", problem="x", owner="o", repo="r", settings_obj=SimpleNamespace(), manager=object()
+        name="p", problem="x", owner="o", repo="r", settings_obj=SimpleNamespace(), manager=_MANAGER_DOUBLE
     )
     assert closed["v"] is True
 

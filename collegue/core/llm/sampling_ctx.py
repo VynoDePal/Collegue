@@ -38,6 +38,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -337,12 +338,24 @@ class LocalSamplingContext:
         auth_mount, script_mount = self._validated_subscription_mounts()
         system_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] == "system")
         user_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] != "system")
-        payload = json.dumps({"system": system_text, "prompt": user_text})
+        from collegue.core.llm.budget_guard import TRANSPORT_SUBSCRIPTION_SAMPLER, current_binding, guarded_call
+
+        binding = current_binding()
+        request: Dict[str, Any] = {"system": system_text, "prompt": user_text}
+        if binding is not None and binding.ledger.snapshot(binding.scope_key).strict:
+            # Budget strict : sortie bornée par la réservation, aucun retry interne du SDK (cf. oh_sampler).
+            request.update(strict=True, max_output_tokens=SUBSCRIPTION_MAX_OUTPUT_ESTIMATE)
+        payload = json.dumps(request)
+        # Conteneur NOMMÉ + auto-limité (coreutils ``timeout`` : TERM puis KILL) : tuer le client
+        # ``docker`` ne tue pas le conteneur, qui continuerait à dépenser si l'hôte meurt ou expire.
+        container = f"collegue-smp-{uuid.uuid4().hex[:12]}"
         argv = [
             "docker",
             "run",
             "--rm",
             "-i",
+            "--name",
+            container,
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -362,10 +375,42 @@ class LocalSamplingContext:
             "-v",
             f"{script_mount}:/oh_sampler.py:ro",
             self._sampler_image,
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=15",
+            str(max(1, int(self._sampler_timeout))),
             "python",
             "/oh_sampler.py",
         ]
-        rc, out, err = await self._run_sampler(argv, payload)
+        if binding is None:
+            rc, out, err = await self._run_sampler(argv, payload, container)
+        else:
+            # Registre durable : réservation AVANT le lancement du conteneur (abonnement non facturé : 0 $,
+            # mais des tokens), règlement avec l'enveloppe d'usage de confiance ; tout échec = usage inconnu.
+            async def _emit():
+                return await self._run_sampler(argv, payload, container)
+
+            def _usage_of(result):
+                r_rc, r_out, _ = result
+                if r_rc != 0:
+                    return None
+                parsed = _parse_usage_envelope(r_out, model)
+                return None if parsed is None else (parsed[0], parsed[1], parsed[2])
+
+            rc, out, err = await guarded_call(
+                _emit,
+                binding=binding,
+                model=model,
+                messages=oai_messages,
+                max_tokens=SUBSCRIPTION_MAX_OUTPUT_ESTIMATE,
+                transport=TRANSPORT_SUBSCRIPTION_SAMPLER,
+                billable=False,
+                usage_of=_usage_of,
+                max_attempts=1,
+                # Le backend abonnement peut ignorer le plafond de sortie (non vérifiable hors ligne) : il ne
+                # fournit donc AUCUNE garantie de plafond de tokens (refusé en strict sous MAX_TOKENS_BUDGET).
+                output_bound_proven=False,
+            )
         match = _SAMPLE_RE.search(out or "")
         if rc != 0 or not match:
             raise RuntimeError(f"sampler abonnement {model} en échec (rc={rc}) : {((err or out) or '')[:300]}")
@@ -374,44 +419,76 @@ class LocalSamplingContext:
         # interprété en aval (reviewer/juge) → fail-closed plutôt que rendre "".
         if not text.strip():
             raise RuntimeError(f"sampler abonnement {model} : réponse vide")
-        usage_match = _SAMPLE_USAGE_RE.search(out or "")
-        if usage_match is not None:
-            try:
-                usage = json.loads(usage_match.group(1))
-                if not isinstance(usage, dict) or usage.get("billable") is not False:
-                    raise ValueError("enveloppe non fiable")
-                prompt_tokens = int(usage["prompt_tokens"])
-                completion_tokens = int(usage["completion_tokens"])
-                usage_model = str(usage["model"] or model)
-                if prompt_tokens < 0 or completion_tokens < 0:
-                    raise ValueError("tokens négatifs")
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise RuntimeError(f"sampler abonnement {model} : enveloppe usage invalide") from exc
+        parsed = _parse_usage_envelope(out, model, strict=True)
+        if parsed is not None:
             from collegue.monitoring.sampling_usage import record_usage
 
-            record_usage(prompt_tokens, completion_tokens, usage_model)
+            record_usage(parsed[0], parsed[1], parsed[2])
         return text
 
-    async def _run_sampler(self, argv: List[str], payload: str):
+    async def _run_sampler(self, argv: List[str], payload: str, container: Optional[str] = None):
         if self._runner is not None:
             return self._runner(argv, payload)
-        proc = await asyncio.to_thread(
-            subprocess.run, argv, input=payload, capture_output=True, text=True, timeout=self._sampler_timeout
-        )
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                argv,
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=self._sampler_timeout + SAMPLER_HOST_MARGIN,
+            )
+        except (subprocess.TimeoutExpired, asyncio.CancelledError):
+            if container:
+                _kill_container(container)
+            raise
         return proc.returncode, proc.stdout, proc.stderr
 
+    def _endpoint_url(self, client) -> Optional[str]:
+        """Destination RÉELLE des appels HTTP (URL de base du client qui émet), pour justifier la borne de tokens.
+
+        ``None`` = inconnue (client factice sans ``base_url``, ni URL de config) : la garde retombe alors sur le
+        routage de la config et n'admet que les destinations hébergées connues.
+        """
+        url = getattr(client, "base_url", None) or self._base_url
+        return str(url) if url else None
+
     async def _create(self, model: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
-        # Garde budget dur (C4) + capture d'usage AU MÊME chokepoint que le handler
-        # serveur : tous les ctx.sample() offline passent ici. ``enforce_budget`` lève
-        # ``BudgetExceeded`` (BaseException) si le plafond cumulé est atteint — on NE la
-        # capture pas (auto-pause volontaire). No-op si plafonds désactivés.
-        from collegue.monitoring.metrics import enforce_budget
+        from collegue.core.llm.budget_guard import TRANSPORT_HTTP, current_binding, guarded_call
         from collegue.monitoring.sampling_usage import record_usage
 
-        enforce_budget()
-        resp = await self._client_obj().chat.completions.create(
-            model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
-        )
+        binding = current_binding()
+        client = self._client_obj()
+        if binding is None:
+            # Hors registre (serveur MCP sans projet) : garde historique C4 basée sur le
+            # MetricsCollector — NON couverte par la garantie stricte (cf. w2-budget.md).
+            from collegue.monitoring.metrics import enforce_budget
+
+            enforce_budget()
+            resp = await client.chat.completions.create(
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
+            )
+        else:
+            # Registre durable : une RÉSERVATION par tentative AVANT émission, retries compris. Le
+            # SDK ne retente jamais en interne (max_retries=0) : c'est guarded_call qui boucle.
+            once = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
+
+            async def _emit():
+                return await once.chat.completions.create(
+                    model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
+                )
+
+            resp = await guarded_call(
+                _emit,
+                binding=binding,
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                transport=TRANSPORT_HTTP,
+                usage_of=_openai_usage,
+                max_attempts=self._max_retries + 1,
+                endpoint=self._endpoint_url(client),
+            )
         usage = getattr(resp, "usage", None)
         if usage is not None:
             record_usage(
@@ -429,6 +506,54 @@ class LocalSamplingContext:
                 if asyncio.iscoroutine(maybe):
                     await maybe
             self._client = None
+
+
+SUBSCRIPTION_MAX_OUTPUT_ESTIMATE = 8192
+SAMPLER_HOST_MARGIN = 45.0
+
+
+def _kill_container(name: str) -> None:
+    """Tue le conteneur NOMMÉ (best-effort) : tuer le client ``docker`` ne l'arrête pas."""
+    try:
+        subprocess.run(["docker", "kill", name], capture_output=True, timeout=15)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _parse_usage_envelope(out: str, model: str, *, strict: bool = False):
+    """``(prompt, completion, modèle)`` de l'enveloppe d'usage de confiance, ou ``None`` si absente/invalide.
+
+    ``strict=True`` : une enveloppe PRÉSENTE mais non fiable lève ``RuntimeError`` (comportement historique).
+    """
+    match = _SAMPLE_USAGE_RE.search(out or "")
+    if match is None:
+        return None
+    try:
+        usage = json.loads(match.group(1))
+        if not isinstance(usage, dict) or usage.get("billable") is not False:
+            raise ValueError("enveloppe non fiable")
+        prompt_tokens = int(usage["prompt_tokens"])
+        completion_tokens = int(usage["completion_tokens"])
+        usage_model = str(usage["model"] or model)
+        if prompt_tokens < 0 or completion_tokens < 0:
+            raise ValueError("tokens négatifs")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        if strict:
+            raise RuntimeError(f"sampler abonnement {model} : enveloppe usage invalide") from exc
+        return None
+    return prompt_tokens, completion_tokens, usage_model
+
+
+def _openai_usage(resp: Any):
+    """``(prompt, completion, modèle)`` d'une réponse chat.completions, ou ``None`` si absent."""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    if not isinstance(prompt, int) or not isinstance(completion, int) or prompt < 0 or completion < 0:
+        return None
+    return prompt, completion, str(getattr(resp, "model", "") or "")
 
 
 def _extract_text(resp: Any) -> str:

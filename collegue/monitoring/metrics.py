@@ -362,6 +362,11 @@ class MetricsCollector:
 
         Providers locaux (LM Studio/Ollama/Unsloth) : coût toujours 0 → le cap
         ``MAX_COST_USD`` est inerte ; seul ``MAX_TOKENS_BUDGET`` les protège.
+
+        **Vague 2** : ce compteur (RAM + ``metrics.json`` best-effort) n'est PLUS l'autorité du
+        budget d'un run. Quand un registre durable est lié (``collegue.state.budget_ledger``), la
+        décision vient de lui et ce collecteur ne sert qu'aux statistiques d'experts. Ce chemin
+        ne subsiste que pour les appels sans projet (serveur MCP) — sans garantie stricte.
         """
         if max_cost_usd is None or max_tokens is None:
             try:

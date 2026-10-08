@@ -34,6 +34,7 @@ différée en Phase 2 ; le pilote Phase 3 câblera cet exécuteur).
 from __future__ import annotations
 
 import errno
+import math
 import os
 import stat
 import subprocess
@@ -71,6 +72,9 @@ GIT_CONTROL_SCAN_MAX_DEPTH = 64
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
+# Auto-limitation du conteneur sous allocation (secondes) : délai entre TERM et KILL, et marge hôte.
+SELF_LIMIT_KILL_AFTER = 15
+SELF_LIMIT_HOST_MARGIN = 30
 
 # Préfixe de la note ajoutée à stderr quand le conteneur est tué au timeout —
 # consommé par le moteur (#461 : classification infra ; #464 : usage perdu).
@@ -79,6 +83,15 @@ TIMEOUT_NOTE = "[sandbox] délai dépassé après"
 
 class SandboxUnavailable(RuntimeError):
     """Docker indisponible, ou refus de s'exécuter (ex. en root)."""
+
+
+class SandboxRefused(ValueError):
+    """Le sandbox a REFUSÉ la commande AVANT tout lancement (montage/chemin invalide).
+
+    Sous-classe de ``ValueError`` (compatibilité) : distingue un refus de validation — aucune
+    dépense possible, la réservation budgétaire peut être libérée — d'une ``ValueError`` quelconque
+    levée plus tard par l'appelant.
+    """
 
 
 def git_control_reason(path: str) -> Optional[str]:
@@ -221,7 +234,7 @@ def git_control_exposure(path: str) -> Optional[str]:
 def _refuse_if_git_control_exposed(path: str, label: str) -> None:
     reason = git_control_exposure(path)
     if reason is not None:
-        raise ValueError(
+        raise SandboxRefused(
             f"{label} refusé : montage exposant les métadonnées Git de contrôle ({reason}) — "
             "monter uniquement le répertoire de travail ou un répertoire ordinaire, jamais un ancêtre "
             "ni le répertoire de contrôle"
@@ -323,13 +336,13 @@ class DockerSandbox:
         """
         ws = os.path.realpath(os.path.abspath(workspace))
         if ":" in ws:
-            raise ValueError(f"workspace invalide (contient ':'): {ws}")
+            raise SandboxRefused(f"workspace invalide (contient ':'): {ws}")
         if ws == os.path.sep:
-            raise ValueError("workspace invalide : la racine du FS ne peut pas être montée")
+            raise SandboxRefused("workspace invalide : la racine du FS ne peut pas être montée")
         if self.workspace_root is not None:
             root = os.path.realpath(os.path.abspath(self.workspace_root))
             if os.path.commonpath([ws, root]) != root:
-                raise ValueError(f"workspace hors du répertoire autorisé {root}: {ws}")
+                raise SandboxRefused(f"workspace hors du répertoire autorisé {root}: {ws}")
         _refuse_if_git_control_exposed(workspace, "workspace")  # chemin BRUT : un lien pendant doit rester visible
         return ws
 
@@ -368,7 +381,7 @@ class DockerSandbox:
         if self.pip_cache_dir:
             cache = os.path.realpath(os.path.abspath(self.pip_cache_dir))
             if ":" in cache or cache == os.path.sep:
-                raise ValueError(f"pip_cache_dir invalide (':' ou racine): {cache}")
+                raise SandboxRefused(f"pip_cache_dir invalide (':' ou racine): {cache}")
             _refuse_if_git_control_exposed(self.pip_cache_dir, "pip_cache_dir")
             argv += ["-v", f"{cache}:{SANDBOX_PIP_CACHE_MOUNT}", "-e", f"PIP_CACHE_DIR={SANDBOX_PIP_CACHE_MOUNT}"]
         # Creds d'abonnement (Codex/ChatGPT) : montage RW, cible fixe (HOME du worker).
@@ -377,7 +390,7 @@ class DockerSandbox:
         if self.subscription_auth_dir:
             auth = os.path.realpath(os.path.abspath(self.subscription_auth_dir))
             if ":" in auth or auth == os.path.sep:
-                raise ValueError(f"subscription_auth_dir invalide (':' ou racine): {auth}")
+                raise SandboxRefused(f"subscription_auth_dir invalide (':' ou racine): {auth}")
             _refuse_if_git_control_exposed(self.subscription_auth_dir, "subscription_auth_dir")
             # Cible = $HOME/.openhands du worker. HOME effectif = override ``env['HOME']``
             # (sinon le défaut /tmp injecté plus bas). Les creds NE peuvent PAS vivre sous
@@ -385,7 +398,7 @@ class DockerSandbox:
             # serait inerte silencieusement (le coder ne verrait jamais l'auth abo).
             home = (self.env.get("HOME") or "/tmp").rstrip("/")
             if home == "/tmp" or home.startswith("/tmp/"):
-                raise ValueError(
+                raise SandboxRefused(
                     "subscription_auth_dir exige env['HOME'] hors /tmp "
                     "(le tmpfs /tmp masquerait le montage des creds d'abonnement)"
                 )
@@ -447,8 +460,14 @@ class DockerSandbox:
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
 
-    def run_command(self, cmd: Union[str, List[str]], workspace: str) -> SandboxResult:
+    def run_command(
+        self, cmd: Union[str, List[str]], workspace: str, *, timeout: Optional[float] = None
+    ) -> SandboxResult:
         """Exécute ``cmd`` dans le sandbox, workspace monté sur ``/workspace``.
+
+        ``timeout`` (secondes, optionnel) remplace ``self.timeout`` pour CET appel — l'échéance d'une
+        allocation budgétaire (vague 2). Au dépassement, le conteneur est tué PAR NOM : tuer le client
+        ``docker`` ne tue pas le conteneur, qui continuerait à dépenser en arrière-plan.
 
         ``cmd`` peut être une chaîne (``sh -c`` dans le conteneur) ou un argv (liste).
         Lève :class:`SandboxUnavailable` si Docker est absent ou si l'on tourne en
@@ -462,6 +481,15 @@ class DockerSandbox:
         ws = self._validate_workspace(workspace)
         os.makedirs(ws, exist_ok=True)
         name = f"collegue-sbx-{uuid.uuid4().hex[:12]}"
+        if timeout is not None and timeout > 0:
+            # Échéance d'allocation : le conteneur S'AUTO-LIMITE (coreutils ``timeout`` : TERM puis KILL),
+            # indépendamment du client ``docker`` — si le process hôte meurt, le conteneur ne dépense pas
+            # indéfiniment en arrière-plan. Le délai hôte, un peu plus long, n'est qu'un filet.
+            inner = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
+            cmd = ["timeout", "--signal=TERM", f"--kill-after={SELF_LIMIT_KILL_AFTER}", str(math.ceil(timeout)), *inner]
+            effective_timeout = float(timeout) + SELF_LIMIT_KILL_AFTER + SELF_LIMIT_HOST_MARGIN
+        else:
+            effective_timeout = self.timeout
         argv = self._build_run_argv(cmd, ws, name=name)
 
         out_f = tempfile.NamedTemporaryFile(prefix="sbx-out-", delete=False)
@@ -470,8 +498,10 @@ class DockerSandbox:
         timed_out = False
         try:
             try:
-                proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=self.timeout)
+                proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=effective_timeout)
                 exit_code = proc.returncode
+                if timeout and exit_code in (TIMEOUT_EXIT_CODE, 137):  # auto-limite du conteneur atteinte
+                    timed_out = True
             except subprocess.TimeoutExpired:
                 # Tuer le client ne tue pas le conteneur → on le tue par nom.
                 self._kill_container(name)
@@ -486,7 +516,7 @@ class DockerSandbox:
             stdout = self._read_capped(out_path)
             stderr = self._read_capped(err_path)
             if timed_out:
-                stderr += f"\n{TIMEOUT_NOTE} {self.timeout:g}s"
+                stderr += f"\n{TIMEOUT_NOTE} {(timeout if timeout else effective_timeout):g}s"
             return SandboxResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out)
         finally:
             for path in (out_path, err_path):

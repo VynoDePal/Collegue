@@ -277,6 +277,40 @@ class Settings(BaseSettings):
         action = str(v).strip().lower()
         return action if action in ("pause", "warn") else "pause"
 
+    # --- Registre budgétaire durable (vague 2) ---
+    # "strict" (défaut) : le registre transactionnel est l'AUTORITÉ ; chaque appel est réservé AVANT
+    # émission (retries/replis compris), un plafond dépassé ou un usage inconnu REFUSE la suite, une
+    # configuration non bornable est refusée. La garantie borne les appels émis par NOTRE code, pas une
+    # commande du workspace qui contacterait librement le fournisseur avec la clé.
+    # "advisory" : le registre enregistre la dépense mais ne bloque pas — AUCUNE garantie annoncée.
+    BUDGET_MODE: str = "strict"
+    # Part du solde réservée à UN worker (le reste couvre revue, gate, sampling) ; plafonds absolus
+    # optionnels par worker (0 = aucun).
+    BUDGET_WORKER_SHARE: float = 0.8
+    BUDGET_WORKER_MAX_USD: float = 0.0
+    BUDGET_WORKER_MAX_TOKENS: int = 0
+    # Plancher d'une allocation utile : en dessous, pause budget plutôt qu'un worker quasi nul.
+    BUDGET_WORKER_MIN_USD: float = 0.01
+    BUDGET_WORKER_MIN_TOKENS: int = 1000
+    # Identités EXACTES (CSV, pas des préfixes) de modèles dont l'OPÉRATEUR atteste que le tokenizer ne produit jamais
+    # plus de tokens que d'octets UTF-8 (BPE « byte-level » ou SentencePiece à repli octet). Les identités connues
+    # (Gemini/Gemma sur l'endpoint Google hébergé, GPT/o-series sur l'API OpenAI) sont déjà admises ; tout autre
+    # modèle ou destination est REFUSÉ en strict sous plafond tant qu'il n'est pas attesté. Un tarif ne vaut pas attestation.
+    BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS: str = ""
+    # Hôtes (CSV, égalité EXACTE sur le nom d'hôte de l'URL de base) que l'opérateur atteste AUTO-HÉBERGÉS et non
+    # facturés. Seul le loopback (localhost, 127.0.0.0/8, ::1) est réputé local avec un provider local déclaré ; tout
+    # autre hôte non hébergé reconnu n'a ni tarif de grille ni gratuité établie : refusé sous plafond USD strict
+    # sans prix configuré ni attestation ici.
+    BUDGET_ATTESTED_FREE_HOSTS: str = ""
+
+    @field_validator("BUDGET_MODE", mode="before")
+    @classmethod
+    def _normalize_budget_mode(cls, v):
+        mode = str(v or "strict").strip().lower()
+        if mode not in ("strict", "advisory"):
+            raise ValueError("BUDGET_MODE doit valoir 'strict' ou 'advisory'")
+        return mode
+
     # #484 : prix de secours du canal coder (USD par MILLION de tokens). Quand
     # litellm ne mappe pas le modèle (« Cost calculation failed: This model isn't
     # mapped yet », ex. gemma-4-31b-it), le runner émet cost_usd=0 malgré des

@@ -49,6 +49,64 @@ OPENHANDS_ENTRYPOINT = "openhands.core.main"
 # cas n'émet pas d'événement ``usage_lost`` — il y a déjà de l'usage compté).
 USAGE_MARKER = "[collegue-usage]"
 
+# Marqueurs de la garde budgétaire du runner (vague 2) : ``armed`` une fois la garde installée AVANT
+# toute dépense, ``final`` quand TOUT l'usage a été émis ET compté, ``unknown`` quand un appel a pu consommer
+# sans que les compteurs du SDK le voient (échec indéterminé, réponse sans usage, borne démentie, échéance en
+# plein appel). Armé sans final = conteneur interrompu ; ``unknown`` l'emporte même si ``final`` apparaît :
+# ``final`` prouve que les deltas ont été vidés, PAS que les compteurs ont tout vu. Dans les deux cas la
+# consommation est INCONNUE (réservation conservée, suite stricte bloquée).
+BUDGET_MARKER = "[collegue-budget]"
+
+
+def parse_budget_markers(logs: str) -> Tuple[bool, bool]:
+    """``(armed, final)`` d'après les marqueurs ``[collegue-budget]`` du runner."""
+    armed = final = False
+    for line in (logs or "").splitlines():
+        index = line.find(BUDGET_MARKER)
+        if index < 0:
+            continue
+        word = line[index + len(BUDGET_MARKER) :].strip().split(" ", 1)[0]
+        armed = armed or word == "armed"
+        final = final or word == "final"
+    return armed, final
+
+
+def budget_unknown_reason(logs: str) -> Optional[str]:
+    """Raison portée par le premier marqueur ``unknown`` du runner, ou ``None``."""
+    for line in (logs or "").splitlines():
+        index = line.find(BUDGET_MARKER)
+        if index < 0:
+            continue
+        rest = line[index + len(BUDGET_MARKER) :].strip()
+        if rest.split(" ", 1)[0] != "unknown":
+            continue
+        try:
+            reason = json.loads(rest.split(" ", 1)[1]).get("reason")
+        except (IndexError, ValueError, AttributeError):
+            reason = None
+        return str(reason or "usage déclaré inconnu par le runner")
+    return None
+
+
+def usage_status_from_run(logs: str, *, timed_out: bool, usage_lines: bool) -> Tuple[str, str]:
+    """``(usage_status, reason)`` : l'usage rapporté est-il COMPLET ?
+
+    - marqueur ``unknown`` → inconnu, quoi qu'il arrive par ailleurs ;
+    - marqueur final présent → complet (``reported``) ;
+    - jamais armé, aucune ligne d'usage, non interrompu → le runner est mort avant de pouvoir
+      dépenser (crash d'import, #498) : zéro établi (``reported``) ;
+    - sinon (armé sans final, timeout, usage partiel) → ``unknown``.
+    """
+    unknown = budget_unknown_reason(logs)
+    if unknown is not None:
+        return "unknown", unknown
+    armed, final = parse_budget_markers(logs)
+    if final and not timed_out:
+        return "reported", ""
+    if not armed and not usage_lines and not timed_out:
+        return "reported", ""
+    return "unknown", "conteneur interrompu ou rapport d'usage incomplet (marqueur final absent)"
+
 
 def parse_usage_from_logs(logs: str) -> Tuple[int, int, float, bool]:
     """``(prompt_tokens, completion_tokens, cost_usd, cost_authoritative)`` (#441/#504).
@@ -177,7 +235,15 @@ class OpenHandsAgent:
     ``sandbox`` est un objet exposant ``run_command(argv, workspace) -> SandboxResult``
     (duck-typing : un faux sandbox suffit en CI). ``role`` détermine le couple
     (provider, modèle) via :func:`resolve_role` (défaut : ``CODER``).
+
+    **Budget (vague 2)** : cet adaptateur historique (CLI ``openhands.core.main``) n'a AUCUNE garde
+    avant émission — ses retries internes et ses appels ne sont pas bornables. Il est donc déclaré
+    ``budget_enforcement = "none"`` : sous plafond, en mode strict, l'allocation est REFUSÉE.
+    Utiliser :class:`~collegue.executor.openhands_sdk_agent.OHSdkAgent` (runner gardé) ou le mode
+    ``BUDGET_MODE=advisory`` (sans garantie).
     """
+
+    budget_enforcement = "none"
 
     def __init__(
         self,
@@ -289,6 +355,8 @@ class OpenHandsAgent:
         result = self._sandbox.run_command(self.build_command(issue), workspace)
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
         prompt_tokens, completion_tokens, cost_usd, cost_authoritative = parse_usage_from_logs(logs)
+        # Pas de marqueur final dans cet adaptateur : seul un run interrompu rend l'usage inconnu.
+        timed_out = bool(getattr(result, "timed_out", False))
         return AgentResult(
             success=result.ok,
             logs=logs,
@@ -297,4 +365,6 @@ class OpenHandsAgent:
             completion_tokens=completion_tokens,
             cost_usd=cost_usd,
             cost_authoritative=cost_authoritative,
+            usage_status="unknown" if timed_out else "reported",
+            usage_reason="conteneur interrompu par le délai du sandbox" if timed_out else "",
         )

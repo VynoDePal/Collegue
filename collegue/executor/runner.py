@@ -64,7 +64,7 @@ def run_issue(
 
     _capture_backend(workspace, runner, git_bin)  # fail-closed AVANT l'agent
 
-    agent_result = agent.implement_issue(workspace.path, issue)
+    agent_result = _run_agent_under_budget(agent, workspace.path, issue)
 
     diff, files_changed = capture_diff(workspace, runner=runner, git_bin=git_bin)
     changed = bool(files_changed)
@@ -75,6 +75,44 @@ def run_issue(
         files_changed=files_changed,
         success=bool(agent_result.success and changed),
     )
+
+
+def _run_agent_under_budget(agent: CodeAgent, workspace_path: str, issue: IssueSpec) -> AgentResult:
+    """Lance l'agent sous une ALLOCATION budgétaire réservée avant son lancement (vague 2).
+
+    Sans registre lié au contexte (dry-run, doubles de test) l'agent est lancé tel quel. Avec registre :
+    allocation bornée par le solde et l'échéance (``BudgetRefused`` si impossible — l'agent n'est alors
+    PAS lancé), puis règlement de la consommation établie, ou d'un usage INCONNU qui conserve la
+    réservation et bloque la suite stricte. C'est le point commun à BUILD et IMPROVE.
+    """
+    from collegue.core.llm.budget_guard import current_binding
+    from collegue.executor.worker_budget import allocate_worker, settle_worker, worker_allocation
+    from collegue.sandbox.executor import SandboxRefused, SandboxUnavailable
+    from collegue.state.budget_ledger import REFUSED_LEDGER, BudgetRefused
+
+    binding = current_binding()
+    if binding is None:
+        return agent.implement_issue(workspace_path, issue)
+    alloc = allocate_worker(binding, agent=agent, label=f"issue-{issue.number}")
+    try:
+        with worker_allocation(alloc):
+            result = agent.implement_issue(workspace_path, issue)
+    except (SandboxUnavailable, SandboxRefused) as exc:
+        # Le worker n'a jamais été lancé (Docker absent, montage refusé…) : aucune dépense possible.
+        binding.ledger.release(alloc.reservation_id, reason=f"worker non lancé: {type(exc).__name__}")
+        raise
+    except BaseException as exc:
+        binding.ledger.mark_unknown(
+            alloc.reservation_id, reason=f"worker interrompu ({type(exc).__name__}) avant rapport d'usage"
+        )
+        raise
+    try:
+        settle_worker(binding, alloc, result)
+    except BudgetRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - la réservation reste ouverte à son montant (pas un zéro)
+        raise BudgetRefused(REFUSED_LEDGER, f"règlement du worker impossible : {exc}") from exc
+    return result
 
 
 def _capture_backend(workspace: Workspace, runner: Optional[CommandRunner], git_bin: str) -> Optional[TrustedGit]:

@@ -43,6 +43,10 @@ def test_metadata_declares_all_tables():
         "metrics",
         "checkpoints",
         "phase5_incidents",
+        "budget_scopes",
+        "budget_reservations",
+        "budget_events",
+        "budget_blocks",
     }
 
 

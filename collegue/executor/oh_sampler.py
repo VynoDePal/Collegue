@@ -79,15 +79,27 @@ def main() -> int:
     system = str(data.get("system", ""))
     prompt = str(data.get("prompt", ""))
 
+    # Sous budget STRICT (vague 2) l'hôte réserve des tokens AVANT ce lancement : la sortie est bornée par le
+    # ``max_output_tokens`` réservé et le SDK ne retente JAMAIS en interne (un retry non comptabilisé
+    # dépasserait la réservation). Les échecs remontent à l'hôte, qui les règle (usage inconnu).
+    strict = bool(data.get("strict"))
+    llm_kwargs = {}
+    if strict:
+        max_output = int(data.get("max_output_tokens") or 0)
+        if max_output <= 0:
+            print("oh_sampler: budget strict sans max_output_tokens : sortie non bornée, refusé", file=sys.stderr)
+            return 3
+        llm_kwargs["max_output_tokens"] = max_output
     llm = LLM.subscription_login(
         vendor="openai",
         model=model,
         open_browser=False,
         service_id="sampler",
-        num_retries=int(os.environ.get("OH_NUM_RETRIES", "6")),
+        num_retries=0 if strict else int(os.environ.get("OH_NUM_RETRIES", "6")),
         retry_min_wait=int(os.environ.get("OH_RETRY_MIN", "5")),
         retry_max_wait=int(os.environ.get("OH_RETRY_MAX", "60")),
         timeout=int(os.environ.get("OH_LLM_TIMEOUT", "180")),
+        **llm_kwargs,
     )
     messages = [
         Message(role="system", content=[TextContent(text=system)]),
