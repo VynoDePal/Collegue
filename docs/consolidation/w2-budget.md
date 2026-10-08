@@ -12,7 +12,7 @@
 
 ## 2. Le registre (`collegue/state/budget_ledger.py`)
 
-Quatre tables, migration additive `alembic/versions/0011_budget_ledger.py` (`revision="0011"`, `down_revision="0010"`) :
+Quatre tables, migration additive `collegue/migrations/versions/0011_budget_ledger.py` (`revision="0011"`, `down_revision="0010"`) :
 
 - `budget_scopes` — un compte par projet/cycle (ou par contexte de planification avant que le projet existe). Plafonds, mode `strict`, agrégats `consumed / reserved / unknown` (micro-USD et tokens), `blocked_reason` durable, `last_error`.
 - `budget_reservations` — une ligne par réservation, `reservation_id` **unique** et durable ; états `reserved → committed | released | unknown`.
@@ -150,7 +150,7 @@ Additive. Les métriques `run_cost_usd` / `run_tokens` sont des **snapshots cumu
 
 ## 13. Raccordements pour B / C
 
-- `alembic/versions/0011_budget_ledger.py` (crée aussi `budget_blocks` et les colonnes `claim_*`, avec le même import legacy que `create_all`) : à déplacer mécaniquement dans le package avec les révisions existantes (B ne le modifie pas).
+- `collegue/migrations/versions/0011_budget_ledger.py` (déplacée mécaniquement par C depuis `alembic/versions/`, blob inchangé ; crée aussi `budget_blocks` et les colonnes `claim_*`, avec le même import legacy que `create_all`) : à déplacer mécaniquement dans le package avec les révisions existantes (B ne le modifie pas).
 - `collegue/executor/oh_runner.py` est copié seul dans l'image : **il n'importe que la stdlib** (aucun nouveau module à embarquer) ; les marqueurs de sortie sont `[collegue-budget] armed|final|unknown|deadline` (son registre d'identités de modèles est une copie de `HOSTED_KNOWN_MODELS`, vérifiée égale par un test).
 - CI : `tests/test_budget_ledger_postgres.py` tourne dans le job `pytest` existant (les images `ubuntu-latest` fournissent PostgreSQL sous `/usr/lib/postgresql/*/bin`) ; pour être explicite, B peut ajouter un `services: postgres` et exporter `COLLEGUE_TEST_POSTGRES_URL`. **Ne pas utiliser le workflow nightly** (appels LLM réels).
 - Dockerfile sandbox : `coreutils timeout` est requis dans l'image (présent dans `python:3.12-slim`).

@@ -197,10 +197,10 @@ Codes de sortie : 0 succès, 1 échec de migration, 2 URL absente. Depuis un che
 (`alembic.ini` : `script_location = %(here)s/collegue/migrations`). API Python : `collegue.migrations.alembic_config(url)`,
 `upgrade(url, revision)`, `current_revision(url)`, `head_revisions()`.
 
-**Raccordement pour C (vague 2)** : A crée `alembic/versions/0011_budget_ledger.py`. À l'intégration, le déplacer
-mécaniquement vers **`collegue/migrations/versions/0011_budget_ledger.py`** (`git mv`) ; aucun autre changement. Les tests de
-A qui construisent `Config(...)` avec `script_location = REPO_ROOT / "alembic"` doivent pointer
-`REPO_ROOT / "collegue" / "migrations"` (ou utiliser `collegue.migrations.alembic_config(url)`), comme dans
+**Raccordement pour C (vague 2) — effectué à l'intégration** : la migration `0011_budget_ledger.py` créée par A dans
+`alembic/versions/` a été déplacée mécaniquement (`git mv`, blob inchangé) vers
+**`collegue/migrations/versions/0011_budget_ledger.py`** ; les tests de A qui construisaient `Config(...)` avec
+`script_location = REPO_ROOT / "alembic"` pointent désormais `REPO_ROOT / "collegue" / "migrations"`, comme
 `tests/test_project_state.py`. Le test `test_migration_graph_is_linear_and_existing_ids_are_unchanged` accepte une tête
 supplémentaire (`0011`) tant que le graphe reste linéaire.
 

@@ -304,7 +304,7 @@ def test_migration_0011_upgrades_postgres_imports_history_once_and_downgrades(pg
         conn.execute(text("CREATE SCHEMA public"))
     monkeypatch.setenv("STATE_DATABASE_URL", pg_url)
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
 
     command.upgrade(cfg, "0010")
     assert "budget_scopes" not in inspect(engine).get_table_names()
@@ -448,7 +448,7 @@ def test_legacy_import_migration_matches_lazy_import_on_real_postgres(pg_url, mo
     engine = _reset(pg_url)
     monkeypatch.setenv("STATE_DATABASE_URL", pg_url)
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
     command.upgrade(cfg, "0010")
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO projects (name, phase, status) VALUES ('legacy', '1', 'active')"))

@@ -889,7 +889,7 @@ def _migrate_sqlite_between(tmp_path, monkeypatch, seed):
     url = f"sqlite:///{tmp_path / 'migrated.db'}"
     monkeypatch.setenv("STATE_DATABASE_URL", url)
     cfg = Config(str(root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "alembic"))
+    cfg.set_main_option("script_location", str(root / "collegue" / "migrations"))
     command.upgrade(cfg, "0010")
     seed(url)
     command.upgrade(cfg, "0011")
