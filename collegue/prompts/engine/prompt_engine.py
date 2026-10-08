@@ -27,10 +27,17 @@ class PromptEngine:
         """
         self.library = PromptLibrary()
 
+        # Stockage par défaut = état modifiable sous COLLEGUE_HOME (jamais le site-packages) ; les
+        # catégories livrées dans le paquet servent alors de graine. Un chemin explicite est respecté tel quel.
+        self._use_packaged_seed = storage_path is None
         if storage_path is None:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            parent_dir = os.path.dirname(current_dir)
-            self.storage_path = os.path.join(parent_dir, "templates")
+            from ..legacy import ensure_default_import
+            from ..storage import default_storage_dir
+
+            # Mise à jour en place : reprend d'abord l'ancien état stocké dans le paquet (lecture seule, sans
+            # écrasement, idempotent), AVANT tout chargement ou amorçage depuis les graines.
+            ensure_default_import()
+            self.storage_path = str(default_storage_dir())
         else:
             self.storage_path = storage_path
 
@@ -41,6 +48,10 @@ class PromptEngine:
     def _load_library(self):
         """Charge la bibliothèque de prompts depuis le stockage."""
         categories_path = os.path.join(self.storage_path, "categories.json")
+        if not os.path.exists(categories_path) and self._use_packaged_seed:
+            from ..storage import seed_categories_file
+
+            categories_path = str(seed_categories_file())
         if os.path.exists(categories_path):
             try:
                 with open(categories_path, "r", encoding="utf-8") as f:

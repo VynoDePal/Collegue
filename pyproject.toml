@@ -8,6 +8,9 @@ requires-python = ">=3.11"
 authors = [
     {name = "VynoDePal", email = "kevyn.odjo@epitech.eu"},
 ]
+# Source UNIQUE des dépendances. Les verrous (locks/*.txt, hachés, universels 3.11/3.12) sont
+# GÉNÉRÉS depuis ce fichier par `python scripts/locks.py generate` ; `requirements*.txt` ne
+# font que les inclure. Voir docs/consolidation/w2-installation.md.
 dependencies = [
     "fastmcp[tasks,openai]>=3.0.0b2,<4.0.0",
     "fastapi>=0.116.1,!=0.136.3",
@@ -22,27 +25,99 @@ dependencies = [
     "google-genai>=1.62.0",
     "requests>=2.31.0",
     "psycopg2-binary>=2.9.9",
+    # État projet durable (C6) : store SQLAlchemy + migrations Alembic embarquées
+    # (collegue/migrations). Cible PostgreSQL (psycopg2) ; testable sur SQLite.
     "sqlalchemy>=2.0.0,<3.0.0",
     "alembic>=1.13.0,<2.0.0",
     "kubernetes>=29.0.0",
+    # Pin de sécurité (dépendance transitive de kubernetes) : aiohttp < 3.14.0 est
+    # affecté par CVE-2026-34993 (RCE via CookieJar.load) et CVE-2026-47265 (fuite de
+    # cookies sur redirection cross-origin). Compatible avec kubernetes (aiohttp<4).
+    "aiohttp>=3.14.0",
     "sentry-sdk[opentelemetry]>=2.49.0,<3.0.0",
     "opentelemetry-sdk>=1.28.0",
     "opentelemetry-api>=1.28.0",
 ]
 
 [project.optional-dependencies]
+# Dashboard Streamlit (docker-compose : même image que le serveur MCP).
+dashboard = [
+    "streamlit>=1.45.0",
+    "pandas>=2.2.0",
+]
+# Tests, lint et construction du wheel (CI Pytest).
 dev = [
     "pytest>=8.4.1",
     "pytest-asyncio>=0.24.0",
-    "ruff>=0.15.0",
+    "pytest-cov>=6.0.0",
+    "ruff==0.16.9",
+    "setuptools>=68.0",
 ]
 
+# Groupes PEP 735 : jamais installés avec le paquet, uniquement verrouillés pour la CI / les images.
+[dependency-groups]
+# Job CI « Ruff » : seul l'outil est installé (version figée par le verrou).
+# Version figée = celle des environnements de l'équipe : `ruff format --check` dépend de la version.
+lint = ["ruff==0.16.9"]
+# Job CI « Dependency audit » : l'outil d'audit, installé avec le runtime verrouillé.
+audit = ["pip-audit>=2.9.0"]
+# docker/sandbox/Dockerfile : runner de tests du gate + navigateur E2E + audit de dépendances.
+sandbox = [
+    # pytest 9.0 a retiré FixtureDef du namespace top-level : casse pytest-asyncio<0.24.
+    "pytest>=8.1,<9",
+    "pytest-asyncio==0.23.6",
+    "playwright>=1.40",
+    "pip-audit>=2.9.0",
+]
+# docker/sandbox/Dockerfile.openhands : closure OpenHands + runner de tests + stack web courante.
+# Le patch scripts/patch_openhands_gemma4_terminal.py exige openhands-ai 1.7.0, SDK/tools 1.19.1
+# (transitifs, verrouillés) et lmnr 0.7.52 : toute dérive casse le build, jamais le patch.
+sandbox-openhands = [
+    "openhands-ai==1.7.0",
+    # lmnr 0.7.53 a retiré observe(rollout_entrypoint=…) attendu par openhands 1.7.0.
+    "lmnr==0.7.52",
+    "pytest>=8.1,<9",
+    "pytest-asyncio==0.23.6",
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    "bcrypt<4.1",
+    "python-multipart",
+    "email-validator",
+    "pydantic-settings",
+    "alembic",
+    "psycopg2-binary",
+    "aiosqlite",
+    "httpx",
+    "pip-audit>=2.9.0",
+]
+
+[project.scripts]
+collegue-migrate = "collegue.migrations.__main__:main"
+
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["collegue*"]
+# Les dossiers de données (skills, graines de prompts, versions de migrations) ne sont pas des paquets
+# Python : ils sont embarqués par package-data ci-dessous, pas découverts comme espaces de noms.
+exclude = [
+    "collegue.skills*",
+    "collegue.prompts.templates.tools*",
+    "collegue.migrations.versions*",
+]
+
+# Ressources NON Python livrées dans le wheel et résolues via importlib.resources (collegue/pkgdata.py).
+[tool.setuptools.package-data]
+collegue = [
+    "skills/**/*.md",
+    "prompts/templates/categories.json",
+    "prompts/templates/tools/**/*.yaml",
+    "tools/rules/*.yaml",
+    "migrations/script.py.mako",
+    "migrations/versions/*.py",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -41,7 +41,13 @@ class PromptVersion:
 
 class PromptVersionManager:
     def __init__(self, storage_path: str = None):
-        self.storage_path = storage_path or os.path.join(os.path.dirname(__file__), "..", "versions")
+        if storage_path is None:
+            from ..legacy import ensure_default_import
+            from ..storage import default_versions_dir
+
+            ensure_default_import()  # reprise de l'ancien historique (une fois par processus, idempotent)
+            storage_path = str(default_versions_dir())
+        self.storage_path = storage_path
         Path(self.storage_path).mkdir(parents=True, exist_ok=True)
         self.versions_file = os.path.join(self.storage_path, "versions.json")
         self.versions_cache: Dict[str, List[PromptVersion]] = {}

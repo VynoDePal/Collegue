@@ -18,7 +18,9 @@ def get_template_path(tool_name: str, version: str = "default") -> Optional[Path
     Returns:
         Path vers le fichier template ou None si non trouvé
     """
-    template_dir = Path(__file__).parent / "tools" / tool_name
+    from ..storage import seed_templates_dir
+
+    template_dir = seed_templates_dir() / tool_name
     template_file = template_dir / f"{version}.yaml"
 
     if template_file.exists():
@@ -33,7 +35,9 @@ def list_available_templates() -> Dict[str, list]:
     Returns:
         Dict avec les outils comme clés et les versions disponibles comme valeurs
     """
-    tools_dir = Path(__file__).parent / "tools"
+    from ..storage import seed_templates_dir
+
+    tools_dir = seed_templates_dir()
     available = {}
 
     if tools_dir.exists():
