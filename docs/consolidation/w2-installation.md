@@ -135,6 +135,21 @@ temporaire + renommage : aucun fichier tronqué, aucun résidu `.tmp`) ; la repr
 `$COLLEGUE_HOME/prompts/.legacy-import.json`, verrou inter-processus) et ne ressuscite pas ce que l'opérateur a supprimé du
 nouvel état après la première reprise.
 
+**Validation avant publication** (le nouvel état sain n'est jamais empoisonné) :
+- *Historique* : chaque clé de l'ancien `versions.json` doit satisfaire le **contrat réel du chargeur**
+  (`PromptVersionManager._load_versions`) : une liste d'objets acceptés par `PromptVersion.from_dict`. Une seule entrée invalide
+  (`{"bad": [{}]}`, valeur non liste comme le format de métriques, élément non objet, champ inconnu ou manquant) ferait vider
+  **tout** le cache du chargeur puis supprimer l'historique sain à la sauvegarde suivante : la clé est donc refusée et
+  signalée, les clés valides sont reprises. Un `versions.json` du **nouvel** état déjà invalide n'est jamais réécrit (erreur
+  signalée).
+- *Templates* : l'**identifiant métier** (`id`) protège le nouvel état quel que soit le nom de fichier : un template ancien dont
+  l'id existe déjà dans le nouvel état (même sous un autre nom de fichier) n'est pas écrit (conflit consigné, ou « identique »
+  si le contenu est le même). Deux fichiers anciens de même id : le premier (ordre alphabétique) est repris, l'autre reste dans
+  l'ancien dossier et est consigné. L'`id` est obligatoire et doit être utilisable comme nom de fichier ; un template est publié
+  sous `<id>.json` (le moteur le retrouve/supprime ainsi). Un `id` absent ou contenant `/`, `\`, `.`/`..` est refusé.
+- *Catégories* : chaque entrée est validée (`PromptCategory`) ; les invalides sont signalées, les valides reprises.
+- Toute incohérence rend la reprise `incomplete` (jamais « complete » à tort) et elle est retentée au démarrage suivant.
+
 **Fichiers anciens invalides ou reprise interrompue** : un fichier illisible ou au schéma invalide est **signalé** (journal ERROR,
 `errors` du marqueur, code de sortie 1 en CLI), laissé intact, et les fichiers valides sont repris quand même. Le marqueur reste
 `incomplete` : la reprise est retentée à chaque démarrage jusqu'à réparation, puis passe à `complete`. Une interruption

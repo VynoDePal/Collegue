@@ -199,6 +199,39 @@ def _load_marker(path: Path) -> dict:
     return {"version": MARKER_VERSION, "sources": {}}
 
 
+def _template_id(data: dict) -> str:
+    """Identifiant métier d'un template ancien : obligatoire (le moteur en génèrerait un au hasard à chaque chargement) et
+    utilisable comme nom de fichier ``<id>.json`` (aucun séparateur de chemin, ni ``.``/``..``)."""
+    template_id = data.get("id")
+    if not isinstance(template_id, str) or not template_id.strip():
+        raise ValueError("« id » manquant ou vide")
+    if (
+        template_id in {".", ".."}
+        or any(c in template_id for c in ("/", "\\", "\x00"))
+        or template_id != template_id.strip()
+    ):
+        raise ValueError(f"« id » inutilisable comme nom de fichier : {template_id!r}")
+    return template_id
+
+
+def _version_entries_problem(entries: Any) -> Optional[str]:
+    """None si ``entries`` satisfait le contrat du chargeur (``PromptVersionManager._load_versions``) : une liste d'objets
+    acceptés par ``PromptVersion.from_dict``. Sinon la raison, car le chargeur vide TOUT son cache sur une seule entrée
+    invalide (puis la sauvegarde suivante supprimerait l'historique sain)."""
+    from .engine.versioning import PromptVersion
+
+    if not isinstance(entries, list):
+        return f"liste attendue, {type(entries).__name__} reçu"
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            return f"élément {index}: objet attendu, {type(entry).__name__} reçu"
+        try:
+            PromptVersion.from_dict(entry)
+        except Exception as exc:  # noqa: BLE001
+            return f"élément {index}: {type(exc).__name__}: {exc}"
+    return None
+
+
 # --- reprise -------------------------------------------------------------------------------------------
 
 
@@ -239,53 +272,83 @@ def _import_locked(report: ImportReport, marker: dict, marker_path: Path) -> Non
     categories_dest = dest / "categories.json"
     write = not report.dry_run
 
-    # 1) templates -------------------------------------------------------------------------------
+    # 1) templates : l'IDENTIFIANT métier protège le nouvel état, quel que soit le nom de fichier ---------
+    dest_by_id: dict[str, tuple[str, dict]] = {}
     dest_names: dict[str, str] = {}
     if templates_dest.is_dir():
-        for existing in templates_dest.glob("*.json"):
+        for existing in sorted(templates_dest.glob("*.json")):
             try:
                 data = _read_json(existing)
-                dest_names[str(data.get("name"))] = str(data.get("id", existing.stem))
-            except (OSError, ValueError, AttributeError):
-                continue  # un fichier illisible du nouvel état n'est pas notre affaire et n'est jamais touché
+                dest_by_id.setdefault(str(data["id"]), (existing.name, data))
+                dest_names[str(data.get("name"))] = str(data["id"])
+            except (OSError, ValueError, AttributeError, KeyError, TypeError):
+                continue  # fichier du nouvel état illisible ou sans id : jamais touché ; le moteur ne le charge pas non plus
+    batch_ids: dict[str, str] = {}  # id -> fichier source déjà retenu dans ce lot
     for path in sorted(templates_src.glob("*.json")) if templates_src.is_dir() else []:
         try:
             raw = path.read_bytes()
             data = _validate_template(json.loads(raw.decode("utf-8")))
+            template_id = _template_id(data)
         except Exception as exc:  # noqa: BLE001 - tout fichier invalide est consigné, jamais ignoré en silence
             report.errors.append(f"templates/{path.name}: {type(exc).__name__}: {exc}")
             continue
-        target = templates_dest / path.name
-        if target.exists():
-            if target.read_bytes() == raw:
+        if template_id in dest_by_id:
+            existing_name, existing_data = dest_by_id[template_id]
+            if existing_data == data:
                 report.identical += 1
             else:
-                report.conflicts.append(f"template {data.get('id', path.stem)}: le nouvel état est conservé")
+                report.conflicts.append(
+                    f"template {template_id} ({path.name}): id déjà présent dans le nouvel état ({existing_name}), conservé"
+                )
             continue
-        name, template_id = str(data.get("name")), str(data.get("id", path.stem))
+        if template_id in batch_ids:
+            report.conflicts.append(
+                f"template {template_id} ({path.name}): même id que {batch_ids[template_id]} déjà retenu, "
+                "laissé dans l'ancien dossier"
+            )
+            continue
+        name = str(data.get("name"))
         if name in dest_names and dest_names[name] != template_id:
             report.conflicts.append(f"template {template_id}: nom « {name} » déjà présent dans le nouvel état")
             continue
+        target = templates_dest / f"{template_id}.json"  # le moteur retrouve/supprime un template par <id>.json
+        if target.exists():
+            report.conflicts.append(f"template {template_id} ({path.name}): {target.name} existe déjà, conservé")
+            continue
+        batch_ids[template_id] = path.name
         if write:
             _atomic_write(target, raw)
         report.templates += 1
 
-    # 2) catégories : ajout des identifiants absents -------------------------------------------------
+    # 2) catégories : ajout des identifiants absents, entrée par entrée ---------------------------------
     if categories_src.is_file():
+        legacy_categories: dict = {}
         try:
-            legacy_categories = _read_json(categories_src)
-            if not isinstance(legacy_categories, dict):
+            loaded = _read_json(categories_src)
+            if not isinstance(loaded, dict):
                 raise ValueError("objet JSON attendu")
-            from .engine.models import PromptCategory
-
-            for cat in legacy_categories.values():
-                PromptCategory(**cat)
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"templates/categories.json: {type(exc).__name__}: {exc}")
         else:
+            from .engine.models import PromptCategory
+
+            for cat_id, cat in loaded.items():
+                try:
+                    if not isinstance(cat, dict):
+                        raise TypeError("objet JSON attendu")
+                    PromptCategory(**cat)
+                except Exception as exc:  # noqa: BLE001
+                    report.errors.append(
+                        f"templates/categories.json: catégorie « {cat_id} » invalide ({type(exc).__name__}: {exc})"
+                    )
+                else:
+                    legacy_categories[cat_id] = cat
+            current: Optional[dict]
             if categories_dest.is_file():
                 try:
                     current = _read_json(categories_dest)
+                    if not isinstance(current, dict):
+                        raise ValueError("objet JSON attendu")
                 except (OSError, ValueError) as exc:
                     current = None
                     report.errors.append(f"categories.json (nouvel état) illisible, non modifié: {exc}")
@@ -293,34 +356,48 @@ def _import_locked(report: ImportReport, marker: dict, marker_path: Path) -> Non
                 from .storage import seed_categories_file
 
                 current = _read_json(seed_categories_file())
-            if isinstance(current, dict):
+            if current is not None:
                 additions = {k: v for k, v in legacy_categories.items() if k not in current}
-                same = [k for k in legacy_categories if k in current and current[k] != legacy_categories[k]]
-                report.conflicts += [f"catégorie {k}: le nouvel état est conservé" for k in same]
+                report.conflicts += [
+                    f"catégorie {k}: le nouvel état est conservé"
+                    for k in legacy_categories
+                    if k in current and current[k] != legacy_categories[k]
+                ]
                 if additions:
                     if write:
                         merged = {**current, **additions}
                         _atomic_write(categories_dest, json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8"))
                     report.category_ids += len(additions)
 
-    # 3) historique de versions : fusion par clé de premier niveau -------------------------------
+    # 3) historique de versions : contrat RÉEL du chargeur, validé avant toute publication ----------------
     if versions_src.is_file():
         try:
-            legacy_versions = _read_json(versions_src)
-            if not isinstance(legacy_versions, dict):
+            loaded_versions = _read_json(versions_src)
+            if not isinstance(loaded_versions, dict):
                 raise ValueError("objet JSON attendu")
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"versions/versions.json: {type(exc).__name__}: {exc}")
         else:
+            legacy_versions: dict = {}
+            for key, entries in loaded_versions.items():
+                problem = _version_entries_problem(entries)
+                if problem:
+                    report.errors.append(f"versions/versions.json: clé « {key} » invalide ({problem})")
+                else:
+                    legacy_versions[key] = entries
             current_versions: Optional[dict] = {}
             if versions_dest.is_file():
                 try:
                     current_versions = _read_json(versions_dest)
                     if not isinstance(current_versions, dict):
                         raise ValueError("objet JSON attendu")
+                    for key, entries in current_versions.items():
+                        problem = _version_entries_problem(entries)
+                        if problem:
+                            raise ValueError(f"clé « {key} » invalide ({problem})")
                 except Exception as exc:  # noqa: BLE001
                     current_versions = None
-                    report.errors.append(f"versions.json (nouvel état) illisible, non modifié: {exc}")
+                    report.errors.append(f"versions.json (nouvel état) invalide, non modifié: {exc}")
             if current_versions is not None:
                 additions = {k: v for k, v in legacy_versions.items() if k not in current_versions}
                 report.conflicts += [

@@ -472,3 +472,272 @@ def test_explicit_cli_rejects_a_missing_source_and_reports_errors_with_a_nonzero
     broken = _cli(world, "import", "--from", str(world["prompts"]))
     assert broken.returncode == 1, "une reprise incomplète ne doit pas sortir en succès"
     assert "broken.json" in broken.stderr
+
+
+# --- validation interne de l'ancien état et collisions d'identifiants (garanties du NOUVEL état) -----------------------
+#
+# Défauts relevés par le contre-test du manager : (1) un ancien ``versions.json`` JSON-valide mais dont la structure
+# interne est invalide (``{"bad": [{}]}``) était fusionné, puis ``PromptVersionManager`` échouait au chargement, vidait
+# TOUT son cache et la sauvegarde suivante supprimait l'historique sain ; (2) un ancien template de même ``id`` métier mais
+# de nom de fichier différent était écrit à côté de l'existant (deux objets ``id=shared``, résultat dépendant de l'ordre).
+
+
+def _version_dict(template_id: str, content: str, version: str = "1") -> dict:
+    return {
+        "id": f"{template_id}-{version}",
+        "template_id": template_id,
+        "version": version,
+        "content": content,
+        "variables": [],
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+    }
+
+
+def _dest_with_history(tmp_path: Path, template_id: str = "existing", content: str = "PRESERVE NEW HISTORY") -> Path:
+    from collegue.prompts.engine.versioning import PromptVersionManager
+
+    dest = tmp_path / "dest"
+    PromptVersionManager(str(dest / "versions")).create_version(template_id, content, [], version="4")
+    return dest
+
+
+def _source_versions(tmp_path: Path, payload) -> Path:
+    source = tmp_path / "source"
+    (source / "versions").mkdir(parents=True)
+    (source / "versions" / "versions.json").write_text(json.dumps(payload), encoding="utf-8")
+    return source
+
+
+def _existing_history(dest: Path, template_id: str = "existing") -> list[str]:
+    from collegue.prompts.engine.versioning import PromptVersionManager
+
+    return [v.content for v in PromptVersionManager(str(dest / "versions")).get_all_versions(template_id)]
+
+
+NESTED_INVALID_HISTORIES = {
+    "entrée vide": {"bad": [{}]},
+    "valeur non liste (métriques)": {"bad": {"1.0": {"score": 1}}},
+    "texte": {"bad": "pas une liste"},
+    "nul": {"bad": None},
+    "éléments non objets": {"bad": [1, "x"]},
+    "champ inconnu": {"bad": [{**_version_dict("bad", "c"), "champ_inconnu": 1}]},
+    "champ obligatoire manquant": {"bad": [{k: v for k, v in _version_dict("bad", "c").items() if k != "content"}]},
+}
+
+
+@pytest.mark.parametrize("payload", NESTED_INVALID_HISTORIES.values(), ids=NESTED_INVALID_HISTORIES.keys())
+def test_nested_invalid_history_never_poisons_the_healthy_new_history(tmp_path: Path, payload) -> None:
+    from collegue.prompts.engine.versioning import PromptVersionManager
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest = _dest_with_history(tmp_path)
+    versions_file = dest / "versions" / "versions.json"
+    before = versions_file.read_bytes()
+    source = _source_versions(tmp_path, payload)
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert report.errors and not report.complete, "une structure interne invalide ne peut pas être « complete »"
+    assert any("bad" in e and "versions.json" in e for e in report.errors), report.errors
+    assert versions_file.read_bytes() == before, "l'historique sain n'est pas réécrit avec une entrée invalide"
+    assert _existing_history(dest) == ["PRESERVE NEW HISTORY"]
+    # Même une sauvegarde ultérieure (nouvelle version) conserve l'historique existant sur disque.
+    PromptVersionManager(str(dest / "versions")).create_version("later", "LATER", [], version="1")
+    assert "existing" in json.loads(versions_file.read_text(encoding="utf-8"))
+    marker_data = json.loads((dest / ".legacy-import.json").read_text(encoding="utf-8"))
+    assert marker_data["sources"][str(source.resolve())]["status"] == "incomplete"
+
+
+def test_valid_history_keys_are_imported_even_when_a_sibling_key_is_invalid_then_the_repair_completes(
+    tmp_path: Path,
+) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest = _dest_with_history(tmp_path)
+    source = _source_versions(tmp_path, {"good": [_version_dict("good", "BON HISTORIQUE")], "bad": [{}]})
+
+    first = import_legacy_state(source, dest=dest)
+
+    assert not first.complete and first.version_keys == 1
+    assert _existing_history(dest, "good") == ["BON HISTORIQUE"] and _existing_history(dest) == ["PRESERVE NEW HISTORY"]
+    assert not any("good" in e for e in first.errors)
+
+    (source / "versions" / "versions.json").write_text(
+        json.dumps({"good": [_version_dict("good", "BON HISTORIQUE")], "bad": [_version_dict("bad", "REPARE")]}),
+        encoding="utf-8",
+    )
+    second = import_legacy_state(source, dest=dest)
+
+    assert second.complete and second.errors == []
+    assert _existing_history(dest, "bad") == ["REPARE"]
+    assert _existing_history(dest, "good") == ["BON HISTORIQUE"], "pas de doublon à la reprise"
+    assert _existing_history(dest) == ["PRESERVE NEW HISTORY"]
+
+
+def test_new_history_that_is_itself_invalid_is_left_untouched_and_reported(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest = tmp_path / "dest"
+    (dest / "versions").mkdir(parents=True)
+    broken = json.dumps({"x": [{}]}).encode("utf-8")
+    (dest / "versions" / "versions.json").write_bytes(broken)
+    source = _source_versions(tmp_path, {"good": [_version_dict("good", "H")]})
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert not report.complete and any("nouvel état" in e for e in report.errors)
+    assert (dest / "versions" / "versions.json").read_bytes() == broken
+
+
+def test_valid_nested_history_is_imported_with_every_field(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest = tmp_path / "dest"
+    entry = {**_version_dict("t", "CONTENU"), "performance_score": 0.5, "is_active": True, "metadata": {"k": "v"}}
+    source = _source_versions(tmp_path, {"t": [entry]})
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert report.complete and report.version_keys == 1
+    assert json.loads((dest / "versions" / "versions.json").read_text(encoding="utf-8"))["t"] == [entry]
+
+
+def _write_template(directory: Path, filename: str, **fields) -> dict:
+    data = {"id": "shared", "name": "N", "description": "d", "template": "T", "category": "c", **fields}
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / filename).write_text(json.dumps(data), encoding="utf-8")
+    return data
+
+
+def test_same_business_id_under_another_filename_does_not_override_the_new_template(tmp_path: Path) -> None:
+    from collegue.prompts.engine.prompt_engine import PromptEngine
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest = tmp_path / "dest"
+    _write_template(dest / "templates", "shared.json", name="NewName", template="KEEP NEW")
+    source = tmp_path / "source"
+    _write_template(source / "templates" / "templates", "zz-different-filename.json", name="OldName", template="OLD")
+
+    report = import_legacy_state(source, dest=dest)
+
+    ids = [json.loads(p.read_text(encoding="utf-8"))["id"] for p in (dest / "templates").glob("*.json")]
+    assert ids == ["shared"], (
+        "un seul objet id=shared : l'identifiant protège le nouvel état quel que soit le nom de fichier"
+    )
+    assert any("shared" in c and "id" in c for c in report.conflicts), report.conflicts
+    assert report.templates == 0 and report.complete
+    assert PromptEngine(str(dest)).get_template("shared").template == "KEEP NEW"
+    assert (source / "templates" / "templates" / "zz-different-filename.json").exists(), "la source reste intacte"
+
+
+def test_identical_template_under_another_filename_is_counted_identical_not_duplicated(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    _write_template(dest / "templates", "shared.json")
+    _write_template(source / "templates" / "templates", "copy-of-shared.json")
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert report.identical == 1 and report.templates == 0 and report.conflicts == []
+    assert [p.name for p in (dest / "templates").glob("*.json")] == ["shared.json"]
+
+
+def test_two_source_files_with_the_same_id_import_one_and_report_the_other(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    directory = source / "templates" / "templates"
+    _write_template(directory, "a-first.json", id="dup", name="First", template="PREMIER")
+    _write_template(directory, "b-second.json", id="dup", name="Second", template="SECOND")
+
+    report = import_legacy_state(source, dest=dest)
+
+    written = [json.loads(p.read_text(encoding="utf-8")) for p in (dest / "templates").glob("*.json")]
+    assert [(w["id"], w["template"]) for w in written] == [("dup", "PREMIER")], "ordre déterministe : le premier gagne"
+    assert any("dup" in c and "b-second.json" in c for c in report.conflicts), report.conflicts
+    assert (directory / "b-second.json").exists(), "rien n'est perdu : l'autre reste dans l'ancien dossier"
+    again = import_legacy_state(source, dest=dest)
+    assert again.already_done and len(list((dest / "templates").glob("*.json"))) == 1
+
+
+def test_imported_template_is_published_under_its_id_filename(tmp_path: Path) -> None:
+    from collegue.prompts.engine.prompt_engine import PromptEngine
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    _write_template(source / "templates" / "templates", "renamed-by-hand.json", id="real-id", template="X")
+
+    import_legacy_state(source, dest=dest)
+
+    assert (dest / "templates" / "real-id.json").is_file() and not (
+        dest / "templates" / "renamed-by-hand.json"
+    ).exists()
+    engine = PromptEngine(str(dest))
+    assert engine.delete_template("real-id") and not (dest / "templates" / "real-id.json").exists()
+
+
+@pytest.mark.parametrize("bad_id", ["../evil", "a/b", "..", ".", "", "x\\y"])
+def test_unsafe_or_missing_template_ids_are_rejected_and_never_write_outside(tmp_path: Path, bad_id: str) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    _write_template(source / "templates" / "templates", "weird.json", id=bad_id)
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert not report.complete and any("weird.json" in e for e in report.errors)
+    assert not (tmp_path / "evil.json").exists()
+    assert not list((dest / "templates").glob("*.json")) if (dest / "templates").exists() else True
+
+
+def test_template_without_an_id_is_reported_not_given_a_random_one(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    directory = source / "templates" / "templates"
+    directory.mkdir(parents=True)
+    (directory / "noid.json").write_text(
+        json.dumps({"name": "N", "description": "d", "template": "T", "category": "c"}), encoding="utf-8"
+    )
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert not report.complete and any("noid.json" in e and "id" in e for e in report.errors)
+
+
+def test_nested_invalid_category_entries_are_reported_and_valid_ones_imported(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    (source / "templates").mkdir(parents=True)
+    (source / "templates" / "categories.json").write_text(
+        json.dumps({"ok": {"id": "ok", "name": "OK", "description": "d"}, "bad": {"id": 1}, "str": "x"}),
+        encoding="utf-8",
+    )
+
+    report = import_legacy_state(source, dest=dest)
+
+    assert not report.complete and report.category_ids == 1
+    reported = " ".join(report.errors)
+    assert "bad" in reported and "str" in reported
+    merged = json.loads((dest / "categories.json").read_text(encoding="utf-8"))
+    assert "ok" in merged and "bad" not in merged and "str" not in merged
+
+
+def test_dry_run_reports_the_same_collisions_as_a_real_run_without_writing(tmp_path: Path) -> None:
+    from collegue.prompts.legacy import import_legacy_state
+
+    dest, source = tmp_path / "dest", tmp_path / "source"
+    directory = source / "templates" / "templates"
+    _write_template(directory, "a.json", id="dup", template="PREMIER")
+    _write_template(directory, "b.json", id="dup", template="SECOND")
+    _write_template(directory, "c.json", id="solo", name="Solo")
+
+    dry = import_legacy_state(source, dest=dest, dry_run=True)
+
+    assert dry.templates == 2 and len(dry.conflicts) == 1 and "b.json" in dry.conflicts[0]
+    assert not dest.exists(), "dry-run : aucune écriture"
+    real = import_legacy_state(source, dest=dest)
+    assert (real.templates, len(real.conflicts)) == (dry.templates, len(dry.conflicts))
