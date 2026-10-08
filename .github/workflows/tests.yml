@@ -17,10 +17,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: locks/lint.txt
 
-      - name: Install ruff
-        run: pip install "ruff>=0.15.0"
+      # Ruff est installé depuis le verrou haché (pyproject.toml -> locks/lint.txt) : `ruff format --check`
+      # dépend de la version, elle ne doit pas changer avec la date.
+      - name: Install ruff (locked)
+        run: pip install --require-hashes --no-deps -r locks/lint.txt
 
       - name: Run ruff check
         run: ruff check collegue tests
@@ -35,6 +37,24 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    # Service PostgreSQL ÉPHÉMÈRE du job (détruit avec lui) : la preuve de réservations concurrentes du registre de
+    # budget exige un vrai PostgreSQL, pas un mock. Le mot de passe est celui du service jetable, pas un secret.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      COLLEGUE_TEST_POSTGRES_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -43,14 +63,41 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+          cache-dependency-path: locks/dev.txt
 
-      - name: Install dependencies
+      # pyproject.toml est la source unique ; locks/dev.txt (haché, universel 3.11/3.12) en est dérivé.
+      - name: Install dependencies (locked)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install --require-hashes --no-deps -r locks/dev.txt
+
+      - name: Verify locks match pyproject.toml
+        run: python scripts/locks.py check
+
+      # Preuve PostgreSQL RÉELLE, dans ce job requis : un échec, un test sauté ou désélectionné, une collecte
+      # tronquée ou un service absent rendent le job rouge (le rapport JUnit doit couvrir tout ce qui est collecté).
+      # Le plancher (21) est un minimum : à relever si des cas sont ajoutés, jamais à abaisser pour masquer une perte.
+      - name: PostgreSQL budget ledger - real concurrency proof
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          test -n "${COLLEGUE_TEST_POSTGRES_URL:-}"
+          # -o addopts= : mêmes options pour la collecte et l'exécution (le « -q » du pyproject masquerait les identifiants,
+          # et aucun marqueur ne doit pouvoir désélectionner cette preuve).
+          expected="$(pytest tests/test_budget_ledger_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests PostgreSQL collectés: ${expected}"
+          pytest tests/test_budget_ledger_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-budget.xml
+          python scripts/ci_require_junit.py pg-budget.xml --min-tests 21 --expect-tests "${expected}"
+
+      - name: Upload PostgreSQL proof report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-budget-junit-${{ matrix.python-version }}
+          path: pg-budget.xml
+          if-no-files-found: warn
 
       - name: Run pytest with coverage
         env:
@@ -75,7 +122,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: locks/audit.txt
 
       # pip-audit --strict audite tout l'environnement, pip/setuptools compris.
       # Le pip par défaut du runner traîne des CVE déjà corrigées en amont :
@@ -83,14 +130,34 @@ jobs:
       - name: Upgrade pip toolchain
         run: python -m pip install --upgrade pip setuptools
 
-      - name: Install pip-audit
-        run: pip install pip-audit
+      # Runtime + dashboard + pip-audit, verrouillés et hachés (locks/audit.txt).
+      - name: Install audited dependencies (locked)
+        run: pip install --require-hashes --no-deps -r locks/audit.txt
 
-      - name: Install project dependencies
-        run: pip install -r requirements.txt
+      # Source -> verrou : une dérive de pyproject.toml sans régénération échoue ici (hors ligne), puis
+      # une résolution fraîche à la date de gel doit reproduire exactement les verrous commités.
+      # uv est épinglé À LA VERSION EXACTE de scripts/locks.py (UV_VERSION) : pip-audit audite ensuite cet
+      # environnement, uv compris (0.9.28 était affecté par GHSA-pjjw-68hj-v9mw et GHSA-4gg8-gxpx-9rph).
+      - name: Verify locks match pyproject.toml
+        run: |
+          pip install uv==0.11.33
+          python scripts/locks.py check --recompile
 
       - name: Run pip-audit
         run: pip-audit --strict --desc
+
+      # Wheel construit depuis les fichiers du dépôt, installé NON éditable dans un venv vierge avec le
+      # verrou runtime, puis exécuté hors checkout (ressources, migrations jusqu'à head, serveur sans LLM).
+      - name: Verify the built wheel in a clean environment
+        run: python scripts/verify_wheel.py --lock runtime --report wheel-report.json
+
+      - name: Upload wheel verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-report
+          path: wheel-report.json
+          if-no-files-found: warn
 
   docker-build:
     name: Docker build

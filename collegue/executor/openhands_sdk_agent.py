@@ -15,14 +15,17 @@ le workspace ; la **capture autoritative du diff** revient à l'exécuteur Coll�
 
 from __future__ import annotations
 
+import json
 from typing import List, Optional
 
 from collegue.core.llm.roles import LLMRole, resolve_role
 from collegue.executor.agent import AgentResult, IssueSpec
-from collegue.executor.openhands_agent import parse_usage_from_logs
+from collegue.executor.openhands_agent import parse_usage_from_logs, usage_status_from_run
 
 # Chemin du runner headless baké dans l'image sandbox (cf. Dockerfile.openhands).
 RUNNER_PATH = "/opt/oh_runner.py"
+# Repli par défaut du runner en mode clé API (``OH_FALLBACK_MODELS`` non fourni par le sandbox).
+RUNNER_DEFAULT_FALLBACK = "gemini/gemma-4-26b-a4b-it"
 
 
 class OHSdkAgent:
@@ -30,7 +33,17 @@ class OHSdkAgent:
 
     ``sandbox`` expose ``run_command(argv, workspace) -> SandboxResult`` (duck-typing).
     ``role`` (défaut ``CODER``) résout le modèle via :func:`resolve_role`.
+
+    **Budget (vague 2)** : sous une allocation (``worker_budget.current_allocation()``), le runner
+    reçoit plafonds, échéance et tarifs de chaque modèle de la chaîne et contrôle chaque appel AVANT
+    émission, retries et replis compris ; le conteneur s'auto-limite à l'échéance (``timeout``) même si
+    le client Docker meurt. ``"in-runner"`` borne les appels du framework d'agent, PAS une commande du
+    workspace qui contacterait librement le fournisseur avec la même clé : avec une clé facturable
+    ce n'est donc pas une barrière effective et le mode strict sous plafond le REFUSE (abonnement :
+    0 $/token, accepté ; mode ``advisory`` : disponible). Voir ``docs/consolidation/w2-budget.md``.
     """
+
+    budget_enforcement = "in-runner"
 
     def __init__(
         self,
@@ -61,6 +74,50 @@ class OHSdkAgent:
             model = "gemma-4-31b-it"
         return model if "/" in model else f"gemini/{model}"
 
+    def model_chain(self) -> List[str]:
+        """Modèles que le runner peut utiliser, dans l'ordre (principal puis replis), tels que le runner les nomme.
+
+        Reproduit le choix de l'environnement du sandbox (``pilot.runtime._coder_sandbox_env``) : abonnement →
+        modèle nu + ``CODER_SUBSCRIPTION_FALLBACK`` ; clé API → ``litellm_model()`` + repli par défaut du runner.
+        """
+        settings = self._settings
+        if bool(getattr(settings, "CODER_SUBSCRIPTION", False)):
+            primary = str(getattr(settings, "CODER_SUBSCRIPTION_MODEL", "gpt-5.5") or "gpt-5.5")
+            fallbacks = str(getattr(settings, "CODER_SUBSCRIPTION_FALLBACK", "gpt-5.4") or "gpt-5.4")
+        else:
+            primary, fallbacks = self.litellm_model(), RUNNER_DEFAULT_FALLBACK
+        chain = [primary]
+        for item in fallbacks.split(","):
+            if item.strip() and item.strip() not in chain:
+                chain.append(item.strip())
+        return chain
+
+    def _budget_args(self, alloc) -> List[str]:
+        """Arguments d'allocation du runner (vide sans allocation : comportement historique)."""
+        if alloc is None:
+            return []
+        args: List[str] = []
+        if alloc.max_micro_usd:
+            args += ["--budget-usd", f"{alloc.max_usd:.6f}"]
+        if alloc.max_tokens:
+            args += ["--budget-tokens", str(alloc.max_tokens)]
+        if alloc.deadline_epoch is not None:
+            args += ["--deadline-epoch", f"{alloc.deadline_epoch:.3f}"]
+        if alloc.prices:
+            # Tarif de CHAQUE modèle de la chaîne (repli compris) : un repli n'hérite pas du prix du principal.
+            table = {name: [float(price_in), float(price_out)] for name, price_in, price_out in alloc.prices}
+            args += ["--prices", json.dumps(table, sort_keys=True)]
+        if alloc.byte_bounded_models:
+            args += ["--byte-bounded-models", ",".join(alloc.byte_bounded_models)]
+        if alloc.strict:
+            args.append("--strict")
+        if not alloc.billable:
+            args.append("--no-billing")
+        if not args:
+            # Allocation sans plafond ni échéance : armer quand même la garde (marqueurs d'usage complets).
+            args += ["--budget-tokens", str(10**12)]
+        return args
+
     def build_command(self, issue: IssueSpec) -> List[str]:
         """Argv lançant le runner headless OpenHands sur le workspace (pur, testable).
 
@@ -69,11 +126,14 @@ class OHSdkAgent:
         est ``issue.to_prompt()`` (déjà sanitizée). On passe un **argv** (pas de ``sh -c``) :
         aucune injection shell.
         """
+        from collegue.executor.worker_budget import current_allocation
+
         return [
             self._python_bin,
             self._runner_path,
             "--max-iterations",
             str(self._max_iterations),
+            *self._budget_args(current_allocation()),
             "-t",
             issue.to_prompt(),
         ]
@@ -87,9 +147,22 @@ class OHSdkAgent:
         ``[collegue-usage]`` émis par le runner remonte au ledger du run (#441/#464/#504 :
         ``cost_authoritative`` = abonnement non facturé → coût 0 à NE PAS re-tarifer #484).
         """
-        result = self._sandbox.run_command(self.build_command(issue), workspace)
+        from collegue.executor.worker_budget import current_allocation
+
+        alloc = current_allocation()
+        run_kwargs = {}
+        if alloc is not None and alloc.runtime_seconds is not None and _accepts_timeout(self._sandbox):
+            # Échéance d'allocation : le conteneur s'auto-limite et l'hôte tue par nom au dépassement.
+            run_kwargs["timeout"] = alloc.runtime_seconds
+        result = self._sandbox.run_command(self.build_command(issue), workspace, **run_kwargs)
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
         prompt_tokens, completion_tokens, cost_usd, cost_authoritative = parse_usage_from_logs(logs)
+        usage_lines = bool(prompt_tokens or completion_tokens or cost_usd)
+        status, reason = ("reported", "")
+        if alloc is not None:
+            status, reason = usage_status_from_run(
+                logs, timed_out=bool(getattr(result, "timed_out", False)), usage_lines=usage_lines
+            )
         return AgentResult(
             success=result.ok,
             logs=logs[-8000:],
@@ -98,4 +171,17 @@ class OHSdkAgent:
             completion_tokens=completion_tokens,
             cost_usd=cost_usd,
             cost_authoritative=cost_authoritative,
+            usage_status=status,
+            usage_reason=reason,
         )
+
+
+def _accepts_timeout(sandbox) -> bool:
+    """Le sandbox accepte-t-il ``run_command(..., timeout=...)`` ? (les doubles de test historiques non)."""
+    import inspect
+
+    try:
+        params = inspect.signature(sandbox.run_command).parameters
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return "timeout" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())

@@ -3,7 +3,6 @@ Prompts - Système de prompts personnalisés
 """
 
 import logging
-import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -11,20 +10,7 @@ logger = logging.getLogger(__name__)
 
 def register_prompts(app, app_state):
     """Enregistre le système de prompts dans l'application FastMCP."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    dirs = [
-        os.path.join(current_dir, "engine"),
-        os.path.join(current_dir, "templates"),
-        os.path.join(current_dir, "templates", "templates"),
-        os.path.join(current_dir, "interface"),
-        os.path.join(current_dir, "interface", "templates"),
-        os.path.join(current_dir, "interface", "static"),
-    ]
-
-    for directory in dirs:
-        os.makedirs(directory, exist_ok=True)
-
+    # Aucun dossier n'est créé dans le paquet : graines en lecture seule, état sous COLLEGUE_HOME.
     try:
         from .engine.enhanced_prompt_engine import EnhancedPromptEngine
 

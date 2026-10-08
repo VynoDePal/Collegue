@@ -395,7 +395,7 @@ async def test_run_improvement_recovery_hook_blocks_before_first_round():
         agent=object(),
         owner="owner",
         repo="repo",
-        manager=object(),
+        manager=SimpleNamespace(budget_enforcement="test-double"),  # double déclaré : pas de registre en strict sinon
         dry_run=False,
         recovery_hook=recovery_hook,
     )

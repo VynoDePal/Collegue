@@ -1,7 +1,7 @@
 """One-shot cleanup for the prompt template storage (#231).
 
 Before the fix, every server startup wrote new UUID-keyed JSON copies of
-the 16 YAML seed templates into ``collegue/prompts/templates/templates/``.
+the 16 YAML seed templates into the prompt store (``$COLLEGUE_HOME/prompts/templates/``).
 The audit found 2112 files on disk — 132 copies of each of the 16 unique
 template names, all with identical content and all with ``performance_score
 = 0.0`` / ``usage_count = 0``.
@@ -13,7 +13,7 @@ This script consolidates the storage :
    with a non-zero ``usage_count`` (if any), otherwise the one most recently
    updated.
 3. Delete the duplicates.
-4. Rebuild ``collegue/prompts/versions/versions.json`` so it only references
+4. Rebuild ``$COLLEGUE_HOME/prompts/versions/versions.json`` so it only references
    template IDs that still exist on disk, and dedupe identical-content
    versions within each template.
 
@@ -22,6 +22,7 @@ Usage::
     python scripts/purge_prompt_duplicates.py --dry-run   # show plan only
     python scripts/purge_prompt_duplicates.py             # apply
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,10 +32,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATES_DIR = REPO_ROOT / "collegue" / "prompts" / "templates" / "templates"
-VERSIONS_FILE = REPO_ROOT / "collegue" / "prompts" / "versions" / "versions.json"
+sys.path.insert(0, str(REPO_ROOT))
+
+from collegue.prompts.storage import default_storage_dir, default_versions_dir  # noqa: E402
+
+# L'état modifiable des prompts vit sous $COLLEGUE_HOME/prompts (le paquet installé reste en lecture seule).
+TEMPLATES_DIR = default_storage_dir() / "templates"
+VERSIONS_FILE = default_versions_dir() / "versions.json"
 
 
 def _rank_entry(entry: Tuple[Path, Dict]) -> Tuple[int, str]:

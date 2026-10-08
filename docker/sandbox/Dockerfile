@@ -15,14 +15,15 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Runner de tests du gate qualité, ÉPINGLÉ (pytest<9). pytest 9.0 a retiré
-# `FixtureDef` du namespace top-level, ce qui casse `from pytest import FixtureDef`
-# de pytest-asyncio<0.24 (que les projets générés pinnent couramment, ex. 0.23.6) :
-# ImportError à la collecte → toute tâche à tests échoue au gate (constaté run v6
-# après un rebuild qui a tiré pytest 9.x). On fige le runner sur 8.x + un
-# pytest-asyncio aligné sur l'écosystème projet. Pré-installé (vs deps du projet)
-# pour que le gate dispose d'un runner même si le projet ne le déclare pas.
-RUN python -m pip install --no-cache-dir "pytest>=8.1,<9" "pytest-asyncio==0.23.6"
+# Runner de tests du gate qualité, ÉPINGLÉ (pytest<9) + pytest-asyncio 0.23.6 + Playwright + pip-audit,
+# installés depuis le verrou haché locks/sandbox.txt (groupe « sandbox » de pyproject.toml). pytest 9.0 a retiré
+# `FixtureDef` du namespace top-level, ce qui casse `from pytest import FixtureDef` de pytest-asyncio<0.24
+# (constaté run v6 après un rebuild qui a tiré pytest 9.x) : le verrou fige donc le runner sur 8.x.
+# pip-audit : mesure « vulnérabilités de dépendances » (collegue/improve/metrics.py). PORTÉE : l'outil est
+# présent, mais ce conteneur tourne SANS réseau — sans accès à la base de vulnérabilités (PyPI/OSV), la
+# mesure reste INDISPONIBLE et échoue (jamais comptée comme zéro vulnérabilité).
+COPY locks/sandbox.txt /opt/locks/sandbox.txt
+RUN python -m pip install --no-cache-dir --require-hashes --no-deps -r /opt/locks/sandbox.txt
 
 # Navigateur headless pour le gate E2E (actif par défaut, #503 suivi) : Playwright + chromium
 # + ses libs système (libnss3, libatk… via --with-deps, root). Le gate démarre le
@@ -33,8 +34,7 @@ RUN python -m pip install --no-cache-dir "pytest>=8.1,<9" "pytest-asyncio==0.23.
 # N.B. NON construit par la CI (elle build docker/collegue/Dockerfile) — image
 # d'exécution réelle uniquement.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN python -m pip install --no-cache-dir playwright \
-    && python -m playwright install --with-deps chromium \
+RUN python -m playwright install --with-deps chromium \
     && chmod -R a+rX /opt/ms-playwright
 
 # Utilisateur non-root par défaut (le `docker run` peut surcharger --user pour

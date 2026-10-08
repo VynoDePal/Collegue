@@ -5,6 +5,16 @@ l'outil read-only ``collegue/tools/postgres_db.py``. Module isolé, non câblé 
 runtime tant que le pilote (Phase 3) ne l'utilise pas.
 """
 
+from collegue.state.budget_ledger import (
+    BudgetIdentityError,
+    BudgetLedger,
+    BudgetLedgerError,
+    BudgetRefused,
+    PlanningCycleError,
+    Reservation,
+    ScopeSnapshot,
+    Settlement,
+)
 from collegue.state.checkpoints import ProjectSnapshot, load_snapshot
 from collegue.state.manager import Phase5IncidentConflictError, ProjectStateManager
 from collegue.state.models import (
@@ -17,6 +27,10 @@ from collegue.state.models import (
     PHASE5_REVERT_IN_PROGRESS,
     PHASE5_REVERT_PENDING,
     Base,
+    BudgetBlock,
+    BudgetEvent,
+    BudgetReservation,
+    BudgetScope,
     Checkpoint,
     Decision,
     Metric,
@@ -27,6 +41,18 @@ from collegue.state.models import (
 
 __all__ = [
     "Base",
+    "BudgetLedger",
+    "BudgetIdentityError",
+    "BudgetLedgerError",
+    "PlanningCycleError",
+    "BudgetRefused",
+    "BudgetScope",
+    "BudgetReservation",
+    "BudgetBlock",
+    "BudgetEvent",
+    "Reservation",
+    "ScopeSnapshot",
+    "Settlement",
     "Project",
     "Task",
     "Decision",

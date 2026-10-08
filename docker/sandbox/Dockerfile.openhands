@@ -3,7 +3,7 @@
 # OpenHands, pour que collegue/executor/openhands_agent.py puisse le lancer en
 # headless via DockerSandbox. Utilise le runtime PROCESS (pas de Docker imbriqué).
 #
-# Résolution via uv : le resolver pip échoue sur le closure d'openhands-ai 1.7.0
+# Résolution via uv (locks/*.txt générés par scripts/locks.py) : le resolver pip échoue sur le closure d'openhands-ai 1.7.0
 # (lmnr épingle opentelemetry-semantic-conventions==0.60b1 → backtracking pip
 # explosif), là où uv (PubGrub) converge.
 
@@ -23,13 +23,19 @@ RUN apt-get update \
         tmux \
     && rm -rf /var/lib/apt/lists/*
 
-# uv : resolver/install rapide et capable du closure otel d'OpenHands.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# uv : resolver/install rapide et capable du closure otel d'OpenHands. Version EXACTE = scripts/locks.py
+# (UV_VERSION) ; ≥ 0.11.15 : 0.9.28 était affecté par GHSA-pjjw-68hj-v9mw et GHSA-4gg8-gxpx-9rph.
+COPY --from=ghcr.io/astral-sh/uv:0.11.33 /uv /usr/local/bin/uv
 
-# Agent codeur OpenHands (headless), version pinnée, installé dans le python système.
-# lmnr épinglé (faux départ v5) : la 0.7.53 a retiré observe(rollout_entrypoint=…)
-# attendu par openhands 1.7.0 → TypeError à l'import, agent mort-né.
-RUN uv pip install --system "openhands-ai==1.7.0" "lmnr==0.7.52"
+# Closure COMPLÈTE verrouillée et hachée (locks/sandbox-openhands.txt, groupe « sandbox-openhands » de
+# pyproject.toml) : OpenHands 1.7.0 + SDK/tools 1.19.1 + lmnr 0.7.52 (la 0.7.53 a retiré
+# observe(rollout_entrypoint=…) attendu par openhands 1.7.0), le runner de tests du gate (pytest<9 +
+# pytest-asyncio 0.23.6 : pytest 9.0 a retiré `FixtureDef`, ce qui casse pytest-asyncio<0.24), la stack web
+# Python courante (le conteneur de test du gate est ÉPHÉMÈRE et SÉPARÉ de celui de l'agent : sans elle le code
+# généré casse à l'import, ex. `No module named 'jose'`) et pip-audit. Un seul `uv pip install` hash-vérifié :
+# plus de résolution flottante entre couches. pip-audit n'a pas de base de vulnérabilités sans réseau.
+COPY locks/sandbox-openhands.txt /opt/locks/sandbox-openhands.txt
+RUN uv pip install --system --require-hashes --no-deps -r /opt/locks/sandbox-openhands.txt
 
 # Compatibilité Gemma 4 / OpenHands SDK 1.7.0 : Gemma peut émettre `commands`
 # alors que TerminalAction exige `command`
@@ -41,30 +47,6 @@ RUN uv pip install --system "openhands-ai==1.7.0" "lmnr==0.7.52"
 COPY scripts/patch_openhands_gemma4_terminal.py /opt/patch_openhands_gemma4_terminal.py
 RUN python /opt/patch_openhands_gemma4_terminal.py \
     && rm /opt/patch_openhands_gemma4_terminal.py
-
-# Runner de tests du gate qualité (pytest) — couche distincte (cache openhands préservé).
-# PIN pytest<9 : pytest 9.0 a retiré `FixtureDef` du namespace top-level, ce qui
-# casse `from pytest import FixtureDef` de pytest-asyncio<0.24 (que les projets
-# générés pinnent couramment, ex. 0.23.6) → ImportError à la collecte → TOUTE
-# tâche avec tests échoue au gate (run v6 bloqué dès la tâche 1). On épingle le
-# runner système sur 8.x + le pytest-asyncio aligné sur l'écosystème projet.
-RUN uv pip install --system "pytest>=8.1,<9" "pytest-asyncio==0.23.6"
-
-# Stack web Python courant pré-installé : le conteneur de test (gate) est ÉPHÉMÈRE et
-# SÉPARÉ de celui de l'agent → sans ça, le code généré (FastAPI + JWT auth, etc.)
-# casse à l'import (ex. `No module named 'jose'`). fastapi/uvicorn/sqlalchemy/pydantic
-# arrivent déjà via openhands ; on ajoute l'auth/validation/migrations.
-RUN uv pip install --system \
-    "python-jose[cryptography]" \
-    "passlib[bcrypt]" \
-    "bcrypt<4.1" \
-    python-multipart \
-    email-validator \
-    pydantic-settings \
-    alembic \
-    "psycopg2-binary" \
-    aiosqlite \
-    httpx
 
 # Navigateur headless pour le GATE E2E (#503 suivi). Playwright (Python) est DÉJÀ
 # fourni par openhands-ai (1.60) → on ajoute SEULEMENT le binaire chromium + ses

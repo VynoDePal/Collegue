@@ -213,8 +213,25 @@ def persist_spec(
     deadline: Any = None,
     status: str = PROJECT_STATUS_PLANNED,
     plan_sync_config: Optional[dict] = None,
+    cycle: Optional[tuple] = None,
 ) -> int:
-    """Persiste le SPEC (rendu Markdown) dans ``Project.spec`` ; retourne le project_id."""
+    """Persiste le SPEC (rendu Markdown) dans ``Project.spec`` ; retourne le project_id.
+
+    ``cycle=(scope_key, claim_token)`` : le projet est créé ET lié au scope budgétaire du cycle de
+    planification dans UNE transaction (``create_project_in_cycle``) — jamais un projet sans budget.
+    """
+    if cycle is not None:
+        scope_key, claim_token = cycle
+        return manager.create_project_in_cycle(
+            scope_key,
+            claim_token,
+            name=name,
+            spec=spec.to_markdown(),
+            deadline=deadline,
+            phase="1",
+            status=status,
+            plan_sync_config=plan_sync_config,
+        )
     return manager.create_project(
         name=name,
         spec=spec.to_markdown(),

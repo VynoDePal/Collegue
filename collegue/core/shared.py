@@ -9,7 +9,6 @@ import asyncio
 import concurrent.futures
 import json
 import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -179,14 +178,15 @@ def normalize_keys(obj: Any) -> Any:
     return obj
 
 
-_RULES_DIR = Path(__file__).parent.parent / "tools" / "rules"
 _rules_cache: Dict[str, Dict[str, list]] = {}
 
 
 def load_rules(rule_file: str) -> Dict[str, list]:
     if rule_file in _rules_cache:
         return _rules_cache[rule_file]
-    filepath = _RULES_DIR / rule_file
+    from collegue.pkgdata import resource_file
+
+    filepath = resource_file("tools", "rules", rule_file)  # ressource embarquée (wheel), jamais le cwd
     with open(filepath, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     _rules_cache[rule_file] = data

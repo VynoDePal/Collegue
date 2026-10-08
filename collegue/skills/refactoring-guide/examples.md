@@ -44,6 +44,7 @@ def process_order(order: Order) -> Order:
     _notify_order_processed(order)
     return order
 
+
 def _validate_order(order: Order) -> None:
     if not order.items:
         raise ValueError("Empty order")
@@ -53,19 +54,18 @@ def _validate_order(order: Order) -> None:
         if item.quantity <= 0:
             raise ValueError(f"Invalid quantity for {item.name}")
 
+
 def _calculate_totals(order: Order) -> None:
-    order.subtotal = sum(
-        item.price * item.quantity for item in order.items
-    )
+    order.subtotal = sum(item.price * item.quantity for item in order.items)
     order.tax = order.subtotal * TAX_RATE
-    order.shipping = (
-        SHIPPING_COST if order.subtotal < FREE_SHIPPING_THRESHOLD else 0
-    )
+    order.shipping = SHIPPING_COST if order.subtotal < FREE_SHIPPING_THRESHOLD else 0
     order.total = order.subtotal + order.tax + order.shipping
+
 
 def _save_order(order: Order) -> None:
     order.status = "processed"
     db.save(order)
+
 
 def _notify_order_processed(order: Order) -> None:
     email.send(order.customer.email, f"Order {order.id} confirmed")
@@ -122,34 +122,34 @@ def get_user_status(user):
         if user.is_active:
             if user.subscription is not None:
                 if user.subscription.is_valid():
-                    if user.subscription.plan == 'premium':
-                        return 'premium_active'
+                    if user.subscription.plan == "premium":
+                        return "premium_active"
                     else:
-                        return 'basic_active'
+                        return "basic_active"
                 else:
-                    return 'subscription_expired'
+                    return "subscription_expired"
             else:
-                return 'no_subscription'
+                return "no_subscription"
         else:
-            return 'inactive'
+            return "inactive"
     else:
-        return 'unknown'
+        return "unknown"
 ```
 
 ### Après (Guard Clauses)
 ```python
 def get_user_status(user: User | None) -> str:
     if user is None:
-        return 'unknown'
+        return "unknown"
     if not user.is_active:
-        return 'inactive'
+        return "inactive"
     if user.subscription is None:
-        return 'no_subscription'
+        return "no_subscription"
     if not user.subscription.is_valid():
-        return 'subscription_expired'
-    if user.subscription.plan == 'premium':
-        return 'premium_active'
-    return 'basic_active'
+        return "subscription_expired"
+    if user.subscription.plan == "premium":
+        return "premium_active"
+    return "basic_active"
 ```
 
 ## Replace Callback Hell with Async/Await (JavaScript)
@@ -237,6 +237,7 @@ const service = new OrderService(mockDb, mockMailer, mockLogger)
 ```python
 import os
 
+
 class Config:
     def __init__(self, name, host, port, debug=False):
         self.name = name
@@ -245,28 +246,23 @@ class Config:
         self.debug = debug
 
     def __repr__(self):
-        return "Config(name={}, host={}, port={})".format(
-            self.name, self.host, self.port
-        )
+        return "Config(name={}, host={}, port={})".format(self.name, self.host, self.port)
+
 
 def load_config(config_dir):
-    config_path = os.path.join(config_dir, 'config.json')
+    config_path = os.path.join(config_dir, "config.json")
     if not os.path.exists(config_path):
-        raise FileNotFoundError(
-            "Config not found: {}".format(config_path)
-        )
-    with open(config_path, 'r') as f:
+        raise FileNotFoundError("Config not found: {}".format(config_path))
+    with open(config_path, "r") as f:
         data = json.load(f)
-    return Config(
-        data['name'], data['host'], data['port'],
-        data.get('debug', False)
-    )
+    return Config(data["name"], data["host"], data["port"], data.get("debug", False))
 ```
 
 ### Après
 ```python
 from dataclasses import dataclass
 from pathlib import Path
+
 
 @dataclass(frozen=True)
 class Config:
@@ -275,15 +271,16 @@ class Config:
     port: int
     debug: bool = False
 
+
 def load_config(config_dir: Path) -> Config:
-    config_path = config_dir / 'config.json'
+    config_path = config_dir / "config.json"
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
     data = json.loads(config_path.read_text())
     return Config(
-        name=data['name'],
-        host=data['host'],
-        port=data['port'],
-        debug=data.get('debug', False),
+        name=data["name"],
+        host=data["host"],
+        port=data["port"],
+        debug=data.get("debug", False),
     )
 ```

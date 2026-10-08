@@ -70,7 +70,7 @@ async def sample_with_timeout(
     Le ``timeout`` (secondes) est résolu depuis ``settings.LLM_CALL_TIMEOUT`` s'il
     n'est pas fourni. ``<= 0`` / ``None`` → aucun timeout (comportement inchangé).
     En cas de dépassement, la coroutine sous-jacente est **annulée proprement**
-    (``asyncio.wait_for`` propage ``CancelledError`` dans ``ctx.sample``) et on lève
+    (``asyncio.timeout`` annule la tâche courante : ``CancelledError`` est propagé dans ``ctx.sample``) et on lève
     :class:`LLMCallTimeout` — l'appelant gère, pas de hang.
     """
     if timeout is None:
@@ -87,12 +87,19 @@ async def sample_with_timeout(
     if not timeout or not math.isfinite(timeout) or timeout <= 0:
         return await ctx.sample(**sample_kwargs)
 
-    # NB : si la pile de sampling avale CancelledError sans la relancer, wait_for
-    # ne lèvera pas TimeoutError (limite connue d'asyncio.wait_for) — le timeout
-    # est alors un no-op. ctx.sample (httpx async) relaie l'annulation normalement.
+    # ``asyncio.timeout`` (et NON ``asyncio.wait_for``) : ``wait_for`` exécute la coroutine dans une NOUVELLE tâche
+    # sous Python 3.11 (contexte copié), si bien que l'usage écrit par ``ctx.sample`` dans la ContextVar de
+    # ``monitoring.sampling_usage`` y reste enfermé et que l'appelant croit l'usage absent — alors que 3.12 exécute
+    # ``wait_for`` dans la tâche appelante. ``asyncio.timeout`` s'exécute dans la tâche de l'appelant sous 3.11 comme
+    # sous 3.12 : l'usage reçu est visible de la capture, une erreur ou une annulation externe survenant APRÈS
+    # réception de l'usage le laisse lisible, et le délai annule toujours l'appel (``CancelledError`` converti en
+    # ``TimeoutError`` à la sortie du bloc).
+    # NB : si la pile de sampling avale CancelledError sans la relancer, le délai est un no-op (limite connue d'asyncio).
+    # ctx.sample (httpx async) relaie l'annulation normalement.
     try:
-        return await asyncio.wait_for(ctx.sample(**sample_kwargs), timeout)
-    except asyncio.TimeoutError as exc:
+        async with asyncio.timeout(timeout):
+            return await ctx.sample(**sample_kwargs)
+    except TimeoutError as exc:  # == asyncio.TimeoutError depuis Python 3.11
         raise LLMCallTimeout(f"Appel LLM interrompu après {timeout:g}s (LLM_CALL_TIMEOUT)") from exc
 
 
@@ -109,18 +116,25 @@ async def accounted_sample(
     if settings_obj is None:
         from collegue.config import settings as settings_obj
 
+    from collegue.core.llm.budget_guard import budget_role, current_binding
     from collegue.monitoring.metrics import enforce_budget, get_metrics_collector
     from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing
     from collegue.monitoring.sampling_usage import capture_usage
 
     collector = collector or get_metrics_collector()
-    enforce_budget(collector=collector, settings_obj=settings_obj)
+    # Registre durable lié : c'est LUI qui borne (réservation avant chaque appel, au transport). Le
+    # MetricsCollector ne sert plus qu'aux statistiques — jamais à une décision de budget (pas de
+    # double comptage ni de garde en mémoire qui repart de zéro).
+    ledger_bound = current_binding() is not None
+    if not ledger_bound:
+        enforce_budget(collector=collector, settings_obj=settings_obj)
     provider, requested_model = resolve_role(role, settings_obj)
     subscription_requested = bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False)) and not str(
         requested_model
     ).lower().startswith(("gemma", "gemini"))
     if (
-        float(getattr(settings_obj, "MAX_COST_USD", 0) or 0) > 0
+        not ledger_bound
+        and float(getattr(settings_obj, "MAX_COST_USD", 0) or 0) > 0
         and not subscription_requested
         and not has_explicit_pricing(requested_model, provider=provider)
     ):
@@ -132,7 +146,7 @@ async def accounted_sample(
     result = None
     error: Optional[BaseException] = None
     error_traceback = None
-    with capture_usage() as captured:
+    with capture_usage() as captured, budget_role(role):
         try:
             result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
             succeeded = True
@@ -170,5 +184,6 @@ async def accounted_sample(
         raise UsageAccountingError(
             f"Usage LLM absent pour {operation} : impossible de garantir le plafond dur configuré."
         )
-    enforce_budget(collector=collector, settings_obj=settings_obj)
+    if not ledger_bound:
+        enforce_budget(collector=collector, settings_obj=settings_obj)
     return result

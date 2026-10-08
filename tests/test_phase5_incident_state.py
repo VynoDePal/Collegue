@@ -272,14 +272,13 @@ def test_incident_is_deleted_with_project(manager):
 
 
 def test_migration_0010_upgrade_and_downgrade(tmp_path, monkeypatch):
-    from alembic.config import Config
-
     from alembic import command
+    from alembic.config import Config
 
     url = f"sqlite:///{tmp_path / 'phase5-migration.db'}"
     monkeypatch.setenv("STATE_DATABASE_URL", url)
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
 
     command.upgrade(cfg, "0009")
     assert "phase5_incidents" not in inspect(create_engine(url)).get_table_names()

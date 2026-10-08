@@ -12,7 +12,6 @@ portables SQLite/PostgreSQL et reflètent exactement le modèle SQLAlchemy.
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-
 from alembic import op
 
 # revision identifiers, used by Alembic.

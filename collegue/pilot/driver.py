@@ -83,6 +83,7 @@ from collegue.pilot.scheduler import (
     remaining_tasks,
 )
 from collegue.sandbox.executor import TIMEOUT_NOTE
+from collegue.state.budget_ledger import REFUSED_DEADLINE, BudgetRefused
 from collegue.textnorm import inline
 
 # Statut projet une fois le MVP construit (le moteur d'amélioration = Phase 4).
@@ -510,7 +511,7 @@ def refresh_tasks_from_db(tasks, manager, project_id: int) -> int:
     return realigned
 
 
-async def run_project(
+async def _run_project_impl(
     project_id: int,
     repo_source: str,
     ctx,
@@ -646,6 +647,16 @@ async def run_project(
 
     # Coût par run : on échantillonne le cumul process avant/après chaque tâche et on
     # enregistre le delta (le ledger ignore les deltas nuls/aberrants).
+    # Registre durable attaché : c'est LUI la source des montants (consommé + réservé + inconnu), pas le
+    # collector ni l'accumulateur coder — qui repartaient de zéro entre deux passes. Un seul canal ⇒
+    # aucun double comptage.
+    ledger_bound = getattr(budget, "ledger", None) is not None
+    if ledger_bound:
+
+        def cost_source() -> Tuple[float, int]:  # noqa: F811 - remplace la source process (collector)
+            snap = budget.ledger_snapshot()
+            return (snap.spent_usd, int(snap.used_tokens)) if snap is not None else (0.0, 0)
+
     sample_cost = cost_source is not None
     last_usd, last_tokens = cost_source() if sample_cost else (0.0, 0)
 
@@ -817,25 +828,43 @@ async def run_project(
         # #461, peut laisser attempt_count à 0 alors qu'une tentative verte est
         # mémorisée — la régénérer de zéro gaspillerait le travail).
         seed = getattr(task, "best_diff", None) or None
-        outcome = await execute_issue(
-            _issue_from_task(task, tasks_by_id),
-            repo_source,
-            ctx,
-            agent=agent,
-            owner=owner,
-            repo=repo,
-            base=base,
-            sandbox=sandbox,
-            reviewer=reviewer,
-            runner=runner,
-            clients=clients,
-            manager=manager,
-            task_id=task.id,
-            project_id=project_id,
-            dry_run=dry_run,
-            seed_diff=seed,
-            gate_options=gate_options,
-        )
+        try:
+            outcome = await execute_issue(
+                _issue_from_task(task, tasks_by_id),
+                repo_source,
+                ctx,
+                agent=agent,
+                owner=owner,
+                repo=repo,
+                base=base,
+                sandbox=sandbox,
+                reviewer=reviewer,
+                runner=runner,
+                clients=clients,
+                manager=manager,
+                task_id=task.id,
+                project_id=project_id,
+                dry_run=dry_run,
+                seed_diff=seed,
+                gate_options=gate_options,
+            )
+        except BudgetRefused as refusal:
+            # Refus AVANT émission (plafond, blocage strict, échéance, tarif inconnu…) : la tâche n'a pas
+            # abouti et rien n'a été dépensé hors registre. On la remet `todo` et on met le run en pause.
+            audit.record(
+                BUDGET_EVENT,
+                iteration=iteration,
+                action=ACTION_PAUSED_BUDGET,
+                reason=str(refusal),
+                code=refusal.code,
+                task_id=task.id,
+            )
+            task.status = TASK_STATUS_TODO
+            if not dry_run:
+                manager.update_task_status(task.id, TASK_STATUS_TODO)
+            # Une échéance atteinte (avant ou PENDANT un appel annulé) est un arrêt d'échéance, pas un plafond.
+            stop_reason = STOP_DEADLINE if refusal.code == REFUSED_DEADLINE else STOP_PAUSED_BUDGET
+            break
         iteration += 1
         if sample_cost:
             cur_usd, cur_tokens = cost_source()
@@ -874,14 +903,15 @@ async def run_project(
                     "LLM_PRICE_*_PER_1M configuré — plafond MAX_COST_USD inopérant pour le canal coder",
                 )
         if coder_tokens or coder_usd:
-            audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
-            # #495 : alimente l'accumulateur coder-seul lu par le budget dur.
-            # Même garde que RunCostLedger.add — un coder_usd aberrant (négatif,
-            # NaN/inf) ne doit pas fausser ni empoisonner le total budgétaire.
-            if math.isfinite(coder_usd) and coder_usd > 0:
-                coder_totals["usd"] += coder_usd
-            if coder_tokens > 0:
-                coder_totals["tokens"] += coder_tokens
+            if not ledger_bound:  # le registre a déjà engagé cette dépense : ne pas la compter deux fois
+                audit.record_cost(usd=coder_usd, tokens=coder_tokens, iteration=iteration)
+                # #495 : alimente l'accumulateur coder-seul lu par le budget dur (chemin SANS registre).
+                # Même garde que RunCostLedger.add — un coder_usd aberrant (négatif,
+                # NaN/inf) ne doit pas fausser ni empoisonner le total budgétaire.
+                if math.isfinite(coder_usd) and coder_usd > 0:
+                    coder_totals["usd"] += coder_usd
+                if coder_tokens > 0:
+                    coder_totals["tokens"] += coder_tokens
         elif TIMEOUT_NOTE in (getattr(agent_result, "logs", "") or ""):
             # #464 : tentative tuée de l'extérieur (timeout sandbox) AVANT toute
             # ligne [collegue-usage] — la dépense (la tentative la plus longue,
@@ -1225,6 +1255,40 @@ async def run_project(
         # photo est exacte quel que soit le motif d'arrêt (deadline incluse).
         pending_reviews=[t.id for t in tasks if t.status == TASK_STATUS_IN_REVIEW],
     )
+
+
+async def run_project(project_id: int, repo_source: str, ctx, **kwargs) -> ProjectRunResult:
+    """Pilote un projet (voir :func:`_run_project_impl`) sous le registre budgétaire durable.
+
+    Pour un run RÉEL, ouvre le scope durable du projet (import unique des cumuls historiques), le rend
+    AUTORITAIRE pour le contrôleur et l'audit, puis lie registre et scope au contexte : tout transport
+    appelé dans le run (worker, sampling, retries, replis) réserve AVANT d'émettre. Le cumul survit aux
+    passes successives du merge-bot et aux redémarrages — rien n'est gardé en mémoire entre deux passes.
+    """
+    import contextlib
+
+    from collegue.core.llm.budget_guard import bind_budget
+    from collegue.pilot.budget import attach_project_budget
+
+    budget = kwargs.get("budget") or BudgetTimeController()
+    kwargs["budget"] = budget
+    manager = kwargs.get("manager")
+    binding = contextlib.nullcontext()
+    if not kwargs.get("dry_run", True):
+        scope = attach_project_budget(budget, manager, project_id)
+        if scope is not None:
+            audit = kwargs.get("audit")
+            attach_audit = getattr(audit, "attach_ledger", None)
+            if callable(attach_audit):
+                attach_audit(manager.budget_ledger, scope.scope_key)
+            binding = bind_budget(
+                manager.budget_ledger,
+                scope.scope_key,
+                settings=budget.settings,
+                deadline=budget.deadline,
+            )
+    with binding:
+        return await _run_project_impl(project_id, repo_source, ctx, **kwargs)
 
 
 async def _default_run_improvement(*args, **kwargs):

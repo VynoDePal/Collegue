@@ -159,7 +159,11 @@ class RunAuditLog:
             raise ValueError("persist=True mais le manager n'expose pas record_decision/add_metric")
         self._persist = wants_persist
         self.events: List[RunEvent] = []
-        self.cost = RunCostLedger()
+        self._local_cost = RunCostLedger()
+        # Registre durable (vague 2) : quand il est attaché, les montants AFFICHÉS en viennent — ce
+        # journal n'en est plus qu'une projection (pas de cumul local, donc pas de double comptage).
+        self._ledger = None
+        self._scope_key: Optional[str] = None
         # #462 : réamorcer le cumul depuis la dernière métrique persistée —
         # symétrique de load_run_start (resume). Sans ça, chaque restart de
         # process publiait son cumul LOCAL comme cumul du run : run FacNor v3
@@ -167,6 +171,22 @@ class RunAuditLog:
         # consommés (-40 %), budget et reporting faux dès la première reprise.
         if self._persist:
             self._reseed_cost_from_metrics()
+
+    def attach_ledger(self, ledger, scope_key: str) -> None:
+        """Fait du registre durable la SOURCE des coûts affichés (idempotent)."""
+        self._ledger = ledger
+        self._scope_key = scope_key
+
+    @property
+    def cost(self) -> RunCostLedger:
+        """Coût du run : lu dans le registre durable s'il est attaché, sinon cumul local historique."""
+        if self._ledger is not None and self._scope_key is not None:
+            try:
+                snap = self._ledger.snapshot(self._scope_key)
+                return RunCostLedger(usd=snap.spent_usd, tokens=int(snap.used_tokens))
+            except Exception:  # noqa: BLE001 - affichage : ne casse jamais le run
+                pass
+        return self._local_cost
 
     def _reseed_cost_from_metrics(self) -> None:
         """Repart du dernier cumul ``run_cost_usd``/``run_tokens`` persisté (#462).
@@ -190,9 +210,9 @@ class RunAuditLog:
         except Exception:
             return
         if usd > 0:
-            self.cost.usd = usd
+            self._local_cost.usd = usd
         if tokens > 0:
-            self.cost.tokens = tokens
+            self._local_cost.tokens = tokens
 
     def record(self, kind: str, *, iteration: Optional[int] = None, **detail: Any) -> RunEvent:
         """Enregistre un événement (et le persiste si activé). Best-effort."""
@@ -255,14 +275,20 @@ class RunAuditLog:
         brutes) : le flux d'événements et le ledger réconcilient toujours, et aucun
         NaN/inf brut n'atterrit dans l'export. Un delta nul (ex. tâche sans appel LLM)
         n'émet aucun événement (bruit évité)."""
-        acc_usd, acc_tokens = self.cost.add(usd=usd, tokens=tokens)
+        if self._ledger is not None:
+            # Le registre est l'autorité : cet appel journalise seulement un delta OBSERVÉ pour l'affichage.
+            acc_usd, acc_tokens = RunCostLedger().add(usd=usd, tokens=tokens)
+        else:
+            acc_usd, acc_tokens = self._local_cost.add(usd=usd, tokens=tokens)
         if not acc_usd and not acc_tokens:
             return
         self.record(COST_OBSERVED, iteration=iteration, usd=acc_usd, tokens=acc_tokens)
         if self._persist:
             try:
-                self._manager.add_metric(self.project_id, METRIC_RUN_COST_USD, float(self.cost.usd))
-                self._manager.add_metric(self.project_id, METRIC_RUN_TOKENS, float(self.cost.tokens))
+                # Projection d'affichage (dashboard) : la valeur écrite est celle du registre quand il existe.
+                shown = self.cost
+                self._manager.add_metric(self.project_id, METRIC_RUN_COST_USD, float(shown.usd))
+                self._manager.add_metric(self.project_id, METRIC_RUN_TOKENS, float(shown.tokens))
             except Exception:
                 pass
 
@@ -316,6 +342,14 @@ def run_cost_summary(manager: object, project_id: int) -> Dict[str, Any]:
     S'appuie sur l'ordre d'insertion de ``get_metrics`` (``ORDER BY Metric.id``,
     autoincrément) : la dernière ligne d'un nom est le cumul le plus récent.
     """
+    ledger = getattr(manager, "budget_ledger", None)
+    if ledger is not None:
+        try:
+            snap = ledger.snapshot_for_project(project_id)
+        except Exception:  # noqa: BLE001
+            snap = None
+        if snap is not None:
+            return {"usd": round(snap.spent_usd, 6), "tokens": int(snap.used_tokens)}
     usd = 0.0
     tokens = 0
     for metric in manager.get_metrics(project_id):

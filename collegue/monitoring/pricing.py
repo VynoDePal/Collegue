@@ -22,6 +22,7 @@ remote absent de la grille est refusé avant l'appel plutôt que valorisé au re
 
 from __future__ import annotations
 
+import re
 from typing import Dict, Optional, Tuple
 
 # (input_usd_per_token, output_usd_per_token)
@@ -133,3 +134,46 @@ def is_explicitly_free(model: str, provider: Optional[str] = None) -> bool:
     interprétés comme gratuits ni contourner les garde-fous de budget.
     """
     return has_explicit_pricing(model, provider=provider) and cost_per_token(model, provider=provider) == (0.0, 0.0)
+
+
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
+
+
+def is_local_provider(provider: Optional[str]) -> bool:
+    """Vrai pour un provider déclaré local (LM Studio, Ollama, Unsloth)."""
+    return bool(provider) and provider.strip().lower() in _LOCAL_PROVIDERS
+
+
+def grid_family(model: str) -> Optional[str]:
+    """Famille d'endpoint qui SERT ce modèle de la grille (``gemini``, ``openai``, ``anthropic``) d'après son identité."""
+    key = _normalize(model)
+    if key.startswith(("gemini", "gemma")):
+        return "gemini"
+    if key.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    if key.startswith("claude"):
+        return "anthropic"
+    return None
+
+
+def strict_grid_price(model: str, family: Optional[str]) -> Optional[Tuple[float, float]]:
+    """Tarif AUTORITAIRE de la grille pour une identité EXACTE servie par SA famille d'endpoint hébergée.
+
+    Contrairement à :func:`cost_per_token` (affichage du dashboard : correspondance par préfixe, tarif de repli),
+    ``gpt-5.4-expensive-variant`` n'est PAS ``gpt-5.4`` : seules l'identité exacte et un instantané daté
+    (``-AAAA-MM-JJ``, ``-AAAAMMJJ``) d'une clé de la grille sont admis. Et le tarif d'un modèle n'est celui du
+    fournisseur de SA famille : ``gpt-5.4`` servi par l'endpoint Gemini n'a PAS le tarif OpenAI (``None``). Un zéro
+    n'est autoritaire que pour un modèle gratuit lié à sa famille (``_FREE_REMOTE_MODELS``).
+    ``None`` = pas de tarif établi.
+    """
+    key = _normalize(model)
+    if family is None or grid_family(key) != family:
+        return None
+    for candidate in (key, _SNAPSHOT_SUFFIX.sub("", key)):
+        prices = _MODEL_PRICES_PER_1M.get(candidate)
+        if prices is None:
+            continue
+        if prices == (0.0, 0.0) and not _free_remote_model_is_valid(candidate, family):
+            return None
+        return prices[0] / _PER_1M, prices[1] / _PER_1M
+    return None

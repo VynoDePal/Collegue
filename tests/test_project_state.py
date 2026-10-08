@@ -43,6 +43,10 @@ def test_metadata_declares_all_tables():
         "metrics",
         "checkpoints",
         "phase5_incidents",
+        "budget_scopes",
+        "budget_reservations",
+        "budget_events",
+        "budget_blocks",
     }
 
 
@@ -297,10 +301,9 @@ def test_models_importable():
 
 
 def test_alembic_migration_creates_schema(tmp_path, monkeypatch):
+    from alembic import command
     from alembic.config import Config
     from sqlalchemy import create_engine, inspect
-
-    from alembic import command
 
     db = tmp_path / "migrated.db"
     url = f"sqlite:///{db}"
@@ -308,7 +311,7 @@ def test_alembic_migration_creates_schema(tmp_path, monkeypatch):
     monkeypatch.setenv("STATE_DATABASE_URL", url)
 
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
     command.upgrade(cfg, "head")
 
     insp = inspect(create_engine(url))
@@ -335,15 +338,14 @@ def test_alembic_migration_creates_schema(tmp_path, monkeypatch):
 
 def test_acceptance_artifact_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
     """0008 ajoute puis retire proprement le triplet QA et sa contrainte."""
+    from alembic import command
     from alembic.config import Config
     from sqlalchemy import create_engine, inspect
-
-    from alembic import command
 
     url = f"sqlite:///{tmp_path / 'artifact-migration.db'}"
     monkeypatch.setenv("STATE_DATABASE_URL", url)
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
 
     command.upgrade(cfg, "0007")
     before = {column["name"] for column in inspect(create_engine(url)).get_columns("tasks")}
@@ -372,15 +374,14 @@ def test_acceptance_artifact_migration_upgrade_and_downgrade(tmp_path, monkeypat
 
 def test_plan_sync_config_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
     """0009 ajoute puis retire proprement la configuration JSON du plan."""
+    from alembic import command
     from alembic.config import Config
     from sqlalchemy import create_engine, inspect
-
-    from alembic import command
 
     url = f"sqlite:///{tmp_path / 'plan-sync-config-migration.db'}"
     monkeypatch.setenv("STATE_DATABASE_URL", url)
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
 
     command.upgrade(cfg, "0008")
     before = {column["name"] for column in inspect(create_engine(url)).get_columns("projects")}
@@ -399,14 +400,13 @@ def test_plan_sync_config_migration_upgrade_and_downgrade(tmp_path, monkeypatch)
 
 def _migrate_sqlite(tmp_path, monkeypatch, name: str) -> str:
     """Lance la migration Alembic sur un SQLite fichier ; retourne l'URL."""
-    from alembic.config import Config
-
     from alembic import command
+    from alembic.config import Config
 
     url = f"sqlite:///{tmp_path / name}"
     monkeypatch.setenv("STATE_DATABASE_URL", url)
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "collegue" / "migrations"))
     command.upgrade(cfg, "head")
     return url
 
