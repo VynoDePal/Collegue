@@ -109,9 +109,59 @@ Les anciens replis `cwd/skills` et `/app/skills` sont supprimés.
 - **État modifiable** : `$COLLEGUE_HOME/prompts/` (`categories.json`, `templates/*.json`, `versions/versions.json`) —
   l'état applicatif est séparé du site-packages, qui peut être en lecture seule (testé en retirant le droit d'écriture).
   Dans Docker, `COLLEGUE_HOME=/app/.collegue` est déjà le volume persistant.
-- Le dossier par défaut d'avant (`collegue/prompts/templates/templates/`, `collegue/prompts/versions/versions.json`) n'est
-  plus écrit ; `scripts/purge_prompt_duplicates.py` cible le nouvel emplacement. Un état existant à l'ancien emplacement
-  n'est pas migré automatiquement (les graines YAML régénèrent les templates au démarrage).
+- Le dossier par défaut d'avant (`<paquet>/prompts/templates/{categories.json,templates/*.json}` et
+  `<paquet>/prompts/versions/versions.json`) n'est plus jamais écrit.
+
+### Mise à jour : reprise de l'ancien état de prompts (`collegue/prompts/legacy.py`)
+
+Avant ce correctif, une mise à jour en place « perdait » les templates personnalisés, les catégories ajoutées et l'historique de
+versions (ils restaient dans l'ancien dossier du paquet, que le moteur ne lisait plus). La reprise est maintenant **automatique
+pour une mise à jour en place** et **explicite** quand l'ancienne installation est ailleurs.
+
+**Chemin ordinaire (aucune intervention)** : au premier démarrage, `PromptEngine()` / `PromptVersionManager()` en stockage par
+défaut reprennent, **avant** tout chargement ou amorçage depuis les graines, ce qu'ils trouvent dans le répertoire `prompts` du
+paquet courant :
+
+| Ancien fichier (paquet) | Nouvel emplacement (`$COLLEGUE_HOME/prompts/`) | Règle |
+|---|---|---|
+| `templates/templates/<id>.json` | `templates/<id>.json` | copié s'il est valide (même validation que le moteur) ; jamais écrasé |
+| `templates/categories.json` | `categories.json` | seuls les identifiants **absents** sont ajoutés (le fichier identique aux graines n'est pas de l'état) |
+| `versions/versions.json` | `versions/versions.json` | fusion par clé de premier niveau ; une clé déjà présente n'est pas touchée |
+
+**Garanties** : l'ancien état n'est jamais modifié ni supprimé (le paquet peut être en lecture seule) ; le nouvel état gagne
+toujours (conflit = même id de template, même nom de template avec un autre id, même clé d'historique, même id de catégorie ;
+chaque conflit est consigné dans le journal et dans le marqueur) ; chaque fichier est publié de façon atomique (écriture
+temporaire + renommage : aucun fichier tronqué, aucun résidu `.tmp`) ; la reprise est idempotente (marqueur
+`$COLLEGUE_HOME/prompts/.legacy-import.json`, verrou inter-processus) et ne ressuscite pas ce que l'opérateur a supprimé du
+nouvel état après la première reprise.
+
+**Fichiers anciens invalides ou reprise interrompue** : un fichier illisible ou au schéma invalide est **signalé** (journal ERROR,
+`errors` du marqueur, code de sortie 1 en CLI), laissé intact, et les fichiers valides sont repris quand même. Le marqueur reste
+`incomplete` : la reprise est retentée à chaque démarrage jusqu'à réparation, puis passe à `complete`. Une interruption
+(`kill`, panne) en cours de route ne laisse aucun marqueur `complete` : le démarrage suivant termine le travail sans doublon.
+
+**Overrides opérateur inchangés** : avec un `storage_path` / `storage_dir` explicite, aucune reprise n'a lieu et rien n'est écrit
+sous `COLLEGUE_HOME`. Une **nouvelle installation** (aucun ancien état) est amorcée depuis les graines et ne crée pas de marqueur.
+
+**Ancienne installation dans un autre chemin** (nouvelle installation ailleurs, déménagement) — commande explicite :
+
+```
+python -m collegue.prompts.legacy import --from /ancienne/installation [--dry-run]
+```
+
+`--from` accepte le dossier `prompts`, la racine du paquet `collegue` ou celle d'un dépôt. `--dry-run` annonce ce qui serait
+repris sans rien écrire ; codes de sortie : 0 succès (ou rien à reprendre, ou déjà repris), 1 reprise incomplète (erreurs
+listées sur stderr), 2 source introuvable. Elle utilise le même marqueur : relancer la commande est sans effet une fois
+`complete`.
+
+**Limites de la reprise** : (1) `categories.json` situé dans le paquet est aussi la graine livrée ; lors d'une mise à jour qui
+remplace ce fichier (réinstallation du wheel), des catégories **personnalisées** qui n'existaient que dans ce fichier ne sont pas
+récupérables — les templates et l'historique, eux, vivent dans des fichiers que la réinstallation n'écrase pas ; pour les
+catégories, utiliser la commande ci-dessus depuis une copie de l'ancien `categories.json` conservée avant la mise à jour.
+(2) Si l'installation mise à jour est supprimée avant le premier démarrage (désinstallation complète du dossier), l'état ancien
+n'existe plus à reprendre. (3) La reprise automatique ne regarde que le paquet courant, jamais un chemin deviné.
+
+`scripts/purge_prompt_duplicates.py` (nettoyage ponctuel historique des doublons, #231) cible désormais le nouvel état sous `COLLEGUE_HOME`.
 
 ## 4. Migrations embarquées
 

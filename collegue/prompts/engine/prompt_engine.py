@@ -31,8 +31,12 @@ class PromptEngine:
         # catégories livrées dans le paquet servent alors de graine. Un chemin explicite est respecté tel quel.
         self._use_packaged_seed = storage_path is None
         if storage_path is None:
+            from ..legacy import ensure_default_import
             from ..storage import default_storage_dir
 
+            # Mise à jour en place : reprend d'abord l'ancien état stocké dans le paquet (lecture seule, sans
+            # écrasement, idempotent), AVANT tout chargement ou amorçage depuis les graines.
+            ensure_default_import()
             self.storage_path = str(default_storage_dir())
         else:
             self.storage_path = storage_path
