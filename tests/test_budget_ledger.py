@@ -46,7 +46,9 @@ def test_usd_is_rounded_up_never_down_and_caps_down():
     assert usd_to_micro(0.1) == 100_000
     assert usd_to_micro("0.0000011") == 2
     assert cap_to_micro(1.0000009) == 1_000_000  # plafond arrondi vers le BAS
-    assert cap_to_micro(0) is None and cap_to_micro(None) is None and cap_to_micro(-1) is None
+    assert cap_to_micro(0) is None and cap_to_micro(None) is None  # 0/None = pas de plafond
+    with pytest.raises(ValueError):
+        cap_to_micro(-1)  # négatif : refusé, jamais un plafond désactivé
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.01, True, "abc"])
@@ -147,6 +149,167 @@ def test_an_event_key_cannot_be_reused_for_another_reservation(manager):
     ledger.commit(a.reservation_id, usd=0.1, tokens=0, event_key="shared")
     with pytest.raises(BudgetLedgerError):
         ledger.commit(b.reservation_id, usd=0.1, tokens=0, event_key="shared")
+
+
+# --- valeurs invalides : jamais un plafond désactivé ni un montant masqué ------------------------
+
+
+_BAD_AMOUNTS = [float("nan"), float("inf"), float("-inf"), "oops", True, -1, [1]]
+
+
+@pytest.mark.parametrize("bad", _BAD_AMOUNTS)
+def test_an_invalid_usd_cap_is_rejected_not_read_as_no_cap(manager, bad):
+    pid = manager.create_project(name="p")
+    with pytest.raises(ValueError):
+        manager.budget_ledger.scope_for_project(pid, max_cost_usd=bad)
+    assert manager.budget_ledger.snapshot_for_project(pid) is None  # aucun scope sans plafond n'a été créé
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "oops", True, -5, 1.5])
+def test_an_invalid_token_cap_is_rejected(manager, bad):
+    pid = manager.create_project(name="p")
+    with pytest.raises(ValueError):
+        manager.budget_ledger.scope_for_project(pid, max_tokens=bad)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "oops", True, -1, 1.5])
+def test_invalid_reservation_amounts_are_rejected_before_any_write(manager, bad):
+    ledger = manager.budget_ledger
+    _pid, key = _scope(manager, cap_usd=1.0)
+    with pytest.raises(ValueError):
+        ledger.reserve(key, micro_usd=bad, tokens=0)
+    with pytest.raises(ValueError):
+        ledger.reserve(key, usd=0.0, tokens=bad)
+    snap = ledger.snapshot(key)
+    assert (snap.reserved_usd, snap.reserved_tokens) == (0.0, 0)
+
+
+def test_invalid_settlement_amounts_are_rejected_and_keep_the_reservation(manager):
+    ledger = manager.budget_ledger
+    _pid, key = _scope(manager, cap_usd=1.0)
+    r = ledger.reserve(key, usd=0.5, tokens=10)
+    for bad in (float("nan"), float("inf"), "oops", True, -0.1):
+        with pytest.raises(ValueError):
+            ledger.commit(r.reservation_id, usd=bad, tokens=0)
+    with pytest.raises(ValueError):
+        ledger.commit(r.reservation_id, usd=0.1, tokens=-3)
+    snap = ledger.snapshot(key)
+    assert (snap.reserved_usd, snap.consumed_usd) == (0.5, 0.0)  # rien n'a été réglé
+
+
+# --- identité : un rejeu est le MÊME événement, jamais un autre sous la même clé ----------------
+
+
+def test_a_reservation_id_cannot_be_reused_for_another_scope_or_amount(manager):
+    ledger = manager.budget_ledger
+    _pid, key = _scope(manager, cap_usd=1.0)
+    _pid2, other = _scope(manager, cap_usd=1.0)
+    ledger.reserve(key, usd=0.4, tokens=10, reservation_id="call:x", model="m", transport="t", role="r")
+    for kwargs in (
+        {"usd": 0.9, "tokens": 10},  # autre montant USD
+        {"usd": 0.4, "tokens": 11},  # autres tokens
+        {"usd": 0.4, "tokens": 10, "kind": "worker"},  # autre type
+        {"usd": 0.4, "tokens": 10, "model": "autre"},  # autre modèle
+    ):
+        args = {"model": "m", "transport": "t", "role": "r", **kwargs}
+        with pytest.raises(BudgetLedgerError):
+            ledger.reserve(key, reservation_id="call:x", **args)
+    with pytest.raises(BudgetLedgerError):  # autre scope
+        ledger.reserve(other, usd=0.4, tokens=10, reservation_id="call:x", model="m", transport="t", role="r")
+    assert ledger.snapshot(key).reserved_usd == 0.4 and ledger.snapshot(other).reserved_usd == 0.0
+    assert ledger.reserve(key, usd=0.4, tokens=10, reservation_id="call:x", model="m", transport="t", role="r").replayed
+
+
+def test_a_commit_key_cannot_be_replayed_with_another_amount_or_as_a_release(manager):
+    ledger = manager.budget_ledger
+    _pid, key = _scope(manager, cap_usd=2.0)
+    r = ledger.reserve(key, usd=0.5, tokens=10)
+    ledger.commit(r.reservation_id, usd=0.4, tokens=5, event_key="evt")
+    with pytest.raises(BudgetLedgerError):
+        ledger.commit(r.reservation_id, usd=0.1, tokens=5, event_key="evt")  # autre montant, même clé
+    with pytest.raises(BudgetLedgerError):
+        ledger.commit(r.reservation_id, usd=0.4, tokens=6, event_key="evt")  # autres tokens, même clé
+    with pytest.raises(BudgetLedgerError):
+        ledger.release(r.reservation_id, reason="x", event_key="evt")  # la clé d'un commit ne libère pas
+    with pytest.raises(BudgetLedgerError):
+        ledger.mark_unknown(r.reservation_id, reason="x", event_key="evt")
+    snap = ledger.snapshot(key)
+    assert (snap.consumed_usd, snap.consumed_tokens, snap.unknown_usd) == (0.4, 5, 0.0)
+    assert ledger.commit(r.reservation_id, usd=0.4, tokens=5, event_key="evt").replayed
+
+
+def _race(url, key, calls):
+    """Lance ``calls`` (une par connexion indépendante) derrière une barrière ; renvoie les issues."""
+    barrier = threading.Barrier(len(calls))
+    outcomes = []
+
+    def worker(call):
+        ledger = ProjectStateManager.from_url(url).budget_ledger
+        barrier.wait()
+        try:
+            outcomes.append(("ok", call(ledger)))
+        except BudgetLedgerError as exc:
+            outcomes.append(("contradiction", str(exc)))
+        except BaseException as exc:  # noqa: BLE001 - toute autre issue est un échec du test
+            outcomes.append(("autre", repr(exc)))
+
+    threads = [threading.Thread(target=worker, args=(call,)) for call in calls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    return outcomes
+
+
+def test_concurrent_reservations_reusing_an_id_with_other_amounts_reserve_once_and_refuse_the_rest(url):
+    manager = ProjectStateManager.from_url(url, create=True)
+    pid = manager.create_project(name="p")
+    key = manager.budget_ledger.scope_for_project(pid, max_cost_usd=10.0).scope_key
+    amounts = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    calls = [lambda ledger, a=a: ledger.reserve(key, usd=a, tokens=0, reservation_id="call:same") for a in amounts]
+
+    outcomes = _race(url, key, calls)
+
+    assert [kind for kind, _ in outcomes].count("ok") == 1, outcomes
+    assert [kind for kind, _ in outcomes].count("contradiction") == len(amounts) - 1, outcomes
+    reserved = manager.budget_ledger.snapshot(key).reserved_usd
+    assert reserved in amounts  # exactement UNE des demandes a gagné, sans somme ni mélange
+
+
+def test_concurrent_commits_reusing_a_key_with_other_amounts_count_once_and_refuse_the_rest(url):
+    manager = ProjectStateManager.from_url(url, create=True)
+    pid = manager.create_project(name="p")
+    ledger = manager.budget_ledger
+    key = ledger.scope_for_project(pid, max_cost_usd=10.0).scope_key
+    rid = ledger.reserve(key, usd=5.0, tokens=0).reservation_id
+    amounts = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    calls = [lambda other, a=a: other.commit(rid, usd=a, tokens=0, event_key="evt") for a in amounts]
+
+    outcomes = _race(url, key, calls)
+
+    assert [kind for kind, _ in outcomes].count("ok") == 1, outcomes
+    assert [kind for kind, _ in outcomes].count("contradiction") == len(amounts) - 1, outcomes
+    snap = ledger.snapshot(key)
+    assert snap.consumed_usd in amounts and snap.reserved_usd == 0.0
+
+
+def test_a_concurrent_release_under_a_commit_key_is_a_contradiction(url):
+    manager = ProjectStateManager.from_url(url, create=True)
+    pid = manager.create_project(name="p")
+    ledger = manager.budget_ledger
+    key = ledger.scope_for_project(pid, max_cost_usd=10.0).scope_key
+    rid = ledger.reserve(key, usd=1.0, tokens=0).reservation_id
+    calls = [lambda other: other.commit(rid, usd=0.5, tokens=0, event_key="evt")] + [
+        lambda other: other.release(rid, reason="x", event_key="evt")
+    ] * 3
+
+    outcomes = _race(url, key, calls)
+
+    assert [kind for kind, _ in outcomes].count("autre") == 0, outcomes
+    snap = ledger.snapshot(key)
+    # soit le commit gagne (0,5 consommé), soit la libération gagne (rien) : jamais les deux, jamais de mélange
+    assert (snap.consumed_usd, snap.reserved_usd) in {(0.5, 0.0), (0.0, 0.0)}
+    assert len(ledger.reservations(key)) == 1
 
 
 # --- usage inconnu --------------------------------------------------------------------------------

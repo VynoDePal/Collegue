@@ -6,6 +6,7 @@ runtime tant que le pilote (Phase 3) ne l'utilise pas.
 """
 
 from collegue.state.budget_ledger import (
+    BudgetIdentityError,
     BudgetLedger,
     BudgetLedgerError,
     BudgetRefused,
@@ -39,6 +40,7 @@ from collegue.state.models import (
 __all__ = [
     "Base",
     "BudgetLedger",
+    "BudgetIdentityError",
     "BudgetLedgerError",
     "BudgetRefused",
     "BudgetScope",

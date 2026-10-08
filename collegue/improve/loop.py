@@ -35,7 +35,7 @@ from collegue.improve.metrics import (
     persist,
 )
 from collegue.improve.proposer import AttemptRecord, build_improvement_task, next_dimension
-from collegue.state.budget_ledger import BudgetRefused
+from collegue.state.budget_ledger import REFUSED_DEADLINE, BudgetRefused
 
 # Raisons d'arrêt.
 STOP_PLATEAU = "plateau"  # rendements décroissants : les gains plafonnent
@@ -437,7 +437,7 @@ async def _run_improvement_impl(
         # Refus AVANT émission (plafond, blocage strict, échéance, tarif inconnu…) : on s'arrête en pause
         # budget en CONSERVANT le bilan partiel (promotions déjà acquises, rejets).
         result.rejected.append(("budget", f"refus budgétaire ({refusal.code}) : {refusal}"))
-        result.stop_reason = STOP_PAUSED_BUDGET
+        result.stop_reason = STOP_DEADLINE if refusal.code == REFUSED_DEADLINE else STOP_PAUSED_BUDGET
     result.rounds = round_num
     return result
 

@@ -292,6 +292,10 @@ class Settings(BaseSettings):
     # Plancher d'une allocation utile : en dessous, pause budget plutôt qu'un worker quasi nul.
     BUDGET_WORKER_MIN_USD: float = 0.01
     BUDGET_WORKER_MIN_TOKENS: int = 1000
+    # Préfixes (CSV) de modèles dont l'OPÉRATEUR atteste que le tokenizer ne produit jamais plus de tokens que
+    # d'octets UTF-8 (BPE « byte-level » ou SentencePiece à repli octet). Les familles gpt-/o1/o3/o4/gemini/gemma/
+    # claude sont déjà admises ; tout autre modèle est REFUSÉ en strict sous plafond tant qu'il n'est pas attesté.
+    BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS: str = ""
 
     @field_validator("BUDGET_MODE", mode="before")
     @classmethod

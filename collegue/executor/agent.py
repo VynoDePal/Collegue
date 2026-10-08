@@ -140,7 +140,14 @@ class FakeCodeAgent:
 
     Sert de double de test aux enfants E2→E5 (workspace réel modifié → ``git diff``
     non vide). ``succeed=False`` simule un agent qui échoue (aucun fichier écrit).
+
+    **Budget** : double déterministe qui ne contacte aucun fournisseur et ne dépense rien hors process ;
+    il déclare EXPLICITEMENT cette capacité (``"test-double"``) — un agent sans déclaration n'a aucune
+    garantie budgétaire par défaut en mode strict (voir ``executor/worker_budget.py``). Ne jamais déclarer
+    cette valeur sur un agent réel.
     """
+
+    budget_enforcement = "test-double"
 
     def __init__(
         self,

@@ -338,7 +338,14 @@ class LocalSamplingContext:
         auth_mount, script_mount = self._validated_subscription_mounts()
         system_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] == "system")
         user_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] != "system")
-        payload = json.dumps({"system": system_text, "prompt": user_text})
+        from collegue.core.llm.budget_guard import TRANSPORT_SUBSCRIPTION_SAMPLER, current_binding, guarded_call
+
+        binding = current_binding()
+        request: Dict[str, Any] = {"system": system_text, "prompt": user_text}
+        if binding is not None and binding.ledger.snapshot(binding.scope_key).strict:
+            # Budget strict : sortie bornée par la réservation, aucun retry interne du SDK (cf. oh_sampler).
+            request.update(strict=True, max_output_tokens=SUBSCRIPTION_MAX_OUTPUT_ESTIMATE)
+        payload = json.dumps(request)
         # Conteneur NOMMÉ + auto-limité (coreutils ``timeout`` : TERM puis KILL) : tuer le client
         # ``docker`` ne tue pas le conteneur, qui continuerait à dépenser si l'hôte meurt ou expire.
         container = f"collegue-smp-{uuid.uuid4().hex[:12]}"
@@ -375,9 +382,6 @@ class LocalSamplingContext:
             "python",
             "/oh_sampler.py",
         ]
-        from collegue.core.llm.budget_guard import TRANSPORT_SUBSCRIPTION_SAMPLER, current_binding, guarded_call
-
-        binding = current_binding()
         if binding is None:
             rc, out, err = await self._run_sampler(argv, payload, container)
         else:

@@ -8,6 +8,7 @@ sont des doubles déterministes qui déclarent un coût ; aucune dépense réell
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -53,6 +54,8 @@ def _controller(cap=1.0, **extra):
 
 class PricedAgent:
     """Agent qui déclare un coût fixe par passe ; enregistre l'allocation qu'il a reçue."""
+
+    budget_enforcement = "test-double"  # double déterministe : ne dépense rien hors process
 
     def __init__(self, price, *, clamp=False):
         self.calls = 0
@@ -317,7 +320,7 @@ async def test_failed_improve_attempts_are_debited(manager, repo):
 
 
 class _CrashingAgent:
-    budget_enforcement = None
+    budget_enforcement = "test-double"  # meurt AVANT de rapporter son usage (la capacité déclarée n'y change rien)
 
     def __init__(self):
         self.calls = 0
@@ -384,22 +387,35 @@ class _Sandbox:
         return self._result
 
 
-def _usage_line(prompt=100, completion=50, cost=0.05):
-    return f'[collegue-usage] {{"prompt_tokens": {prompt}, "completion_tokens": {completion}, "cost_usd": {cost}, "billable": true}}'
+def _usage_line(prompt=100, completion=50, cost=0.0, billable=False):
+    flag = "true" if billable else "false"
+    return f'[collegue-usage] {{"prompt_tokens": {prompt}, "completion_tokens": {completion}, "cost_usd": {cost}, "billable": {flag}}}'
 
 
-def _run_oh(manager, pid, sandbox, *, cap=1.0, deadline_seconds=None):
-    """Un round BUILD avec le VRAI OHSdkAgent sur un faux sandbox."""
-    ctrl = BudgetTimeController(
-        settings_obj=_settings(cap),
-        deadline_seconds=deadline_seconds,
+def _subscription_settings(cap=1.0, **extra):
+    """Coder par abonnement (0 $/token) : seule configuration réelle où le mode strict accepte l'agent SDK."""
+    return _settings(
+        cap,
+        CODER_SUBSCRIPTION=True,
+        LLM_MODEL_CODER="gpt-5.5",
+        CODER_SUBSCRIPTION_MODEL="gpt-5.5",
+        CODER_SUBSCRIPTION_FALLBACK="gpt-5.4",
+        **extra,
     )
-    agent = OHSdkAgent(sandbox, settings_obj=_settings(cap))
+
+
+def _run_oh(manager, pid, sandbox, *, cap=1.0, deadline_seconds=None, settings=None):
+    """Un round BUILD avec le VRAI OHSdkAgent sur un faux sandbox."""
+    settings = settings if settings is not None else _subscription_settings(cap)
+    ctrl = BudgetTimeController(settings_obj=settings, deadline_seconds=deadline_seconds)
+    agent = OHSdkAgent(sandbox, settings_obj=settings)
     return agent, ctrl
 
 
 async def _oh_pass(manager, repo, pid, sandbox, **kw):
-    agent, ctrl = _run_oh(manager, pid, sandbox, **{k: v for k, v in kw.items() if k in ("cap", "deadline_seconds")})
+    agent, ctrl = _run_oh(
+        manager, pid, sandbox, **{k: v for k, v in kw.items() if k in ("cap", "deadline_seconds", "settings")}
+    )
     return agent, await _run(
         manager, repo, pid, budget=ctrl, agent=agent, dry_run=False, max_iterations=1, reconcile_reviews=False
     )
@@ -414,10 +430,11 @@ async def test_the_worker_receives_a_bounded_allocation_and_a_container_deadline
     argv = call["argv"]
     assert "--budget-usd" in argv and float(argv[argv.index("--budget-usd") + 1]) == pytest.approx(0.8)
     assert "--deadline-epoch" in argv and float(argv[argv.index("--deadline-epoch") + 1]) > time.time()
-    assert "--price-in" in argv and "--price-out" in argv
+    table = json.loads(argv[argv.index("--prices") + 1])  # tarif de CHAQUE modèle de la chaîne (repli compris)
+    assert set(table) == {"gpt-5.5", "gpt-5.4"} and "--strict" in argv and "--no-billing" in argv
     assert call["timeout"] is not None and 0 < call["timeout"] <= 900  # échéance transmise au conteneur
     snap = _ledger(manager, pid)
-    assert snap.consumed_usd == pytest.approx(0.05) and snap.reserved_usd == 0.0  # reliquat de 0,75 $ libéré
+    assert (snap.consumed_usd, snap.consumed_tokens) == (0.0, 150) and snap.reserved_usd == 0.0  # abonnement : 0 $
     assert snap.unknown_usd == 0.0
 
 
@@ -489,6 +506,150 @@ async def test_an_unpriced_coder_is_refused_under_a_usd_cap_before_any_launch(ma
     assert result.stop_reason == "paused_budget" and sandbox.calls == []
 
 
+# --- arbitrage des workers : « in-runner » n'est pas une barrière contre une clé facturable accessible ----------
+
+
+class _Mute:
+    """Agent réel potentiel qui ne dit RIEN de sa dépense : aucune garantie par défaut."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        return FakeCodeAgent().implement_issue(workspace, issue)
+
+
+async def test_an_agent_without_declared_enforcement_gets_no_guarantee_by_default(manager, repo):
+    pid = _linear_project(manager, 1)
+    mute = _Mute()
+    result = await _run(manager, repo, pid, budget=_controller(), agent=mute, dry_run=False, reconcile_reviews=False)
+    assert result.stop_reason == "paused_budget" and mute.calls == 0  # refusé AVANT tout lancement
+
+
+async def test_in_runner_with_a_billable_key_is_not_a_strict_guarantee_and_is_refused(manager, repo):
+    """Une commande du workspace dispose de la même clé facturable et d'un réseau libre : pas de barrière."""
+    pid = _linear_project(manager, 1)
+    sandbox = _Sandbox(_usage_line())
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        budget=_controller(),
+        agent=OHSdkAgent(sandbox, settings_obj=_settings()),  # clé API facturable (gemini), pas d'abonnement
+        dry_run=False,
+        reconcile_reviews=False,
+    )
+    assert result.stop_reason == "paused_budget" and sandbox.calls == []  # AUCUN conteneur lancé
+
+
+async def test_in_runner_with_a_billable_key_stays_available_in_advisory_mode(manager, repo):
+    pid = _linear_project(manager, 1)
+    sandbox = _Sandbox(_usage_line(cost=0.05, billable=True))
+    advisory = _controller(BUDGET_MODE="advisory", BUDGET_EXHAUSTED_ACTION="warn")
+    await _run(
+        manager,
+        repo,
+        pid,
+        budget=advisory,
+        agent=OHSdkAgent(sandbox, settings_obj=_settings()),
+        dry_run=False,
+        reconcile_reviews=False,
+    )
+    assert len(sandbox.calls) == 1 and _ledger(manager, pid).strict is False  # enregistré, sans garantie annoncée
+
+
+async def test_a_subscription_coder_is_accepted_in_strict_mode(manager, repo):
+    pid = _linear_project(manager, 1)
+    sandbox = _Sandbox(f"[collegue-budget] armed {{}}\n{_usage_line()}\n[collegue-budget] final\nOH_RUNNER_DONE\n")
+    await _oh_pass(manager, repo, pid, sandbox)
+    assert len(sandbox.calls) == 1 and _ledger(manager, pid).consumed_tokens == 150
+
+
+async def test_an_unknown_marker_wins_over_the_final_marker(manager, repo):
+    """``final`` prouve que les deltas ont été vidés, pas que les compteurs du SDK ont tout vu."""
+    pid = _linear_project(manager, 2)
+    out = (
+        '[collegue-budget] armed {}\n[collegue-budget] unknown {"reason": "appel indéterminé (HTTP 503)"}\n'
+        f"{_usage_line()}\n[collegue-budget] final\n"
+    )
+    await _oh_pass(manager, repo, pid, _Sandbox(out, exit_code=4))
+    snap = _ledger(manager, pid)
+    assert snap.unknown_usd == pytest.approx(0.8) and snap.blocked and "indéterminé" in snap.blocked_reason
+
+
+async def test_a_container_timeout_is_unknown_even_when_the_final_marker_was_printed(manager, repo):
+    pid = _linear_project(manager, 2)
+    out = f"[collegue-budget] armed {{}}\n{_usage_line()}\n[collegue-budget] final\n"
+    await _oh_pass(manager, repo, pid, _Sandbox(out, exit_code=124, timed_out=True))
+    assert _ledger(manager, pid).blocked
+
+
+class _DeadlineAgent:
+    budget_enforcement = "test-double"
+
+    def implement_issue(self, workspace, issue):
+        from collegue.state import BudgetRefused
+        from collegue.state.budget_ledger import REFUSED_DEADLINE
+
+        raise BudgetRefused(REFUSED_DEADLINE, "échéance atteinte pendant l'appel : annulé, usage inconnu")
+
+
+async def test_a_deadline_refusal_during_a_call_stops_the_run_as_deadline_reached(manager, repo):
+    pid = _linear_project(manager, 2)
+    result = await _run(
+        manager, repo, pid, budget=_controller(), agent=_DeadlineAgent(), dry_run=False, reconcile_reviews=False
+    )
+    assert result.stop_reason == "deadline_reached"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"BUDGET_WORKER_SHARE": "oops"},
+        {"BUDGET_WORKER_SHARE": float("nan")},
+        {"BUDGET_WORKER_SHARE": 0},
+        {"BUDGET_WORKER_SHARE": 1.5},
+        {"BUDGET_WORKER_SHARE": True},
+        {"BUDGET_WORKER_MAX_USD": -1},
+        {"BUDGET_WORKER_MAX_USD": float("inf")},
+        {"BUDGET_WORKER_MAX_TOKENS": 12.5},
+        {"BUDGET_WORKER_MIN_USD": float("nan")},
+        {"BUDGET_WORKER_MIN_TOKENS": "x"},
+    ],
+)
+def test_invalid_worker_settings_are_refused_not_corrected(manager, extra):
+    from collegue.core.llm.budget_guard import BudgetBinding
+    from collegue.executor.worker_budget import allocate_worker
+    from collegue.state import BudgetRefused
+
+    pid = manager.create_project(name="p")
+    key = manager.budget_ledger.scope_for_project(pid, max_cost_usd=1.0).scope_key
+    binding = BudgetBinding(manager.budget_ledger, key, settings=_settings(**extra))
+    with pytest.raises(BudgetRefused) as refused:
+        allocate_worker(binding, agent=PricedAgent(0.1))
+    assert refused.value.code == "unbounded_transport"
+    snap = manager.budget_ledger.snapshot(key)
+    assert snap.reserved_usd == 0.0  # rien n'a été réservé
+
+
+@pytest.mark.parametrize("runtime", [float("nan"), float("inf"), 0, -5, True, "60"])
+def test_an_invalid_worker_runtime_is_refused(manager, runtime):
+    from collegue.core.llm.budget_guard import BudgetBinding
+    from collegue.executor.worker_budget import allocate_worker
+    from collegue.state import BudgetRefused
+
+    pid = manager.create_project(name="p")
+    key = manager.budget_ledger.scope_for_project(pid, max_cost_usd=1.0).scope_key
+    with pytest.raises(BudgetRefused):
+        allocate_worker(
+            BudgetBinding(manager.budget_ledger, key, settings=_settings()),
+            agent=PricedAgent(0.1),
+            timeout_seconds=runtime,
+        )
+    assert manager.budget_ledger.snapshot(key).reserved_usd == 0.0
+
+
 # --- dry-run : aucune écriture au registre ----------------------------------------------------------------------
 
 
@@ -534,7 +695,7 @@ class _FakePlannerClient:
             content = '{"title": "Demo", "summary": "s", "objectives": ["o"], "acceptance_criteria": ["le test passe"]}'
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-            usage=SimpleNamespace(prompt_tokens=2000, completion_tokens=1000),
+            usage=SimpleNamespace(prompt_tokens=300, completion_tokens=200),  # sous la borne du payload transmis
             model=model,
         )
 
@@ -564,7 +725,7 @@ async def test_planning_spend_is_in_the_ledger_before_the_project_exists_and_sur
     # et la réservation y était déjà prise.
     (during_spec,) = client.snapshots[0]
     assert during_spec["project_id"] is None and during_spec["reserved_usd"] > 0
-    expected = 2 * (2000 * 1.5e-6 + 1000 * 9e-6)
+    expected = 2 * (300 * 1.5e-6 + 200 * 9e-6)
 
     scope = manager.budget_ledger.snapshot_for_project(plan.project_id)  # lié au projet ensuite
     assert scope is not None and scope.scope_key.startswith("planning:")

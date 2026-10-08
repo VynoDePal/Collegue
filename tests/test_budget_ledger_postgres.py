@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from collegue.state import BudgetRefused, ProjectStateManager
+from collegue.state import BudgetIdentityError, BudgetRefused, ProjectStateManager
 from collegue.state.budget_ledger import REFUSED_BLOCKED, REFUSED_CAP_USD
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -176,6 +176,61 @@ def test_concurrent_identical_reservation_ids_and_commits_apply_once(pg_manager,
     assert committed.count(False) == 1 and len(committed) == workers
     snap = pg_manager.budget_ledger.snapshot(key)
     assert (snap.consumed_usd, snap.reserved_usd) == (0.7, 0.0)
+
+
+def _race(pg_url, calls):
+    barrier = threading.Barrier(len(calls))
+    outcomes = []
+
+    def worker(call):
+        ledger = ProjectStateManager.from_url(pg_url).budget_ledger
+        barrier.wait()
+        try:
+            outcomes.append(("ok", call(ledger)))
+        except BudgetIdentityError:
+            outcomes.append(("contradiction", None))
+        except BaseException as exc:  # noqa: BLE001 - toute autre issue fait échouer le test
+            outcomes.append(("autre", repr(exc)))
+
+    threads = [threading.Thread(target=worker, args=(call,)) for call in calls]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    return [kind for kind, _ in outcomes], outcomes
+
+
+def test_concurrent_reservation_id_reuse_with_other_amounts_reserves_once_on_real_postgres(pg_manager, pg_url):
+    _pid, key = _scope(pg_manager, cap=10.0)
+    amounts = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    calls = [lambda ledger, a=a: ledger.reserve(key, usd=a, tokens=0, reservation_id="call:same") for a in amounts]
+    kinds, outcomes = _race(pg_url, calls)
+    assert kinds.count("ok") == 1 and kinds.count("contradiction") == len(amounts) - 1, outcomes
+    assert pg_manager.budget_ledger.snapshot(key).reserved_usd in amounts
+
+
+def test_concurrent_event_key_reuse_with_other_amounts_counts_once_on_real_postgres(pg_manager, pg_url):
+    ledger = pg_manager.budget_ledger
+    _pid, key = _scope(pg_manager, cap=10.0)
+    rid = ledger.reserve(key, usd=5.0, tokens=0).reservation_id
+    amounts = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    calls = [lambda other, a=a: other.commit(rid, usd=a, tokens=0, event_key="evt") for a in amounts]
+    kinds, outcomes = _race(pg_url, calls)
+    assert kinds.count("ok") == 1 and kinds.count("contradiction") == len(amounts) - 1, outcomes
+    snap = ledger.snapshot(key)
+    assert snap.consumed_usd in amounts and snap.reserved_usd == 0.0
+
+
+def test_a_release_replayed_under_a_commit_key_is_refused_on_real_postgres(pg_manager):
+    ledger = pg_manager.budget_ledger
+    _pid, key = _scope(pg_manager, cap=2.0)
+    rid = ledger.reserve(key, usd=0.5, tokens=0).reservation_id
+    ledger.commit(rid, usd=0.4, tokens=0, event_key="evt")
+    with pytest.raises(BudgetIdentityError):
+        ledger.release(rid, reason="x", event_key="evt")
+    with pytest.raises(BudgetIdentityError):
+        ledger.commit(rid, usd=0.1, tokens=0, event_key="evt")
+    assert ledger.snapshot(key).consumed_usd == 0.4
 
 
 def test_unknown_usage_blocks_strict_across_connections_on_real_postgres(pg_manager, pg_url):

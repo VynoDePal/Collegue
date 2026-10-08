@@ -23,6 +23,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+# Plafond de sortie appliqué quand l'appelant n'en fournit aucun (sortie bornée ⇒ coût borné).
+DEFAULT_BOUNDED_MAX_TOKENS = 4096
+
 
 def _usage_of(resp):
     usage = getattr(resp, "usage", None)
@@ -54,6 +57,9 @@ def _make_handler_class():
                 if binding is not None:
                     # Registre durable lié (moteur autonome) : réservation AVANT chaque tentative, pas de
                     # retry interne du SDK (max_retries=0), règlement avec l'usage réel.
+                    # La sortie DOIT être bornée par un max_tokens réellement transmis : sans lui elle ne l'est pas.
+                    if not kw.get("max_tokens"):
+                        kw["max_tokens"] = DEFAULT_BOUNDED_MAX_TOKENS
                     once = self.client.with_options(max_retries=0) if hasattr(self.client, "with_options") else None
                     target = once.chat.completions.create if once is not None else inner
 
@@ -65,7 +71,7 @@ def _make_handler_class():
                         binding=binding,
                         model=str(kw.get("model") or self.default_model or ""),
                         messages=kw.get("messages"),
-                        max_tokens=int(kw.get("max_tokens") or 0) or 4096,
+                        max_tokens=int(kw["max_tokens"]),
                         transport=TRANSPORT_HTTP,
                         usage_of=_usage_of,
                         max_attempts=3,  # = les 2 retries par défaut du SDK, désormais réservés un à un

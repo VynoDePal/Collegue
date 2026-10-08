@@ -91,30 +91,68 @@ class BudgetLedgerError(RuntimeError):
     """Incohérence ou conflit du registre (double règlement avec une autre clé, état invalide…)."""
 
 
-def usd_to_micro(value) -> int:
-    """USD → micro-USD, arrondi vers le HAUT (conservateur). Refuse NaN/inf/négatif/bool."""
+class BudgetIdentityError(BudgetLedgerError):
+    """Une identité (``reservation_id``/``event_key``) est rejouée avec un SENS contradictoire : refusée telle quelle."""
+
+
+def _decimal(value, label: str) -> Decimal:
     if isinstance(value, bool):
-        raise ValueError("montant USD invalide (bool)")
+        raise ValueError(f"{label} invalide (bool): {value!r}")
+    if value is None:
+        raise ValueError(f"{label} manquant")
     try:
-        amount = Decimal(str(value))
-    except Exception as exc:  # noqa: BLE001 - montant illisible
-        raise ValueError(f"montant USD illisible: {value!r}") from exc
-    if not amount.is_finite() or amount < 0:
-        raise ValueError(f"montant USD invalide: {value!r}")
+        amount = Decimal(str(value).strip())
+    except Exception as exc:  # noqa: BLE001 - valeur illisible
+        raise ValueError(f"{label} illisible: {value!r}") from exc
+    if not amount.is_finite():
+        raise ValueError(f"{label} non fini: {value!r}")
+    return amount
+
+
+def usd_to_micro(value) -> int:
+    """USD → micro-USD, arrondi vers le HAUT (conservateur). Refuse NaN/inf/négatif/bool/illisible."""
+    amount = _decimal(value, "montant USD")
+    if amount < 0:
+        raise ValueError(f"montant USD négatif: {value!r}")
     return int((amount * MICRO).to_integral_value(rounding=ROUND_CEILING))
 
 
+def validate_micro(value, label: str = "micro-USD") -> int:
+    """Entier de micro-USD ≥ 0 (ni bool, ni fraction, ni négatif, ni non fini)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, float) and math.isfinite(value) and value == int(value) and value >= 0:
+            return int(value)
+        raise ValueError(f"{label} invalide (entier ≥ 0 requis): {value!r}")
+    if value < 0:
+        raise ValueError(f"{label} négatif: {value!r}")
+    return int(value)
+
+
 def cap_to_micro(value) -> Optional[int]:
-    """Plafond USD → micro-USD, arrondi vers le BAS (conservateur). ``None``/<=0 → pas de plafond."""
+    """Plafond USD → micro-USD, arrondi vers le BAS (conservateur).
+
+    ``None`` et ``0`` = pas de plafond (convention historique de ``MAX_COST_USD=0`` : désactivé,
+    documentée). Toute valeur INVALIDE (NaN/inf/bool/illisible/négative) est REFUSÉE : elle ne désactive
+    jamais silencieusement un plafond.
+    """
     if value is None:
         return None
-    try:
-        amount = Decimal(str(value))
-    except Exception:  # noqa: BLE001
-        return None
-    if not amount.is_finite() or amount <= 0:
+    amount = _decimal(value, "plafond USD")
+    if amount < 0:
+        raise ValueError(f"plafond USD négatif: {value!r}")
+    if amount == 0:
         return None
     return int((amount * MICRO).to_integral_value(rounding=ROUND_FLOOR))
+
+
+def cap_to_tokens(value) -> Optional[int]:
+    """Plafond de tokens (entier). ``None``/``0`` = pas de plafond ; invalide/fractionnaire/négatif ⇒ refusé."""
+    if value is None:
+        return None
+    amount = _decimal(value, "plafond de tokens")
+    if amount < 0 or amount != amount.to_integral_value():
+        raise ValueError(f"plafond de tokens invalide (entier ≥ 0 requis): {value!r}")
+    return int(amount) or None
 
 
 def micro_to_usd(micro: int) -> float:
@@ -122,16 +160,21 @@ def micro_to_usd(micro: int) -> float:
 
 
 def _tokens(value) -> int:
-    if isinstance(value, bool):
-        raise ValueError("nombre de tokens invalide (bool)")
-    if isinstance(value, float):
-        if not math.isfinite(value) or value < 0:
-            raise ValueError(f"nombre de tokens invalide: {value!r}")
-        return math.ceil(value)
-    number = int(value)
-    if number < 0:
-        raise ValueError(f"nombre de tokens négatif: {value!r}")
-    return number
+    """Nombre de tokens : entier ≥ 0 (une fraction ou un non-fini est une erreur, pas un arrondi)."""
+    amount = _decimal(value, "nombre de tokens")
+    if amount < 0 or amount != amount.to_integral_value():
+        raise ValueError(f"nombre de tokens invalide (entier ≥ 0 requis): {value!r}")
+    return int(amount)
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """Vrai pour une violation d'UNICITÉ (rejeu), faux pour CHECK/FK/NOT NULL (vraie erreur)."""
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "pgcode", None)
+    if code is not None:
+        return str(code) == "23505"
+    text = str(orig).lower()
+    return "unique constraint failed" in text or "duplicate key" in text
 
 
 def _utcnow() -> datetime:
@@ -386,7 +429,7 @@ class BudgetLedger:
 
     def _open(self, key, *, project_id, kind, max_cost_usd, max_tokens, strict) -> ScopeSnapshot:
         cap_usd = cap_to_micro(max_cost_usd)
-        cap_tok = None if not max_tokens or int(max_tokens) <= 0 else int(max_tokens)
+        cap_tok = cap_to_tokens(max_tokens)
 
         def _do(session: Session):
             row = None
@@ -556,11 +599,29 @@ class BudgetLedger:
         """
         if kind not in ("call", "worker"):
             raise ValueError(f"kind invalide: {kind!r}")
-        need_micro = int(micro_usd) if micro_usd is not None else usd_to_micro(usd)
+        need_micro = validate_micro(micro_usd) if micro_usd is not None else usd_to_micro(usd)
         need_tokens = _tokens(tokens)
         rid = reservation_id or f"{kind}:{uuid.uuid4().hex}"
         if expires_at is None and ttl_seconds is not None:
             expires_at = self._clock() + timedelta(seconds=float(ttl_seconds))
+
+        def check_identity(existing: BudgetReservation, scope_id: int) -> None:
+            """Un rejeu est le MÊME événement : scope, type, montants et libellés identiques."""
+            wanted = (scope_id, kind, need_micro, need_tokens, str(role)[:48], str(model)[:160], str(transport)[:48])
+            have = (
+                existing.scope_id,
+                existing.kind,
+                int(existing.reserved_micro_usd),
+                int(existing.reserved_tokens),
+                existing.role,
+                existing.model,
+                existing.transport,
+            )
+            if wanted != have:
+                raise BudgetIdentityError(
+                    f"identité de réservation contradictoire pour {rid} : demande {wanted} ≠ enregistrée {have} "
+                    "(un reservation_id ne peut pas changer de sens)"
+                )
 
         def _do(session: Session):
             scope = session.scalar(select(BudgetScope).where(BudgetScope.scope_key == scope_key))
@@ -568,6 +629,7 @@ class BudgetLedger:
                 raise BudgetRefused(REFUSED_SCOPE, f"scope budgétaire inconnu: {scope_key}")
             existing = session.scalar(select(BudgetReservation).where(BudgetReservation.reservation_id == rid))
             if existing is not None:
+                check_identity(existing, scope.id)
                 return self._reservation_of(existing, scope_key, replayed=True)
 
             used_usd = BudgetScope.consumed_micro_usd + BudgetScope.reserved_micro_usd + BudgetScope.unknown_micro_usd
@@ -646,16 +708,22 @@ class BudgetLedger:
 
         try:
             return self._run(_do)
-        except IntegrityError:
-            # Deux appelants avec le même reservation_id : l'un a gagné, l'autre rejoue.
+        except IntegrityError as exc:
+            if not _is_unique_violation(exc):
+                # Une contrainte CHECK/FK n'est PAS un rejeu : ne jamais la masquer derrière une réservation existante.
+                raise BudgetLedgerError(f"contrainte violée à la réservation de {rid} : {exc.orig}") from exc
+
+            # Deux appelants avec le même reservation_id : l'un a gagné, l'autre rejoue — si c'est le MÊME sens.
             def _replay(session: Session):
                 existing = session.scalar(select(BudgetReservation).where(BudgetReservation.reservation_id == rid))
-                if existing is None:
+                scope = session.scalar(select(BudgetScope).where(BudgetScope.scope_key == scope_key))
+                if existing is None or scope is None:
                     raise BudgetLedgerError(f"contrainte violée sans réservation existante: {rid}")
+                check_identity(existing, scope.id)
                 return self._reservation_of(existing, scope_key, replayed=True)
 
             return self._run(_replay)
-        except BudgetRefused:
+        except (BudgetRefused, BudgetIdentityError):
             raise
         except (OperationalError, BudgetLedgerError) as exc:
             raise BudgetRefused(REFUSED_LEDGER, f"registre budgétaire indisponible : {exc}") from exc
@@ -699,14 +767,23 @@ class BudgetLedger:
         consumed_tokens: int = 0,
         reason: Optional[str] = None,
     ) -> Settlement:
+        def check_event_identity(prior: BudgetEvent) -> None:
+            """Rejouer une clé = rejouer le MÊME événement (réservation, type et montants identiques)."""
+            wanted = (reservation_id, kind, consumed_micro, consumed_tokens)
+            have = (prior.reservation_id, prior.kind, int(prior.micro_usd), int(prior.tokens))
+            if wanted != have:
+                raise BudgetIdentityError(
+                    f"clé d'événement {event_key} réutilisée avec un sens contradictoire : demande {wanted} ≠ "
+                    f"enregistrée {have} (une clé d'idempotence ne peut pas changer de sens)"
+                )
+
         def _do(session: Session):
             row = session.scalar(select(BudgetReservation).where(BudgetReservation.reservation_id == reservation_id))
             if row is None:
                 raise BudgetLedgerError(f"réservation inconnue: {reservation_id}")
             prior = session.scalar(select(BudgetEvent).where(BudgetEvent.event_key == event_key))
             if prior is not None:
-                if prior.reservation_id != reservation_id:
-                    raise BudgetLedgerError(f"clé d'événement {event_key} déjà utilisée pour une autre réservation")
+                check_event_identity(prior)
                 return Settlement(
                     reservation_id, row.state, int(row.consumed_micro_usd), int(row.consumed_tokens), replayed=True
                 )
@@ -763,12 +840,20 @@ class BudgetLedger:
 
         try:
             return self._run(_do)
-        except IntegrityError:
-            # Course de rejeu : la même clé vient d'être appliquée par un autre appelant.
+        except IntegrityError as exc:
+            if not _is_unique_violation(exc):
+                raise BudgetLedgerError(f"contrainte violée au règlement de {reservation_id} : {exc.orig}") from exc
+
+            # Course de rejeu : la même clé vient d'être appliquée par un autre appelant — rejeu SEULEMENT
+            # si c'est le même événement ; un sens contradictoire échoue sans toucher aux soldes.
             def _replay(session: Session):
                 row = session.scalar(
                     select(BudgetReservation).where(BudgetReservation.reservation_id == reservation_id)
                 )
+                prior = session.scalar(select(BudgetEvent).where(BudgetEvent.event_key == event_key))
+                if prior is None or row is None:
+                    raise BudgetLedgerError(f"contrainte d'unicité violée sans événement existant: {event_key}")
+                check_event_identity(prior)
                 return Settlement(
                     reservation_id, row.state, int(row.consumed_micro_usd), int(row.consumed_tokens), replayed=True
                 )
@@ -795,7 +880,7 @@ class BudgetLedger:
         La consommation réelle peut dépasser la réservation (le fournisseur a dépassé
         l'estimation) : elle est enregistrée intégralement, jamais tronquée.
         """
-        micro = int(micro_usd) if micro_usd is not None else usd_to_micro(usd)
+        micro = validate_micro(micro_usd) if micro_usd is not None else usd_to_micro(usd)
         return self._settle(
             reservation_id,
             event_key=event_key or f"commit:{reservation_id}",
@@ -832,7 +917,7 @@ class BudgetLedger:
         self, reservation_id: str, *, usd=0.0, tokens: int = 0, micro_usd=None, event_key: str, reason: str = ""
     ) -> Settlement:
         """Résout un usage inconnu avec la consommation réelle établie (facture, relevé fournisseur)."""
-        micro = int(micro_usd) if micro_usd is not None else usd_to_micro(usd)
+        micro = validate_micro(micro_usd) if micro_usd is not None else usd_to_micro(usd)
         return self._settle(
             reservation_id,
             event_key=event_key,
@@ -843,6 +928,30 @@ class BudgetLedger:
             consumed_tokens=_tokens(tokens),
             reason=reason or "résolu par l'opérateur",
         )
+
+    def block(self, scope_key: str, *, reason: str, event_key: Optional[str] = None) -> None:
+        """Bloque durablement le scope (strict) : une hypothèse de borne a été DÉMENTIE par la réalité.
+
+        Idempotent par ``event_key``. Sans plafond le blocage n'a pas d'effet (il n'y a rien à protéger) ;
+        l'événement reste journalisé.
+        """
+        key = event_key or f"block:{scope_key}:{uuid.uuid4().hex}"
+
+        def _do(session: Session):
+            scope = session.scalar(select(BudgetScope).where(BudgetScope.scope_key == scope_key))
+            if scope is None:
+                raise BudgetRefused(REFUSED_SCOPE, f"scope budgétaire inconnu: {scope_key}")
+            if session.scalar(select(BudgetEvent).where(BudgetEvent.event_key == key)) is not None:
+                return
+            session.add(BudgetEvent(event_key=key, scope_id=scope.id, kind="note", detail=str(reason)[:2000]))
+            session.flush()
+            session.execute(
+                update(BudgetScope)
+                .where(BudgetScope.id == scope.id)
+                .values(blocked_reason=_block_expr(str(reason)[:2000]), revision=BudgetScope.revision + 1)
+            )
+
+        self._run(_do)
 
     # ── reprise après crash ────────────────────────────────────────────────────────
 

@@ -14,8 +14,18 @@ Règlement
   ``mark_unknown`` : la réservation est CONSERVÉE comme borne haute, la suite STRICTE est
   bloquée avec un motif durable. Un échec n'est jamais lu comme zéro.
 
-Un agent dont l'appel ne peut pas être borné (``budget_enforcement == "none"``) est REFUSÉ en
-mode strict sous plafond : la garantie ne peut pas être prétendue.
+Capacité budgétaire déclarée par l'agent (``budget_enforcement``) — mode strict sous plafond
+-----------------------------------------------------------------------------------------------
+- **absente** : AUCUNE garantie par défaut → refus (``unbounded_transport``). Un agent qui ne dit rien sur sa
+  dépense n'est pas présumé inoffensif ;
+- ``"none"`` : aucun contrôle avant émission → refus ;
+- ``"test-double"`` : double déterministe qui ne dépense rien hors process (il rapporte un usage fictif) →
+  accepté, explicitement. À ne JAMAIS déclarer sur un agent réel ;
+- ``"in-runner"`` : le runner contrôle chaque appel du framework d'agent, MAIS les commandes du workspace
+  disposent de la même clé et d'un réseau libre : elles peuvent appeler le fournisseur hors de tout contrôle.
+  Avec une clé FACTURABLE, ce n'est pas une barrière effective → refus en strict (le mode ``advisory`` reste
+  disponible, la limite est documentée). Sans exposition en dollars (abonnement : 0 $ par token), le plafond de
+  tokens est appliqué sur les appels du framework et la limite résiduelle est documentée.
 """
 
 from __future__ import annotations
@@ -43,12 +53,10 @@ from collegue.state.budget_ledger import (
     usd_to_micro,
 )
 
-# Valeurs de ``Agent.budget_enforcement`` :
-#   "in-runner" : le worker contrôle chaque appel (retries et replis compris) avant émission ;
-#   "none"      : aucun contrôle possible → incompatible avec la garantie stricte sous plafond ;
-#   absent      : double de test / agent qui ne dépense pas hors process (réservation + règlement seuls).
+# Valeurs de ``Agent.budget_enforcement`` (voir l'en-tête du module pour la matrice complète).
 ENFORCEMENT_IN_RUNNER = "in-runner"
 ENFORCEMENT_NONE = "none"
+ENFORCEMENT_TEST_DOUBLE = "test-double"
 
 DEFAULT_WORKER_SHARE = 0.8
 # Plancher d'une allocation « utile » : avec 80 % du solde restant à chaque passe, les allocations
@@ -69,10 +77,10 @@ class WorkerAllocation:
     max_tokens: int
     deadline_epoch: Optional[float]
     runtime_seconds: Optional[float]
-    price_in: Optional[float]
-    price_out: Optional[float]
+    prices: Tuple[Tuple[str, float, float], ...]  # (modèle, usd/token entrée, usd/token sortie) pour TOUTE la chaîne
     billable: bool
     strict: bool
+    byte_bounded_models: Tuple[str, ...] = ()
 
     @property
     def max_usd(self) -> float:
@@ -95,12 +103,69 @@ def worker_allocation(alloc: Optional[WorkerAllocation]) -> Iterator[Optional[Wo
         _current.reset(token)
 
 
-def _float_setting(settings: Optional[object], name: str, default: float) -> float:
-    try:
-        value = float(getattr(settings, name, default))
-    except (TypeError, ValueError):
+def _setting(settings: Optional[object], name: str, default: float, *, integer: bool = False) -> float:
+    """Réglage numérique ≥ 0 STRICT : absent → défaut ; NaN/inf/bool/illisible/négatif → REFUSÉ (jamais corrigé)."""
+    raw = getattr(settings, name, None)
+    if raw is None or raw == "":
         return default
-    return value if math.isfinite(value) and value >= 0 else default
+    bad = BudgetRefused(REFUSED_UNBOUNDED, f"réglage budgétaire invalide {name}={raw!r} : refusé (aucune correction)")
+    if isinstance(raw, bool):
+        raise bad
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise bad from None
+    if not math.isfinite(value) or value < 0 or (integer and value != int(value)):
+        raise bad
+    return value
+
+
+def _runtime_seconds(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise BudgetRefused(REFUSED_UNBOUNDED, f"durée d'exécution invalide ({value!r}) : worker refusé")
+    return float(value)
+
+
+def _chain_models(agent: object, model: str) -> list:
+    """Modèles que le worker peut utiliser (principal + replis) ; l'agent les déclare via ``model_chain()``."""
+    chain = getattr(agent, "model_chain", None)
+    try:
+        models = [str(m) for m in (chain() if callable(chain) else [model]) if m]
+    except Exception:  # noqa: BLE001 - une chaîne illisible n'est pas bornable
+        raise BudgetRefused(REFUSED_UNBOUNDED, "chaîne de modèles du worker illisible : worker refusé") from None
+    return models or [model]
+
+
+def _require_enforceable(agent: object, billable: bool) -> None:
+    """Matrice d'enforcement (voir l'en-tête du module) : refuse ce qui ne peut pas être borné en strict."""
+    enforcement = getattr(agent, "budget_enforcement", None)
+    name = type(agent).__name__
+    if enforcement == ENFORCEMENT_TEST_DOUBLE:
+        return
+    if enforcement is None:
+        raise BudgetRefused(
+            REFUSED_UNBOUNDED,
+            f"agent {name} : aucune capacité budgétaire déclarée (budget_enforcement) — aucune garantie par défaut ; "
+            "déclarer 'test-double' (double sans dépense réelle) ou utiliser BUDGET_MODE=advisory",
+        )
+    if enforcement == ENFORCEMENT_NONE:
+        raise BudgetRefused(
+            REFUSED_UNBOUNDED,
+            f"agent {name} : appels non bornables (aucun contrôle avant émission) — incompatible avec le mode "
+            "budgétaire strict sous plafond ; utiliser l'agent SDK ou BUDGET_MODE=advisory",
+        )
+    if enforcement == ENFORCEMENT_IN_RUNNER:
+        if billable:
+            raise BudgetRefused(
+                REFUSED_UNBOUNDED,
+                f"agent {name} : le contrôle 'in-runner' ne borne que les appels du framework ; une commande du "
+                "workspace dispose de la même clé FACTURABLE et d'un réseau libre — pas de barrière effective, donc "
+                "pas de garantie stricte en dollars. Utiliser l'abonnement (0 $/token) ou BUDGET_MODE=advisory",
+            )
+        return
+    raise BudgetRefused(REFUSED_UNBOUNDED, f"agent {name} : capacité budgétaire inconnue ({enforcement!r}) : refusé")
 
 
 def _coder_model_and_billable(settings: Optional[object]) -> Tuple[str, bool]:
@@ -131,20 +196,31 @@ def allocate_worker(
             f"scope {scope_key} bloqué (usage inconnu, mode strict) : {snap.blocked_reason}",
             snapshot=snap,
         )
-    enforcement = getattr(agent, "budget_enforcement", None)
     capped = snap.strict and (snap.cap_micro_usd is not None or snap.cap_tokens is not None)
-    if capped and enforcement == ENFORCEMENT_NONE:
+    model, billable = _coder_model_and_billable(settings)
+    if capped:
+        _require_enforceable(agent, billable)
+    share = _setting(settings, "BUDGET_WORKER_SHARE", DEFAULT_WORKER_SHARE)
+    if not 0 < share <= 1:
         raise BudgetRefused(
             REFUSED_UNBOUNDED,
-            f"agent {type(agent).__name__} : appels non bornables (aucun contrôle avant émission) — "
-            "incompatible avec le mode budgétaire strict sous plafond ; utiliser l'agent SDK ou BUDGET_MODE=advisory",
+            f"BUDGET_WORKER_SHARE={share!r} hors de ]0, 1] : refusé (aucune correction)",
+            snapshot=snap,
         )
+    max_usd_setting = _setting(settings, "BUDGET_WORKER_MAX_USD", 0.0)
+    max_tok_setting = int(_setting(settings, "BUDGET_WORKER_MAX_TOKENS", 0.0, integer=True))
+    min_usd = _setting(settings, "BUDGET_WORKER_MIN_USD", DEFAULT_MIN_WORKER_USD)
+    min_tokens = int(_setting(settings, "BUDGET_WORKER_MIN_TOKENS", DEFAULT_MIN_WORKER_TOKENS, integer=True))
+    timeout_seconds = _runtime_seconds(timeout_seconds)
 
-    model, billable = _coder_model_and_billable(settings)
-    prices = resolve_prices(model, settings, billable=billable)
-    share = min(1.0, max(0.05, _float_setting(settings, "BUDGET_WORKER_SHARE", DEFAULT_WORKER_SHARE)))
-    max_usd_setting = _float_setting(settings, "BUDGET_WORKER_MAX_USD", 0.0)
-    max_tok_setting = int(_float_setting(settings, "BUDGET_WORKER_MAX_TOKENS", 0.0))
+    # Tarifs de CHAQUE modèle de la chaîne (principal + replis) : un repli est tarifé à son propre prix.
+    chain = _chain_models(agent, model)
+    table = []
+    for name in chain:
+        priced = resolve_prices(name.split("/")[-1], settings, billable=billable)
+        if priced is not None:
+            table.append((name, priced[0], priced[1]))
+    primary_priced = any(entry[0] == chain[0] for entry in table)
 
     # Dimension USD
     alloc_micro = 0
@@ -154,10 +230,9 @@ def allocate_worker(
             raise BudgetRefused(
                 REFUSED_CAP_USD, f"plafond USD atteint : aucun worker lancé ({snap.spent_usd:.6f} $)", snapshot=snap
             )
-        if prices is None and snap.strict and enforcement == ENFORCEMENT_IN_RUNNER:
-            # Seul un runner qui APPLIQUE le plafond USD a besoin des tarifs pour le faire. Un agent non
-            # déclaré (double de test) ne dépense qu'en rapportant son coût après coup : réservation +
-            # règlement, sans garantie intra-passe (documentée).
+        if not primary_priced and snap.strict and getattr(agent, "budget_enforcement", None) == ENFORCEMENT_IN_RUNNER:
+            # Seul un runner qui APPLIQUE le plafond USD a besoin des tarifs pour le faire. Un double de test
+            # ne dépense qu'en rapportant son coût après coup : réservation + règlement.
             raise BudgetRefused(
                 REFUSED_UNBOUNDED,
                 f"modèle coder {model!r} sans tarif autoritaire : dépense non bornable sous plafond USD "
@@ -165,7 +240,7 @@ def allocate_worker(
                 snapshot=snap,
             )
         alloc_micro = max(1, int(free * share))
-        floor = usd_to_micro(_float_setting(settings, "BUDGET_WORKER_MIN_USD", DEFAULT_MIN_WORKER_USD))
+        floor = usd_to_micro(min_usd)
         if alloc_micro < floor:
             raise BudgetRefused(
                 REFUSED_CAP_USD,
@@ -185,7 +260,6 @@ def allocate_worker(
                 REFUSED_CAP_TOKENS, f"plafond tokens atteint : aucun worker lancé ({snap.used_tokens})", snapshot=snap
             )
         alloc_tokens = max(1, int(free_tok * share))
-        min_tokens = int(_float_setting(settings, "BUDGET_WORKER_MIN_TOKENS", DEFAULT_MIN_WORKER_TOKENS))
         if alloc_tokens < min_tokens:
             raise BudgetRefused(
                 REFUSED_CAP_TOKENS,
@@ -221,10 +295,14 @@ def allocate_worker(
         max_tokens=alloc_tokens,
         deadline_epoch=(now.timestamp() + runtime) if runtime is not None else None,
         runtime_seconds=runtime,
-        price_in=None if prices is None else prices[0],
-        price_out=None if prices is None else prices[1],
+        prices=tuple(table),
         billable=billable,
         strict=snap.strict,
+        byte_bounded_models=tuple(
+            m.strip()
+            for m in str(getattr(settings, "BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS", "") or "").split(",")
+            if m.strip()
+        ),
     )
 
 

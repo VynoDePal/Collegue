@@ -68,24 +68,117 @@ class _UsageDeltaEmitter:
 # ── garde budgétaire (vague 2) ────────────────────────────────────────────────────────────
 #
 # Le runner tourne DANS le conteneur : l'hôte ne voit pas ses appels. L'hôte lui remet donc une
-# ALLOCATION (plafonds USD/tokens, échéance, tarifs) réservée dans le registre durable avant le
-# lancement ; ce runner contrôle chaque appel AVANT émission — retries et replis de modèle compris —
-# et s'arrête quand l'allocation ou l'échéance est atteinte. Il n'importe que la stdlib : le
-# script est copié seul dans l'image.
+# ALLOCATION (plafonds USD/tokens, échéance, tarifs PAR MODÈLE de la chaîne) réservée dans le registre durable
+# avant le lancement ; ce runner contrôle chaque appel AVANT émission — retries et replis de modèle compris —
+# et s'arrête quand l'allocation ou l'échéance est atteinte. Il n'importe que la stdlib : le script est copié
+# seul dans l'image.
+#
+# Ce que la garde établit, et ce qu'elle n'établit PAS :
+# - le prompt est borné par les OCTETS UTF-8 du payload complet transmis (messages, outils, schémas) : un
+#   tokenizer à repli octet ne produit jamais plus de tokens que d'octets (familles listées ou attestées) ;
+#   une famille inconnue ou une modalité non textuelle n'est pas bornable : le modèle est écarté ;
+# - la sortie est bornée par ``max_output_tokens`` du LLM (obligatoire) ; que le fournisseur l'honore est une
+#   hypothèse, d'où le contrôle a posteriori (compteurs SDK) ;
+# - une erreur HTTP ne prouve pas l'absence de facturation : seuls les rejets avant traitement (400/401/403/404/
+#   405/413/415/422/429) et l'échec de connexion sont « sans consommation » ; tout autre échec rend l'usage
+#   INCONNU (marqueur ``unknown``), sans retry ;
+# - le marqueur ``final`` ne prouve pas que les compteurs SDK ont tout vu : une réponse sans usage compté ou une
+#   borne démentie rend aussi l'usage inconnu ;
+# - l'échéance est appliquée PENDANT un appel en vol (chien de garde) : le worker est arrêté, usage inconnu.
 #
 # Périmètre exact de la garantie : elle borne les appels du framework d'agent. Elle ne protège PAS
-# d'une commande du workspace qui contacterait librement le fournisseur avec la clé facturable.
+# d'une commande du workspace qui contacterait librement le fournisseur avec la clé facturable
+# (l'hôte refuse donc le mode strict avec une clé facturable accessible, voir ``worker_budget``).
 
 BUDGET_MARKER = "[collegue-budget]"
-_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
-_RETRYABLE_NAMES = frozenset({"RateLimitError", "ServiceUnavailableError", "InternalServerError", "Timeout"})
-CHARS_PER_TOKEN_ESTIMATE = 2
-PROMPT_OVERHEAD_TOKENS = 32
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
+BYTE_BOUNDED_PREFIXES = ("gpt-", "chatgpt", "o1", "o3", "o4", "gemini", "gemma", "claude")
+PER_MESSAGE_FRAMING_TOKENS = 16
+PER_TOOL_FRAMING_TOKENS = 64
+REQUEST_FRAMING_TOKENS = 64
+_NON_TEXT_PART_TYPES = frozenset(
+    {
+        "image_url",
+        "image",
+        "input_image",
+        "input_audio",
+        "audio",
+        "audio_url",
+        "file",
+        "input_file",
+        "video",
+        "video_url",
+    }
+)
+_PROVEN_REJECTED_STATUS = frozenset({400, 401, 403, 404, 405, 413, 415, 422, 429})
+_RETRYABLE_REJECTED_STATUS = frozenset({429})
+_LEGACY_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})  # advisory : comportement historique
+_LEGACY_RETRYABLE_NAMES = frozenset({"RateLimitError", "ServiceUnavailableError", "InternalServerError", "Timeout"})
+_CONNECT_ERROR_NAMES = frozenset({"ConnectError", "ConnectTimeout"})
+RELEASE, UNKNOWN = "release", "unknown"
 
 
 class AllocationExhausted(RuntimeError):
     """L'allocation budgétaire (ou l'échéance) interdit l'appel suivant : il n'est PAS émis."""
+
+
+class UsageUnknown(AllocationExhausted):
+    """La consommation d'un appel émis n'est pas établie : le worker s'arrête (usage inconnu, pas de retry)."""
+
+
+class ModelNotBounded(RuntimeError):
+    """Ce modèle de la chaîne ne peut pas être borné (tarif/tokenizer inconnu) : on passe au suivant."""
+
+
+class UnboundablePayload(ValueError):
+    """Modalité non textuelle : ses tokens ne se déduisent pas de ses octets."""
+
+
+def _payload_bytes(value, _depth=0) -> int:
+    if _depth > 64:
+        raise UnboundablePayload("payload trop profond")
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8", errors="surrogatepass"))
+    if isinstance(value, (bytes, bytearray)):
+        raise UnboundablePayload("contenu binaire")
+    if isinstance(value, (int, float, bool)):
+        return len(str(value))
+    if isinstance(value, dict):
+        if str(value.get("type", "")).lower() in _NON_TEXT_PART_TYPES or any(
+            str(key).lower() in _NON_TEXT_PART_TYPES for key in value
+        ):
+            raise UnboundablePayload(f"modalité non textuelle ({value.get('type')!r})")
+        return sum(_payload_bytes(k, _depth + 1) + _payload_bytes(v, _depth + 1) for k, v in value.items())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return sum(_payload_bytes(item, _depth + 1) for item in value)
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return _payload_bytes(dump(), _depth + 1)
+    if hasattr(value, "__dict__"):
+        return _payload_bytes(vars(value), _depth + 1)
+    return len(str(value).encode("utf-8", errors="surrogatepass"))
+
+
+def classify_failure(exc: BaseException, *, strict: bool = True):
+    """``(RELEASE|UNKNOWN, retryable)`` : une réservation n'est libérée que si l'absence de conso est ÉTABLIE."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and not isinstance(status, bool) and getattr(exc, "response", None) is not None:
+        if status in _PROVEN_REJECTED_STATUS:
+            return RELEASE, status in _RETRYABLE_REJECTED_STATUS
+        if not strict:
+            return RELEASE, status in _LEGACY_RETRYABLE_STATUS
+        return UNKNOWN, False
+    link, seen = exc, 0
+    while link is not None and seen < 6:
+        if type(link).__name__ in _CONNECT_ERROR_NAMES:
+            return RELEASE, True
+        link, seen = (link.__cause__ or link.__context__), seen + 1
+    if not strict:
+        legacy_status = isinstance(status, int) and status in _LEGACY_RETRYABLE_STATUS
+        return RELEASE, legacy_status or type(exc).__name__ in _LEGACY_RETRYABLE_NAMES
+    return UNKNOWN, False
 
 
 class BudgetGuard:
@@ -97,71 +190,181 @@ class BudgetGuard:
         max_usd=None,
         max_tokens=None,
         deadline_epoch=None,
-        price_in=None,
-        price_out=None,
+        prices=None,
         billable=True,
+        strict=True,
         max_attempts=1,
+        attested_models=(),
         clock=None,
         sleep=None,
+        exit_fn=None,
     ) -> None:
         self.max_usd = max_usd if max_usd and max_usd > 0 else None
         self.max_tokens = max_tokens if max_tokens and max_tokens > 0 else None
         self.deadline_epoch = deadline_epoch
-        self.price_in = price_in
-        self.price_out = price_out
+        self.prices = {str(k): (float(v[0]), float(v[1])) for k, v in (prices or {}).items()}
         self.billable = billable
+        self.strict = strict
         self.max_attempts = max(1, int(max_attempts))
+        self.attested_models = tuple(m.strip().lower() for m in attested_models if m and m.strip())
         # Résolus à l'appel (et non figés à la définition) : horloge/sommeil substituables.
         self._clock = clock or (lambda: time.time())
         self._sleep = sleep or (lambda seconds: time.sleep(seconds))
-        self._llms: list = []
+        self._exit = exit_fn or os._exit
+        self._llms: list = []  # (llm, (price_in, price_out) | None)
+        self._lock = threading.Lock()
+        self._inflight = 0
         self.refused = 0
+        self.tainted = None  # raison durable : l'usage de ce run n'est PAS établi
 
-    def validate(self) -> None:
-        """Refuse de démarrer si le coût n'est pas bornable (plafond USD sans tarif sur un modèle facturé)."""
-        if self.max_usd and self.billable and (self.price_in is None or self.price_out is None):
+    # ── configuration par modèle ─────────────────────────────────────────────────────────
+    def price_of(self, model):
+        return self.prices.get(model)
+
+    def _byte_bounded(self, model) -> bool:
+        # ``fournisseur/modèle`` (format LiteLLM) : le tokenizer est celui de la famille du fournisseur OU du modèle.
+        parts = [part for part in model.strip().lower().split("/") if part]
+        known = BYTE_BOUNDED_PREFIXES + self.attested_models
+        return any(part.startswith(known) for part in (parts[0], parts[-1])) if parts else False
+
+    def needs_price(self) -> bool:
+        return bool(self.max_usd and self.billable)
+
+    def admit(self, model) -> None:
+        """Lève :class:`ModelNotBounded` si ``model`` ne peut pas être borné (tarif / tokenizer inconnu)."""
+        if self.needs_price() and self.price_of(model) is None:
+            raise ModelNotBounded(f"modèle {model!r} sans tarif autoritaire sous plafond USD")
+        if self.strict and (self.max_usd or self.max_tokens) and not self._byte_bounded(model):
+            raise ModelNotBounded(f"famille de tokenizer inconnue pour {model!r} : borne en octets non justifiée")
+
+    def validate(self, primary=None) -> None:
+        """Refuse de démarrer si le coût du modèle principal n'est pas bornable."""
+        if primary is not None:
+            try:
+                self.admit(primary)
+            except ModelNotBounded as exc:
+                raise AllocationExhausted(f"dépense non bornable, worker refusé : {exc}") from exc
+        elif self.needs_price() and not self.prices:
             raise AllocationExhausted("plafond USD sans tarif autoritaire : dépense non bornable, worker refusé")
 
-    def register(self, llm) -> None:
-        self._llms.append(llm)
+    def register(self, llm, model=None) -> None:
+        self._llms.append((llm, self.price_of(model) if model is not None else None))
 
     def spent(self) -> tuple:
         prompt = completion = 0
-        cost = 0.0
-        for llm in self._llms:
+        cost = priced = 0.0
+        for llm, price in self._llms:
             metrics = getattr(llm, "metrics", None)
             usage = getattr(metrics, "accumulated_token_usage", None)
-            prompt += int(getattr(usage, "prompt_tokens", 0) or 0)
-            completion += int(getattr(usage, "completion_tokens", 0) or 0)
+            p, c = int(getattr(usage, "prompt_tokens", 0) or 0), int(getattr(usage, "completion_tokens", 0) or 0)
+            prompt += p
+            completion += c
             cost += float(getattr(metrics, "accumulated_cost", 0.0) or 0.0)
+            if price is not None:
+                priced += p * price[0] + c * price[1]
+        self._priced = priced
         return prompt, completion, cost
 
-    def precheck(self, llm, payload) -> None:
-        """Lève :class:`AllocationExhausted` si l'appel ne tient plus dans l'allocation (rien n'est émis)."""
-        if self.deadline_epoch is not None and self._clock() >= self.deadline_epoch:
+    # ── usage inconnu ────────────────────────────────────────────────────────────────────
+    def taint(self, reason: str) -> None:
+        """Marque l'usage comme NON établi (une fois) : le marqueur ``final`` ne sera pas émis."""
+        with self._lock:
+            if self.tainted is not None:
+                return
+            self.tainted = reason
+        print(f"{BUDGET_MARKER} unknown {json.dumps({'reason': reason})}", flush=True)
+
+    def _enter(self) -> None:
+        with self._lock:
+            self._inflight += 1
+
+    def _leave(self) -> None:
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    # ── échéance ─────────────────────────────────────────────────────────────────────────
+    def deadline_reached(self) -> bool:
+        return self.deadline_epoch is not None and self._clock() >= self.deadline_epoch
+
+    def enforce_deadline(self) -> bool:
+        """Appelé par le chien de garde : à l'échéance, un appel en vol est ANNULÉ (usage inconnu) et le process
+        s'arrête ; sinon (aucun appel en vol) le worker reçoit SIGTERM. Renvoie vrai si l'échéance est atteinte."""
+        if not self.deadline_reached():
+            return False
+        with self._lock:
+            inflight = self._inflight
+        if inflight:
+            self.taint("échéance atteinte pendant un appel en vol : usage inconnu")
+        else:
+            print(f"{BUDGET_MARKER} deadline", flush=True)
+        self._exit(5)
+        return True
+
+    def start_watchdog(self, period: float = 0.5) -> None:
+        if self.deadline_epoch is None:
+            return
+
+        def watch() -> None:
+            while not self.enforce_deadline():
+                time.sleep(period)
+
+        threading.Thread(target=watch, name="collegue-budget-deadline", daemon=True).start()
+
+    # ── contrôle avant émission ──────────────────────────────────────────────────────────
+    def precheck(self, llm, payload, model=None):
+        """Lève :class:`AllocationExhausted` si l'appel ne tient plus dans l'allocation (rien n'est émis).
+
+        Renvoie ``(prompt_bound, max_out)`` : la borne HAUTE du prompt et de la sortie, vérifiée après l'appel.
+        """
+        if self.deadline_reached():
             self.refused += 1
             raise AllocationExhausted("échéance de l'allocation atteinte")
+        try:
+            body = _payload_bytes(payload)
+        except UnboundablePayload as exc:
+            self.refused += 1
+            raise AllocationExhausted(f"requête non bornable ({exc}) : refusée avant émission") from exc
+        args, kwargs = payload if isinstance(payload, tuple) and len(payload) == 2 else ((), {})
+        messages = kwargs.get("messages", args[0] if args else None)
+        n_messages = len(messages) if isinstance(messages, (list, tuple)) else 1
+        tools = kwargs.get("tools")
+        n_tools = len(tools) if isinstance(tools, (list, tuple)) else (1 if tools else 0)
+        prompt_bound = (
+            body + n_messages * PER_MESSAGE_FRAMING_TOKENS + n_tools * PER_TOOL_FRAMING_TOKENS + REQUEST_FRAMING_TOKENS
+        )
+        max_out = getattr(llm, "max_output_tokens", None)
+        if not isinstance(max_out, int) or isinstance(max_out, bool) or max_out <= 0:
+            self.refused += 1
+            raise AllocationExhausted("sortie non bornée (max_output_tokens absent du LLM) : refusée avant émission")
         prompt_spent, completion_spent, reported_cost = self.spent()
-        est_prompt = len(str(payload)) // CHARS_PER_TOKEN_ESTIMATE + PROMPT_OVERHEAD_TOKENS
-        max_out = int(getattr(llm, "max_output_tokens", None) or DEFAULT_MAX_OUTPUT_TOKENS)
-        if self.max_tokens is not None and prompt_spent + completion_spent + est_prompt + max_out > self.max_tokens:
+        if self.max_tokens is not None and prompt_spent + completion_spent + prompt_bound + max_out > self.max_tokens:
             self.refused += 1
             raise AllocationExhausted(
-                f"allocation de tokens épuisée ({prompt_spent + completion_spent} + {est_prompt + max_out} > {self.max_tokens})"
+                f"allocation de tokens épuisée ({prompt_spent + completion_spent} + {prompt_bound + max_out} > {self.max_tokens})"
             )
         if self.max_usd is not None and self.billable:
-            priced = prompt_spent * self.price_in + completion_spent * self.price_out
-            projected = max(priced, reported_cost) + est_prompt * self.price_in + max_out * self.price_out
+            price = self._price_for(llm)
+            if price is None:
+                self.refused += 1
+                raise AllocationExhausted("plafond USD sans tarif pour ce modèle : appel refusé")
+            projected = max(self._priced, reported_cost) + prompt_bound * price[0] + max_out * price[1]
             if projected > self.max_usd:
                 self.refused += 1
                 raise AllocationExhausted(f"allocation USD épuisée ({projected:.6f} > {self.max_usd:.6f})")
+        return prompt_bound, max_out
 
-    def install(self, llm) -> None:
+    def _price_for(self, llm):
+        for known, price in self._llms:
+            if known is llm:
+                return price
+        return None
+
+    def install(self, llm, model=None) -> None:
         """Enveloppe les points d'émission du LLM. Échoue (fail-closed) si aucun n'est contrôlable."""
         names = [n for n in ("completion", "responses") if callable(getattr(llm, n, None))]
         if not names:
             raise AllocationExhausted("aucun point d'émission contrôlable sur le LLM : garde budgétaire indisponible")
-        self.register(llm)
+        self.register(llm, model)
         for name in names:
             object.__setattr__(llm, name, self._wrap(llm, getattr(llm, name)))
 
@@ -170,35 +373,70 @@ class BudgetGuard:
 
         def guarded(*args, **kwargs):
             for attempt in range(guard.max_attempts):
-                guard.precheck(llm, (args, kwargs))  # avant CHAQUE tentative, retries compris
+                if guard.tainted is not None and guard.strict:
+                    raise UsageUnknown(f"usage inconnu ({guard.tainted}) : plus aucun appel n'est émis")
+                prompt_bound, max_out = guard.precheck(llm, (args, kwargs))  # avant CHAQUE tentative
+                before = guard.spent()
+                guard._enter()
                 try:
-                    return original(*args, **kwargs)
-                except Exception as exc:  # noqa: BLE001 - classé ci-dessous
-                    if attempt + 1 < guard.max_attempts and _retryable(exc):
-                        guard._sleep(min(30.0, 2.0**attempt))
+                    result = original(*args, **kwargs)
+                except BaseException as exc:  # noqa: BLE001 - classé ci-dessous, jamais avalé
+                    guard._leave()
+                    if not isinstance(exc, Exception):
+                        guard.taint(f"appel interrompu ({type(exc).__name__}) : usage inconnu")
+                        raise
+                    verdict, retryable = classify_failure(exc, strict=guard.strict)
+                    if verdict == UNKNOWN:
+                        reason = (
+                            f"appel indéterminé ({type(exc).__name__}) : l'absence de facturation n'est pas établie"
+                        )
+                        guard.taint(reason)
+                        raise UsageUnknown(reason) from exc
+                    if retryable and attempt + 1 < guard.max_attempts:
+                        delay = min(30.0, 2.0**attempt)
+                        left = None if guard.deadline_epoch is None else guard.deadline_epoch - guard._clock()
+                        if left is not None and delay >= left:
+                            raise AllocationExhausted("échéance trop proche pour retenter") from exc
+                        guard._sleep(delay)
                         continue
                     raise
+                guard._leave()
+                after = guard.spent()
+                d_prompt, d_completion = after[0] - before[0], after[1] - before[1]
+                if guard.strict and d_prompt + d_completion <= 0:
+                    reason = "réponse reçue sans usage comptabilisé par le SDK : consommation inconnue"
+                    guard.taint(reason)
+                    raise UsageUnknown(reason)
+                if guard.strict and (d_prompt > prompt_bound or d_completion > max_out):
+                    reason = (
+                        f"borne de tokens démentie par le fournisseur (prompt {d_prompt}>{prompt_bound} "
+                        f"ou sortie {d_completion}>{max_out})"
+                    )
+                    guard.taint(reason)
+                    raise UsageUnknown(reason)
+                return result
+            raise AllocationExhausted("aucune tentative émise")  # pragma: no cover
 
         return guarded
-
-
-def _retryable(exc: BaseException) -> bool:
-    status = getattr(exc, "status_code", None)
-    return (isinstance(status, int) and status in _RETRYABLE_STATUS) or type(exc).__name__ in _RETRYABLE_NAMES
 
 
 def _guard_from_args(args) -> "BudgetGuard | None":
     """Construit la garde depuis l'allocation hôte ; ``None`` si aucune allocation n'est fournie."""
     if not (args.budget_usd or args.budget_tokens or args.deadline_epoch):
         return None
+    try:
+        prices = json.loads(args.prices) if args.prices else {}
+    except ValueError as exc:
+        raise AllocationExhausted(f"table de tarifs illisible ({exc})") from exc
     return BudgetGuard(
         max_usd=args.budget_usd,
         max_tokens=args.budget_tokens,
         deadline_epoch=args.deadline_epoch,
-        price_in=args.price_in,
-        price_out=args.price_out,
+        prices=prices,
         billable=not args.no_billing,
+        strict=args.strict,
         max_attempts=int(os.environ.get("OH_NUM_RETRIES", "8")) + 1,
+        attested_models=[m for m in (args.byte_bounded_models or "").split(",")],
     )
 
 
@@ -211,20 +449,21 @@ def main() -> int:
     ap.add_argument("--budget-usd", type=float, default=None)
     ap.add_argument("--budget-tokens", type=int, default=None)
     ap.add_argument("--deadline-epoch", type=float, default=None)
-    ap.add_argument("--price-in", type=float, default=None, help="USD par token d'entrée")
-    ap.add_argument("--price-out", type=float, default=None, help="USD par token de sortie")
+    ap.add_argument(
+        "--prices", default=None, help='JSON {"modèle": [usd/token entrée, usd/token sortie]} pour TOUTE la chaîne'
+    )
+    ap.add_argument(
+        "--byte-bounded-models", default="", help="CSV de préfixes de modèles à tokenizer attesté par l'opérateur"
+    )
+    ap.add_argument("--strict", action="store_true", help="mode strict : échec indéterminé = usage inconnu, sans retry")
     ap.add_argument("--no-billing", action="store_true", help="abonnement : aucune facturation au token")
     args = ap.parse_args()
 
-    guard = _guard_from_args(args)
-    if guard is not None:
-        try:
-            guard.validate()
-        except AllocationExhausted as exc:
-            print(f"oh_runner: {exc}", file=sys.stderr)
-            return 3
-        # SIGTERM (échéance, `timeout` du conteneur) → arrêt PROPRE : les `finally` vident l'usage.
-        signal.signal(signal.SIGTERM, lambda _signum, _frame: (_ for _ in ()).throw(SystemExit(143)))
+    try:
+        guard = _guard_from_args(args)
+    except AllocationExhausted as exc:
+        print(f"oh_runner: {exc}", file=sys.stderr)
+        return 3
 
     os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
@@ -249,6 +488,17 @@ def main() -> int:
         print("oh_runner: LLM_API_KEY/GEMINI_API_KEY manquante", file=sys.stderr)
         return 2
 
+    chain = [primary, *[m for m in fallbacks if m != primary]]
+    if guard is not None:
+        try:
+            guard.validate(primary)
+        except AllocationExhausted as exc:
+            print(f"oh_runner: {exc}", file=sys.stderr)
+            return 3
+        # SIGTERM (échéance, `timeout` du conteneur) → arrêt PROPRE : les `finally` vident l'usage.
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: (_ for _ in ()).throw(SystemExit(143)))
+        guard.start_watchdog()
+
     def run_with(model: str) -> None:
         # Résilience 503 : on retente longtemps (le budget-temps global du run borne).
         common = dict(
@@ -260,6 +510,10 @@ def main() -> int:
             retry_max_wait=int(os.environ.get("OH_RETRY_MAX", "90")),
             timeout=int(os.environ.get("OH_LLM_TIMEOUT", "300")),
         )
+        if guard is not None:
+            guard.admit(model)  # ModelNotBounded : ce modèle est écarté, le suivant de la chaîne est tenté
+            # La sortie DOIT être bornée par un plafond réellement porté par le LLM (reasoning compris).
+            common["max_output_tokens"] = int(os.environ.get("OH_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS))
         if subscription:
             # L'allow-list client d'OpenHands (OPENAI_CODEX_MODELS) est désynchronisée
             # du backend ChatGPT : elle liste des SKU *-codex que le serveur REFUSE et
@@ -279,7 +533,7 @@ def main() -> int:
         else:
             llm = LLM(model=model, api_key=api_key, **common)
         if guard is not None:
-            guard.install(llm)  # AllocationExhausted si aucun point d'émission n'est contrôlable
+            guard.install(llm, model)  # AllocationExhausted si aucun point d'émission n'est contrôlable
         agent = get_default_agent(llm=llm, cli_mode=True)
         conv = Conversation(agent=agent, workspace=args.workspace, max_iteration_per_run=args.max_iterations)
         conv.send_message(args.task)
@@ -304,7 +558,6 @@ def main() -> int:
         while not stop.wait(30.0):
             emitter.emit(llm)
 
-    chain = [primary, *[m for m in fallbacks if m != primary]]
     last_exc = None
     if guard is not None:
         print(f"{BUDGET_MARKER} armed {json.dumps({'usd': args.budget_usd, 'tokens': args.budget_tokens})}", flush=True)
@@ -313,8 +566,15 @@ def main() -> int:
             try:
                 print(f"oh_runner: modèle {model} (essai {idx + 1}/{len(chain)})", file=sys.stderr)
                 run_with(model)
+                if guard is not None and guard.tainted is not None:
+                    # Le SDK a pu avaler l'arrêt (la conversation se termine « normalement ») : l'usage reste inconnu.
+                    print(f"oh_runner: usage inconnu ({guard.tainted})", file=sys.stderr)
+                    return 4
                 print("OH_RUNNER_DONE")
                 return 0
+            except ModelNotBounded as exc:
+                last_exc = exc
+                print(f"oh_runner: modèle {model} écarté ({exc})", file=sys.stderr)
             except AllocationExhausted as exc:
                 # L'allocation est épuisée : basculer sur un autre modèle ne l'agrandit pas.
                 print(f"oh_runner: allocation budgétaire atteinte ({exc})", file=sys.stderr)
@@ -322,11 +582,14 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001 - on bascule sur le fallback
                 last_exc = exc
                 print(f"oh_runner: échec avec {model}: {exc}", file=sys.stderr)
+                if guard is not None and guard.tainted is not None and guard.strict:
+                    return 4  # usage inconnu : aucun repli (il dépenserait sans compteur fiable)
         print(f"oh_runner: tous les modèles ont échoué ({last_exc})", file=sys.stderr)
         return 1
     finally:
-        if guard is not None:
-            # Marqueur FINAL : tout l'usage a été émis (les `finally` de run_with ont vidé les deltas).
+        if guard is not None and guard.tainted is None:
+            # Marqueur FINAL : tout l'usage a été émis ET compté (les `finally` de run_with ont vidé les deltas).
+            # Un usage inconnu l'interdit : ``final`` ne prouve rien si un appel a pu échapper aux compteurs.
             print(f"{BUDGET_MARKER} final", flush=True)
 
 

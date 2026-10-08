@@ -41,7 +41,7 @@ def _no_backoff(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", instant)
 
 
-def _response(prompt=1000, completion=500, model=MODEL, content="ok", usage=True):
+def _response(prompt=60, completion=40, model=MODEL, content="ok", usage=True):
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
         usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion) if usage else None,
@@ -105,7 +105,8 @@ def _ctx(client, **kwargs):
 
 
 async def _sample(ctx, env, text="bonjour", max_tokens=100, **kw):
-    with bind_budget(env.ledger, env.key, settings=SETTINGS, **kw):
+    kw.setdefault("settings", SETTINGS)
+    with bind_budget(env.ledger, env.key, **kw):
         return await ctx.sample(text, max_tokens=max_tokens)
 
 
@@ -113,13 +114,13 @@ async def _sample(ctx, env, text="bonjour", max_tokens=100, **kw):
 
 
 async def test_the_reservation_exists_before_the_call_and_actual_usage_settles_it(env):
-    client = FakeClient([_response(1000, 500)], probe=lambda: env.ledger.snapshot(env.key).reserved_usd)
+    client = FakeClient([_response(60, 40)], probe=lambda: env.ledger.snapshot(env.key).reserved_usd)
     result = await _sample(_ctx(client), env)
 
     assert result.text == "ok" and len(client.calls) == 1
     assert client.during[0] > 0  # la réservation était DÉJÀ prise quand l'appel est parti
     snap = env.ledger.snapshot(env.key)
-    expected = 1000 * 1.5e-6 + 500 * 9e-6  # usage réel, au tarif autoritaire
+    expected = 60 * 1.5e-6 + 40 * 9e-6  # usage réel, au tarif autoritaire
     assert snap.consumed_usd == pytest.approx(expected, abs=1e-6)
     assert (snap.reserved_usd, snap.unknown_usd, snap.blocked_reason) == (0.0, 0.0, None)  # le reliquat est libéré
 
@@ -145,7 +146,7 @@ async def test_over_budget_is_refused_before_any_call_is_emitted(env):
 
 async def test_each_retry_is_reserved_and_failed_attempts_cost_nothing(env):
     client = FakeClient(
-        [_status_error(429), _status_error(503), _response(200, 100)],
+        [_status_error(429), _status_error(429), _response(50, 30)],
         probe=lambda: env.ledger.snapshot(env.key).reserved_usd,
     )
     result = await _sample(_ctx(client, max_retries=2), env)
@@ -153,15 +154,15 @@ async def test_each_retry_is_reserved_and_failed_attempts_cost_nothing(env):
     assert result.text == "ok" and len(client.calls) == 3
     assert all(during > 0 for during in client.during)  # une réservation à CHAQUE tentative
     snap = env.ledger.snapshot(env.key)
-    assert snap.consumed_usd == pytest.approx(200 * 1.5e-6 + 100 * 9e-6, abs=1e-6)  # seule la réussie est facturée
+    assert snap.consumed_usd == pytest.approx(50 * 1.5e-6 + 30 * 9e-6, abs=1e-6)  # seule la réussie est facturée
     assert (snap.reserved_usd, snap.unknown_usd) == (0.0, 0.0)
     reservations = env.ledger.reservations(env.key)
     assert [r.state for r in reservations] == ["released", "released", "committed"]
 
 
 async def test_exhausted_retries_raise_the_last_error_with_everything_released(env):
-    client = FakeClient([_status_error(503)] * 3)
-    with pytest.raises(openai.InternalServerError):
+    client = FakeClient([_status_error(429)] * 3)
+    with pytest.raises(openai.RateLimitError):
         await _sample(_ctx(client, max_retries=2), env)
     assert len(client.calls) == 3
     snap = env.ledger.snapshot(env.key)
@@ -192,14 +193,14 @@ async def test_a_connect_failure_is_released_but_a_read_failure_is_unknown(env):
 
 async def test_a_model_change_is_reserved_separately_per_model(env):
     """Repli de modèle : chaque modèle est réservé et réglé à SON tarif, dans le même registre."""
-    for model, price_in, price_out in (("gemini-3.5-flash", 1.5e-6, 9e-6), ("gemini-2.5-flash", 0.3e-6, 2.5e-6)):
-        client = FakeClient([_response(1000, 500, model=model)])
+    for model in ("gemini-3.5-flash", "gemini-2.5-flash"):
+        client = FakeClient([_response(60, 40, model=model)])
         ctx = LocalSamplingContext(default_model=model, client=client)
         with bind_budget(env.ledger, env.key, settings=SETTINGS):
             await ctx.sample("x", max_tokens=100)
     rows = env.ledger.reservations(env.key)
     assert [r.state for r in rows] == ["committed", "committed"]
-    expected = (1000 * 1.5e-6 + 500 * 9e-6) + (1000 * 0.3e-6 + 500 * 2.5e-6)
+    expected = (60 * 1.5e-6 + 40 * 9e-6) + (60 * 0.3e-6 + 40 * 2.5e-6)
     assert env.ledger.snapshot(env.key).consumed_usd == pytest.approx(expected, abs=2e-6)
 
 
@@ -260,27 +261,28 @@ async def test_the_same_model_is_bounded_by_tokens_when_there_is_no_usd_cap(tmp_
     manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 's.db'}", create=True)
     pid = manager.create_project(name="p")
     key = manager.budget_ledger.scope_for_project(pid, max_tokens=5000).scope_key
-    client = FakeClient([_response(100, 50, model="mystery-9"), _response(100, 50, model="mystery-9")])
+    client = FakeClient([_response(60, 50, model="mystery-9"), _response(60, 50, model="mystery-9")])
     ctx = LocalSamplingContext(default_model="mystery-9", client=client)
     env = SimpleNamespace(ledger=manager.budget_ledger, key=key)
-    await _sample(ctx, env, max_tokens=500)
-    assert manager.budget_ledger.snapshot(key).consumed_tokens == 150  # borné et compté en tokens
+    attested = SimpleNamespace(**vars(SETTINGS), BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="mystery-")
+    await _sample(ctx, env, max_tokens=500, settings=attested)
+    assert manager.budget_ledger.snapshot(key).consumed_tokens == 110  # borné et compté en tokens
     with pytest.raises(BudgetRefused):
-        await _sample(ctx, env, max_tokens=5000)  # ne tient plus dans les tokens restants
+        await _sample(ctx, env, max_tokens=5000, settings=attested)  # ne tient plus dans les tokens restants
     assert len(client.calls) == 1
 
 
 def test_local_providers_are_free_and_remain_bounded_by_tokens():
     settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_MODEL="local-model")
     est = estimate_call(model="local-model", messages="x" * 100, max_tokens=50, settings=settings, capped_usd=True)
-    assert est.micro_usd == 0 and est.tokens == 50 + 50 + 32
+    assert est.micro_usd == 0 and est.tokens == 100 + 16 + 64 + 50  # octets + cadrage + sortie
 
 
 # --- persistance : jamais un zéro ------------------------------------------------------------------------
 
 
 async def test_a_commit_that_cannot_be_persisted_refuses_in_strict_and_keeps_the_reservation(env, monkeypatch):
-    client = FakeClient([_response(1000, 500)])
+    client = FakeClient([_response(60, 40)])
     real_commit = env.ledger.commit
 
     def broken_commit(*args, **kwargs):
@@ -349,7 +351,7 @@ def _sub_ctx(tmp_path, runner):
     )
 
 
-def _envelope(prompt=300, completion=120):
+def _envelope(prompt=60, completion=40):
     usage = {"prompt_tokens": prompt, "completion_tokens": completion, "model": "gpt-5.4", "billable": False}
     return f"<<<SAMPLE_BEGIN>>>verdict<<<SAMPLE_END>>>\n<<<SAMPLE_USAGE>>>{json.dumps(usage)}<<<SAMPLE_USAGE_END>>>"
 
@@ -367,7 +369,7 @@ async def test_the_subscription_sampler_reserves_tokens_before_launch_and_settle
         res = await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
     assert res.text == "verdict" and seen["during"] > 0
     snap = env.ledger.snapshot(env.key)
-    assert (snap.consumed_tokens, snap.consumed_usd, snap.reserved_tokens) == (420, 0.0, 0)  # abonnement : 0 $
+    assert (snap.consumed_tokens, snap.consumed_usd, snap.reserved_tokens) == (100, 0.0, 0)  # abonnement : 0 $
     # conteneur nommé et auto-limité : tuer le client docker ne laisse pas un conteneur dépenser
     assert "--name" in seen["argv"] and "timeout" in seen["argv"]
 
@@ -423,3 +425,146 @@ async def test_the_server_sampling_handler_goes_through_the_same_guard(env):
         )
     assert response.model == MODEL and len(client.calls) == 2  # la 429 est retentée par NOTRE boucle
     assert [r.state for r in env.ledger.reservations(env.key)] == ["released", "committed"]
+
+
+# --- borne HAUTE du payload complet (contre-test du manager : « chars/2 + 32 » n'en est pas une) -------------
+
+
+def test_the_prompt_bound_counts_utf8_bytes_not_characters():
+    text = "漢" * 100  # 100 caractères, 300 octets UTF-8 : au moins 100 tokens d'octet dans le pire cas
+    est = estimate_call(model=MODEL, messages=text, max_tokens=10, settings=SETTINGS, require_bound=True)
+    assert est.prompt_tokens >= 300 > 100 // 2 + 32
+
+
+def test_the_whole_transmitted_payload_is_counted_system_tools_and_schemas():
+    base = [{"role": "user", "content": "x"}]
+    with_system = [{"role": "system", "content": "s" * 400}] + base
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {"type": "object", "d": "p" * 500}}}]
+    plain = estimate_call(model=MODEL, messages=base, max_tokens=10, settings=SETTINGS).prompt_tokens
+    assert (
+        estimate_call(model=MODEL, messages=with_system, max_tokens=10, settings=SETTINGS).prompt_tokens >= plain + 400
+    )
+    assert (
+        estimate_call(model=MODEL, messages=base, tools=tools, max_tokens=10, settings=SETTINGS).prompt_tokens
+        >= plain + 500
+    )
+
+
+@pytest.mark.parametrize("part", [{"type": "image_url", "image_url": {"url": "data:..."}}, {"type": "input_audio"}])
+def test_a_non_text_modality_is_refused_in_strict(part):
+    messages = [{"role": "user", "content": [{"type": "text", "text": "x"}, part]}]
+    with pytest.raises(BudgetRefused) as refused:
+        estimate_call(model=MODEL, messages=messages, max_tokens=10, settings=SETTINGS, require_bound=True)
+    assert refused.value.code == REFUSED_UNBOUNDED
+
+
+def test_an_unknown_tokenizer_family_or_unbounded_output_is_refused_in_strict():
+    with pytest.raises(BudgetRefused) as unknown:
+        estimate_call(model="mystery-9", messages="x", max_tokens=10, settings=SETTINGS, require_bound=True)
+    assert unknown.value.code == REFUSED_UNBOUNDED
+    for missing in (0, None, "oops"):
+        with pytest.raises(BudgetRefused) as unbounded:
+            estimate_call(model=MODEL, messages="x", max_tokens=missing, settings=SETTINGS, require_bound=True)
+        assert unbounded.value.code == REFUSED_UNBOUNDED
+
+
+async def test_a_non_text_request_emits_nothing_through_the_public_handler(env):
+    from collegue.core.llm.sampling_handler import _make_handler_class
+
+    client = FakeClient([_response()])
+    handler = _make_handler_class()(default_model=MODEL, client=client)
+    messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]}]
+    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+        with pytest.raises(BudgetRefused) as refused:
+            await handler.client.chat.completions.create(model=MODEL, messages=messages, max_tokens=64)
+    assert refused.value.code == REFUSED_UNBOUNDED and client.calls == []
+
+
+async def test_the_handler_transmits_a_bounding_max_tokens_when_the_caller_gave_none(env):
+    from collegue.core.llm.sampling_handler import DEFAULT_BOUNDED_MAX_TOKENS, _make_handler_class
+
+    client = FakeClient([_response()])
+    handler = _make_handler_class()(default_model=MODEL, client=client)
+    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+        await handler.client.chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "x"}])
+    assert client.calls[0]["max_tokens"] == DEFAULT_BOUNDED_MAX_TOKENS  # la sortie est réellement bornée
+
+
+async def test_a_provider_exceeding_the_bound_is_recorded_in_full_and_blocks_the_scope(env):
+    client = FakeClient([_response(prompt=5000, completion=40)])  # bien au-delà des octets transmis
+    await _sample(_ctx(client), env)
+    snap = env.ledger.snapshot(env.key)
+    assert snap.consumed_tokens == 5040 and snap.blocked  # consommation réelle ENTIÈRE, suite bloquée
+
+
+# --- une erreur HTTP ne prouve pas l'absence de facturation ---------------------------------------------------
+
+
+async def test_a_5xx_after_emission_is_unknown_never_retried_and_blocks(env):
+    client = FakeClient([_status_error(503), _response()])
+    with pytest.raises(openai.InternalServerError):
+        await _sample(_ctx(client, max_retries=3), env)
+    assert len(client.calls) == 1  # aucun retry : l'appel a pu être facturé
+    snap = env.ledger.snapshot(env.key)
+    assert snap.unknown_usd > 0 and snap.blocked
+    assert [r.state for r in env.ledger.reservations(env.key)] == ["unknown"]
+
+
+async def test_a_5xx_is_unknown_through_the_server_handler_too(env):
+    from collegue.core.llm.sampling_handler import _make_handler_class
+
+    client = FakeClient([_status_error(503), _response()])
+    handler = _make_handler_class()(default_model=MODEL, client=client)
+    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+        with pytest.raises(openai.InternalServerError):
+            await handler.client.chat.completions.create(
+                model=MODEL, messages=[{"role": "user", "content": "x"}], max_tokens=64
+            )
+    assert len(client.calls) == 1 and env.ledger.snapshot(env.key).blocked
+
+
+async def test_a_client_timeout_is_unknown_and_not_retried(env):
+    timeout = openai.APITimeoutError(request=httpx.Request("POST", "http://llm.invalid"))
+    client = FakeClient([timeout, _response()])
+    with pytest.raises(openai.APITimeoutError):
+        await _sample(_ctx(client, max_retries=3), env)
+    assert len(client.calls) == 1 and env.ledger.snapshot(env.key).unknown_usd > 0
+
+
+# --- l'échéance s'applique PENDANT l'appel et les backoffs ------------------------------------------------------
+
+
+async def test_the_deadline_cancels_an_in_flight_call_and_leaves_its_usage_unknown(env):
+    gate = asyncio.Event()
+
+    async def hang():
+        await gate.wait()
+
+    client = FakeClient([hang, _response()])
+    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=150)
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(_ctx(client), env, deadline=deadline)
+    assert refused.value.code == REFUSED_DEADLINE
+    snap = env.ledger.snapshot(env.key)
+    assert snap.unknown_usd > 0 and snap.blocked and len(client.calls) == 1
+
+
+async def test_a_backoff_that_would_cross_the_deadline_emits_no_further_call(env):
+    client = FakeClient([_status_error(429), _response()])
+    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=50)
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(_ctx(client, max_retries=3), env, deadline=deadline)
+    assert refused.value.code == REFUSED_DEADLINE and len(client.calls) == 1
+    assert env.ledger.snapshot(env.key).reserved_usd == 0.0  # la 429 rejetée est libérée
+
+
+async def test_the_strict_subscription_sampler_gets_a_bounded_output_and_no_internal_retry(env, tmp_path):
+    seen = {}
+
+    def runner(argv, payload):
+        seen["payload"] = json.loads(payload)
+        return 0, _envelope(), ""
+
+    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+        await _sub_ctx(tmp_path, runner).sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
+    assert seen["payload"]["strict"] is True and seen["payload"]["max_output_tokens"] > 0

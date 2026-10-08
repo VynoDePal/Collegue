@@ -83,7 +83,7 @@ from collegue.pilot.scheduler import (
     remaining_tasks,
 )
 from collegue.sandbox.executor import TIMEOUT_NOTE
-from collegue.state.budget_ledger import BudgetRefused
+from collegue.state.budget_ledger import REFUSED_DEADLINE, BudgetRefused
 from collegue.textnorm import inline
 
 # Statut projet une fois le MVP construit (le moteur d'amélioration = Phase 4).
@@ -862,7 +862,8 @@ async def _run_project_impl(
             task.status = TASK_STATUS_TODO
             if not dry_run:
                 manager.update_task_status(task.id, TASK_STATUS_TODO)
-            stop_reason = STOP_PAUSED_BUDGET
+            # Une échéance atteinte (avant ou PENDANT un appel annulé) est un arrêt d'échéance, pas un plafond.
+            stop_reason = STOP_DEADLINE if refusal.code == REFUSED_DEADLINE else STOP_PAUSED_BUDGET
             break
         iteration += 1
         if sample_cost:

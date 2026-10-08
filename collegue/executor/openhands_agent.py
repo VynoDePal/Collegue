@@ -50,8 +50,11 @@ OPENHANDS_ENTRYPOINT = "openhands.core.main"
 USAGE_MARKER = "[collegue-usage]"
 
 # Marqueurs de la garde budgétaire du runner (vague 2) : ``armed`` une fois la garde installée AVANT
-# toute dépense, ``final`` quand TOUT l'usage a été émis. Armé sans final = conteneur interrompu : la
-# consommation est INCONNUE (la réservation est conservée, la suite stricte bloquée).
+# toute dépense, ``final`` quand TOUT l'usage a été émis ET compté, ``unknown`` quand un appel a pu consommer
+# sans que les compteurs du SDK le voient (échec indéterminé, réponse sans usage, borne démentie, échéance en
+# plein appel). Armé sans final = conteneur interrompu ; ``unknown`` l'emporte même si ``final`` apparaît :
+# ``final`` prouve que les deltas ont été vidés, PAS que les compteurs ont tout vu. Dans les deux cas la
+# consommation est INCONNUE (réservation conservée, suite stricte bloquée).
 BUDGET_MARKER = "[collegue-budget]"
 
 
@@ -68,16 +71,37 @@ def parse_budget_markers(logs: str) -> Tuple[bool, bool]:
     return armed, final
 
 
+def budget_unknown_reason(logs: str) -> Optional[str]:
+    """Raison portée par le premier marqueur ``unknown`` du runner, ou ``None``."""
+    for line in (logs or "").splitlines():
+        index = line.find(BUDGET_MARKER)
+        if index < 0:
+            continue
+        rest = line[index + len(BUDGET_MARKER) :].strip()
+        if rest.split(" ", 1)[0] != "unknown":
+            continue
+        try:
+            reason = json.loads(rest.split(" ", 1)[1]).get("reason")
+        except (IndexError, ValueError, AttributeError):
+            reason = None
+        return str(reason or "usage déclaré inconnu par le runner")
+    return None
+
+
 def usage_status_from_run(logs: str, *, timed_out: bool, usage_lines: bool) -> Tuple[str, str]:
     """``(usage_status, reason)`` : l'usage rapporté est-il COMPLET ?
 
+    - marqueur ``unknown`` → inconnu, quoi qu'il arrive par ailleurs ;
     - marqueur final présent → complet (``reported``) ;
     - jamais armé, aucune ligne d'usage, non interrompu → le runner est mort avant de pouvoir
       dépenser (crash d'import, #498) : zéro établi (``reported``) ;
     - sinon (armé sans final, timeout, usage partiel) → ``unknown``.
     """
+    unknown = budget_unknown_reason(logs)
+    if unknown is not None:
+        return "unknown", unknown
     armed, final = parse_budget_markers(logs)
-    if final:
+    if final and not timed_out:
         return "reported", ""
     if not armed and not usage_lines and not timed_out:
         return "reported", ""

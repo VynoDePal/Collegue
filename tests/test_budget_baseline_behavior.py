@@ -54,6 +54,8 @@ def _controller():
 
 
 class _Priced:
+    budget_enforcement = "test-double"
+
     def __init__(self, price):
         self.calls = 0
         self.price = price
@@ -71,6 +73,8 @@ class _Priced:
 
 class _CrashesOnce:
     """Plante à la 1ʳᵉ passe sans rapporter d'usage (OOM-kill), puis fonctionnerait normalement."""
+
+    budget_enforcement = "test-double"
 
     def __init__(self):
         self.calls = 0
@@ -231,7 +235,7 @@ async def test_defect_5_planning_spend_reaches_the_project_cost(url):
             )
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-                usage=SimpleNamespace(prompt_tokens=2000, completion_tokens=1000),
+                usage=SimpleNamespace(prompt_tokens=300, completion_tokens=200),
                 model=model,
             )
 
@@ -245,5 +249,5 @@ async def test_defect_5_planning_spend_reaches_the_project_cost(url):
         manager=manager,
         ctx=LocalSamplingContext(default_model=MODEL, client=_Client()),
     )
-    expected = 2 * (2000 * 1.5e-6 + 1000 * 9e-6)  # SPEC + décomposition, tarif autoritaire
+    expected = 2 * (300 * 1.5e-6 + 200 * 9e-6)  # SPEC + décomposition, tarif autoritaire
     assert run_cost_summary(manager, plan.project_id)["usd"] == pytest.approx(expected, abs=1e-5)
