@@ -765,3 +765,62 @@ async def test_a_proof_of_an_earlier_head_does_not_cover_the_head_that_the_pr_no
         load_delivery_proof(reloaded, pid, owner=OWNER, repo=REPO, pr_number=999, head_sha=old_head)
     with pytest.raises(DeliveryProofError):
         load_delivery_proof(reloaded, pid + 1, owner=OWNER, repo=REPO, pr_number=101, head_sha=old_head)
+
+
+# ── levée d'une alerte « attention » par l'opérateur : jamais une reprise depuis un clone obsolète ───────────────────
+
+
+async def test_acknowledging_an_attention_cycle_after_a_confirmed_merge_still_requires_a_proven_resync(
+    bridge, source, state_url
+):
+    strict = {"BUILD_AUTO_MERGE": False, "DEPS_REQUIRE_MERGED": True}
+    pid = sibling_project(state_url, 2)
+    agent = DeliveringAgent()
+    await run_pass(state_url, source, bridge, pid, agent=agent, settings=strict)
+    head = bridge.prs[101]["head"]["sha"]
+    manager = open_manager(state_url)
+    proof = load_delivery_proof(manager, pid, owner=OWNER, repo=REPO, pr_number=101, head_sha=head)
+    task = manager.get_tasks(pid)[0]
+
+    merge_sha = bridge.merge_out_of_band(101)["sha"]  # la fusion distante a eu lieu (par un humain)
+    # le moteur avait écrit son intention, puis a constaté une fusion non conforme : cycle « attention », SHA fusionné connu
+    record = manager.begin_task_merge(
+        task.id,
+        owner=OWNER,
+        repo=REPO,
+        base_branch="main",
+        pr_number=101,
+        head_sha=head,
+        base_sha=proof.base_sha,
+        tree_sha=proof.tree_sha,
+        proof_id=proof.proof_id,
+        merge_method="squash",
+    )
+    attention = manager.transition_task_merge(
+        task.id,
+        expected_state="merge_pending",
+        expected_revision=record.revision,
+        new_state="attention",
+        merge_sha=merge_sha,
+        last_error="fusion distante non conforme (test)",
+    )
+    good_origin = bridge.break_origin(source)  # le checkout n'est pas (encore) sur la fusion
+
+    blocked = await run_pass(state_url, source, bridge, pid, agent=agent, settings=strict)
+    assert blocked.stop_reason == "merge_attention" and agent.calls == 1  # l'alerte bloque tout
+
+    assert open_manager(state_url).acknowledge_task_merge(task.id, expected_revision=attention.revision) is True
+    after = await run_pass(state_url, source, bridge, pid, agent=agent, settings=strict)
+    # l'acquittement ne rend PAS la main : la PR fusionnée est relue, la fusion consignée comme externe, et la
+    # resynchronisation (en échec ici) bloque encore toute tâche
+    assert after.stop_reason == "repo_sync_failed" and agent.calls == 1
+    assert [(c.origin, c.state) for c in open_manager(state_url).list_task_merges(pid)] == [
+        ("external", "merged_unsynced")
+    ]
+
+    bridge.restore_origin(source, good_origin)
+    await run_pass(state_url, source, bridge, pid, agent=agent, settings=strict)
+    assert agent.calls == 2 and agent.seen[1] == ["delivered-0.txt"], (
+        "la tâche suivante part du contenu fusionné ET resynchronisé"
+    )
+    assert len(bridge.merge_calls()) == 1, "aucune seconde fusion émise par le moteur"
