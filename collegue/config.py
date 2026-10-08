@@ -297,6 +297,11 @@ class Settings(BaseSettings):
     # (Gemini/Gemma sur l'endpoint Google hébergé, GPT/o-series sur l'API OpenAI) sont déjà admises ; tout autre
     # modèle ou destination est REFUSÉ en strict sous plafond tant qu'il n'est pas attesté. Un tarif ne vaut pas attestation.
     BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS: str = ""
+    # Hôtes (CSV, égalité EXACTE sur le nom d'hôte de l'URL de base) que l'opérateur atteste AUTO-HÉBERGÉS et non
+    # facturés. Seul le loopback (localhost, 127.0.0.0/8, ::1) est réputé local avec un provider local déclaré ; tout
+    # autre hôte non hébergé reconnu n'a ni tarif de grille ni gratuité établie : refusé sous plafond USD strict
+    # sans prix configuré ni attestation ici.
+    BUDGET_ATTESTED_FREE_HOSTS: str = ""
 
     @field_validator("BUDGET_MODE", mode="before")
     @classmethod

@@ -18,6 +18,7 @@ import glob
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -74,7 +75,7 @@ def pg_url():
         capture_output=True,
         env=env,
     )
-    options = f"-c listen_addresses='' -c unix_socket_directories={sock} -c fsync=off -c max_connections=200"
+    options = f"-c listen_addresses='' -c unix_socket_directories={sock} -c fsync=off -c max_connections=60"
     subprocess.run(
         [f"{bindir}/pg_ctl", "-D", str(data), "-l", str(root / "pg.log"), "-w", "-o", options, "start"],
         check=True,
@@ -93,13 +94,37 @@ def pg_url():
 
 
 @pytest.fixture(autouse=True)
-def _release_pooled_connections():
-    """Chaque test ouvre des dizaines de managers (un par thread) : libérer leurs pools à la fin du test, sinon le
-    serveur jetable épuise ses connexions (« too many clients ») au fil du module."""
-    yield
-    import gc
+def _close_every_engine_and_prove_no_connection_leaks(pg_url, monkeypatch):
+    """Ferme EXPLICITEMENT chaque engine créé pendant le test (managers de threads compris), puis PROUVE côté
+    serveur qu'aucune connexion de la base de test ne survit : pas de dépendance au ramasse-miettes, et le seuil
+    de connexions du serveur (60, comme le service CI standard à 100) n'est jamais approché au fil du module."""
+    import sqlalchemy
+    from sqlalchemy.pool import NullPool
 
-    gc.collect()
+    real_create = sqlalchemy.create_engine
+    created = []
+
+    def tracking(*args, **kwargs):
+        engine = real_create(*args, **kwargs)
+        created.append(engine)
+        return engine
+
+    monkeypatch.setattr("collegue.state.manager.create_engine", tracking)
+    monkeypatch.setattr(sys.modules[__name__], "create_engine", tracking)
+    yield
+    for engine in created:
+        engine.dispose()
+    probe = real_create(pg_url, poolclass=NullPool)
+    try:
+        with probe.connect() as conn:
+            leaked = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                )
+            ).scalar_one()
+    finally:
+        probe.dispose()
+    assert leaked == 0, f"{leaked} connexion(s) PostgreSQL encore ouvertes après le test (fuite de pool/engine)"
 
 
 @pytest.fixture

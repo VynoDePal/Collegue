@@ -282,7 +282,9 @@ async def test_the_same_model_is_bounded_by_tokens_when_there_is_no_usd_cap(tmp_
 
 
 def test_local_providers_are_free_and_remain_bounded_by_tokens():
-    settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_MODEL="local-model")
+    settings = SimpleNamespace(
+        LLM_PROVIDER="lmstudio", LLM_MODEL="local-model", llm_base_url="http://localhost:1234/v1"
+    )
     est = estimate_call(model="local-model", messages="x" * 100, max_tokens=50, settings=settings, capped_usd=True)
     assert est.micro_usd == 0 and est.tokens == 102 + 16 + 64 + 50  # octets sérialisés (guillemets) + cadrage + sortie
 
@@ -711,22 +713,103 @@ async def test_the_real_destination_of_the_client_decides_not_an_unrelated_provi
     assert result.text == "ok" and len(hosted.calls) == 1  # destination hébergée + identité connue : acceptée
 
 
-async def test_an_exact_operator_attestation_admits_a_gateway_destination(env):
+async def test_a_tokenizer_attestation_alone_never_admits_a_gateway_under_a_usd_cap(env):
+    """Attester le tokenizer ne dit rien du tarif : une passerelle sans prix établi est refusée avant émission."""
+    settings = SimpleNamespace(
+        LLM_PROVIDER="lmstudio", LLM_CALL_TIMEOUT=2, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="llama3-8b-instruct"
+    )
     gateway = _client_at("http://gateway.invalid/v1/", [_response(model="llama3-8b-instruct")])
     ctx = LocalSamplingContext(default_model="llama3-8b-instruct", client=gateway)
-    usd_free = SimpleNamespace(
-        LLM_PROVIDER="lmstudio",
-        LLM_CALL_TIMEOUT=2,
-        BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="llama3-8b-instruct",
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(ctx, env, settings=settings)
+    assert refused.value.code == REFUSED_UNBOUNDED and gateway.calls == []
+
+
+async def test_a_gateway_with_an_explicit_price_or_an_attested_free_host_is_admitted_with_a_matching_tokenizer(env):
+    base = dict(LLM_PROVIDER="openai", LLM_CALL_TIMEOUT=2, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="llama3-8b-instruct")
+    priced = SimpleNamespace(**base, LLM_PRICE_PROMPT_PER_1M=1.0, LLM_PRICE_COMPLETION_PER_1M=2.0)
+    gateway = _client_at("http://gateway.invalid/v1/", [_response(60, 40, model="llama3-8b-instruct")])
+    result = await _sample(
+        LocalSamplingContext(default_model="llama3-8b-instruct", client=gateway), env, settings=priced
     )
-    result = await _sample(ctx, env, settings=usd_free)
     assert result.text == "ok" and len(gateway.calls) == 1
-    other = _client_at("http://gateway.invalid/v1/", [_response(model="llama3-8b-instruct-derived")])
-    with pytest.raises(BudgetRefused):  # l'attestation est une identité exacte, pas un préfixe
+    assert env.ledger.snapshot(env.key).consumed_usd == pytest.approx(60 * 1e-6 + 40 * 2e-6, abs=1e-9)
+
+    free = SimpleNamespace(**base, BUDGET_ATTESTED_FREE_HOSTS="gateway.lan")
+    before = env.ledger.snapshot(env.key).consumed_usd
+    lan = _client_at("http://gateway.lan:8080/v1/", [_response(60, 40, model="llama3-8b-instruct")])
+    await _sample(LocalSamplingContext(default_model="llama3-8b-instruct", client=lan), env, settings=free)
+    assert (
+        len(lan.calls) == 1 and env.ledger.snapshot(env.key).consumed_usd == before
+    )  # hôte attesté auto-hébergé : 0 $
+
+    other = _client_at("http://gateway.lan.evil/v1/", [_response(model="llama3-8b-instruct")])
+    with pytest.raises(BudgetRefused):  # égalité EXACTE du nom d'hôte, pas de suffixe
+        await _sample(LocalSamplingContext(default_model="llama3-8b-instruct", client=other), env, settings=free)
+    assert other.calls == []
+
+
+async def test_an_unknown_destination_declared_local_is_neither_free_nor_priced(tmp_path):
+    """Réponse manager n°1 : ``lmstudio`` + passerelle inconnue + plafond USD ridicule ⇒ refus, jamais 0 $."""
+    settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_CALL_TIMEOUT=2)
+    for cap_tokens in (None, 100_000):
+        scope = _scope(tmp_path, f"gw-{cap_tokens}.db", usd=0.000001, tokens=cap_tokens)
+        attested = SimpleNamespace(**vars(settings), BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="gpt-5.4")
+        client = _client_at("https://gateway.example.invalid/v1/", [_response(2, 1, model="gpt-5.4")])
+        with pytest.raises(BudgetRefused):
+            await _sample(
+                LocalSamplingContext(default_model="gpt-5.4", client=client), scope, settings=attested, max_tokens=8
+            )
+        assert client.calls == [] and scope.ledger.snapshot(scope.key).consumed_usd == 0.0
+
+
+async def test_a_model_identity_is_not_a_price_on_another_providers_endpoint(tmp_path):
+    """Réponse manager n°2 : ``gpt-5.4`` exactement attesté, mais servi par l'endpoint Google : pas de tarif OpenAI."""
+    google = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini", LLM_CALL_TIMEOUT=2, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="gpt-5.4"
+    )
+    scope = _scope(tmp_path, "family.db", usd=100.0, tokens=100_000)
+    client = _client_at(google, [_response(2, 1, model="gpt-5.4")])
+    with pytest.raises(BudgetRefused) as refused:
         await _sample(
-            LocalSamplingContext(default_model="llama3-8b-instruct-derived", client=other), env, settings=usd_free
+            LocalSamplingContext(default_model="gpt-5.4", client=client), scope, settings=settings, max_tokens=8
+        )
+    assert refused.value.code == REFUSED_UNBOUNDED and client.calls == []
+    # variante inverse : un modèle Gemini servi par l'endpoint OpenAI n'a pas non plus le tarif Gemini
+    inverse = SimpleNamespace(
+        LLM_PROVIDER="openai", LLM_CALL_TIMEOUT=2, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="gemini-2.5-flash"
+    )
+    other = _client_at("https://api.openai.com/v1/", [_response(2, 1, model="gemini-2.5-flash")])
+    with pytest.raises(BudgetRefused):
+        await _sample(
+            LocalSamplingContext(default_model="gemini-2.5-flash", client=other), scope, settings=inverse, max_tokens=8
         )
     assert other.calls == []
+    # cas bénin : le bon modèle sur SA famille, tarif de la grille, règlement cohérent
+    good = _client_at(google, [_response(2, 1, model="gemini-2.5-flash")])
+    plain = SimpleNamespace(LLM_PROVIDER="gemini", LLM_CALL_TIMEOUT=2)
+    await _sample(
+        LocalSamplingContext(default_model="gemini-2.5-flash", client=good), scope, settings=plain, max_tokens=8
+    )
+    assert scope.ledger.snapshot(scope.key).consumed_usd == pytest.approx(
+        4e-6, abs=1e-9
+    )  # 3,1 µ$ arrondis vers le HAUT (jamais sous-estimé)
+
+
+async def test_the_server_handler_refuses_an_unknown_destination_declared_local(tmp_path):
+    from collegue.core.llm.sampling_handler import _make_handler_class
+
+    scope = _scope(tmp_path, "handler-gw.db", usd=0.000001)
+    client = _client_at("https://gateway.example.invalid/v1/", [_response(2, 1, model="gpt-5.4")])
+    handler = _make_handler_class()(default_model="gpt-5.4", client=client)
+    settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_CALL_TIMEOUT=2)
+    with bind_budget(scope.ledger, scope.key, settings=settings):
+        with pytest.raises(BudgetRefused):
+            await handler.client.chat.completions.create(
+                model="gpt-5.4", messages=[{"role": "user", "content": "x"}], max_tokens=8
+            )
+    assert client.calls == []
 
 
 async def test_a_long_prompt_on_a_grid_model_is_refused_with_an_honest_diagnostic(env):
@@ -869,12 +952,38 @@ def test_prices_follow_the_destination_not_the_declared_provider():
     local = SimpleNamespace(LLM_PROVIDER="lmstudio")
     assert pricing_family(local, "https://api.openai.com/v1/") == ("openai", False)
     assert pricing_family(local, "http://localhost:1234/v1") == (None, True)
-    assert pricing_family(local, None) == (None, True)
+    assert pricing_family(local, "http://127.0.0.1:1234/v1") == (None, True)
+    assert pricing_family(local, "http://[::1]:1234/v1") == (None, True)
+    assert pricing_family(local, "https://gateway.example.invalid/v1") == (None, False)  # inconnu ≠ gratuit
+    assert pricing_family(local, None) == (None, False)  # aucune destination connue : pas de gratuité présumée
+    assert pricing_family(SimpleNamespace(LLM_PROVIDER="lmstudio", llm_base_url="http://localhost:1234/v1"), None) == (
+        None,
+        True,
+    )  # l'URL effective de la config fait foi
+    assert pricing_family(SimpleNamespace(LLM_PROVIDER="lmstudio", llm_base_url="http://lan.invalid:1/v1"), None) == (
+        None,
+        False,
+    )
+    assert pricing_family(SimpleNamespace(LLM_PROVIDER="openai"), "http://localhost:1234/v1") == (None, False)
     assert pricing_family(SimpleNamespace(LLM_PROVIDER="gemini"), "https://api.openai.com/v1/") == ("openai", False)
-    assert resolve_prices_with_source("gpt-5.4", local, endpoint="https://api.openai.com/v1/")[1] == SOURCE_GRID
-    assert resolve_prices_with_source("gpt-5.4", local, endpoint="https://api.openai.com/v1/")[0][0] > 0
+    attested = SimpleNamespace(LLM_PROVIDER="openai", BUDGET_ATTESTED_FREE_HOSTS="gpu.lan, other.lan")
+    assert pricing_family(attested, "http://gpu.lan:8000/v1") == (None, True)
+    assert pricing_family(attested, "http://gpu.lan.evil/v1") == (None, False)
+    resolved = resolve_prices_with_source("gpt-5.4", local, endpoint="https://api.openai.com/v1/")
+    assert resolved[1] == SOURCE_GRID and resolved[0][0] > 0
     assert resolve_prices_with_source("llama", local, endpoint="http://localhost:1234/v1")[0] == (0.0, 0.0)
+    assert resolve_prices_with_source("gpt-5.4", local, endpoint="https://gateway.example.invalid/v1") is None
     assert (
         resolve_prices_with_source("gpt-5.4", SimpleNamespace(LLM_PROVIDER="openai"), endpoint="http://gw.invalid/v1")
         is None
     )
+    assert resolve_prices_with_source("gpt-5.4", SimpleNamespace(LLM_PROVIDER="gemini"), family="gemini") is None
+
+
+def test_the_grid_family_of_a_model_must_match_the_serving_family():
+    from collegue.monitoring.pricing import grid_family, strict_grid_price
+
+    assert grid_family("gpt-5.4") == "openai" and grid_family("gemini-2.5-pro") == "gemini"
+    assert strict_grid_price("gpt-5.4", "gemini") is None and strict_grid_price("gemini-2.5-pro", "openai") is None
+    assert strict_grid_price("gemini-2.5-pro", "gemini") is not None
+    assert strict_grid_price("claude-sonnet-4", "openai") is None  # aucun transport Anthropic supporté

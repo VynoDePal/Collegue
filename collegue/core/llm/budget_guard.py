@@ -330,26 +330,52 @@ def resolve_prices(
     return None if resolved is None else resolved[0]
 
 
+def _is_loopback_host(host: str) -> bool:
+    import ipaddress
+
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _attested_free_hosts(settings: Optional[object]) -> frozenset:
+    raw = str(getattr(settings, "BUDGET_ATTESTED_FREE_HOSTS", "") or "")
+    return frozenset(item.strip().lower() for item in raw.split(",") if item.strip())
+
+
 def pricing_family(
     settings: Optional[object], endpoint: Optional[str] = None, family: Optional[str] = None
 ) -> Tuple[Optional[str], bool]:
-    """``(famille d'endpoint hébergée, local)`` : l'AUTORITÉ tarifaire est la destination RÉELLE du transport.
+    """``(famille d'endpoint hébergée, gratuit établi)`` : l'AUTORITÉ tarifaire est la destination RÉELLE.
 
     - ``family`` explicite (worker : fournisseur de la chaîne) ou famille déduite de l'hôte de ``endpoint`` ;
-    - sans destination connue, retombée sur le routage de la config (``LLM_PROVIDER``) ;
-    - ``local`` n'est vrai que si le provider déclaré est local ET que la destination n'est PAS un endpoint
-      hébergé facturé : ``LLM_PROVIDER=lmstudio`` avec un client qui parle à l'API OpenAI est facturé au tarif
-      cloud, jamais à 0.
+    - sans destination connue, retombée sur le routage de la config (``LLM_PROVIDER`` hébergé) ;
+    - **gratuit** seulement si la destination est ÉTABLIE locale : provider déclaré local ET hôte de loopback
+      (``localhost``, ``127.0.0.0/8``, ``::1``), ou hôte explicitement attesté auto-hébergé par l'opérateur
+      (``BUDGET_ATTESTED_FREE_HOSTS``, égalité exacte). Le label de provider seul ne prouve rien : une passerelle
+      ou un hôte inconnu n'est ni hébergé reconnu ni gratuit (aucun tarif de grille, aucun zéro) ; sans URL
+      connue, l'URL effective de la config (``llm_base_url``) fait foi, sinon destination INCONNUE. Pas de
+      résolution DNS ni de réseau.
     """
     from collegue.monitoring.pricing import is_local_provider
 
     resolved = family or (endpoint_family(endpoint, settings) if endpoint else None)
     if resolved is not None:
         return resolved, False
-    if is_local_provider(getattr(settings, "LLM_PROVIDER", None)):
+    url = endpoint or (
+        getattr(settings, "llm_base_url", None) if is_local_provider(getattr(settings, "LLM_PROVIDER", None)) else None
+    )
+    host = (urlparse(str(url)).hostname or "").lower() if url else ""
+    if host and (
+        host in _attested_free_hosts(settings)
+        or (is_local_provider(getattr(settings, "LLM_PROVIDER", None)) and _is_loopback_host(host))
+    ):
         return None, True
     if endpoint:
-        return None, False  # destination non hébergée et provider non local : aucun tarif de grille établi
+        return None, False  # destination connue mais ni hébergée reconnue ni locale établie : aucun tarif établi
     return endpoint_family(None, settings), False
 
 

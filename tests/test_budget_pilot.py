@@ -698,10 +698,17 @@ def test_the_worker_price_table_uses_the_real_provider_of_each_chain_model_and_e
     # Clé API Gemini : principal gemma gratuit (famille gemini), repli inconnu de la grille ⇒ pas de tarif improvisé.
     settings = _settings(5.0, LLM_PROVIDER="lmstudio", LLM_MODEL_CODER="gemma-4-31b-it")
     agent = OHSdkAgent(_Sandbox(), settings_obj=settings)
-    agent.model_chain = lambda: ["gemini/gemma-4-31b-it", "gemini/gemma-unverified-variant"]
+    agent.model_chain = lambda: [
+        "gemini/gemma-4-31b-it",
+        "gemini/gemma-unverified-variant",
+        "gemini/gpt-5.4",  # identité OpenAI envoyée à l'endpoint Gemini : pas de tarif OpenAI
+        "openai/gpt-5.4",
+    ]
     alloc = allocate_worker(BudgetBinding(manager.budget_ledger, key, settings=settings), agent=agent)
     table = {name: (price_in, price_out) for name, price_in, price_out in alloc.prices}
-    assert table == {"gemini/gemma-4-31b-it": (0.0, 0.0)}  # le zéro est celui de SA famille ; la variante est écartée
+    assert set(table) == {"gemini/gemma-4-31b-it", "openai/gpt-5.4"}  # variante et famille incohérente écartées
+    assert table["gemini/gemma-4-31b-it"] == (0.0, 0.0)  # le zéro est celui de SA famille
+    assert table["openai/gpt-5.4"][0] > 0  # tarif cloud de SA famille
 
 
 # --- dry-run : aucune écriture au registre ----------------------------------------------------------------------
