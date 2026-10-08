@@ -231,14 +231,32 @@ def test_a_scanner_error_is_a_refusal_not_an_authorization(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_an_unreadable_subdirectory_is_a_refusal(tmp_path, kind):
-    if os.getuid() == 0:
-        pytest.skip("root lit tout")
+def test_an_unreadable_subdirectory_is_a_refusal(tmp_path, monkeypatch, record_property, kind):
+    """Un sous-répertoire non listable rend la vérification impossible ⇒ refus.
+
+    Non-root : vrai ``chmod 0``. Root (``unshare -Urn``, CI) ou injection forcée : ``chmod`` est sans effet,
+    donc EACCES est injecté sur ``os.scandir(locked)`` (jamais de skip) ; la preuve est enregistrée.
+    """
     tree = tmp_path / "ordinary"
     locked = tree / "locked"
     locked.mkdir(parents=True)
+    if _INJECT_ACCESS:
+        record_property("proof", PROOF_INJECTED)
+        real_scandir = os.scandir
+
+        def scandir(path="."):
+            if os.path.abspath(os.fspath(path)) == str(locked):
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", scandir)
+        _assert_refused(kind, tree, match="vérification")
+        return
+    record_property("proof", PROOF_REAL)
     locked.chmod(0)
     try:
+        with pytest.raises(PermissionError):
+            os.scandir(locked)  # la permission est RÉELLEMENT refusée par le noyau
         _assert_refused(kind, tree, match="vérification")
     finally:
         locked.chmod(0o755)
@@ -722,19 +740,56 @@ def test_a_symlink_loop_is_a_refusal(tmp_path, kind):
     _assert_refused(kind, tmp_path / "loop-a", match="vérification")
 
 
-@pytest.mark.parametrize("kind", KINDS)
-def test_a_traversable_but_unlistable_parent_still_finds_a_control_by_direct_stat(tmp_path, kind):
-    """Un parent ``--x`` (traversable, non listable) laisse ``lstat`` fonctionner : le contrôle est vu."""
-    if os.getuid() == 0:
-        pytest.fail(
-            "cas réel uid non-root uniquement : en root les permissions sont sans effet (couvert par l'injection)"
-        )
+@pytest.fixture
+def execonly_tree(tmp_path, monkeypatch, record_property):
+    """``parent`` est TRAVERSABLE mais NON LISTABLE ; ``parent/workspace.control`` (marqué) est dedans.
+
+    Contrat distinct de ``closed_tree`` (parent totalement inaccessible) : ici ``lstat`` sur les enfants
+    FONCTIONNE, seul le listage (``scandir``) du parent est impossible.
+
+    - non-root : vrai ``chmod 0o111`` (le noyau refuse le listage, autorise la traversée) ;
+    - root (CI, ``unshare -Urn``) ou ``COLLEGUE_FORCE_INJECTED_EACCES=1`` : ``chmod`` est sans effet ⇒
+      injection d'EACCES sur ``os.scandir(parent)`` UNIQUEMENT ; ``lstat``/``stat`` restent réels.
+    La nature de la preuve est enregistrée (``record_property('proof', …)``).
+    """
     parent = tmp_path / "execonly"
     control = parent / "workspace.control"
     control.mkdir(parents=True)
     (control / GIT_CONTROL_MARKER).write_text("managed\n")
+    if _INJECT_ACCESS:
+        record_property("proof", PROOF_INJECTED)
+        real_scandir = os.scandir
+
+        def scandir(path="."):
+            if os.path.abspath(os.fspath(path)) == str(parent):
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", scandir)
+        yield parent, control
+        return
+    record_property("proof", PROOF_REAL)
     parent.chmod(0o111)
     try:
-        _assert_refused(kind, control)
+        yield parent, control
     finally:
-        parent.chmod(0o700)
+        parent.chmod(0o700)  # pour que tmp_path puisse être nettoyé
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_traversable_but_unlistable_parent_still_finds_a_control_by_direct_stat(execonly_tree, kind):
+    """Un parent ``--x`` (traversable, non listable) laisse ``lstat`` fonctionner : le contrôle est vu
+    DIRECTEMENT (marqueur), pas par un échec de listage ; le montage du parent, lui, est refusé."""
+    parent, control = execonly_tree
+    # Le scénario est bien celui du contrat : listage impossible, stat des enfants possible.
+    with pytest.raises(PermissionError):
+        os.scandir(parent)
+    assert os.lstat(control / GIT_CONTROL_MARKER).st_size > 0
+
+    reason = ex.git_control_exposure(str(control))
+    assert reason is not None and "répertoire de contrôle Git" in reason
+    assert "vérification impossible" not in reason  # détecté par lstat, pas par une erreur
+    assert ex.git_control_exposure(str(control / "objects-to-create")) is not None  # sous-chemin : ancêtre = contrôle
+
+    _assert_refused(kind, control)
+    _assert_refused(kind, parent, match="vérification")  # monter le parent : listage impossible ⇒ refus
