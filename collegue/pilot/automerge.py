@@ -70,6 +70,42 @@ _BLOCKED_EXTENSIONS = frozenset(
 )
 # Basenames exécutés/sensibles indépendamment de l'extension.
 _BLOCKED_BASENAMES = frozenset({"dockerfile", "makefile", "conftest.py", "setup.py", "setup.cfg", "pyproject.toml"})
+# Fichiers de DÉPENDANCES, verrous et construction d'image : ils déterminent ce qui est installé puis exécuté
+# (CI, images, production). Un `.txt`, `.json` ou `.in` n'est pas « du balisage » dans ces rôles : classés sensibles
+# quel que soit l'élargissement de l'allowlist (W3-B ; l'arbre W2 a ajouté `locks/*.txt`, `requirements*.txt` générés
+# et `Dockerfile.openhands`, que seule l'allowlist par défaut refusait).
+_BLOCKED_DEPENDENCY_BASENAMES = frozenset(
+    {
+        "pipfile",
+        "pipfile.lock",
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "go.mod",
+        "go.sum",
+        "gemfile",
+        "gemfile.lock",
+        "cargo.toml",
+        "cargo.lock",
+        "composer.json",
+        "composer.lock",
+        "manifest.in",
+        ".dockerignore",
+        "compose.yaml",
+        "compose.yml",
+    }
+)
+# Segments de répertoire dont TOUT le contenu est sensible (verrous générés, dépendances par fichier).
+_BLOCKED_DEPENDENCY_SEGMENTS = frozenset({"locks", "requirements"})
+_DEPENDENCY_BASENAME_PATTERNS = (
+    "requirements*.txt",  # requirements.txt, requirements-dev.txt, requirements-lock.txt…
+    "constraints*.txt",
+    "dockerfile*",  # Dockerfile, Dockerfile.openhands, Dockerfile.dev…
+    "*.dockerfile",
+    "docker-compose*",
+)
 
 
 @dataclass(frozen=True)
@@ -148,8 +184,10 @@ def is_sensitive(path: str) -> bool:
     """Fichiers **toujours** bloqués (même dans l'allowlist) : garde dure, non configurable.
 
     Insensible à la casse. Bloque : traversée (``..``), secrets (``.env*``), lockfiles
-    (``*.lock``), config/CI (``.github/`` à n'importe quelle profondeur), migrations
-    (``migrations/`` ou ``alembic/versions/``), et tout **code/exécutable/config**
+    (``*.lock``, tout ``locks/``), manifestes de dépendances (``requirements*.txt``,
+    ``package.json``…), Dockerfiles, config/CI (``.github/`` à n'importe quelle profondeur),
+    migrations (``migrations/`` — dont ``collegue/migrations/versions`` — ou
+    ``alembic/versions/``), et tout **code/exécutable/config**
     (extension dans ``_BLOCKED_EXTENSIONS`` ou basename dans ``_BLOCKED_BASENAMES``) —
     « faible risque » exclut tout ce qui s'exécute (ex. ``tests/conftest.py`` = RCE CI).
     """
@@ -166,12 +204,26 @@ def is_sensitive(path: str) -> bool:
         return True
     if "alembic" in segments and "versions" in segments:
         return True
+    if _is_dependency_or_build_file(segments):
+        return True
     if base in _BLOCKED_BASENAMES:
         return True
     dot = base.rfind(".")
     if dot > 0 and base[dot:] in _BLOCKED_EXTENSIONS:
         return True
     return False
+
+
+def _is_dependency_or_build_file(segments: List[str]) -> bool:
+    """Dépendances, verrous et fichiers de construction d'image (garde dure, voir ``_BLOCKED_DEPENDENCY_*``)."""
+    if not segments:
+        return False
+    if _BLOCKED_DEPENDENCY_SEGMENTS.intersection(segments[:-1]):
+        return True
+    base = segments[-1]
+    if base in _BLOCKED_DEPENDENCY_BASENAMES:
+        return True
+    return any(fnmatch.fnmatchcase(base, pattern) for pattern in _DEPENDENCY_BASENAME_PATTERNS)
 
 
 def _checks_all_green(checks: Optional[Sequence[str]]) -> bool:
@@ -356,6 +408,9 @@ async def auto_merge_promotion(
     guard_fn: Optional[Callable[..., object]] = None,
     remote_revert_fn: Optional[Callable[..., object]] = None,
     continue_fn: Optional[Callable[[], object]] = None,
+    merge_gate: Optional[Callable[..., object]] = None,
+    merge_result_check: Optional[Callable[..., object]] = None,
+    proof_loader: Optional[Callable[..., object]] = None,
 ) -> PromotionAutoMergeOutcome:
     """Tente l'auto-merge d'une PR Phase 4 puis vérifie la santé de ``main``.
 
@@ -365,6 +420,12 @@ async def auto_merge_promotion(
     afin qu'aucune PR enfant ne soit mergée dans une branche non intégrée.
 
     Politique off ou dry-run : aucun appel GitHub, aucun effet.
+
+    Chemin commun avec le merge-bot BUILD (``merge_policy``) : preuve de livraison de phase ``improve`` pour la tête
+    observée, sommet de base == base prouvée, checks REQUIS (protections classiques ET rulesets) tous présents et
+    verts, précondition serveur « à jour avant fusion » applicable à l'acteur. ``merge_gate`` /
+    ``merge_result_check`` / ``proof_loader`` sont les coutures d'injection (tests) ; par défaut, la vraie politique.
+    Un refus du chemin commun n'écrit RIEN de durable (avant le write-ahead Phase 5).
     """
 
     def blocked(reason: str, *, stop_reason: str = "auto_merge_blocked", merged: bool = False, **kwargs):
@@ -543,6 +604,33 @@ async def auto_merge_promotion(
             return blocked("délai d'attente CI dépassé (checks absents ou pending)")
         await _sleep(ci_poll_seconds, sleep_fn)
 
+    # Chemin commun SHA / base / checks requis / preuve (identique au merge-bot BUILD). Avant tout write-ahead.
+    from collegue.pilot import merge_policy
+
+    gate = merge_gate or merge_policy.verify_merge_candidate
+    try:
+        approval = gate(
+            clients,
+            manager,
+            project_id=project_id,
+            owner=owner,
+            repo=repo,
+            base=base,
+            pr_number=int(number),
+            expected_phase="improve",
+            method=policy.method,
+            expected_head_sha=head_sha,
+            expected_pr_base_sha=base_sha,
+            proof_loader=proof_loader,
+            require_all_green=True,
+        )
+    except merge_policy.MergeRefused as refused:
+        return blocked(f"politique de fusion commune: {refused.reason}")
+    except Exception as exc:  # noqa: BLE001 - vérification inaccessible => pas de fusion
+        return blocked(f"politique de fusion commune inaccessible: {exc}")
+    if getattr(approval, "head_sha", None) != head_sha:
+        return blocked("la politique de fusion a validé une autre tête que celle observée — refus")
+
     required_state_methods = (
         "begin_phase5_incident",
         "claim_phase5_revert",
@@ -608,6 +696,26 @@ async def auto_merge_promotion(
         incident_attention("merge confirmé sans SHA")
         return blocked(
             "merge confirmé sans SHA — garde post-merge impossible",
+            stop_reason="post_merge_guard_failed",
+            merged=True,
+            automerge=merge_outcome,
+        )
+    check_result = merge_result_check or merge_policy.verify_merge_result
+    try:
+        check_result(
+            clients,
+            owner=owner,
+            repo=repo,
+            method=policy.method,
+            base_sha=approval.base_sha,
+            head_sha=head_sha,
+            tree_sha=approval.tree_sha,
+            merge_sha=merge_sha,
+        )
+    except Exception as exc:  # noqa: BLE001 - précondition trompée ou commit illisible : main non conforme à la preuve
+        incident_attention(f"commit de fusion non conforme à la preuve: {exc}")
+        return blocked(
+            f"commit de fusion non conforme à la preuve: {getattr(exc, 'reason', exc)}",
             stop_reason="post_merge_guard_failed",
             merged=True,
             automerge=merge_outcome,

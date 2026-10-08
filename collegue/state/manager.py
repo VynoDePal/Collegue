@@ -36,6 +36,13 @@ from collegue.state.models import (
     PHASE5_RECOVERED,
     PHASE5_REVERT_IN_PROGRESS,
     PHASE5_REVERT_PENDING,
+    TASK_MERGE_ABANDONED,
+    TASK_MERGE_ATTENTION,
+    TASK_MERGE_METHODS,
+    TASK_MERGE_PENDING,
+    TASK_MERGE_STATES,
+    TASK_MERGE_SYNCED,
+    TASK_MERGE_UNSYNCED,
     Base,
     Checkpoint,
     Decision,
@@ -43,6 +50,7 @@ from collegue.state.models import (
     Phase5Incident,
     Project,
     Task,
+    TaskMerge,
 )
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -55,6 +63,21 @@ _PHASE5_TRANSITIONS = {
     PHASE5_ATTENTION: frozenset(),
     PHASE5_RECOVERED: frozenset(),
 }
+
+
+_TASK_MERGE_TRANSITIONS = {
+    TASK_MERGE_PENDING: frozenset(
+        {TASK_MERGE_PENDING, TASK_MERGE_UNSYNCED, TASK_MERGE_ABANDONED, TASK_MERGE_ATTENTION}
+    ),
+    TASK_MERGE_UNSYNCED: frozenset({TASK_MERGE_UNSYNCED, TASK_MERGE_SYNCED, TASK_MERGE_ATTENTION}),
+    TASK_MERGE_SYNCED: frozenset(),
+    TASK_MERGE_ATTENTION: frozenset(),
+    TASK_MERGE_ABANDONED: frozenset(),
+}
+
+
+class TaskMergeConflictError(RuntimeError):
+    """Une transition du cycle de fusion d'une tâche ne correspond plus à l'état durable (CAS refusé)."""
 
 
 class Phase5IncidentConflictError(RuntimeError):
@@ -454,6 +477,184 @@ class ProjectStateManager:
                 .order_by(Task.id)
             )
             return list(s.scalars(stmt))
+
+    # ── cycle de fusion des tâches BUILD (vague 3) ──────────────────────────────
+
+    def begin_task_merge(
+        self,
+        task_id: int,
+        *,
+        owner: str,
+        repo: str,
+        base_branch: str,
+        pr_number: int,
+        head_sha: str,
+        base_sha: str,
+        tree_sha: str,
+        proof_id: str,
+        merge_method: str,
+    ) -> TaskMerge:
+        """Écrit l'intention de fusion (write-ahead) AVANT l'appel de fusion distant.
+
+        Idempotent pour la même identité dans l'état ``merge_pending`` ; une ligne ``abandoned`` (ou ``synced`` pour
+        une autre PR/tête) est rouverte (révision incrémentée). Toute autre ligne existante lève :class:`TaskMergeConflictError` : un cycle
+        non terminé doit d'abord être réconcilié.
+        """
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+            raise ValueError(f"task_id de fusion invalide: {task_id!r}")
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+            raise ValueError(f"numéro de PR de fusion invalide: {pr_number!r}")
+        if merge_method not in TASK_MERGE_METHODS:
+            raise ValueError(f"méthode de fusion invalide: {merge_method!r}")
+        proof_id = str(proof_id or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", proof_id):
+            raise ValueError("identifiant de preuve invalide (SHA-256 attendu)")
+        payload = {
+            "owner": _phase5_text(owner, "owner", max_length=255),
+            "repo": _phase5_text(repo, "repo", max_length=255),
+            "base_branch": _phase5_text(base_branch, "branche de base", max_length=255),
+            "pr_number": pr_number,
+            "head_sha": _phase5_sha(head_sha, "SHA de tête"),
+            "base_sha": _phase5_sha(base_sha, "SHA de base"),
+            "tree_sha": _phase5_sha(tree_sha, "SHA du tree"),
+            "proof_id": proof_id,
+            "merge_method": str(merge_method),
+        }
+        try:
+            with self.session() as s:
+                task = s.get(Task, task_id)
+                if task is None:
+                    raise ValueError(f"tâche de fusion introuvable: {task_id}")
+                existing = s.get(TaskMerge, task_id)
+                if existing is None:
+                    row = TaskMerge(
+                        task_id=task_id, project_id=task.project_id, state=TASK_MERGE_PENDING, revision=0, **payload
+                    )
+                    s.add(row)
+                    s.flush()
+                    return row
+                same_identity = all(getattr(existing, k) == v for k, v in payload.items())
+                # Une ligne « abandoned » (intention caduque) ou « synced » d'une AUTRE PR/tête (tâche rejouée après
+                # un revert, nouvelle PR) peut être rouverte ; « synced » pour la même tête = déjà fusionnée.
+                if existing.state == TASK_MERGE_ABANDONED or (
+                    existing.state == TASK_MERGE_SYNCED and not same_identity
+                ):
+                    for key, value in payload.items():
+                        setattr(existing, key, value)
+                    existing.state = TASK_MERGE_PENDING
+                    existing.revision = existing.revision + 1
+                    existing.merge_sha = None
+                    existing.last_error = None
+                    s.flush()
+                    return existing
+                if existing.state == TASK_MERGE_PENDING and all(getattr(existing, k) == v for k, v in payload.items()):
+                    return existing
+                raise TaskMergeConflictError(
+                    f"la tâche {task_id} a déjà un cycle de fusion ({existing.state}, PR #{existing.pr_number}, "
+                    f"tête {existing.head_sha[:12]}) — à réconcilier avant toute nouvelle fusion"
+                )
+        except IntegrityError as exc:
+            existing = self.get_task_merge(task_id)
+            if existing is not None and existing.state == TASK_MERGE_PENDING:
+                if all(getattr(existing, k) == v for k, v in payload.items()):
+                    return existing
+            raise TaskMergeConflictError(f"création concurrente d'un cycle de fusion pour la tâche {task_id}") from exc
+
+    def get_task_merge(self, task_id: int) -> Optional[TaskMerge]:
+        with self.session() as s:
+            return s.get(TaskMerge, task_id)
+
+    def list_task_merges(self, project_id: int, *, states: Optional[Any] = None) -> List[TaskMerge]:
+        """Cycles de fusion du projet (filtrés par états si fournis), par tâche."""
+        with self.session() as s:
+            stmt = select(TaskMerge).where(TaskMerge.project_id == project_id).order_by(TaskMerge.task_id)
+            if states is not None:
+                wanted = set(states)
+                if not wanted <= TASK_MERGE_STATES:
+                    raise ValueError(f"états de fusion inconnus: {sorted(wanted - TASK_MERGE_STATES)}")
+                stmt = stmt.where(TaskMerge.state.in_(wanted))
+            return list(s.scalars(stmt))
+
+    def transition_task_merge(
+        self,
+        task_id: int,
+        *,
+        expected_state: str,
+        expected_revision: int,
+        new_state: str,
+        merge_sha: Any = _UNSET,
+        last_error: Any = _UNSET,
+        complete_task: bool = False,
+    ) -> TaskMerge:
+        """Transition CAS stricte (état + révision). ``complete_task`` passe AUSSI la tâche à ``merged``,
+        dans la même transaction, pour ``synced`` : jamais « synced » avec une tâche encore ``in_review``."""
+        if expected_state not in TASK_MERGE_STATES or new_state not in TASK_MERGE_STATES:
+            raise ValueError(f"état de fusion inconnu: {expected_state!r} -> {new_state!r}")
+        if new_state not in _TASK_MERGE_TRANSITIONS[expected_state]:
+            raise ValueError(f"transition de fusion interdite: {expected_state!r} -> {new_state!r}")
+        if complete_task and new_state != TASK_MERGE_SYNCED:
+            raise ValueError("complete_task n'est valable que pour la transition vers synced")
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+            raise ValueError(f"révision de fusion invalide: {expected_revision!r}")
+        values: dict[str, Any] = {
+            "state": new_state,
+            "revision": expected_revision + 1,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if merge_sha is not _UNSET:
+            values["merge_sha"] = _phase5_sha(merge_sha, "SHA de fusion", nullable=True)
+        if (
+            new_state == TASK_MERGE_UNSYNCED
+            and expected_state != TASK_MERGE_UNSYNCED
+            and values.get("merge_sha") is None
+        ):
+            raise ValueError("SHA de fusion requis pour merged_unsynced")
+        if last_error is not _UNSET:
+            if last_error is not None and not isinstance(last_error, str):
+                raise ValueError("last_error de fusion doit être une chaîne ou None")
+            values["last_error"] = last_error
+        with self.session() as s:
+            result = s.execute(
+                update(TaskMerge)
+                .where(
+                    TaskMerge.task_id == task_id,
+                    TaskMerge.state == expected_state,
+                    TaskMerge.revision == expected_revision,
+                )
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                actual = s.get(TaskMerge, task_id)
+                observed = "absent" if actual is None else f"state={actual.state}, revision={actual.revision}"
+                raise TaskMergeConflictError(
+                    f"CAS de fusion refusé pour la tâche {task_id}: attendu state={expected_state}, "
+                    f"revision={expected_revision}; observé {observed}"
+                )
+            if complete_task:
+                s.execute(update(Task).where(Task.id == task_id).values(status="merged"))
+            row = s.get(TaskMerge, task_id, populate_existing=True)
+            if row is None:  # pragma: no cover - protégé par rowcount=1
+                raise TaskMergeConflictError("cycle de fusion disparu après son CAS")
+            return row
+
+    def acknowledge_task_merge(self, task_id: int, *, expected_revision: int) -> bool:
+        """Acquitte explicitement un cycle ``attention`` après inspection humaine (supprime la ligne)."""
+        row = self.get_task_merge(task_id)
+        if row is None:
+            return False
+        if row.state != TASK_MERGE_ATTENTION:
+            raise TaskMergeConflictError(f"cycle de fusion non terminal ({row.state}) — acquittement refusé")
+        with self.session() as s:
+            result = s.execute(
+                delete(TaskMerge).where(
+                    TaskMerge.task_id == task_id,
+                    TaskMerge.state == TASK_MERGE_ATTENTION,
+                    TaskMerge.revision == expected_revision,
+                )
+            )
+            if result.rowcount != 1:
+                raise TaskMergeConflictError("révision d'acquittement de fusion périmée")
+            return True
 
     # ── metrics ─────────────────────────────────────────────────────────────────
 

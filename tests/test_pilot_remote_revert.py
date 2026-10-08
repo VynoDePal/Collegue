@@ -334,6 +334,14 @@ def _sync_to_final(case: _LocalCase):
     return sync
 
 
+GATE_CALLS: list = []
+
+
+def _gate_ok(clients, **kw):
+    """Checks requis + précondition serveur (testés pour de vrai dans test_pilot_merge_policy.py)."""
+    GATE_CALLS.append(kw)
+
+
 async def _publish(
     case: _LocalCase,
     branches: _Branches,
@@ -342,6 +350,7 @@ async def _publish(
     sync_base_fn=None,
     health_fn=None,
     ci_timeout_seconds=0,
+    merge_gate=None,
 ):
     return await publish_and_merge_revert(
         case.revert,
@@ -363,6 +372,7 @@ async def _publish(
         clock=lambda: 0,
         sync_base_fn=sync_base_fn or _sync_to_final(case),
         health_fn=health_fn or (lambda *a, **k: SimpleNamespace(healthy=True, reason="main verte")),
+        merge_gate=merge_gate or _gate_ok,
     )
 
 
@@ -456,6 +466,7 @@ async def test_remote_revert_reconstructs_proof_after_local_workspace_is_lost(sq
         ci_timeout_seconds=0,
         sync_base_fn=_sync_to_final(squash_case),
         health_fn=lambda *a, **k: SimpleNamespace(healthy=True, reason="main verte"),
+        merge_gate=_gate_ok,
     )
 
     assert result.status == STATUS_RECOVERED and result.restored is True
@@ -531,3 +542,30 @@ async def test_remote_revert_main_move_during_final_health_is_not_reported_recov
 
     assert result.status == STATUS_HEALTH_FAILED
     assert result.restored is False and branches.delete_calls == []
+
+
+async def test_remote_revert_applies_the_required_checks_gate_before_merging(squash_case):
+    from collegue.pilot.merge_policy import MergeRefused
+
+    GATE_CALLS.clear()
+    branches = _Branches(squash_case)
+    prs = _PRs(squash_case, branches)
+    await _publish(squash_case, branches, prs)
+    (gate,) = GATE_CALLS
+    assert gate["base"] == "main" and gate["head_sha"] and prs.merge_calls
+
+    for refusal in (
+        MergeRefused("check requis absent", code="missing_check"),
+        MergeRefused("check rouge", code="failed_check"),
+        RuntimeError("protections illisibles"),
+    ):
+        branches = _Branches(squash_case)
+        prs = _PRs(squash_case, branches)
+
+        def gate(clients, _r=refusal, **kw):
+            raise _r
+
+        result = await _publish(squash_case, branches, prs, merge_gate=gate)
+        assert prs.merge_calls == [], f"aucune fusion du revert si la politique refuse ({refusal})"
+        assert result.restored is False
+        assert result.status in {"auto_revert_pending", "auto_revert_publish_failed"}
