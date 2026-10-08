@@ -47,8 +47,26 @@ distante. Ce n'est **pas** un refus (décision de politique laissée au manager)
   Sont rejetés : `000` (rien à l'écoute), `404` (mauvais chemin), `405`/`406` (mauvais contrat),
   `400`, `408`, `429` et `5xx`. La bannière « All services started successfully! » n'apparaît
   qu'à ce moment.
-- Réglages : `COLLEGUE_APP_DIR` (`/app`), `READY_POLL_INTERVAL` (1 s), `HEALTH_READY_ATTEMPTS`
-  (30), `MCP_READY_ATTEMPTS` (120).
+- Réglages (mode http) : `COLLEGUE_APP_DIR` (`/app`), `READY_POLL_INTERVAL` (1 s),
+  `HEALTH_READY_ATTEMPTS` (30), `MCP_READY_ATTEMPTS` (120). Ils sont **validés avant de démarrer
+  le moindre processus** :
+
+  | Réglage | Valeurs acceptées | Absent ou vide (`VAR=`) |
+  |---|---|---|
+  | `HEALTH_READY_ATTEMPTS`, `MCP_READY_ATTEMPTS` | entier décimal de **1 à 999999**, sans signe, espace, zéro initial ni notation scientifique | valeur par défaut |
+  | `READY_POLL_INTERVAL` | secondes, entier ou décimal à **3 décimales au plus**, de **0.001 à 3600** (`1`, `0.05`) ; ni `inf`/`nan`, ni `1e1`, ni signe, ni espace | valeur par défaut |
+
+  Toute autre valeur (`abc`, `0`, `-1`, `1.5`, `99999999999999999999`, une valeur blanche…) est
+  refusée : message `ERROR: VAR='valeur' invalide : …` sur stderr, **code 2**, aucun processus
+  lancé. Avant ce correctif, `HEALTH_READY_ATTEMPTS=abc` faisait échouer `[ … -ge abc ]` dans un
+  `if`, ce que `set -e` ne rattrape pas : attente infinie. Les bornes tiennent largement dans un
+  entier de shell (les valeurs énormes ne peuvent pas rouvrir le défaut). Une valeur *vide* est
+  traitée comme *absente* (`${VAR:-défaut}`), une valeur *blanche* est invalide.
+- Chaque sonde `curl` de l'entrypoint est bornée (`--connect-timeout 2 --max-time 3`) : une
+  connexion locale bloquée ne suspend plus l'attente, donc le nombre fini de tentatives borne
+  réellement le démarrage. Les pauses sont interruptibles (SIGTERM/`docker stop` n'attend pas la
+  fin d'un long `READY_POLL_INTERVAL`) et leur `sleep` est arrêté à la sortie.
+- Le mode `stdio` et la sous-commande `mcp-ready` **ne lisent ni ne valident** ces réglages.
 - Sous-commande `./entrypoint.sh mcp-ready` : ne démarre rien, code 0 si le MCP répond selon le
   critère ci-dessus, 1 sinon. Elle est utilisée par le healthcheck Compose.
 - Le mode `stdio` est inchangé (`exec fastmcp run … --transport stdio`).
@@ -167,7 +185,7 @@ Les noms des checks requis sont inchangés : `Ruff`, `Pytest (Python 3.11)`,
 |---|---|
 | `tests/test_app_oauth_fail_closed.py` | démarrage réel (sous-processus) : local, OAuth JWKS/clé publique (401 sans jeton), constructeur en erreur, import absent, clé absente/vide/blanche ; jamais de `FastMCP` construit sur un refus |
 | `tests/test_server_auth.py` | `build_auth_provider`, valeurs blanches, issuer, algorithme, scopes exacts, loopback, avertissements d'exposition |
-| `tests/test_entrypoint_lifecycle.py` | `entrypoint.sh` avec faux `fastmcp`/health/`curl` : codes exacts, jamais « prêt » à tort, timeouts, mort du health server, SIGTERM, aucun processus survivant, `mcp-ready`, stdio |
+| `tests/test_entrypoint_lifecycle.py` | `entrypoint.sh` avec faux `fastmcp`/health/`curl` : codes exacts, jamais « prêt » à tort, timeouts, mort du health server, SIGTERM, aucun processus survivant, `mcp-ready`, stdio, validation des réglages de readiness (refus avant tout processus), sonde health bornée, SIGTERM prompt avec un long intervalle |
 | `tests/test_docker_compose_config.py` | cinq publications en loopback, variables séparées, `docker compose config` réel, healthcheck MCP |
 | `tests/test_ci_nightly_pipeline.py` | étape pytest du workflow contre un faux `pytest` (codes 1/2/3/5), bilan JUnit, statut E2E |
 | `tests/test_ci_docker_smoke.py` | script de smoke contre un `docker` factice : succès, crash, jamais prêt, MCP/healthcheck indisponible, mort après prêt, `docker run` KO, nettoyage, logs |
