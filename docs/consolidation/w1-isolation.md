@@ -192,6 +192,12 @@ Propriétés :
   sont ceux qui sont montés. Le routage fournisseur/modèle n'est pas modifié.
 - **Faux positif assumé** : un marqueur planté dans un arbre fait refuser ce montage.
 
+Tests de permissions (`tests/test_sandbox_git_control_mounts.py`) : en non-root, vraies permissions (`chmod`) ;
+en root (CI, `unshare -Urn`) ou avec `COLLEGUE_FORCE_INJECTED_EACCES=1`, `chmod` est sans effet donc EACCES est
+injecté sur la SEULE opération concernée (`lstat/stat/scandir` d'un parent fermé ; `scandir` seul pour un parent
+« traversable mais non listable », où `lstat` doit rester réel). Aucun skip ; la nature de la preuve est enregistrée
+(`proof=real-permissions-uid-nonroot` ou `injected-eacces-root`, visible dans `--junitxml`).
+
 Limite : le test porte sur le disque au moment de la construction de l'argv ; un contrôle créé *après* par un autre
 processus entre la vérification et `docker run` n'est pas couvert (course locale, hors modèle de menace : seul l'hôte
 écrit des contrôles).
