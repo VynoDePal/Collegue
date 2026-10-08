@@ -178,8 +178,9 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | Intégration GitHub (watchdog, PR) | |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Observabilité Sentry | |
 | `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |
-| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Budget dur du run (auto-pause) | |
-| `COLLEGUE_HOME` | Racine de persistance (budget, métriques, checkpoints) | |
+| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Plafonds du run, appliqués par le **registre de budget durable** (planification, BUILD, IMPROVE, reprises) ; pause à l'atteinte | |
+| `BUDGET_MODE` | `strict` (défaut : réservation **avant** chaque appel émis par le framework, usage inconnu = blocage durable) ou `advisory` (enregistre sans bloquer, **aucune garantie**). La garantie porte sur les appels que le framework émet, pas sur un programme du workspace qui disposerait d'une clé : voir [w2-budget](docs/consolidation/w2-budget.md) (transports acceptés et refusés) | |
+| `COLLEGUE_HOME` | Racine de persistance (métriques, checkpoints, **prompts modifiables** ; l'ancien état de prompts d'une installation précédente est repris au premier démarrage, voir [w2-installation](docs/consolidation/w2-installation.md)) | |
 | `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Codage par **abonnement** ChatGPT/Codex (coût API `$0`) au lieu d'une clé | |
 | `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **on** par défaut). Distinct de Phase 5 | |
 | `GATE_ACCEPTANCE_TESTS` | Oracles pytest générés au plan-time par le rôle QA, scellés avec le plan puis rejoués sans LLM (**off** par défaut) | |
@@ -201,7 +202,7 @@ durable (Postgres/SQLite) et de sandbox Docker.
 **Sûr par défaut** : un run reste en `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
 `plan draft` persiste seulement son brouillon durable ; l'opérateur approuve ensuite
 le hash affiché, et seul `plan sync --execute` touche GitHub ;
-budget dur auto-pausé. En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
+budget durable en mode `strict` (pause à l'atteinte d'un plafond ou d'un usage inconnu ; les transports non bornables sont refusés plutôt que prétendus). En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
 construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
 laisse ses PR **ouvertes pour merge humain** (§6) par défaut. L'auto-merge
 risk-gated Phase 5 est réellement câblé mais reste opt-in : CI complète, SHA stable,
@@ -270,9 +271,14 @@ Voir [docs/watchdog_deployment.md](docs/watchdog_deployment.md) pour le déploie
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes --no-deps -r locks/dev.txt   # dépendances verrouillées et hachées (outils de test inclus)
+python -m collegue.migrations upgrade                      # schéma de l'état durable (STATE_DATABASE_URL)
 python -m collegue.app
 ```
+
+`pyproject.toml` est la **source unique** des dépendances ; les fichiers `locks/*.txt` en sont générés
+(`python scripts/locks.py`, voir [w2-installation](docs/consolidation/w2-installation.md)). Le paquet embarque ses
+ressources (skills, graines de prompts, migrations) : il s'exécute aussi installé depuis un wheel, hors du dépôt.
 
 Tests :
 

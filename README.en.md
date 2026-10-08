@@ -177,8 +177,9 @@ Overview **by theme** (full list and default values in
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | GitHub integration (watchdog, PRs) | |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Sentry observability | |
 | `STATE_DATABASE_URL` | Autonomous engine durable state (Postgres/SQLite) | |
-| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Hard run budget (auto-pause) | |
-| `COLLEGUE_HOME` | Persistence root (budget, metrics, checkpoints) | |
+| `MAX_COST_USD` / `MAX_TOKENS_BUDGET` / `COLLEGUE_RUN_DEADLINE_SECONDS` | Run caps enforced by the **durable budget ledger** (planning, BUILD, IMPROVE, resumes); pause when reached | |
+| `BUDGET_MODE` | `strict` (default: reservation **before** every call the framework emits, unknown usage = durable block) or `advisory` (records without blocking, **no guarantee**). The guarantee covers calls the framework emits, not a workspace program that holds a key: see [w2-budget](docs/consolidation/w2-budget.md) (FR; accepted and refused transports) | |
+| `COLLEGUE_HOME` | Persistence root (metrics, checkpoints, **editable prompts**; the prompt state of a previous installation is imported on first start, see [w2-installation](docs/consolidation/w2-installation.md), FR) | |
 | `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Code via a ChatGPT/Codex **subscription** (`$0` API cost) instead of an API key | |
 | `BUILD_AUTO_MERGE` | **Build-phase merge-bot** (auto-merges task PRs; **on** by default). Improvement stays human-merge | |
 | `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Coder container network and resources | |
@@ -198,8 +199,8 @@ Stages: `planner` → `pilote` → `executor` → `improve`, on a durable-state
 
 **Safe by default**: a run stays in `dry_run` until you pass `--execute`.
 `plan draft` only persists its durable draft; the operator then approves the
-displayed hash, and only `plan sync --execute` writes to GitHub. The hard budget
-auto-pauses the engine. In a real BUILD, a **merge-bot** auto-merges each task to
+displayed hash, and only `plan sync --execute` writes to GitHub. The durable budget (`strict` mode)
+pauses the engine at a cap or on unknown usage; unboundable transports are refused rather than claimed. In a real BUILD, a **merge-bot** auto-merges each task to
 construct the MVP (`BUILD_AUTO_MERGE`, on by default); the **improvement** phase
 leaves its PRs **open for human merge** (§6) by default. Phase 5 risk-gated
 auto-merge is wired but remains opt-in: complete CI, a stable SHA, base resync and
@@ -259,9 +260,14 @@ See [docs/watchdog_deployment.md](docs/watchdog_deployment.md) for deployment.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes --no-deps -r locks/dev.txt   # locked, hashed dependencies (test tools included)
+python -m collegue.migrations upgrade                      # durable state schema (STATE_DATABASE_URL)
 python -m collegue.app
 ```
+
+`pyproject.toml` is the **single source** of dependencies; `locks/*.txt` are generated from it
+(`python scripts/locks.py`, see [w2-installation](docs/consolidation/w2-installation.md), FR). The package embeds its
+resources (skills, prompt seeds, migrations) and also runs installed from a wheel, outside the repository.
 
 Tests:
 

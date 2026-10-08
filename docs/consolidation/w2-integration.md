@@ -142,3 +142,26 @@ Push, PR vers `main` (base à vérifier), description en français (`--body-file
 - Rédigée sans avoir lu les rapports de A et B ; aucune de leurs décisions (emplacement des migrations, nom des locks, format du registre, commande PostgreSQL) n'est supposée ici.
 - Les noms de sondes du manager sont cités à titre de référence ; elles restent hors dépôt.
 - La suite complète de la base n'a pas été rejouée pour ce travail documentaire (dernière preuve : vague 1, 2800 / 36 / 9 sur `66f12f8`, puis `main` `9862b39` verte en CI).
+
+## 7. État intégré (vague 2)
+
+Section ajoutée à l'intégration ; les résultats chiffrés, les SHA et les preuves sont dans `reports/w2-c-integration.md`
+(hors dépôt). Les §1 à §6 ci-dessus décrivent la préparation et restent le protocole.
+
+- **Contributions** : lot B `23de03d`, lot A `d0b0aab`, fusionnés `--no-ff` par SHA (B d'abord) sur la base `9862b39`.
+- **Raccords mécaniques réalisés** (commits séparés) :
+  1. `0011_budget_ledger.py` : `alembic/versions/` → `collegue/migrations/versions/`, mêmes identifiants (`0011`/`0010`), blob
+     identique à celui de A au moment du déplacement (le fichier contient la table `budget_blocks` et les champs de claim) ;
+  2. chemins `script_location` des tests de A (`test_budget_ledger.py`, `test_budget_ledger_postgres.py`) et références
+     documentaires A/B vers `collegue/migrations` ;
+  3. réordonnancement d'imports seul de `0011` et de ces deux tests (le dossier racine `alembic/` n'existe plus, `alembic`
+     devient un paquet tiers pour isort et `collegue/` est dans le périmètre Ruff) : AST de `0011` identique à celui de A ;
+  4. `tests/test_project_state.py` : union des quatre tables du registre (A) et des chemins empaquetés (B) ;
+  5. CI : service `postgres:16` et étape dédiée dans le job `Pytest` requis (3.11 et 3.12), garde
+     `scripts/ci_require_junit.py` (rapport JUnit complet, plancher 21, 0 skip, 0 échec), test du câblage
+     `tests/test_ci_postgres_budget.py`.
+- **Sensibilité Phase 5** : le segment `versions` du nouveau chemin conserve la classification sensible des migrations ;
+  `scripts/ci_require_junit.py` et `collegue/migrations/**` sont sensibles ; les fichiers `locks/*.txt` et les `Dockerfile.*`
+  ne le sont toujours pas (écart connu, traité par la politique de fusion de la vague 3).
+- **Hors CI locale** : Python 3.11 et l'image Docker (smoke compris) restent prouvés par les cinq checks de la PR ; le plancher
+  PostgreSQL (21) doit être relevé quand A ajoute des cas, jamais abaissé pour masquer une perte.

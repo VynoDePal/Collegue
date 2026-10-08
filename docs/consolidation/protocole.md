@@ -291,4 +291,12 @@ Lots intégrés : A `d3a8786071b691926a4ee491cc479d88cbc25c71` (garde de montage
 
 ## 10. Vague 2
 
-La vague 1 est close (PR #608 et #609, `main` = `9862b39`). La vague 2 (A : registre de budget transactionnel durable et exécution bornée ; B : wheel installable, ressources, migrations existantes, dépendances verrouillées depuis `pyproject.toml`) a son propre protocole d'intégration et sa checklist : [`w2-integration.md`](w2-integration.md). Les règles de livraison (deux étapes, arbitrage des findings avant fusion, preuve absente ≠ succès, cinq checks requis, aucun bypass) sont inchangées (`AGENTS.md`).
+La vague 1 est close (PR #608 et #609, `main` = `9862b39`). La vague 2 (A : registre de budget transactionnel durable et exécution bornée ; B : wheel installable, ressources, migrations existantes, dépendances verrouillées depuis `pyproject.toml`) a son protocole d'intégration, sa checklist et son état intégré : [`w2-integration.md`](w2-integration.md). Les règles de livraison (deux étapes, arbitrage des findings avant fusion, preuve absente ≠ succès, cinq checks requis, aucun bypass) sont inchangées (`AGENTS.md`).
+
+État et limites à citer sans les arrondir :
+- **Strict ≠ advisory.** La garantie stricte porte sur les appels que le framework émet (réservation avant émission, usage inconnu bloquant, transport non bornable refusé) ; elle ne couvre pas un programme du workspace qui disposerait d'une clé. `advisory` n'offre aucune garantie.
+- **Abonnement** : plafond USD seul accepté (0 $ établi) ; plafond de tokens strict refusé. **Fournisseurs, modèles, endpoints** : identité exacte reconnue ou attestée, famille de tarif liée à la destination ; destination inconnue, passerelle ou LAN non attesté : refus sans prix configuré. Un loopback et un hôte attesté sont crus sur parole (un tunnel payant n'est pas détectable avant le routage complet de la vague 4).
+- **Reprise** : même identité de cycle ⇒ même solde ; création du projet et lien au scope en une transaction ; droit de cycle exclusif à échéance de 2 h.
+- **Usage inconnu / historique ambigu** : réservation conservée, suite stricte bloquée avec un motif durable, résolution par l'opérateur ; un cumul historique décroissant ou invalide bloque jusqu'à résolution.
+- **Prompts** : l'ancien état d'une installation précédente est importé sans être modifié ; le nouvel état gagne toujours.
+- **Preuves restant à la CI** : Python 3.11, image Docker et smoke, wheel complet avec verrous, PostgreSQL sur le runner. Toute suppression d'une de ces preuves est une régression.
