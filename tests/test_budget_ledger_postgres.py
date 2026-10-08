@@ -74,7 +74,7 @@ def pg_url():
         capture_output=True,
         env=env,
     )
-    options = f"-c listen_addresses='' -c unix_socket_directories={sock} -c fsync=off -c max_connections=60"
+    options = f"-c listen_addresses='' -c unix_socket_directories={sock} -c fsync=off -c max_connections=200"
     subprocess.run(
         [f"{bindir}/pg_ctl", "-D", str(data), "-l", str(root / "pg.log"), "-w", "-o", options, "start"],
         check=True,
@@ -90,6 +90,16 @@ def pg_url():
     finally:
         subprocess.run([f"{bindir}/pg_ctl", "-D", str(data), "-m", "immediate", "stop"], capture_output=True, env=env)
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _release_pooled_connections():
+    """Chaque test ouvre des dizaines de managers (un par thread) : libérer leurs pools à la fin du test, sinon le
+    serveur jetable épuise ses connexions (« too many clients ») au fil du module."""
+    yield
+    import gc
+
+    gc.collect()
 
 
 @pytest.fixture

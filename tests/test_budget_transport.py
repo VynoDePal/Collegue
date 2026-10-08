@@ -749,3 +749,132 @@ def test_prices_resolve_from_the_grid_first_and_from_the_operator_only_for_unkno
     settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_PRICE_PROMPT_PER_1M=9.0, LLM_PRICE_COMPLETION_PER_1M=9.0)
     assert resolve_prices_with_source("gemini-2.5-pro", settings)[1] == SOURCE_GRID  # la grille l'emporte
     assert resolve_prices_with_source("modele-inconnu", settings)[1] == SOURCE_CONFIGURED
+
+
+# --- autorité tarifaire = destination réelle du transport ; attestation de tokenizer ≠ tarif -----------------------
+
+
+def _scope(tmp_path, name, *, usd, tokens=None):
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / name}", create=True)
+    pid = manager.create_project(name="p")
+    key = manager.budget_ledger.scope_for_project(pid, max_cost_usd=usd, max_tokens=tokens).scope_key
+    return SimpleNamespace(ledger=manager.budget_ledger, key=key, manager=manager)
+
+
+def _openai_cloud(model, script):
+    return _client_at("https://api.openai.com/v1/", script)
+
+
+async def test_a_remote_billed_endpoint_is_priced_as_cloud_even_when_the_provider_is_declared_local(tmp_path):
+    """``LLM_PROVIDER=lmstudio`` mais le client parle à l'API OpenAI : tarif cloud, jamais 0, avant ET après l'appel."""
+    settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_CALL_TIMEOUT=2)
+    tiny = _scope(tmp_path, "tiny.db", usd=0.000001)
+    refused_client = _openai_cloud("gpt-5.4", [_response(2, 1, model="gpt-5.4")])
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(
+            LocalSamplingContext(default_model="gpt-5.4", client=refused_client), tiny, settings=settings, max_tokens=8
+        )
+    assert refused.value.code == REFUSED_CAP_USD and refused_client.calls == []  # refusé AVANT émission
+
+    roomy = _scope(tmp_path, "roomy.db", usd=100.0)
+    client = _openai_cloud("gpt-5.4", [_response(2, 1, model="gpt-5.4")])
+    await _sample(LocalSamplingContext(default_model="gpt-5.4", client=client), roomy, settings=settings, max_tokens=8)
+    snap = roomy.ledger.snapshot(roomy.key)
+    assert snap.consumed_usd == pytest.approx(2 * 2.5e-6 + 1 * 15e-6, abs=1e-9)  # règlement au MÊME tarif cloud
+    assert snap.consumed_usd > 0 and (snap.reserved_usd, snap.unknown_usd) == (0.0, 0.0)
+
+
+async def test_a_local_provider_on_a_local_destination_is_free_and_stays_free_at_settlement(tmp_path):
+    settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_CALL_TIMEOUT=2)
+    scope = _scope(tmp_path, "local.db", usd=0.000001)  # plafond USD ridicule : un modèle gratuit n'y touche pas
+    client = _client_at("http://localhost:1234/v1/", [_response(2, 1, model="llama-local")])
+    result = await _sample(
+        LocalSamplingContext(default_model="llama-local", client=client), scope, settings=settings, max_tokens=8
+    )
+    assert result.text == "ok" and len(client.calls) == 1
+    snap = scope.ledger.snapshot(scope.key)
+    assert snap.consumed_usd == 0.0 and snap.consumed_tokens == 3  # gratuit ET compté en tokens
+    # sous un plafond de tokens, l'identité locale doit en revanche être attestée (aucune borne sinon)
+    capped = _scope(tmp_path, "local-tokens.db", usd=1.0, tokens=100_000)
+    other = _client_at("http://localhost:1234/v1/", [_response(2, 1, model="llama-local")])
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(
+            LocalSamplingContext(default_model="llama-local", client=other), capped, settings=settings, max_tokens=8
+        )
+    assert refused.value.code == REFUSED_UNBOUNDED and other.calls == []
+    attested = SimpleNamespace(**vars(settings), BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="llama-local")
+    again = _client_at("http://localhost:1234/v1/", [_response(2, 1, model="llama-local")])
+    await _sample(
+        LocalSamplingContext(default_model="llama-local", client=again), capped, settings=attested, max_tokens=8
+    )
+    assert len(again.calls) == 1
+
+
+async def test_a_tokenizer_attestation_is_not_a_price_attestation(tmp_path):
+    """``gpt-5.4-expensive-variant`` attesté pour son tokenizer n'hérite PAS du tarif de ``gpt-5.4`` (préfixe)."""
+    variant = "gpt-5.4-expensive-variant"
+    base = dict(LLM_PROVIDER="openai", LLM_CALL_TIMEOUT=2, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS=variant)
+    scope = _scope(tmp_path, "variant.db", usd=100.0)
+    client = _openai_cloud(variant, [_response(2, 1, model=variant)])
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(
+            LocalSamplingContext(default_model=variant, client=client),
+            scope,
+            settings=SimpleNamespace(**base),
+            max_tokens=8,
+        )
+    assert refused.value.code == REFUSED_UNBOUNDED and client.calls == []  # aucun tarif établi ⇒ refus avant émission
+
+    priced = SimpleNamespace(**base, LLM_PRICE_PROMPT_PER_1M=50.0, LLM_PRICE_COMPLETION_PER_1M=100.0)
+    accepted = _openai_cloud(variant, [_response(2, 1, model=variant)])
+    await _sample(LocalSamplingContext(default_model=variant, client=accepted), scope, settings=priced, max_tokens=8)
+    assert len(accepted.calls) == 1
+    assert scope.ledger.snapshot(scope.key).consumed_usd == pytest.approx(2 * 50e-6 + 1 * 100e-6, abs=1e-9)
+
+
+async def test_the_server_handler_applies_the_same_pricing_authority(tmp_path):
+    from collegue.core.llm.sampling_handler import _make_handler_class
+
+    variant = "gpt-5.4-expensive-variant"
+    scope = _scope(tmp_path, "handler.db", usd=100.0)
+    client = _openai_cloud(variant, [_response(2, 1, model=variant)])
+    handler = _make_handler_class()(default_model=variant, client=client)
+    settings = SimpleNamespace(
+        LLM_PROVIDER="lmstudio", LLM_CALL_TIMEOUT=2, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS=variant
+    )
+    with bind_budget(scope.ledger, scope.key, settings=settings):
+        with pytest.raises(BudgetRefused) as refused:
+            await handler.client.chat.completions.create(
+                model=variant, messages=[{"role": "user", "content": "x"}], max_tokens=8
+            )
+    assert refused.value.code == REFUSED_UNBOUNDED and client.calls == []
+
+
+def test_strict_grid_prices_need_an_exact_identity_and_the_right_family():
+    from collegue.monitoring.pricing import cost_per_token, strict_grid_price
+
+    assert strict_grid_price("gpt-5.4", "openai") == pytest.approx((2.5e-6, 15e-6))
+    assert strict_grid_price("gpt-5.4-2026-03-05", "openai") == pytest.approx((2.5e-6, 15e-6))  # instantané daté
+    assert strict_grid_price("gpt-5.4-mini", "openai") == pytest.approx((0.75e-6, 4.5e-6))  # clé plus spécifique
+    assert strict_grid_price("gpt-5.4-expensive-variant", "openai") is None  # préfixe ≠ identité
+    assert strict_grid_price("gemma-4-31b-it", "gemini") == (0.0, 0.0)  # gratuit lié à SA famille
+    assert strict_grid_price("gemma-4-31b-it", "openai") is None  # même nom sur un autre endpoint : pas de zéro
+    # l'affichage historique du dashboard garde ses préfixes (estimation nommée, hors garantie)
+    assert cost_per_token("gpt-5.4-expensive-variant", provider="openai") == pytest.approx((2.5e-6, 15e-6))
+
+
+def test_prices_follow_the_destination_not_the_declared_provider():
+    from collegue.core.llm.budget_guard import SOURCE_GRID, pricing_family, resolve_prices_with_source
+
+    local = SimpleNamespace(LLM_PROVIDER="lmstudio")
+    assert pricing_family(local, "https://api.openai.com/v1/") == ("openai", False)
+    assert pricing_family(local, "http://localhost:1234/v1") == (None, True)
+    assert pricing_family(local, None) == (None, True)
+    assert pricing_family(SimpleNamespace(LLM_PROVIDER="gemini"), "https://api.openai.com/v1/") == ("openai", False)
+    assert resolve_prices_with_source("gpt-5.4", local, endpoint="https://api.openai.com/v1/")[1] == SOURCE_GRID
+    assert resolve_prices_with_source("gpt-5.4", local, endpoint="https://api.openai.com/v1/")[0][0] > 0
+    assert resolve_prices_with_source("llama", local, endpoint="http://localhost:1234/v1")[0] == (0.0, 0.0)
+    assert (
+        resolve_prices_with_source("gpt-5.4", SimpleNamespace(LLM_PROVIDER="openai"), endpoint="http://gw.invalid/v1")
+        is None
+    )

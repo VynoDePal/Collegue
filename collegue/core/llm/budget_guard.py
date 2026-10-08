@@ -317,29 +317,70 @@ def _price(settings: Optional[object], name: str) -> float:
     return value if math.isfinite(value) and value > 0 else 0.0
 
 
-def resolve_prices(model: str, settings: Optional[object], *, billable: bool = True) -> Optional[Tuple[float, float]]:
+def resolve_prices(
+    model: str,
+    settings: Optional[object],
+    *,
+    billable: bool = True,
+    endpoint: Optional[str] = None,
+    family: Optional[str] = None,
+) -> Optional[Tuple[float, float]]:
     """Voir :func:`resolve_prices_with_source` (prix seuls)."""
-    resolved = resolve_prices_with_source(model, settings, billable=billable)
+    resolved = resolve_prices_with_source(model, settings, billable=billable, endpoint=endpoint, family=family)
     return None if resolved is None else resolved[0]
 
 
-def resolve_prices_with_source(
-    model: str, settings: Optional[object], *, billable: bool = True
-) -> Optional[Tuple[Tuple[float, float], str]]:
-    """``(usd/token entrée, usd/token sortie)`` AUTORITAIRES, ou ``None`` si le coût n'est pas bornable.
+def pricing_family(
+    settings: Optional[object], endpoint: Optional[str] = None, family: Optional[str] = None
+) -> Tuple[Optional[str], bool]:
+    """``(famille d'endpoint hébergée, local)`` : l'AUTORITÉ tarifaire est la destination RÉELLE du transport.
 
-    Un modèle absent de la grille n'a PAS de prix de repli ici (un repli bas sous-estimerait) :
-    seuls la grille autoritaire (providers locaux, Gemma 4 gratuit…) et les prix configurés
-    ``LLM_PRICE_*_PER_1M`` sont admis. Un transport non facturé (abonnement) coûte 0. Le prix est celui
-    du modèle DEMANDÉ : un repli de modèle est tarifé à son propre prix, jamais à celui du premier.
+    - ``family`` explicite (worker : fournisseur de la chaîne) ou famille déduite de l'hôte de ``endpoint`` ;
+    - sans destination connue, retombée sur le routage de la config (``LLM_PROVIDER``) ;
+    - ``local`` n'est vrai que si le provider déclaré est local ET que la destination n'est PAS un endpoint
+      hébergé facturé : ``LLM_PROVIDER=lmstudio`` avec un client qui parle à l'API OpenAI est facturé au tarif
+      cloud, jamais à 0.
+    """
+    from collegue.monitoring.pricing import is_local_provider
+
+    resolved = family or (endpoint_family(endpoint, settings) if endpoint else None)
+    if resolved is not None:
+        return resolved, False
+    if is_local_provider(getattr(settings, "LLM_PROVIDER", None)):
+        return None, True
+    if endpoint:
+        return None, False  # destination non hébergée et provider non local : aucun tarif de grille établi
+    return endpoint_family(None, settings), False
+
+
+def resolve_prices_with_source(
+    model: str,
+    settings: Optional[object],
+    *,
+    billable: bool = True,
+    endpoint: Optional[str] = None,
+    family: Optional[str] = None,
+) -> Optional[Tuple[Tuple[float, float], str]]:
+    """``((usd/token entrée, usd/token sortie), source)`` AUTORITAIRES, ou ``None`` si le coût n'est pas bornable.
+
+    L'autorité est la **destination réelle** du transport (voir :func:`pricing_family`), pas le provider déclaré :
+    réservation et règlement résolvent avec les mêmes ``endpoint``/``family``. Un modèle n'a de tarif de grille que
+    par **identité exacte** (ou instantané daté) servie par sa famille d'endpoint ; un préfixe de nom (variante
+    ``gpt-5.4-…``) n'hérite jamais du tarif d'un autre modèle, et une attestation de tokenizer n'est pas une
+    attestation de facturation. Hors grille, seuls les prix configurés ``LLM_PRICE_*_PER_1M`` (l'opérateur en
+    répond) sont admis ; sinon pas de tarif ⇒ refus sous plafond USD. Un transport non facturé coûte 0.
     """
     if not billable:
         return (0.0, 0.0), SOURCE_NOT_BILLED
-    from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing
+    from collegue.monitoring.pricing import strict_grid_price
 
-    provider = getattr(settings, "LLM_PROVIDER", None)
-    if has_explicit_pricing(model, provider=provider):
-        return cost_per_token(model, provider=provider), SOURCE_GRID
+    resolved_family, local = pricing_family(settings, endpoint, family)
+    if local:
+        return (0.0, 0.0), SOURCE_GRID  # provider local, destination non hébergée : gratuit
+    if resolved_family is not None:
+        grid = strict_grid_price(model, resolved_family)
+        if grid is not None:
+            return grid, SOURCE_GRID
     prompt, completion = _price(settings, "LLM_PRICE_PROMPT_PER_1M"), _price(settings, "LLM_PRICE_COMPLETION_PER_1M")
     if prompt > 0 or completion > 0:
         return (prompt / 1_000_000.0, completion / 1_000_000.0), SOURCE_CONFIGURED
@@ -406,7 +447,7 @@ def estimate_call(
                 "sortie non bornée (aucun max_tokens transmis au fournisseur) : refusée avant émission",
             )
     out = max(0, out)
-    resolved = resolve_prices_with_source(model, settings, billable=billable)
+    resolved = resolve_prices_with_source(model, settings, billable=billable, endpoint=endpoint)
     prices = None if resolved is None else resolved[0]
     if (
         resolved is not None
@@ -523,7 +564,13 @@ async def guarded_call(
     # La borne de tokens ne sert que si une dimension plafonnée en dépend : le plafond de tokens, ou le plafond
     # USD d'un transport FACTURÉ. Un plafond USD sur un transport non facturé (abonnement : 0 $ établi) n'a
     # besoin d'aucune borne de tokens — mais n'offre alors AUCUNE garantie de tokens (voir plus bas).
-    guaranteed = strict and (snap.cap_tokens is not None or (snap.cap_micro_usd is not None and billable))
+    # Un transport effectivement GRATUIT (provider local sur une destination non hébergée, modèle gratuit de sa
+    # famille) n'a pas d'exposition en dollars non plus : seul un plafond de tokens exige alors une borne.
+    priced = resolve_prices_with_source(model, binding.settings, billable=billable, endpoint=endpoint)
+    free_transport = priced is not None and priced[0] == (0.0, 0.0)
+    guaranteed = strict and (
+        snap.cap_tokens is not None or (snap.cap_micro_usd is not None and billable and not free_transport)
+    )
     if strict and snap.cap_tokens is not None and not output_bound_proven:
         raise BudgetRefused(
             REFUSED_UNBOUNDED,
@@ -618,7 +665,7 @@ async def guarded_call(
             else:
                 prompt_tokens, completion_tokens, actual_model = usage
                 micro = actual_micro(
-                    resolve_prices(actual_model or model, binding.settings, billable=billable),
+                    resolve_prices(actual_model or model, binding.settings, billable=billable, endpoint=endpoint),
                     prompt_tokens,
                     completion_tokens,
                 )

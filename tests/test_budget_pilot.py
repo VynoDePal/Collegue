@@ -689,6 +689,21 @@ def test_the_operator_reads_and_resolves_independent_block_causes(manager):
     assert resolve_budget_block(manager, pid, "bound-1", note="hypothèse corrigée après revue")["blocks"] == []
 
 
+def test_the_worker_price_table_uses_the_real_provider_of_each_chain_model_and_exact_identities(manager):
+    from collegue.core.llm.budget_guard import BudgetBinding
+    from collegue.executor.worker_budget import allocate_worker
+
+    pid = manager.create_project(name="p")
+    key = manager.budget_ledger.scope_for_project(pid, max_cost_usd=5.0, strict=False).scope_key  # advisory
+    # Clé API Gemini : principal gemma gratuit (famille gemini), repli inconnu de la grille ⇒ pas de tarif improvisé.
+    settings = _settings(5.0, LLM_PROVIDER="lmstudio", LLM_MODEL_CODER="gemma-4-31b-it")
+    agent = OHSdkAgent(_Sandbox(), settings_obj=settings)
+    agent.model_chain = lambda: ["gemini/gemma-4-31b-it", "gemini/gemma-unverified-variant"]
+    alloc = allocate_worker(BudgetBinding(manager.budget_ledger, key, settings=settings), agent=agent)
+    table = {name: (price_in, price_out) for name, price_in, price_out in alloc.prices}
+    assert table == {"gemini/gemma-4-31b-it": (0.0, 0.0)}  # le zéro est celui de SA famille ; la variante est écartée
+
+
 # --- dry-run : aucune écriture au registre ----------------------------------------------------------------------
 
 

@@ -227,7 +227,15 @@ def allocate_worker(
     chain = _chain_models(agent, model)
     table = []
     for name in chain:
-        priced = resolve_prices(name.split("/")[-1], settings, billable=billable)
+        # Autorité tarifaire = fournisseur RÉEL de la chaîne (nom LiteLLM ``gemini/…`` ou ``openai/…`` ; nom nu =
+        # backend OpenAI en abonnement), pas le provider déclaré de la config.
+        provider_part = name.partition("/")[0].lower() if "/" in name else ("openai" if not billable else "")
+        priced = resolve_prices(
+            name.split("/")[-1],
+            settings,
+            billable=billable,
+            family=provider_part if provider_part in ("gemini", "openai") else None,
+        )
         if priced is not None:
             table.append((name, priced[0], priced[1]))
     primary_priced = any(entry[0] == chain[0] for entry in table)
