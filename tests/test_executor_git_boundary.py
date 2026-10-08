@@ -1398,6 +1398,7 @@ def test_local_command_runner_default_is_never_used_on_a_workspace_by_the_engine
         "collegue/executor/workspace.py": "resync_repository_base(repo_source) — garde require_trusted_checkout",
         "collegue/pilot/guard.py": "rev-parse HEAD de repo_source (checkout opérateur) — jamais un clone/workspace",
         "collegue/pilot/remote_revert.py": "_verify_synced_repository(repo_source) — checkout opérateur resynchronisé",
+        "collegue/pilot/merge_cycle.py": "verify_local_sync(repo_source) — checkout opérateur, garde require_trusted_checkout",
     }
     users = {
         str(path.relative_to(root.parent))

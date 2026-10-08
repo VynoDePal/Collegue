@@ -102,6 +102,22 @@ class CommitChecks(BaseModel):
     complete: bool = False
 
 
+class CheckObservation(BaseModel):
+    """Un check observé sur un SHA, avec son origine (``app_id`` pour un check-run, absent pour un statut legacy)."""
+
+    name: str
+    state: str
+    app_id: Optional[int] = None
+    kind: str = "check_run"  # "check_run" | "status"
+
+
+class CommitCheckDetails(BaseModel):
+    """Checks d'un SHA avec identité de l'application émettrice et preuve de complétude."""
+
+    checks: List[CheckObservation] = []
+    complete: bool = False
+
+
 class Comment(BaseModel):
     id: int
     user: str
@@ -380,10 +396,33 @@ class PRCommands(GitHubClient):
         Un check non terminé devient ``pending``. Une réponse partielle ou
         malformée rend ``complete=False`` ; l'appelant doit alors refuser le merge.
         """
+        details = self.get_commit_check_details(owner, repo, head_sha, page_size=page_size, max_pages=max_pages)
+        return CommitChecks(
+            states=[c.state for c in details.checks],
+            names=[c.name for c in details.checks],
+            complete=details.complete,
+        )
+
+    def get_commit_check_details(
+        self,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        *,
+        page_size: int = 100,
+        max_pages: int = 10,
+    ) -> CommitCheckDetails:
+        """Comme :meth:`get_commit_checks`, avec l'``app_id`` de chaque check-run.
+
+        Nécessaire pour comparer aux checks REQUIS (protections classiques et rulesets désignent parfois
+        l'application attendue : un check de même nom émis par une AUTRE application ne compte pas).
+        ``complete=False`` dès qu'une page est absente, malformée ou tronquée.
+        """
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
         page_size = min(100, max(1, int(page_size)))
         max_pages = max(1, int(max_pages))
-        states: List[str] = []
-        names: List[str] = []
+        checks: List[CheckObservation] = []
 
         seen_runs = 0
         total_runs: Optional[int] = None
@@ -405,11 +444,19 @@ class PRCommands(GitHubClient):
             batch = payload["check_runs"]
             for check in batch:
                 if not isinstance(check, dict):
-                    return CommitChecks(states=states, names=names, complete=False)
-                names.append(str(check.get("name") or "check-run"))
+                    return CommitCheckDetails(checks=checks, complete=False)
                 status = str(check.get("status") or "").strip().lower()
                 conclusion = str(check.get("conclusion") or "").strip().lower()
-                states.append(conclusion if status == "completed" and conclusion else "pending")
+                app = check.get("app")
+                app_id = app.get("id") if isinstance(app, dict) else None
+                checks.append(
+                    CheckObservation(
+                        name=str(check.get("name") or "check-run"),
+                        state=conclusion if status == "completed" and conclusion else "pending",
+                        app_id=app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None,
+                        kind="check_run",
+                    )
+                )
             seen_runs += len(batch)
             if seen_runs >= total_runs:
                 checks_complete = seen_runs == total_runs
@@ -429,24 +476,26 @@ class PRCommands(GitHubClient):
             batch = payload
             for status in batch:
                 if not isinstance(status, dict):
-                    return CommitChecks(states=states, names=names, complete=False)
+                    return CommitCheckDetails(checks=checks, complete=False)
                 context = str(status.get("context") or "commit-status")
                 # L'API renvoie du plus récent au plus ancien : ne conserver que
                 # le verdict le plus récent de chaque contexte legacy.
                 if context in seen_contexts:
                     continue
                 seen_contexts.add(context)
-                names.append(context)
-                states.append(str(status.get("state") or "pending").strip().lower())
+                checks.append(
+                    CheckObservation(
+                        name=context,
+                        state=str(status.get("state") or "pending").strip().lower(),
+                        app_id=None,
+                        kind="status",
+                    )
+                )
             if len(batch) < page_size:
                 statuses_complete = True
                 break
 
-        return CommitChecks(
-            states=states,
-            names=names,
-            complete=bool(checks_complete and statuses_complete),
-        )
+        return CommitCheckDetails(checks=checks, complete=bool(checks_complete and statuses_complete))
 
     def get_pr_comments(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[Comment]:
         """Get comments on a pull request."""

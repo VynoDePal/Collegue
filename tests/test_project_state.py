@@ -47,6 +47,7 @@ def test_metadata_declares_all_tables():
         "budget_reservations",
         "budget_events",
         "budget_blocks",
+        "task_merges",
     }
 
 

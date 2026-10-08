@@ -325,6 +325,102 @@ class Phase5Incident(Base):
     project: Mapped["Project"] = relationship(back_populates="phase5_incident")
 
 
+# ── Cycle de fusion d'une tâche BUILD (vague 3) ──────────────────────────────────────────
+#
+# Write-ahead durable du merge-bot BUILD : l'intention de fusion (avec toutes les ancres vérifiées : PR, tête, base,
+# tree et preuve de livraison) est persistée AVANT l'appel de fusion distant ; la confirmation distante puis la
+# resynchronisation locale sont deux états distincts. Un crash entre l'appel distant et l'enregistrement local, ou
+# un échec de resynchronisation après une fusion réussie, se reprend en réconciliant GitHub avec cette ligne :
+# jamais un second merge, jamais la tâche suivante construite depuis un checkout périmé.
+TASK_MERGE_PENDING = "merge_pending"  # intention écrite, fusion distante non confirmée
+TASK_MERGE_UNSYNCED = "merged_unsynced"  # fusion distante CONFIRMÉE et vérifiée, resynchronisation locale à faire
+TASK_MERGE_SYNCED = "synced"  # fusion + resynchronisation vérifiées ; la tâche est « merged »
+TASK_MERGE_ATTENTION = "attention"  # incohérence (contenu/base/PR) : intervention humaine, aucune action automatique
+TASK_MERGE_ABANDONED = "abandoned"  # intention caduque (PR non fusionnée, tête changée) ; une nouvelle peut commencer
+TASK_MERGE_STATES = frozenset(
+    {TASK_MERGE_PENDING, TASK_MERGE_UNSYNCED, TASK_MERGE_SYNCED, TASK_MERGE_ATTENTION, TASK_MERGE_ABANDONED}
+)
+TASK_MERGE_METHODS = frozenset({"squash", "merge"})
+# Origine du cycle : ``engine`` = fusion émise par le merge-bot (preuve de livraison, ancres complètes) ;
+# ``external`` = PR fusionnée HORS moteur (opérateur, autre outil) : seul le fait « fusion distante connue
+# (SHA), synchronisation locale non prouvée » est durable — aucune preuve de livraison n'est inventée.
+TASK_MERGE_ORIGIN_ENGINE = "engine"
+TASK_MERGE_ORIGIN_EXTERNAL = "external"
+TASK_MERGE_ORIGINS = frozenset({TASK_MERGE_ORIGIN_ENGINE, TASK_MERGE_ORIGIN_EXTERNAL})
+
+
+class TaskMerge(Base):
+    """Cycle de fusion durable d'UNE tâche BUILD (une ligne par tâche, transitions CAS)."""
+
+    __tablename__ = "task_merges"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('merge_pending', 'merged_unsynced', 'synced', 'attention', 'abandoned')",
+            name="ck_task_merges_state",
+        ),
+        CheckConstraint(
+            "merge_method IS NULL OR merge_method IN ('squash', 'merge')", name="ck_task_merges_merge_method"
+        ),
+        CheckConstraint("origin IN ('engine', 'external')", name="ck_task_merges_origin"),
+        CheckConstraint("pr_number > 0", name="ck_task_merges_pr_positive"),
+        CheckConstraint("revision >= 0", name="ck_task_merges_revision_nonnegative"),
+        CheckConstraint(
+            "(head_sha IS NULL OR length(head_sha) = 40) AND (base_sha IS NULL OR length(base_sha) = 40) "
+            "AND (tree_sha IS NULL OR length(tree_sha) = 40) AND (proof_id IS NULL OR length(proof_id) = 64) "
+            "AND (merge_sha IS NULL OR length(merge_sha) = 40)",
+            name="ck_task_merges_sha_lengths",
+        ),
+        CheckConstraint(
+            "(origin = 'engine' AND head_sha IS NOT NULL AND base_sha IS NOT NULL AND tree_sha IS NOT NULL "
+            "AND proof_id IS NOT NULL AND merge_method IS NOT NULL) "
+            "OR (origin = 'external' AND head_sha IS NULL AND base_sha IS NULL AND tree_sha IS NULL "
+            "AND proof_id IS NULL AND merge_method IS NULL AND merge_sha IS NOT NULL "
+            "AND state IN ('merged_unsynced', 'synced', 'attention'))",
+            name="ck_task_merges_origin_anchors",
+        ),
+        CheckConstraint(
+            "length(trim(owner)) > 0 AND length(trim(repo)) > 0 AND length(trim(base_branch)) > 0",
+            name="ck_task_merges_required_text",
+        ),
+        CheckConstraint(
+            "(state IN ('merged_unsynced', 'synced') AND merge_sha IS NOT NULL) "
+            "OR (state IN ('merge_pending', 'abandoned') AND merge_sha IS NULL) "
+            "OR state = 'attention'",
+            name="ck_task_merges_state_merge_sha",
+        ),
+    )
+
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True, autoincrement=False
+    )
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Jeton CAS monotone (même discipline que Phase5Incident).
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    owner: Mapped[str] = mapped_column(String(255), nullable=False)
+    repo: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=TASK_MERGE_ORIGIN_ENGINE, server_default=TASK_MERGE_ORIGIN_ENGINE
+    )
+    # Ancres vérifiées avant l'écriture : tête testée, base de confiance, tree complet, identifiant de la preuve.
+    # Toutes NULL (et seulement alors) pour ``origin='external'`` : aucune preuve de livraison n'existe.
+    head_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    base_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    tree_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    proof_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    merge_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    merge_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow, server_default=func.now()
+    )
+
+
 # ── Registre budgétaire durable (vague 2) ────────────────────────────────────────────
 #
 # AUTORITÉ de la dépense LLM d'un projet/cycle. Montants en entiers : micro-USD

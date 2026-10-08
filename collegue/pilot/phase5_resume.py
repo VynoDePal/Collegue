@@ -55,12 +55,19 @@ async def resume_phase5_incident(
     guard_fn: Optional[Callable[..., object]] = None,
     remote_revert_fn: Optional[Callable[..., object]] = None,
     auto_merge_enabled: bool = False,
+    merge_gate: Optional[Callable[..., object]] = None,
+    proof_loader: Optional[Callable[..., object]] = None,
 ) -> Phase5ResumeOutcome:
     """Réconcilie l'unique incident actif avant toute nouvelle amélioration.
 
     ``merge_pending`` relit la PR source avant de merger ; ``health_pending``
     resynchronise et rejoue la garde ; ``revert_pending`` reconstruit le rollback
     depuis les objets GitHub, sans dépendre d'un workspace ``/tmp``.
+
+    Le PUT de fusion repris passe par le MÊME chemin commun que la boucle normale (``merge_policy``) : preuve de
+    livraison ``improve`` pour la tête persistée, base == base prouvée, checks requis verts, précondition serveur ;
+    ``merge_gate`` / ``proof_loader`` sont les coutures d'injection. Refus retryable ou API illisible : intention
+    conservée en ``merge_pending`` ; autre refus : ``attention`` (jamais de fusion).
     """
     incident = manager.get_phase5_incident(project_id)
     if incident is None:
@@ -182,6 +189,28 @@ async def resume_phase5_incident(
                     if any(state not in accepted_wait_states for state in states):
                         raise Phase5InvariantError("CI source rouge pendant la reprise")
                     return result("phase5_incident_pending", "CI source encore en attente pendant la reprise")
+                from collegue.pilot import merge_policy
+
+                try:
+                    (merge_gate or merge_policy.verify_merge_candidate)(
+                        clients,
+                        manager,
+                        project_id=project_id,
+                        owner=owner,
+                        repo=repo,
+                        base=base,
+                        pr_number=incident.source_pr_number,
+                        expected_phase="improve",
+                        method=incident.merge_method,
+                        expected_head_sha=incident.source_head_sha,
+                        expected_pr_base_sha=incident.base_sha_before_merge,
+                        proof_loader=proof_loader,
+                        require_all_green=True,
+                    )
+                except merge_policy.MergeRefused as refused:
+                    if refused.retryable or refused.code == merge_policy.CODE_API:
+                        return result("phase5_incident_pending", f"fusion reprise différée: {refused.reason}")
+                    raise Phase5InvariantError(f"politique de fusion commune: {refused.reason}") from refused
                 try:
                     merged = prs.merge_pr(
                         owner,
