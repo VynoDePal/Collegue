@@ -71,10 +71,12 @@ def _make_handler_class():
                         binding=binding,
                         model=str(kw.get("model") or self.default_model or ""),
                         messages=kw.get("messages"),
+                        tools=kw.get("tools"),
                         max_tokens=int(kw["max_tokens"]),
                         transport=TRANSPORT_HTTP,
                         usage_of=_usage_of,
                         max_attempts=3,  # = les 2 retries par défaut du SDK, désormais réservés un à un
+                        endpoint=str(getattr(self.client, "base_url", None) or "") or None,
                     )
                 else:
                     # Garde budget dur historique (C4, MetricsCollector) : NON couverte par la garantie

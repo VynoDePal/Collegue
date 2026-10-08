@@ -1478,15 +1478,44 @@ class LLMAdequacyChecker:
     """:class:`AdequacyChecker` par LLM (#437) — fail-closed.
 
     ``sample_fn`` : ``async (prompt, system_prompt) -> str``, injectable (mocké en
-    CI) ; défaut = ``generate_text`` des providers LLM avec la config du serveur.
+    CI). Sans injection, l'appel passe par le ``ctx`` de sampling du pilote — donc par le transport GARDÉ du
+    registre budgétaire (réservation avant émission, règlement, rôle REVIEWER, scope du projet) — et jamais par
+    un client fournisseur direct qui dépenserait hors registre. Sans ``ctx`` ni ``sample_fn`` le juge est
+    fail-closed (``RuntimeError``), comme le checker d'acceptation.
     Le diff est borné (``max_diff_chars``) pour rester dans la fenêtre du modèle,
     après retrait des fichiers générés (#526) ; une troncature résiduelle est
     ANNONCÉE au juge (sinon il conclut à tort à l'absence d'un fichier non vu).
     """
 
-    def __init__(self, sample_fn=None, *, max_diff_chars: int = 60000):
-        self._sample_fn = sample_fn or _default_adequacy_sample_fn()
+    def __init__(self, sample_fn=None, *, settings_obj=None, max_diff_chars: int = 60000):
+        self._sample_fn = sample_fn
+        self._settings_obj = settings_obj
         self._max_diff_chars = max_diff_chars
+
+    async def _sample(self, prompt: str, system_prompt: str, ctx) -> str:
+        if self._sample_fn is not None:
+            return await self._sample_fn(prompt, system_prompt)
+        if ctx is None:
+            raise RuntimeError("ctx de sampling absent pour le juge d'adéquation (appel direct non budgété refusé)")
+
+        from collegue.config import settings as global_settings
+        from collegue.core.llm import LLMRole, model_preferences_for_role
+        from collegue.core.llm.budget_guard import budget_role
+        from collegue.core.llm.client import sample_with_timeout
+
+        settings_obj = self._settings_obj or global_settings
+        sample_kwargs = {
+            "messages": prompt,
+            "system_prompt": system_prompt,
+            "temperature": 0.2,  # verdict, pas créativité
+            "max_tokens": int(getattr(settings_obj, "MAX_TOKENS", 8192)),
+        }
+        preferences = model_preferences_for_role(LLMRole.REVIEWER, settings_obj)
+        if preferences:
+            sample_kwargs["model_preferences"] = preferences
+        with budget_role(LLMRole.REVIEWER):
+            result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
+        return str(getattr(result, "text", "") or "")
 
     def _diff_for_judge(self, diff: str) -> str:
         """Diff prêt pour le juge : fichiers générés retirés (#526), borné, et
@@ -1513,7 +1542,7 @@ class LLMAdequacyChecker:
             f"## Diff livré\n```diff\n{bounded}\n```\n\n"
             "Ce diff implémente-t-il concrètement l'issue ?"
         )
-        text = await self._sample_fn(prompt, _ADEQUACY_SYSTEM)
+        text = await self._sample(prompt, _ADEQUACY_SYSTEM, ctx)
         outcome = _parse_adequacy(text)
         # #499 : ne contrôler la COUVERTURE des critères que si l'adéquation est
         # OK (sinon déjà rouge), que le diff touche des tests (sinon
@@ -1526,27 +1555,9 @@ class LLMAdequacyChecker:
             f"## Diff livré\n```diff\n{bounded}\n```\n\n"
             "Les critères chiffrables/observables de l'issue sont-ils assertés par au moins un test du diff ?"
         )
-        test_text = await self._sample_fn(test_prompt, _TEST_ADEQUACY_SYSTEM)
+        test_text = await self._sample(test_prompt, _TEST_ADEQUACY_SYSTEM, ctx)
         asserts, justif = _parse_test_adequacy(test_text)
         return replace(outcome, tests_assert_criteria=asserts, tests_justification=justif)
-
-
-def _default_adequacy_sample_fn():  # pragma: no cover - chemin réel (integration)
-    from collegue.config import settings
-    from collegue.resources.llm.providers import LLMConfig, generate_text
-
-    config = LLMConfig(
-        model_name=settings.llm_model,
-        api_key=settings.llm_api_key,
-        max_tokens=settings.MAX_TOKENS,
-        temperature=0.2,  # verdict, pas créativité
-    )
-
-    async def sample(prompt: str, system_prompt: str) -> str:
-        response = await generate_text(config, prompt, system_prompt)
-        return response.text
-
-    return sample
 
 
 # ── §4.7 (Phase B) : tests d'acceptation exécutables, auteur indépendant ─────────

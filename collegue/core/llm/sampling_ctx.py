@@ -407,6 +407,9 @@ class LocalSamplingContext:
                 billable=False,
                 usage_of=_usage_of,
                 max_attempts=1,
+                # Le backend abonnement peut ignorer le plafond de sortie (non vérifiable hors ligne) : il ne
+                # fournit donc AUCUNE garantie de plafond de tokens (refusé en strict sous MAX_TOKENS_BUDGET).
+                output_bound_proven=False,
             )
         match = _SAMPLE_RE.search(out or "")
         if rc != 0 or not match:
@@ -440,6 +443,15 @@ class LocalSamplingContext:
                 _kill_container(container)
             raise
         return proc.returncode, proc.stdout, proc.stderr
+
+    def _endpoint_url(self, client) -> Optional[str]:
+        """Destination RÉELLE des appels HTTP (URL de base du client qui émet), pour justifier la borne de tokens.
+
+        ``None`` = inconnue (client factice sans ``base_url``, ni URL de config) : la garde retombe alors sur le
+        routage de la config et n'admet que les destinations hébergées connues.
+        """
+        url = getattr(client, "base_url", None) or self._base_url
+        return str(url) if url else None
 
     async def _create(self, model: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
         from collegue.core.llm.budget_guard import TRANSPORT_HTTP, current_binding, guarded_call
@@ -475,6 +487,7 @@ class LocalSamplingContext:
                 transport=TRANSPORT_HTTP,
                 usage_of=_openai_usage,
                 max_attempts=self._max_retries + 1,
+                endpoint=self._endpoint_url(client),
             )
         usage = getattr(resp, "usage", None)
         if usage is not None:

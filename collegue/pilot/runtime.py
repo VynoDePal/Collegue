@@ -294,10 +294,11 @@ def _gate_options(settings_obj, *, manager=None, project_id: Optional[int] = Non
     return options
 
 
-def _build_adequacy_checker(settings_obj):  # pragma: no cover - infra réelle (integration)
+def _build_adequacy_checker(settings_obj):
+    """Juge d'adéquation par le ``ctx`` de sampling du pilote : transport GARDÉ (registre budgétaire)."""
     from collegue.executor.quality_gate import LLMAdequacyChecker
 
-    return LLMAdequacyChecker()
+    return LLMAdequacyChecker(settings_obj=settings_obj)
 
 
 def _build_acceptance_checker(manager, project_id: int):  # pragma: no cover - infra réelle (integration)
@@ -770,6 +771,32 @@ class PlanResult:
     # Le draft possède encore l'objet ``Spec`` structuré. Les actions relues
     # depuis la DB n'ont que son Markdown : ne pas inventer des compteurs.
     spec_counts_available: bool = True
+    # Identité durable du cycle de planification (enveloppe budgétaire) ; ``None`` si aucun registre.
+    cycle_id: Optional[str] = None
+
+
+_CYCLE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def planning_cycle_key(name: str, problem: str, owner: str, repo: str, cycle_id: Optional[str] = None) -> str:
+    """Identité durable (clé de scope) d'un cycle de planification.
+
+    - ``cycle_id`` explicite : l'opérateur NOMME le cycle ; la consigne peut changer entre deux reprises sans
+      renouveler l'enveloppe (``planning:cycle:<id>``). Un nouvel ``cycle_id`` = une nouvelle enveloppe, voulue.
+    - sinon : identité dérivée de ``(owner, repo, name, problem)`` (``planning:auto:<sha256>``) : relancer la
+      MÊME commande après un échec reprend le même solde, jamais un budget neuf ; des projets distincts ont
+      des enveloppes distinctes.
+    """
+    import hashlib
+
+    if cycle_id is not None:
+        if not isinstance(cycle_id, str) or _CYCLE_ID_RE.fullmatch(cycle_id) is None:
+            raise ValueError(
+                "cycle_id invalide : 1 à 64 caractères parmi A-Z a-z 0-9 . _ - (commence par un alphanumérique)"
+            )
+        return f"planning:cycle:{cycle_id}"
+    material = "\x1f".join(str(part) for part in (owner, repo, name, problem))
+    return "planning:auto:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:40]
 
 
 async def plan_project_from_settings(
@@ -795,6 +822,7 @@ async def plan_project_from_settings(
     decompose_attempts: int = 3,
     retry_sleep_seconds: float = 3.0,
     decompose_exact_task_count: Optional[int] = None,
+    cycle_id: Optional[str] = None,
 ) -> PlanResult:
     """Crée un **draft** durable : problème → SPEC → DAG → aperçu hashé.
 
@@ -807,6 +835,12 @@ async def plan_project_from_settings(
     refusé : l'opérateur doit relire le hash rendu, puis lancer séparément
     ``plan approve`` et ``plan sync``. Cette séparation empêche qu'un même process
     LLM génère et auto-approuve son propre plan.
+
+    **Enveloppe budgétaire du cycle.** Le scope de planification a une identité durable
+    (:func:`planning_cycle_key`) : relancer la même planification après un échec — y compris avant que le projet
+    existe, après un redémarrage — REPREND le même solde au lieu d'ouvrir un plafond neuf ; un seul appel à la
+    fois détient le cycle (pas de double création). Un cycle déjà abouti à un projet est refusé
+    (``PlanningCycleError``) : une nouvelle enveloppe est un nouveau cycle explicite (``cycle_id``).
 
     ``decompose`` est re-tenté sur ``ValueError`` (décomposition vide — aléa d'un modèle
     « thinking » coupé trop tôt, d'où ``max_tokens`` élargi).
@@ -844,19 +878,31 @@ async def plan_project_from_settings(
     # ``persist_spec`` — mais ``generate_spec`` dépense DÉJÀ. Un scope durable est donc créé AVANT
     # la première dépense, lié au projet dès qu'il existe : les frais de SPEC, de décomposition et de QA
     # (échecs compris) restent au même registre que BUILD et IMPROVE.
-    from collegue.pilot.budget import budget_strict_from_settings
+    from collegue.pilot.budget import budget_strict_from_settings, require_budget_ledger
+    from collegue.state.budget_ledger import PlanningCycleError
 
-    ledger = getattr(manager, "budget_ledger", None)
+    ledger = require_budget_ledger(manager, settings_obj, what="la planification")
     planning_scope = None
+    claim_token = None
+    cycle_key = None
     budget_stack = contextlib.ExitStack()
     if ledger is not None:
         from collegue.core.llm.budget_guard import bind_budget
 
-        planning_scope = ledger.create_planning_scope(
-            max_cost_usd=getattr(settings_obj, "MAX_COST_USD", None),
-            max_tokens=getattr(settings_obj, "MAX_TOKENS_BUDGET", None),
-            strict=budget_strict_from_settings(settings_obj),
-        )
+        cycle_key = planning_cycle_key(name, problem, owner, repo, cycle_id)
+        try:
+            planning_scope, claim_token = ledger.open_planning_cycle(
+                cycle_key,
+                max_cost_usd=getattr(settings_obj, "MAX_COST_USD", None),
+                max_tokens=getattr(settings_obj, "MAX_TOKENS_BUDGET", None),
+                strict=budget_strict_from_settings(settings_obj),
+            )
+        except BaseException:
+            if owns_ctx:
+                aclose = getattr(ctx, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            raise
         budget_stack.enter_context(bind_budget(ledger, planning_scope.scope_key, settings=settings_obj))
 
     try:
@@ -865,21 +911,46 @@ async def plan_project_from_settings(
         from collegue.planner.plan_review import build_plan_preview
         from collegue.planner.spec_generator import generate_spec, persist_spec
 
-        spec = await generate_spec(problem, ctx, context=context, settings_obj=settings_obj)
-        project_id = persist_spec(
-            manager,
-            name,
-            spec,
-            deadline=deadline,
-            plan_sync_config=plan_sync_config,
-        )
-        if planning_scope is not None:
-            ledger.bind_project(planning_scope.scope_key, project_id)
+        acceptance_enabled = bool(getattr(settings_obj, "GATE_ACCEPTANCE_TESTS", False))
+        resumed = False
+        tasks: list = []
+        if planning_scope is not None and planning_scope.project_id is not None:
+            # REPRISE du même cycle : le projet (SPEC déjà payée) existe. On ne régénère pas la SPEC et on ne crée
+            # pas de second projet ; on reprend à l'étape inachevée, avec le MÊME solde.
+            project_id = int(planning_scope.project_id)
+            stored = manager.get_project(project_id)
+            if stored is None:
+                raise RuntimeError(
+                    f"le projet {project_id} du cycle {cycle_key} est introuvable : réconciliation requise"
+                )
+            tasks = list(manager.get_tasks(project_id))
+            acceptance_done = bool(getattr(stored, "acceptance_tests_required", False))
+            if tasks and (not acceptance_enabled or acceptance_done):
+                raise PlanningCycleError(
+                    f"le cycle de planification {cycle_key} a déjà abouti au projet {project_id} (draft complet) : "
+                    "relire/approuver ce draft (`plan approve`), ou ouvrir une NOUVELLE enveloppe avec un autre "
+                    "cycle_id explicite.",
+                    project_id=project_id,
+                )
+            spec = str(getattr(stored, "spec", "") or "")
+            resumed = True
+            logger.info("reprise du cycle %s sur le projet %s (%d tâche(s))", cycle_key, project_id, len(tasks))
+        else:
+            spec = await generate_spec(problem, ctx, context=context, settings_obj=settings_obj)
+            project_id = persist_spec(
+                manager,
+                name,
+                spec,
+                deadline=deadline,
+                plan_sync_config=plan_sync_config,
+                cycle=None if planning_scope is None else (planning_scope.scope_key, claim_token),
+            )
 
         last_err: Optional[Exception] = None
-        tasks: list = []
         attempts = max(1, decompose_attempts)
         for attempt in range(1, attempts + 1):
+            if tasks:
+                break  # reprise après décomposition réussie : seuls les tests d'acceptation restent à produire
             try:
                 tasks = await decompose(
                     spec,
@@ -902,9 +973,9 @@ async def plan_project_from_settings(
                 if attempt < attempts and retry_sleep_seconds > 0:
                     await asyncio.sleep(retry_sleep_seconds)
         else:
-            raise last_err if last_err is not None else ValueError("Décomposition impossible.")
+            if not tasks:
+                raise last_err if last_err is not None else ValueError("Décomposition impossible.")
 
-        acceptance_enabled = bool(getattr(settings_obj, "GATE_ACCEPTANCE_TESTS", False))
         if acceptance_enabled:
             # §4.7 : l'oracle est écrit AVANT tout code, sans workspace ni diff,
             # puis persisté en un batch atomique. Une génération invalide remonte
@@ -925,9 +996,9 @@ async def plan_project_from_settings(
 
         return PlanResult(
             project_id=project_id,
-            spec_title=getattr(spec, "title", ""),
-            objectives=len(getattr(spec, "objectives", []) or []),
-            acceptance_criteria=len(getattr(spec, "acceptance_criteria", []) or []),
+            spec_title="" if resumed else getattr(spec, "title", ""),
+            objectives=0 if resumed else len(getattr(spec, "objectives", []) or []),
+            acceptance_criteria=0 if resumed else len(getattr(spec, "acceptance_criteria", []) or []),
             task_count=len(tasks),
             preview_markdown=preview_md,
             dry_run=True,
@@ -936,7 +1007,11 @@ async def plan_project_from_settings(
             # Même lecture cohérente que le contenu affiché à l'opérateur : ne
             # jamais recalculer dans une seconde session après l'aperçu.
             plan_hash=preview.plan_hash,
+            cycle_id=cycle_key,
+            spec_counts_available=not resumed,
         )
+    except PlanningCycleError:
+        raise  # refus de cycle (abouti / en cours) : aucune dépense, rien à journaliser comme échec
     except BaseException as exc:
         # L'échec de planification est CONSERVÉ durablement avec sa dépense (les appels déjà émis
         # restent débités sur le scope) : jamais une planification ratée « gratuite ».
@@ -948,6 +1023,11 @@ async def plan_project_from_settings(
         raise
     finally:
         budget_stack.close()
+        if claim_token is not None:
+            try:
+                ledger.release_planning_claim(planning_scope.scope_key, claim_token)
+            except Exception as exc:  # noqa: BLE001 - expire seul (échéance du droit exclusif)
+                logger.warning("droit exclusif du cycle %s non libéré: %s", cycle_key, exc)
         if owns_ctx:
             aclose = getattr(ctx, "aclose", None)
             if aclose is not None:

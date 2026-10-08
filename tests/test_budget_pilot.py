@@ -650,6 +650,45 @@ def test_an_invalid_worker_runtime_is_refused(manager, runtime):
     assert manager.budget_ledger.snapshot(key).reserved_usd == 0.0
 
 
+async def test_a_subscription_worker_under_a_strict_token_cap_is_refused_before_any_launch(manager, repo):
+    """0 $ établi ≠ garantie de tokens : le backend abonnement n'offre pas de plafond de sortie effectif."""
+    pid = _linear_project(manager, 1)
+    sandbox = _Sandbox(_usage_line())
+    settings = _subscription_settings(1.0, MAX_TOKENS_BUDGET=500_000)
+    result = await _oh_pass(manager, repo, pid, sandbox, settings=settings)
+    assert result[1].stop_reason == "paused_budget" and sandbox.calls == []
+
+
+async def test_a_subscription_worker_stays_available_under_a_token_cap_in_advisory_mode(manager, repo):
+    pid = _linear_project(manager, 1)
+    sandbox = _Sandbox(f"[collegue-budget] armed {{}}\n{_usage_line()}\n[collegue-budget] final\nOH_RUNNER_DONE\n")
+    settings = _subscription_settings(
+        1.0, MAX_TOKENS_BUDGET=500_000, BUDGET_MODE="advisory", BUDGET_EXHAUSTED_ACTION="warn"
+    )
+    await _oh_pass(manager, repo, pid, sandbox, settings=settings)
+    assert len(sandbox.calls) == 1 and _ledger(manager, pid).strict is False
+
+
+# --- opérateur : causes de blocage indépendantes ---------------------------------------------------------------
+
+
+def test_the_operator_reads_and_resolves_independent_block_causes(manager):
+    from collegue.pilot.budget import budget_status, resolve_budget_block
+
+    pid = _linear_project(manager, 1)
+    ledger = manager.budget_ledger
+    key = ledger.scope_for_project(pid, max_cost_usd=1.0, max_tokens=100_000).scope_key
+    ledger.block(key, reason="borne du fournisseur démentie", event_key="bound-1")
+
+    status = budget_status(manager, pid)
+    assert [b["block_key"] for b in status["blocks"]] == ["bound-1"] and status["scope"]["blocked_reason"]
+    with pytest.raises(ValueError):
+        resolve_budget_block(manager, pid, "bound-1", note="  ")  # une justification est exigée
+    after = resolve_budget_block(manager, pid, "bound-1", note="hypothèse corrigée après revue")
+    assert after["blocks"] == [] and after["scope"]["blocked_reason"] is None
+    assert resolve_budget_block(manager, pid, "bound-1", note="hypothèse corrigée après revue")["blocks"] == []
+
+
 # --- dry-run : aucune écriture au registre ----------------------------------------------------------------------
 
 

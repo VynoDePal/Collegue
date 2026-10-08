@@ -23,15 +23,18 @@ Une configuration dont on ne peut pas borner l'appel est REFUSÉE en strict
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import random
+import re
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterator, Optional, Tuple
+from urllib.parse import urlparse
 
 from collegue.state.budget_ledger import (
     REFUSED_DEADLINE,
@@ -52,13 +55,65 @@ TRANSPORT_SUBSCRIPTION_SAMPLER = "subscription-sampler"
 TRANSPORT_WORKER = "openhands-worker"
 
 # ── Borne HAUTE du prompt ────────────────────────────────────────────────────────────────────
-# Un tokenizer à repli octet (BPE « byte-level » : tiktoken/GPT, ou SentencePiece avec byte-fallback :
-# Gemini/Gemma, Claude…) ne peut JAMAIS produire plus de tokens que le texte n'a d'octets UTF-8 : chaque
-# octet est lui-même un token de base, les fusions ne font que réduire. La borne n'est donc pas une
-# moyenne « chars/N » mais ``octets UTF-8 du payload effectivement transmis`` + un cadrage fixe
-# (gabarit de chat). L'hypothèse ne vaut que pour les familles ci-dessous (ou attestées par l'opérateur) ;
-# une famille inconnue ou une modalité non textuelle n'est pas bornable : refus en strict.
-TOKENIZER_BYTE_BOUNDED_PREFIXES = ("gpt-", "chatgpt", "o1", "o3", "o4", "gemini", "gemma", "claude")
+# Un tokenizer à repli octet (BPE « byte-level » : tiktoken/GPT ; SentencePiece avec byte-fallback :
+# Gemini/Gemma) ne peut JAMAIS produire plus de tokens que le texte qu'il découpe n'a d'octets UTF-8 : chaque
+# octet est lui-même un token de base, les fusions ne font que réduire. La borne n'est donc pas une moyenne
+# « chars/N » mais ``octets UTF-8 de la requête SÉRIALISÉE transmise`` (structure comprise : clés, séparateurs,
+# schémas d'outils ; l'échappement JSON ne fait que rallonger le texte réel) + un cadrage fixe (gabarit de chat).
+#
+# L'hypothèse ne vaut que pour une IDENTITÉ exacte de modèle servie par une DESTINATION réellement utilisée par le
+# client (hôte hébergé Gemini ou API OpenAI), pas pour un simple préfixe de nom : un nom ``gpt-…`` inconnu, ou servi
+# par un ``base_url`` arbitraire, peut cacher n'importe quel tokenizer — et un tarif explicite n'en atteste aucun. Tout
+# le reste (providers locaux, passerelles, identités inconnues) exige une ATTESTATION EXACTE de l'opérateur
+# (``BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS``), sinon il est refusé en strict sous plafond.
+# Identités EXACTES de modèles dont la famille de tokenizer est documentée (pas des préfixes de nom : un nom
+# ``gpt-…`` inconnu peut être n'importe quel dérivé). Hypothèse documentée, non vérifiée contre l'API (aucun appel
+# réel) : OpenAI = BPE byte-level (tiktoken o200k/cl100k) ; Gemini/Gemma = SentencePiece à repli octet. Un
+# instantané daté (``-AAAA-MM-JJ``, ``-AAAAMMJJ``) d'une identité connue est admis. Toute autre identité exige une
+# attestation EXACTE de l'opérateur (``BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS``).
+HOSTED_KNOWN_MODELS = {
+    "gemini": frozenset(
+        {
+            "gemini-3.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-pro-preview",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it",
+        }
+    ),
+    "openai": frozenset(
+        {
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.5",
+            "o1",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+        }
+    ),
+}
+# Destinations RÉELLES des transports hébergés : c'est l'hôte du client qui fait foi, pas un réglage sans rapport.
+HOSTED_ENDPOINT_HOSTS = {"generativelanguage.googleapis.com": "gemini", "api.openai.com": "openai"}
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
+SOURCE_NOT_BILLED = "not-billed"
+SOURCE_GRID = "grid"  # tarif standard ≤ 200k de monitoring/pricing.py
+SOURCE_CONFIGURED = "configured"  # LLM_PRICE_*_PER_1M : l'opérateur en répond
+# La grille de ``monitoring/pricing.py`` est un tarif standard « prompts ≤ 200k » : au-delà, aucune borne
+# tarifaire établie ⇒ refus avant émission en strict (sauf prix explicitement configurés par l'opérateur).
+PRICING_GRID_MAX_PROMPT_TOKENS = 200_000
 PER_MESSAGE_FRAMING_TOKENS = 16  # rôle + délimiteurs du gabarit de chat, par message
 PER_TOOL_FRAMING_TOKENS = 64  # préambule du gabarit pour chaque outil déclaré
 REQUEST_FRAMING_TOKENS = 64  # BOS/EOS, instructions implicites du gabarit
@@ -147,38 +202,47 @@ class UnboundableRequest(ValueError):
     """Le payload contient une modalité dont les tokens ne sont pas bornables par ses octets."""
 
 
-def _payload_bytes(value: Any, *, _depth: int = 0) -> int:
-    """Octets UTF-8 de TOUT ce qui sera transmis : clés, valeurs, outils, schémas (récursif).
+def _plain(value: Any, *, _depth: int = 0) -> Any:
+    """Réduit ``value`` à des types JSON (dict/list/str/nombres) ; refuse ce qui n'est pas du texte.
 
     Les objets de message (pydantic, dataclass) sont aplatis. Une pièce non textuelle (image, audio, fichier,
-    vidéo) lève :class:`UnboundableRequest` : ses tokens ne se déduisent pas de ses octets.
+    vidéo) ou du binaire lève :class:`UnboundableRequest` : ses tokens ne se déduisent pas de ses octets.
     """
     if _depth > 64:
         raise UnboundableRequest("payload trop profond pour être borné")
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        return len(value.encode("utf-8", errors="surrogatepass"))
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
     if isinstance(value, (bytes, bytearray)):
         raise UnboundableRequest("contenu binaire dans le payload : tokens non bornables")
-    if isinstance(value, (int, float, bool)):
-        return len(str(value))
     if isinstance(value, dict):
         if str(value.get("type", "")).lower() in _NON_TEXT_PART_TYPES or any(
             str(key).lower() in _NON_TEXT_PART_TYPES for key in value
         ):
             raise UnboundableRequest(f"modalité non textuelle ({value.get('type')!r}) : tokens non bornables")
-        return sum(
-            _payload_bytes(k, _depth=_depth + 1) + _payload_bytes(v, _depth=_depth + 1) for k, v in value.items()
-        )
+        return {str(k): _plain(v, _depth=_depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
-        return sum(_payload_bytes(item, _depth=_depth + 1) for item in value)
+        return [_plain(item, _depth=_depth + 1) for item in value]
     dump = getattr(value, "model_dump", None)
     if callable(dump):
-        return _payload_bytes(dump(), _depth=_depth + 1)
+        return _plain(dump(), _depth=_depth + 1)
     if hasattr(value, "__dict__"):
-        return _payload_bytes(vars(value), _depth=_depth + 1)
-    return len(str(value).encode("utf-8", errors="surrogatepass"))
+        return _plain(vars(value), _depth=_depth + 1)
+    return str(value)
+
+
+def _payload_bytes(value: Any) -> int:
+    """Octets UTF-8 de la requête SÉRIALISÉE (structure comprise), séparateurs les plus larges (``", "``/``": "``).
+
+    Compter seulement clés + valeurs oublierait guillemets, virgules, deux-points et accolades : une grande liste
+    d'entiers dans un schéma d'outil pèse surtout en délimiteurs. On sérialise donc la structure réellement
+    transmise ; l'échappement JSON ne fait que rallonger le texte, la borne reste une borne HAUTE.
+    """
+    if value is None:
+        return 0
+    plain = _plain(value)
+    return len(json.dumps(plain, ensure_ascii=False, separators=(", ", ": ")).encode("utf-8", errors="surrogatepass"))
 
 
 def _message_count(messages: Any) -> int:
@@ -194,19 +258,55 @@ def _message_count(messages: Any) -> int:
 
 def _normalized_model(model: str) -> str:
     name = (model or "").strip().lower()
-    for prefix in ("models/", "openai/", "gemini/", "anthropic/"):
+    for prefix in ("models/", "openai/", "gemini/"):
         if name.startswith(prefix):
             name = name[len(prefix) :]
     return name
 
 
-def tokenizer_is_byte_bounded(model: str, settings: Optional[object]) -> bool:
-    """Vrai si la borne « tokens ≤ octets » est justifiée pour ``model`` (famille connue ou attestée)."""
+def endpoint_family(endpoint: Optional[str], settings: Optional[object]) -> Optional[str]:
+    """Famille hébergée (``gemini``/``openai``) de la destination RÉELLE du transport, ou ``None`` (inconnue).
+
+    ``endpoint`` = URL de base du client qui émet l'appel ; son hôte fait foi. Sans URL connue, on retombe sur le
+    routage de la config (``LLM_PROVIDER`` : ``gemini`` → endpoint Google ; ``openai`` sans ``base_url`` → API
+    OpenAI) — jamais pour un ``base_url`` personnalisé ou un provider local.
+    """
+    if endpoint:
+        host = (urlparse(str(endpoint)).hostname or "").lower()
+        return HOSTED_ENDPOINT_HOSTS.get(host)
+    provider = str(getattr(settings, "LLM_PROVIDER", "") or "").strip().lower()
+    if provider == "gemini":
+        return "gemini"
+    if provider == "openai" and not getattr(settings, "llm_base_url", None):
+        return "openai"
+    return None
+
+
+def _known_identity(name: str, family: str) -> bool:
+    known = HOSTED_KNOWN_MODELS[family]
+    return name in known or _SNAPSHOT_SUFFIX.sub("", name) in known
+
+
+def tokenizer_is_byte_bounded(model: str, settings: Optional[object], endpoint: Optional[str] = None) -> bool:
+    """Vrai si la borne « tokens ≤ octets » est justifiée pour ``model`` sur CE transport.
+
+    - identité EXACTE attestée par l'opérateur (``BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS``, CSV, égalité stricte,
+      instantané daté admis) ; ou
+    - destination hébergée connue (:func:`endpoint_family`) ET identité exacte de cette famille
+      (:data:`HOSTED_KNOWN_MODELS`).
+    Un préfixe de nom, un nom ``gpt-…`` inconnu, un provider local ou un ``base_url`` personnalisé ne sont PAS une
+    preuve, même avec un tarif explicite (un tarif n'atteste pas un tokenizer).
+    """
     name = _normalized_model(model)
-    if name.startswith(TOKENIZER_BYTE_BOUNDED_PREFIXES):
+    attested = {
+        item.strip().lower()
+        for item in str(getattr(settings, "BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS", "") or "").split(",")
+    }
+    attested.discard("")
+    if name in attested or _SNAPSHOT_SUFFIX.sub("", name) in attested:
         return True
-    attested = str(getattr(settings, "BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS", "") or "")
-    return any(item.strip() and name.startswith(item.strip().lower()) for item in attested.split(","))
+    family = endpoint_family(endpoint, settings)
+    return family is not None and _known_identity(name, family)
 
 
 def _price(settings: Optional[object], name: str) -> float:
@@ -218,6 +318,14 @@ def _price(settings: Optional[object], name: str) -> float:
 
 
 def resolve_prices(model: str, settings: Optional[object], *, billable: bool = True) -> Optional[Tuple[float, float]]:
+    """Voir :func:`resolve_prices_with_source` (prix seuls)."""
+    resolved = resolve_prices_with_source(model, settings, billable=billable)
+    return None if resolved is None else resolved[0]
+
+
+def resolve_prices_with_source(
+    model: str, settings: Optional[object], *, billable: bool = True
+) -> Optional[Tuple[Tuple[float, float], str]]:
     """``(usd/token entrée, usd/token sortie)`` AUTORITAIRES, ou ``None`` si le coût n'est pas bornable.
 
     Un modèle absent de la grille n'a PAS de prix de repli ici (un repli bas sous-estimerait) :
@@ -226,15 +334,15 @@ def resolve_prices(model: str, settings: Optional[object], *, billable: bool = T
     du modèle DEMANDÉ : un repli de modèle est tarifé à son propre prix, jamais à celui du premier.
     """
     if not billable:
-        return 0.0, 0.0
+        return (0.0, 0.0), SOURCE_NOT_BILLED
     from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing
 
     provider = getattr(settings, "LLM_PROVIDER", None)
     if has_explicit_pricing(model, provider=provider):
-        return cost_per_token(model, provider=provider)
+        return cost_per_token(model, provider=provider), SOURCE_GRID
     prompt, completion = _price(settings, "LLM_PRICE_PROMPT_PER_1M"), _price(settings, "LLM_PRICE_COMPLETION_PER_1M")
     if prompt > 0 or completion > 0:
-        return prompt / 1_000_000.0, completion / 1_000_000.0
+        return (prompt / 1_000_000.0, completion / 1_000_000.0), SOURCE_CONFIGURED
     return None
 
 
@@ -257,11 +365,12 @@ def estimate_call(
     billable: bool = True,
     capped_usd: bool = False,
     require_bound: bool = False,
+    endpoint: Optional[str] = None,
 ) -> CallEstimate:
     """Borne HAUTE du coût d'un appel : prompt (octets du payload COMPLET) + sortie bornée, au prix autoritaire.
 
     - Prompt : octets UTF-8 de ``messages`` ET ``tools`` (système, schémas, cadrage compris) + cadrage fixe —
-      une borne structurelle (voir ``TOKENIZER_BYTE_BOUNDED_PREFIXES``), pas une moyenne.
+      une borne structurelle (voir l'en-tête du module), pas une moyenne.
     - Sortie : ``max_tokens`` doit être un entier > 0 EFFECTIVEMENT transmis au fournisseur ; sinon la sortie
       n'est pas bornée. (Les tokens de raisonnement comptent dans ``max_tokens`` pour les familles prises en
       charge — hypothèse documentée.)
@@ -284,11 +393,12 @@ def estimate_call(
     if require_bound:
         if unbounded is not None:
             raise BudgetRefused(REFUSED_UNBOUNDED, f"requête non bornable ({unbounded}) : refusée avant émission")
-        if not tokenizer_is_byte_bounded(model, settings):
+        if not tokenizer_is_byte_bounded(model, settings, endpoint):
             raise BudgetRefused(
                 REFUSED_UNBOUNDED,
-                f"famille de tokenizer inconnue pour {model!r} : la borne « tokens ≤ octets » n'est pas justifiée — "
-                "attester le modèle (BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS) ou utiliser BUDGET_MODE=advisory",
+                f"identité/destination non reconnue pour {model!r} (endpoint {endpoint or 'défaut de la config'}) : la "
+                "borne « tokens ≤ octets » n'est pas justifiée — un tarif explicite n'atteste pas un tokenizer. "
+                "Attester l'identité EXACTE (BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS) ou utiliser BUDGET_MODE=advisory",
             )
         if out <= 0:
             raise BudgetRefused(
@@ -296,7 +406,21 @@ def estimate_call(
                 "sortie non bornée (aucun max_tokens transmis au fournisseur) : refusée avant émission",
             )
     out = max(0, out)
-    prices = resolve_prices(model, settings, billable=billable)
+    resolved = resolve_prices_with_source(model, settings, billable=billable)
+    prices = None if resolved is None else resolved[0]
+    if (
+        resolved is not None
+        and resolved[1] == SOURCE_GRID
+        and (capped_usd or require_bound)
+        and prompt > PRICING_GRID_MAX_PROMPT_TOKENS
+    ):
+        raise BudgetRefused(
+            REFUSED_UNBOUNDED,
+            f"prompt borné à {prompt} tokens > {PRICING_GRID_MAX_PROMPT_TOKENS} : la grille tarifaire est un tarif "
+            "standard ≤ 200k et aucun palier supérieur n'est établi — refusé avant émission. Les LLM_PRICE_*_PER_1M ne "
+            "remplacent PAS la grille d'un modèle qu'elle connaît (ils ne servent qu'aux modèles absents de la grille) : "
+            "il n'y a pas de réglage qui lève ce refus, réduire le prompt",
+        )
     if prices is None:
         if capped_usd:
             raise BudgetRefused(
@@ -381,6 +505,8 @@ async def guarded_call(
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
     backoff_base: float = 0.5,
     backoff_cap: float = 8.0,
+    output_bound_proven: bool = True,
+    endpoint: Optional[str] = None,
 ) -> Any:
     """Émet ``call`` avec une RÉSERVATION par tentative (retries inclus), bornée par l'échéance.
 
@@ -394,7 +520,16 @@ async def guarded_call(
     ledger, scope_key = binding.ledger, binding.scope_key
     snap = _ledger_call(ledger.snapshot, scope_key)
     strict = snap.strict
-    guaranteed = strict and (snap.cap_micro_usd is not None or snap.cap_tokens is not None)
+    # La borne de tokens ne sert que si une dimension plafonnée en dépend : le plafond de tokens, ou le plafond
+    # USD d'un transport FACTURÉ. Un plafond USD sur un transport non facturé (abonnement : 0 $ établi) n'a
+    # besoin d'aucune borne de tokens — mais n'offre alors AUCUNE garantie de tokens (voir plus bas).
+    guaranteed = strict and (snap.cap_tokens is not None or (snap.cap_micro_usd is not None and billable))
+    if strict and snap.cap_tokens is not None and not output_bound_proven:
+        raise BudgetRefused(
+            REFUSED_UNBOUNDED,
+            f"transport {transport} : le plafond de sortie n'est pas prouvé effectif (le backend peut l'ignorer) — "
+            "pas de garantie de plafond de tokens ; utiliser BUDGET_MODE=advisory ou retirer MAX_TOKENS_BUDGET",
+        )
     attempts = max(1, int(max_attempts))
     call_id = uuid.uuid4().hex
     last_exc: Optional[BaseException] = None
@@ -409,6 +544,7 @@ async def guarded_call(
             billable=billable,
             capped_usd=snap.cap_micro_usd is not None and strict,
             require_bound=guaranteed,
+            endpoint=endpoint,
         )
         reservation: Reservation = _ledger_call(
             ledger.reserve,

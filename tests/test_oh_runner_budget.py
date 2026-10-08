@@ -94,8 +94,8 @@ class _Harness:
         monkeypatch.setitem(sys.modules, "openhands.sdk", sdk)
         monkeypatch.setitem(sys.modules, "openhands.tools.preset.default", default)
         monkeypatch.setenv("LLM_API_KEY", "test-key")
-        monkeypatch.setenv("LLM_MODEL", "gemini/primary")
-        monkeypatch.setenv("OH_FALLBACK_MODELS", "gemini/fallback")
+        monkeypatch.setenv("LLM_MODEL", "gemini/gemma-4-31b-it")
+        monkeypatch.setenv("OH_FALLBACK_MODELS", "gemini/gemma-4-26b-a4b-it")
         monkeypatch.setenv("OH_NUM_RETRIES", "2")
         monkeypatch.setenv("OH_MAX_OUTPUT_TOKENS", "1000")
         monkeypatch.setattr(oh_runner.BudgetGuard, "start_watchdog", lambda self, period=0.5: None)
@@ -107,7 +107,7 @@ class _Harness:
         return oh_runner.main()
 
 
-PRICES = '{"gemini/primary": [0.0000015, 0.000009], "gemini/fallback": [0.0000003, 0.0000025]}'
+PRICES = '{"gemini/gemma-4-31b-it": [0.0000015, 0.000009], "gemini/gemma-4-26b-a4b-it": [0.0000003, 0.0000025]}'
 # Borne du prompt de la conversation factice : 200 octets + 16 (message) + 64 (requête) = 280 tokens ;
 # sortie bornée à 1 000 (OH_MAX_OUTPUT_TOKENS) ⇒ une réservation de 1 280 tokens par appel.
 
@@ -131,7 +131,7 @@ def test_with_an_allocation_the_runner_arms_then_finalizes_and_disables_sdk_retr
 
 
 def test_a_call_that_does_not_fit_the_token_allocation_is_never_emitted(monkeypatch, capsys):
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [(200, 100, 0.0)]}, calls_per_conversation=3)
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [(200, 100, 0.0)]}, calls_per_conversation=3)
     code = harness.run(monkeypatch, "--budget-tokens", "1500")  # 1 280 réservés ; après 300 réels, +1 280 > 1 500
     assert code == 4
     assert len(harness.emitted) == 1  # le 2ᵉ appel n'est PAS parti
@@ -167,7 +167,7 @@ def test_a_non_text_modality_is_refused_before_emission(monkeypatch, capsys):
 
 
 def test_a_usd_allocation_is_enforced_with_the_price_of_the_model_in_use(monkeypatch):
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [(280, 900, 0.0)]}, calls_per_conversation=3)
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [(280, 900, 0.0)]}, calls_per_conversation=3)
     code = harness.run(monkeypatch, "--budget-usd", "0.012", "--prices", PRICES, "--budget-tokens", "10000000")
     # 1ʳᵉ réservation ≈ 0,0094 $ ≤ 0,012 ; après 1 appel réel (0,0085 $) le suivant ferait ≈ 0,0179 $ > 0,012 $.
     assert code == 4 and len(harness.emitted) == 1
@@ -177,29 +177,35 @@ def test_each_fallback_model_is_priced_with_its_own_price(monkeypatch):
     """Le repli n'hérite PAS du tarif du modèle principal : un modèle sans tarif propre est écarté."""
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [RuntimeError("503 persistants")], "gemini/fallback": [(100, 50, 0.0)]},
+        scripts={
+            "gemini/gemma-4-31b-it": [RuntimeError("503 persistants")],
+            "gemini/gemma-4-26b-a4b-it": [(100, 50, 0.0)],
+        },
         calls_per_conversation=1,
     )
-    only_primary = '{"gemini/primary": [0.0000015, 0.000009]}'
+    only_primary = '{"gemini/gemma-4-31b-it": [0.0000015, 0.000009]}'
     code = harness.run(monkeypatch, "--budget-usd", "5", "--prices", only_primary)
     assert code == 1  # le repli a été écarté faute de tarif : il n'a jamais été construit ni appelé
-    assert [llm.model for llm in harness.created] == ["gemini/primary"]
+    assert [llm.model for llm in harness.created] == ["gemini/gemma-4-31b-it"]
 
 
 def test_a_known_fallback_price_lets_the_fallback_run_under_the_same_allocation(monkeypatch):
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [RuntimeError("503 persistants")], "gemini/fallback": [(100, 50, 0.0)]},
+        scripts={
+            "gemini/gemma-4-31b-it": [RuntimeError("503 persistants")],
+            "gemini/gemma-4-26b-a4b-it": [(100, 50, 0.0)],
+        },
         calls_per_conversation=1,
     )
     assert harness.run(monkeypatch, "--budget-usd", "5", "--prices", PRICES) == 0
-    assert [e[0] for e in harness.emitted] == ["gemini/primary", "gemini/fallback"]
+    assert [e[0] for e in harness.emitted] == ["gemini/gemma-4-31b-it", "gemini/gemma-4-26b-a4b-it"]
 
 
 def test_a_429_is_retried_but_each_retry_is_checked_and_a_5xx_is_not_retried_in_strict(monkeypatch):
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [_StatusError(429), _StatusError(429), (10, 5, 0.0)]},
+        scripts={"gemini/gemma-4-31b-it": [_StatusError(429), _StatusError(429), (10, 5, 0.0)]},
         calls_per_conversation=1,
     )
     sleeps = []
@@ -211,18 +217,21 @@ def test_a_429_is_retried_but_each_retry_is_checked_and_a_5xx_is_not_retried_in_
 def test_a_5xx_in_strict_is_unknown_usage_without_retry_or_fallback(monkeypatch, capsys):
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [_StatusError(503), (10, 5, 0.0)], "gemini/fallback": [(10, 5, 0.0)]},
+        scripts={
+            "gemini/gemma-4-31b-it": [_StatusError(503), (10, 5, 0.0)],
+            "gemini/gemma-4-26b-a4b-it": [(10, 5, 0.0)],
+        },
         calls_per_conversation=1,
     )
     assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict") == 4
     captured = capsys.readouterr()
-    assert [e[0] for e in harness.emitted] == ["gemini/primary"]  # ni retry ni repli
+    assert [e[0] for e in harness.emitted] == ["gemini/gemma-4-31b-it"]  # ni retry ni repli
     assert "[collegue-budget] unknown" in captured.out
     assert "[collegue-budget] final" not in captured.out  # `final` ne prouve rien : l'usage est inconnu
 
 
 def test_a_5xx_in_advisory_mode_keeps_the_historical_retry(monkeypatch):
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [_StatusError(503), (10, 5, 0.0)]})
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [_StatusError(503), (10, 5, 0.0)]})
     monkeypatch.setattr(oh_runner.time, "sleep", lambda s: None)
     assert harness.run(monkeypatch, "--budget-tokens", "100000") == 0
     assert len(harness.emitted) == 2
@@ -231,7 +240,7 @@ def test_a_5xx_in_advisory_mode_keeps_the_historical_retry(monkeypatch):
 def test_a_connection_failure_before_send_is_released_and_retried_even_in_strict(monkeypatch):
     refused = RuntimeError("connexion refusée")
     refused.__cause__ = ConnectError("refused")
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [refused, (10, 5, 0.0)]})
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [refused, (10, 5, 0.0)]})
     monkeypatch.setattr(oh_runner.time, "sleep", lambda s: None)
     assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict") == 0
     assert len(harness.emitted) == 2
@@ -240,36 +249,43 @@ def test_a_connection_failure_before_send_is_released_and_retried_even_in_strict
 def test_a_proven_rejection_falls_back_to_the_next_model(monkeypatch):
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [_StatusError(400)], "gemini/fallback": [(10, 5, 0.0)]},
+        scripts={"gemini/gemma-4-31b-it": [_StatusError(400)], "gemini/gemma-4-26b-a4b-it": [(10, 5, 0.0)]},
         calls_per_conversation=1,
     )
     assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict") == 0
-    assert [e[0] for e in harness.emitted] == ["gemini/primary", "gemini/fallback"]
+    assert [e[0] for e in harness.emitted] == ["gemini/gemma-4-31b-it", "gemini/gemma-4-26b-a4b-it"]
 
 
 def test_the_fallback_model_shares_the_same_allocation(monkeypatch):
     """Repli de modèle (mode advisory, échec non classé) : l'usage du 1ᵉʳ modèle compte contre l'allocation du second."""
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [(200, 100, 0.0), RuntimeError("503 persistants")], "gemini/fallback": []},
+        scripts={
+            "gemini/gemma-4-31b-it": [(200, 100, 0.0), RuntimeError("503 persistants")],
+            "gemini/gemma-4-26b-a4b-it": [],
+        },
         calls_per_conversation=2,
     )
     code = harness.run(monkeypatch, "--budget-tokens", "1600")
     # primaire : 1 appel (300 tokens) puis erreur → repli ; son 1ᵉʳ appel (300 + 1 280 ≤ 1 600) passe, le suivant
     # (450 + 1 280 > 1 600) est refusé : l'allocation est COMMUNE aux modèles.
     assert code == 4
-    assert [e[0] for e in harness.emitted] == ["gemini/primary", "gemini/primary", "gemini/fallback"]
+    assert [e[0] for e in harness.emitted] == [
+        "gemini/gemma-4-31b-it",
+        "gemini/gemma-4-31b-it",
+        "gemini/gemma-4-26b-a4b-it",
+    ]
 
 
 def test_a_response_without_counted_usage_makes_the_usage_unknown(monkeypatch, capsys):
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [(0, 0, 0.0)]}, calls_per_conversation=1)
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [(0, 0, 0.0)]}, calls_per_conversation=1)
     assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict") == 4
     out = capsys.readouterr().out
     assert "[collegue-budget] unknown" in out and "[collegue-budget] final" not in out
 
 
 def test_a_provider_exceeding_the_bound_makes_the_usage_unknown(monkeypatch, capsys):
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [(5000, 50, 0.0)]}, calls_per_conversation=1)
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [(5000, 50, 0.0)]}, calls_per_conversation=1)
     assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict") == 4
     captured = capsys.readouterr()
     assert "borne de tokens démentie" in captured.out + captured.err
@@ -278,7 +294,7 @@ def test_a_provider_exceeding_the_bound_makes_the_usage_unknown(monkeypatch, cap
 
 def test_a_sdk_that_swallows_the_stop_still_ends_with_unknown_usage(monkeypatch, capsys):
     """Le SDK peut attraper l'exception de la garde et finir « normalement » : le run n'est PAS un succès."""
-    harness = _Harness(monkeypatch, scripts={"gemini/primary": [_StatusError(503)]}, calls_per_conversation=1)
+    harness = _Harness(monkeypatch, scripts={"gemini/gemma-4-31b-it": [_StatusError(503)]}, calls_per_conversation=1)
     monkeypatch.setattr(
         harness_conversation := sys.modules["openhands.sdk"].Conversation,
         "run",
@@ -311,7 +327,63 @@ def test_an_unknown_tokenizer_family_is_refused_in_strict_unless_attested(monkey
     monkeypatch.setenv("OH_FALLBACK_MODELS", "")
     assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict") == 3
     assert harness.created == [] and "tokenizer" in capsys.readouterr().err
-    assert harness.run(monkeypatch, "--budget-tokens", "100000", "--strict", "--byte-bounded-models", "mystery") == 0
+    assert (
+        harness.run(monkeypatch, "--budget-tokens", "100000", "--strict", "--byte-bounded-models", "mystery/primary")
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "subscription", "accepted"),
+    [
+        ("gemini/gemini-3.5-flash", False, True),  # endpoint hébergé Gemini + identité Gemini connue
+        ("gemini/gemini-3.5-flash-2026-05-01", False, True),  # instantané daté d'une identité connue
+        ("gemini/gemini-unverified-derivative", False, False),  # préfixe de famille ≠ identité connue
+        ("openai/gpt-unverified-derivative", False, False),
+        ("gpt-unverified-derivative", True, False),  # même sous abonnement : un préfixe n'atteste pas un tokenizer
+        ("gemini/gemma-4-31b-it", False, True),
+        ("openai/gpt-5.4", False, True),  # API OpenAI + famille GPT
+        ("gpt-5.5", True, True),  # nom nu SOUS abonnement = backend OpenAI
+        ("gpt-5.5-2026-01-15", True, True),
+        ("gpt-5.5", False, False),  # nom nu hors abonnement : un préfixe de nom n'est pas une preuve
+        ("openrouter/gpt-5", False, False),  # passerelle : le tokenizer réel est inconnu
+        ("gemini/gpt-5", False, False),  # famille incompatible avec l'endpoint
+        ("ollama/llama3", False, False),  # local : exige une attestation
+    ],
+)
+def test_the_tokenizer_bound_is_justified_by_endpoint_and_family_not_by_a_name_prefix(model, subscription, accepted):
+    guard = oh_runner.BudgetGuard(max_tokens=1000, strict=True, subscription=subscription)
+    if accepted:
+        guard.admit(model)
+    else:
+        with pytest.raises(oh_runner.ModelNotBounded):
+            guard.admit(model)
+
+
+def test_an_operator_attestation_is_an_exact_identity_not_a_prefix():
+    guard = oh_runner.BudgetGuard(max_tokens=1000, strict=True, attested_models=["ollama/llama3"])
+    guard.admit("ollama/llama3")
+    with pytest.raises(oh_runner.ModelNotBounded):
+        guard.admit("ollama/llama3-derived")  # un suffixe de nom n'est pas attesté
+
+
+def test_the_runner_registry_matches_the_host_registry():
+    """Le runner est copié seul dans l'image : sa liste d'identités doit rester identique à celle de l'hôte."""
+    from collegue.core.llm.budget_guard import HOSTED_KNOWN_MODELS
+
+    assert oh_runner.HOSTED_KNOWN_MODELS == HOSTED_KNOWN_MODELS
+
+
+def test_a_large_integer_list_in_a_tool_schema_is_counted_with_its_delimiters():
+    ints = list(range(1000, 3000))  # 2 000 entiers de 4 chiffres : 6 octets chacun avec « , »
+    guard = oh_runner.BudgetGuard(max_tokens=10**7)
+    llm = SimpleNamespace(max_output_tokens=10, metrics=_metrics())
+    plain, _ = guard.precheck(llm, ((), {"messages": [{"role": "user", "content": "x"}]}))
+    with_schema, _ = guard.precheck(
+        llm,
+        ((), {"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "function", "enum": ints}]}),
+    )
+    assert with_schema - plain >= 2000 * 6  # les virgules et espaces comptent, pas seulement les chiffres
 
 
 def test_an_expired_deadline_stops_before_any_emission(monkeypatch, capsys):
@@ -332,7 +404,7 @@ def test_the_deadline_cancels_an_in_flight_call_and_leaves_the_usage_unknown(cap
     llm = SimpleNamespace(
         max_output_tokens=100, metrics=_metrics(), completion=lambda *a, **k: release.wait(10) and "late"
     )
-    guard.install(llm, "gemini/primary")
+    guard.install(llm, "gemini/gemma-4-31b-it")
     guard.start_watchdog(period=0.01)
     call = threading.Thread(target=lambda: _swallow(lambda: llm.completion("x")), daemon=True)
     call.start()
@@ -372,7 +444,10 @@ def test_a_subscription_model_needs_no_price_under_a_usd_cap(monkeypatch):
 def test_the_final_marker_is_printed_even_when_the_run_fails_without_unknown_usage(monkeypatch, capsys):
     harness = _Harness(
         monkeypatch,
-        scripts={"gemini/primary": [RuntimeError("boom")], "gemini/fallback": [RuntimeError("boom 2")]},
+        scripts={
+            "gemini/gemma-4-31b-it": [RuntimeError("boom")],
+            "gemini/gemma-4-26b-a4b-it": [RuntimeError("boom 2")],
+        },
         calls_per_conversation=1,
     )
     assert harness.run(monkeypatch, "--budget-tokens", "100000") == 1  # advisory : échecs non classés « sans conso »

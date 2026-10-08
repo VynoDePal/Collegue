@@ -262,18 +262,47 @@ def budget_strict_from_settings(settings_obj) -> bool:
     return mode != "advisory" and action != "warn"
 
 
+def require_budget_ledger(manager, settings_obj, *, what: str = "ce run"):
+    """Registre budgétaire du manager d'un run RÉEL, ou refus explicite.
+
+    - registre présent : renvoyé ;
+    - absent + mode ``advisory`` (nommé, sans garantie) : ``None`` — le chemin historique, documenté ;
+    - absent + manager qui déclare ``budget_enforcement = "test-double"`` : ``None`` (double déterministe) ;
+    - absent sinon (mode strict, le défaut) : :class:`BudgetRefused` — on ne retombe JAMAIS en silence sur
+      un compteur historique sans garantie.
+    """
+    from collegue.state.budget_ledger import REFUSED_LEDGER, BudgetRefused
+
+    ledger = getattr(manager, "budget_ledger", None)
+    if ledger is not None:
+        return ledger
+    if getattr(manager, "budget_enforcement", None) == "test-double":
+        return None
+    if not budget_strict_from_settings(settings_obj):
+        return None
+    raise BudgetRefused(
+        REFUSED_LEDGER,
+        f"{what} en mode budgétaire strict exige un registre durable : le manager {type(manager).__name__} n'en "
+        "expose pas. Utiliser ProjectStateManager, BUDGET_MODE=advisory (sans garantie) ou, pour un double "
+        "déterministe, déclarer budget_enforcement = 'test-double'.",
+    )
+
+
 def attach_project_budget(budget, manager, project_id: int):
     """Ouvre le scope durable du projet et le rend AUTORITAIRE pour ``budget`` (idempotent).
 
-    Retourne le :class:`~collegue.state.budget_ledger.ScopeSnapshot`, ou ``None`` si le manager
-    n'expose pas de registre (doubles de test historiques). Plafonds et mode viennent des settings
-    du contrôleur ; le premier appel IMPORTE une fois les cumuls historiques ``run_cost_usd``.
+    Retourne le :class:`~collegue.state.budget_ledger.ScopeSnapshot`, ou ``None`` si le contrôleur n'accepte pas
+    de registre (double de budget) ou si le mode est ``advisory`` / le manager un double déclaré. Un manager
+    SANS registre en mode strict est REFUSÉ (:func:`require_budget_ledger`). Plafonds et mode viennent des
+    settings du contrôleur ; le premier appel IMPORTE une fois les cumuls historiques ``run_cost_usd``.
     """
-    ledger = getattr(manager, "budget_ledger", None)
     attach = getattr(budget, "attach_ledger", None)
-    if ledger is None or not callable(attach):
+    if not callable(attach):
         return None
     settings = getattr(budget, "settings", None)
+    ledger = require_budget_ledger(manager, settings, what="le run")
+    if ledger is None:
+        return None
     scope = ledger.scope_for_project(
         int(project_id),
         max_cost_usd=getattr(settings, "MAX_COST_USD", None),
@@ -301,6 +330,9 @@ def budget_status(manager, project_id: int) -> dict:
         "unknown_reservations": [
             {"reservation_id": r.reservation_id, "kind": r.kind, "reserved_usd": r.reserved_usd} for r in unknown
         ],
+        # Causes de blocage INDÉPENDANTES (borne démentie, historique ambigu) : résolues par
+        # :func:`resolve_budget_block`, jamais par le règlement d'un appel.
+        "blocks": ledger.open_blocks(snap.scope_key),
     }
 
 
@@ -325,5 +357,25 @@ def resolve_unknown_usage(
         tokens=tokens,
         event_key=f"resolve:{reservation_id}",
         reason=note or "résolu par l'opérateur",
+    )
+    return budget_status(manager, project_id)
+
+
+def resolve_budget_block(
+    manager, project_id: int, block_key: str, *, note: str, usd: float = 0.0, tokens: int = 0
+) -> dict:
+    """Résout EXPLICITEMENT une cause de blocage ouverte (voir ``budget_status(...)["blocks"]``).
+
+    ``usd``/``tokens`` : dépense passée établie par l'opérateur (relevé fournisseur) — c'est ainsi qu'un
+    historique ambigu est tranché ; elle est ajoutée au consommé. Idempotent (clé dérivée de la cause).
+    """
+    ledger = manager.budget_ledger
+    snap = ledger.snapshot_for_project(int(project_id))
+    if snap is None:
+        raise ValueError(f"projet {project_id} sans scope budgétaire")
+    if not str(note or "").strip():
+        raise ValueError("une résolution de blocage exige une justification (note)")
+    ledger.resolve_block(
+        snap.scope_key, block_key, event_key=f"resolve-block:{block_key}", reason=note, usd=usd, tokens=tokens
     )
     return budget_status(manager, project_id)

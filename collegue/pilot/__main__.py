@@ -90,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     plan_p.add_argument("--spec-filename", default=None, help="Chemin du SPEC dans le dépôt cible.")
     plan_p.add_argument("--base", default=None, help="Branche de base scellée (défaut draft : main).")
     plan_p.add_argument(
+        "--cycle-id",
+        default=None,
+        help=(
+            "Pour `plan draft` : identité NOMMÉE du cycle de planification (enveloppe budgétaire). Sans elle, "
+            "l'identité est dérivée de (owner, repo, name, problem) : relancer la même commande après un échec "
+            "reprend le même solde. Un nouvel identifiant ouvre une NOUVELLE enveloppe, explicitement."
+        ),
+    )
+    plan_p.add_argument(
         "--nightly-exact-task-count",
         type=int,
         default=None,
@@ -221,6 +230,7 @@ async def _plan_draft(args: argparse.Namespace) -> int:
         spec_filename=args.spec_filename or "SPEC.md",
         base_branch=args.base or "main",
         decompose_exact_task_count=args.nightly_exact_task_count,
+        cycle_id=args.cycle_id,
     )
     _print_plan_result(result, output_format=args.format)
     return 0
@@ -287,6 +297,7 @@ def _validate_plan_args(parser: argparse.ArgumentParser, args: argparse.Namespac
         "spec_filename",
         "base",
         "nightly_exact_task_count",
+        "cycle_id",
     )
     supplied = ["--" + name.replace("_", "-") for name in sealed_args if getattr(args, name) is not None]
     if supplied:

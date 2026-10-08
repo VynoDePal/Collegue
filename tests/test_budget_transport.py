@@ -100,6 +100,15 @@ def env(tmp_path):
     return SimpleNamespace(manager=manager, ledger=manager.budget_ledger, key=scope.scope_key, pid=pid)
 
 
+@pytest.fixture
+def usd_env(tmp_path):
+    """Scope à plafond USD SEUL : le seul cas où le sampler d'abonnement (0 $ établi) est accepté en strict."""
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'usd.db'}", create=True)
+    pid = manager.create_project(name="p")
+    scope = manager.budget_ledger.scope_for_project(pid, max_cost_usd=1.0)
+    return SimpleNamespace(manager=manager, ledger=manager.budget_ledger, key=scope.scope_key, pid=pid)
+
+
 def _ctx(client, **kwargs):
     return LocalSamplingContext(default_model=MODEL, client=client, max_retries=kwargs.pop("max_retries", 2), **kwargs)
 
@@ -264,7 +273,7 @@ async def test_the_same_model_is_bounded_by_tokens_when_there_is_no_usd_cap(tmp_
     client = FakeClient([_response(60, 50, model="mystery-9"), _response(60, 50, model="mystery-9")])
     ctx = LocalSamplingContext(default_model="mystery-9", client=client)
     env = SimpleNamespace(ledger=manager.budget_ledger, key=key)
-    attested = SimpleNamespace(**vars(SETTINGS), BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="mystery-")
+    attested = SimpleNamespace(**vars(SETTINGS), BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="mystery-9")
     await _sample(ctx, env, max_tokens=500, settings=attested)
     assert manager.budget_ledger.snapshot(key).consumed_tokens == 110  # borné et compté en tokens
     with pytest.raises(BudgetRefused):
@@ -275,7 +284,7 @@ async def test_the_same_model_is_bounded_by_tokens_when_there_is_no_usd_cap(tmp_
 def test_local_providers_are_free_and_remain_bounded_by_tokens():
     settings = SimpleNamespace(LLM_PROVIDER="lmstudio", LLM_MODEL="local-model")
     est = estimate_call(model="local-model", messages="x" * 100, max_tokens=50, settings=settings, capped_usd=True)
-    assert est.micro_usd == 0 and est.tokens == 100 + 16 + 64 + 50  # octets + cadrage + sortie
+    assert est.micro_usd == 0 and est.tokens == 102 + 16 + 64 + 50  # octets sérialisés (guillemets) + cadrage + sortie
 
 
 # --- persistance : jamais un zéro ------------------------------------------------------------------------
@@ -356,44 +365,86 @@ def _envelope(prompt=60, completion=40):
     return f"<<<SAMPLE_BEGIN>>>verdict<<<SAMPLE_END>>>\n<<<SAMPLE_USAGE>>>{json.dumps(usage)}<<<SAMPLE_USAGE_END>>>"
 
 
-async def test_the_subscription_sampler_reserves_tokens_before_launch_and_settles_with_the_envelope(env, tmp_path):
+async def test_the_subscription_sampler_reserves_tokens_before_launch_and_settles_with_the_envelope(usd_env, tmp_path):
     seen = {}
 
     def runner(argv, payload):
-        seen["during"] = env.ledger.snapshot(env.key).reserved_tokens
+        seen["during"] = usd_env.ledger.snapshot(usd_env.key).reserved_tokens
         seen["argv"] = argv
         return 0, _envelope(), ""
 
     ctx = _sub_ctx(tmp_path, runner)
-    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
         res = await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
     assert res.text == "verdict" and seen["during"] > 0
-    snap = env.ledger.snapshot(env.key)
+    snap = usd_env.ledger.snapshot(usd_env.key)
     assert (snap.consumed_tokens, snap.consumed_usd, snap.reserved_tokens) == (100, 0.0, 0)  # abonnement : 0 $
     # conteneur nommé et auto-limité : tuer le client docker ne laisse pas un conteneur dépenser
     assert "--name" in seen["argv"] and "timeout" in seen["argv"]
 
 
-async def test_a_failing_subscription_sampler_is_unknown_and_blocks_under_a_cap(env, tmp_path):
+async def test_a_failing_subscription_sampler_is_unknown_and_blocks_under_a_cap(usd_env, tmp_path):
     ctx = _sub_ctx(tmp_path, lambda argv, payload: (1, "", "boom"))
-    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
         with pytest.raises(RuntimeError):
             await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
-    snap = env.ledger.snapshot(env.key)
+    snap = usd_env.ledger.snapshot(usd_env.key)
     assert snap.unknown_tokens > 0 and snap.blocked
 
 
-async def test_a_refused_subscription_call_launches_no_container(env, tmp_path):
+async def test_a_token_cap_in_strict_refuses_the_subscription_sampler_before_any_launch(env, tmp_path):
+    """Pas de plafond de sortie prouvé côté backend abonnement ⇒ aucune garantie de tokens : refus, rien lancé."""
     launched = []
     ctx = _sub_ctx(tmp_path, lambda argv, payload: launched.append(argv) or (0, _envelope(), ""))
-    env.ledger.scope_for_project(env.pid, max_tokens=10)  # budget de tokens épuisé d'avance
-    with bind_budget(env.ledger, env.key, settings=SETTINGS):
-        with pytest.raises(BudgetRefused):
+    with bind_budget(env.ledger, env.key, settings=SETTINGS):  # env : plafond de tokens 1 000 000, strict
+        with pytest.raises(BudgetRefused) as refused:
             await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
-    assert launched == []
+    assert refused.value.code == REFUSED_UNBOUNDED and launched == []
 
 
-async def test_the_sampler_container_is_killed_by_name_on_a_host_timeout(env, tmp_path, monkeypatch):
+async def test_the_subscription_sampler_stays_available_in_advisory_mode(tmp_path):
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'adv.db'}", create=True)
+    pid = manager.create_project(name="p")
+    key = manager.budget_ledger.scope_for_project(pid, max_tokens=1000, strict=False).scope_key
+    ctx = _sub_ctx(tmp_path, lambda argv, payload: (0, _envelope(), ""))
+    with bind_budget(manager.budget_ledger, key, settings=SETTINGS):
+        assert (await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)).text == "verdict"
+
+
+async def test_a_free_subscription_call_is_accepted_when_the_usd_cap_is_reached_exactly(usd_env, tmp_path):
+    """0 $ de plus ne dépasse pas un plafond USD atteint exactement : un appel autoritairement gratuit est accepté."""
+    ctx = _sub_ctx(tmp_path, lambda argv, payload: (0, _envelope(), ""))
+    usd_env.ledger.scope_for_project(usd_env.pid, max_cost_usd=0.000001)
+    usd_env.ledger.reserve(usd_env.key, usd=0.000001, tokens=0)  # plafond USD atteint exactement
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
+        assert (await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)).text == "verdict"
+
+
+async def test_a_blocked_scope_launches_no_subscription_container(usd_env, tmp_path):
+    """Usage inconnu déjà établi ⇒ blocage strict : aucun conteneur, même pour un transport gratuit."""
+    launched = []
+    ctx = _sub_ctx(tmp_path, lambda argv, payload: launched.append(argv) or (0, _envelope(), ""))
+    unknown = usd_env.ledger.reserve(usd_env.key, usd=0.01, tokens=0)
+    usd_env.ledger.mark_unknown(unknown.reservation_id, reason="appel précédent interrompu")
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
+        with pytest.raises(BudgetRefused) as refused:
+            await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
+    assert refused.value.code == REFUSED_BLOCKED and launched == []
+
+
+async def test_an_overspent_usd_scope_launches_no_subscription_container(usd_env, tmp_path):
+    """Dépassement déjà ÉTABLI (consommation réelle > plafond) : le strict refuse la suite, même gratuite."""
+    launched = []
+    ctx = _sub_ctx(tmp_path, lambda argv, payload: launched.append(argv) or (0, _envelope(), ""))
+    held = usd_env.ledger.reserve(usd_env.key, usd=0.5, tokens=0)
+    usd_env.ledger.commit(held.reservation_id, usd=1.5, tokens=0)  # le fournisseur a facturé plus que le plafond (1 $)
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
+        with pytest.raises(BudgetRefused) as refused:
+            await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
+    assert refused.value.code == REFUSED_CAP_USD and launched == []
+
+
+async def test_the_sampler_container_is_killed_by_name_on_a_host_timeout(usd_env, tmp_path, monkeypatch):
     import collegue.core.llm.sampling_ctx as sc
 
     killed = []
@@ -404,11 +455,11 @@ async def test_the_sampler_container_is_killed_by_name_on_a_host_timeout(env, tm
 
     monkeypatch.setattr(sc.subprocess, "run", fake_run)
     ctx = _sub_ctx(tmp_path, None)
-    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
         with pytest.raises(Exception):
             await ctx.sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
     assert len(killed) == 1 and killed[0].startswith("collegue-smp-")
-    assert env.ledger.snapshot(env.key).unknown_tokens > 0  # interrompu après lancement : usage inconnu
+    assert usd_env.ledger.snapshot(usd_env.key).unknown_tokens > 0  # interrompu après lancement : usage inconnu
 
 
 # --- handler serveur ----------------------------------------------------------------------------------------
@@ -558,13 +609,143 @@ async def test_a_backoff_that_would_cross_the_deadline_emits_no_further_call(env
     assert env.ledger.snapshot(env.key).reserved_usd == 0.0  # la 429 rejetée est libérée
 
 
-async def test_the_strict_subscription_sampler_gets_a_bounded_output_and_no_internal_retry(env, tmp_path):
+async def test_the_strict_subscription_sampler_gets_a_bounded_output_and_no_internal_retry(usd_env, tmp_path):
     seen = {}
 
     def runner(argv, payload):
         seen["payload"] = json.loads(payload)
         return 0, _envelope(), ""
 
-    with bind_budget(env.ledger, env.key, settings=SETTINGS):
+    with bind_budget(usd_env.ledger, usd_env.key, settings=SETTINGS):
         await _sub_ctx(tmp_path, runner).sample("revois", model_preferences=["gpt-5.4"], max_tokens=100)
     assert seen["payload"]["strict"] is True and seen["payload"]["max_output_tokens"] > 0
+
+
+# --- bornes : structure sérialisée, grille tarifaire, endpoint ---------------------------------------------------
+
+
+def test_the_bound_counts_the_serialized_structure_not_only_keys_and_values():
+    ints = list(range(1000, 3000))
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {"enum": ints}}}]
+    base = estimate_call(model=MODEL, messages="x", max_tokens=10, settings=SETTINGS).prompt_tokens
+    with_tools = estimate_call(model=MODEL, messages="x", tools=tools, max_tokens=10, settings=SETTINGS).prompt_tokens
+    assert with_tools - base >= 2000 * 6  # 4 chiffres + « , » par entier : les délimiteurs comptent
+
+
+def test_a_prompt_beyond_the_tariff_grid_domain_is_refused_under_a_usd_cap():
+    huge = "a" * 250_000  # > 200k tokens dans le pire cas : la grille standard ne borne pas ce tarif
+    with pytest.raises(BudgetRefused) as refused:
+        estimate_call(model=MODEL, messages=huge, max_tokens=10, settings=SETTINGS, capped_usd=True, require_bound=True)
+    assert refused.value.code == REFUSED_UNBOUNDED and "200000" in str(refused.value)
+
+
+def test_an_explicit_operator_price_is_not_limited_to_the_grid_domain():
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini",
+        LLM_MODEL="gemini-x",
+        LLM_PRICE_PROMPT_PER_1M=5.0,
+        LLM_PRICE_COMPLETION_PER_1M=15.0,
+        BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="gemini-x",  # un tarif explicite n'atteste PAS le tokenizer
+    )
+    est = estimate_call(
+        model="gemini-x", messages="a" * 250_000, max_tokens=10, settings=settings, capped_usd=True, require_bound=True
+    )
+    assert est.prompt_tokens > 250_000 and est.micro_usd > 0
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url", "model", "justified"),
+    [
+        ("gemini", None, "gemini-3.5-flash", True),
+        ("gemini", None, "gemma-4-31b-it", True),
+        ("openai", None, "gpt-4o-mini", True),
+        ("openai", "http://gateway.invalid/v1", "gpt-4o-mini", False),  # base_url custom : tokenizer inconnu
+        ("lmstudio", "http://localhost:1234/v1", "gemma-local", False),  # local : un nom n'est pas une preuve
+        ("gemini", None, "gpt-4o-mini", False),  # famille incompatible avec l'endpoint hébergé
+        ("openai", None, "claude-sonnet-4", False),
+    ],
+)
+def test_the_tokenizer_bound_is_scoped_to_the_endpoint_and_family(provider, base_url, model, justified):
+    from collegue.core.llm.budget_guard import tokenizer_is_byte_bounded
+
+    settings = SimpleNamespace(LLM_PROVIDER=provider, llm_base_url=base_url)
+    assert tokenizer_is_byte_bounded(model, settings) is justified
+    attested = SimpleNamespace(
+        LLM_PROVIDER=provider, llm_base_url=base_url, BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS=model
+    )
+    assert tokenizer_is_byte_bounded(model, attested) is True  # l'opérateur peut attester explicitement
+
+
+# --- identité exacte et destination réelle du transport ----------------------------------------------------------
+
+
+def _client_at(base_url, script):
+    client = FakeClient(script)
+    client.base_url = base_url
+    return client
+
+
+async def test_an_unverified_model_name_is_refused_even_with_an_explicit_price(env):
+    """Un tarif explicite n'atteste pas un tokenizer : ``gpt-unverified-derivative`` n'est PAS une identité connue."""
+    settings = SimpleNamespace(
+        LLM_PROVIDER="openai", LLM_PRICE_PROMPT_PER_1M=1.0, LLM_PRICE_COMPLETION_PER_1M=2.0, LLM_CALL_TIMEOUT=2
+    )
+    client = FakeClient([_response(model="gpt-unverified-derivative")])
+    ctx = LocalSamplingContext(default_model="gpt-unverified-derivative", client=client)
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(ctx, env, settings=settings)
+    assert refused.value.code == REFUSED_UNBOUNDED and client.calls == []
+    assert "n'atteste pas un tokenizer" in str(refused.value)
+
+
+async def test_the_real_destination_of_the_client_decides_not_an_unrelated_provider_setting(env):
+    """``LLM_PROVIDER=gemini`` mais le client parle à une passerelle : la borne n'est pas justifiée."""
+    settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_CALL_TIMEOUT=2)
+    gateway = _client_at("http://gateway.invalid/v1/", [_response(model=MODEL)])
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(LocalSamplingContext(default_model=MODEL, client=gateway), env, settings=settings)
+    assert refused.value.code == REFUSED_UNBOUNDED and gateway.calls == []
+
+    hosted = _client_at("https://generativelanguage.googleapis.com/v1beta/openai/", [_response(model=MODEL)])
+    result = await _sample(LocalSamplingContext(default_model=MODEL, client=hosted), env, settings=settings)
+    assert result.text == "ok" and len(hosted.calls) == 1  # destination hébergée + identité connue : acceptée
+
+
+async def test_an_exact_operator_attestation_admits_a_gateway_destination(env):
+    gateway = _client_at("http://gateway.invalid/v1/", [_response(model="llama3-8b-instruct")])
+    ctx = LocalSamplingContext(default_model="llama3-8b-instruct", client=gateway)
+    usd_free = SimpleNamespace(
+        LLM_PROVIDER="lmstudio",
+        LLM_CALL_TIMEOUT=2,
+        BUDGET_ATTESTED_BYTE_TOKENIZER_MODELS="llama3-8b-instruct",
+    )
+    result = await _sample(ctx, env, settings=usd_free)
+    assert result.text == "ok" and len(gateway.calls) == 1
+    other = _client_at("http://gateway.invalid/v1/", [_response(model="llama3-8b-instruct-derived")])
+    with pytest.raises(BudgetRefused):  # l'attestation est une identité exacte, pas un préfixe
+        await _sample(
+            LocalSamplingContext(default_model="llama3-8b-instruct-derived", client=other), env, settings=usd_free
+        )
+    assert other.calls == []
+
+
+async def test_a_long_prompt_on_a_grid_model_is_refused_with_an_honest_diagnostic(env):
+    """Au-delà de 200k tokens la grille ne borne rien ; ``LLM_PRICE_*`` ne remplace pas la grille d'un modèle connu."""
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini", LLM_PRICE_PROMPT_PER_1M=9.0, LLM_PRICE_COMPLETION_PER_1M=9.0, LLM_CALL_TIMEOUT=2
+    )
+    client = FakeClient([_response(model="gemini-2.5-pro")])
+    ctx = LocalSamplingContext(default_model="gemini-2.5-pro", client=client)
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(ctx, env, text="哈" * 210_000, settings=settings)
+    message = str(refused.value)
+    assert refused.value.code == REFUSED_UNBOUNDED and client.calls == []
+    assert "ne remplacent PAS la grille" in message and "configurer LLM_PRICE" not in message
+
+
+def test_prices_resolve_from_the_grid_first_and_from_the_operator_only_for_unknown_models():
+    from collegue.core.llm.budget_guard import SOURCE_CONFIGURED, SOURCE_GRID, resolve_prices_with_source
+
+    settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_PRICE_PROMPT_PER_1M=9.0, LLM_PRICE_COMPLETION_PER_1M=9.0)
+    assert resolve_prices_with_source("gemini-2.5-pro", settings)[1] == SOURCE_GRID  # la grille l'emporte
+    assert resolve_prices_with_source("modele-inconnu", settings)[1] == SOURCE_CONFIGURED

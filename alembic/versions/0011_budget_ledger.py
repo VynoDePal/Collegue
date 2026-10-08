@@ -4,13 +4,16 @@ Revision ID: 0011
 Revises: 0010
 Create Date: 2026-10-09
 
-Ajoute ``budget_scopes`` / ``budget_reservations`` / ``budget_events`` (migration ADDITIVE :
+Ajoute ``budget_scopes`` / ``budget_reservations`` / ``budget_events`` / ``budget_blocks`` (migration ADDITIVE :
 aucune table existante n'est modifiée) puis importe UNE SEULE FOIS les cumuls historiques.
 
 Import : les métriques ``run_cost_usd`` / ``run_tokens`` sont des SNAPSHOTS CUMULATIFS
 ordonnés par ``id`` (l'ancien audit y écrivait le total courant du run), pas des deltas :
-seule la DERNIÈRE valeur de chaque nom par projet est reprise, sinon un projet à N
-snapshots serait compté N fois. Les contraintes d'unicité (``scope_key``, ``project_id``,
+seul le DERNIER cumul de chaque nom par projet est repris, sinon un projet à N
+snapshots serait compté N fois. Une série DÉCROISSANTE ou contenant une valeur invalide est AMBIGUË :
+l'import retient la borne au MAXIMUM observé (identique au dernier cumul quand la série croît) et ouvre une
+cause de blocage durable ``ambiguous_history`` (``budget_blocks``) — la borne n'est jamais présentée comme la
+dépense totale établie. Même sémantique que l'import paresseux de ``BudgetLedger`` (``create_all``). Les contraintes d'unicité (``scope_key``, ``project_id``,
 ``reservation_id``, ``event_key``) rendent l'import exactement-une-fois, y compris si la
 migration est rejouée sur une base déjà migrée à la main. Montants arrondis vers le HAUT
 en micro-USD (conservateur).
@@ -36,6 +39,20 @@ def _micro(value: float) -> int:
     return int((amount * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
 
 
+def _analyze(values):
+    """``(borne, anomalies)`` — même règle que ``collegue.state.budget_ledger.analyze_legacy_series``."""
+    best, previous, issues = 0.0, None, []
+    for index, value in enumerate(values):
+        if value is None or not math.isfinite(value) or value < 0:
+            issues.append(f"valeur invalide #{index + 1} ({value!r})")
+            continue
+        if previous is not None and value < previous:
+            issues.append(f"série décroissante #{index + 1} ({previous!r} → {value!r})")
+        previous = float(value)
+        best = max(best, float(value))
+    return best, issues
+
+
 def upgrade() -> None:
     op.create_table(
         "budget_scopes",
@@ -53,6 +70,8 @@ def upgrade() -> None:
         sa.Column("unknown_micro_usd", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("unknown_tokens", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("blocked_reason", sa.Text(), nullable=True),
+        sa.Column("claim_token", sa.String(length=64), nullable=True),
+        sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
         sa.Column("revision", sa.Integer(), server_default="0", nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -125,6 +144,26 @@ def upgrade() -> None:
     op.create_index("ix_budget_events_scope_id", "budget_events", ["scope_id"])
     op.create_index("ix_budget_events_reservation_id", "budget_events", ["reservation_id"])
 
+    op.create_table(
+        "budget_blocks",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("block_key", sa.String(length=192), nullable=False),
+        sa.Column("scope_id", sa.Integer(), nullable=False),
+        sa.Column("kind", sa.String(length=24), nullable=False),
+        sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("resolution", sa.Text(), nullable=True),
+        sa.CheckConstraint(
+            "kind IN ('bound_violation', 'ambiguous_history', 'manual')",
+            name="ck_budget_blocks_kind",
+        ),
+        sa.ForeignKeyConstraint(["scope_id"], ["budget_scopes.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("block_key"),
+    )
+    op.create_index("ix_budget_blocks_scope_id", "budget_blocks", ["scope_id"])
+
     _import_legacy_cumulative_metrics()
 
 
@@ -170,20 +209,28 @@ def _import_legacy_cumulative_metrics() -> None:
         sa.column("micro_usd", sa.BigInteger),
         sa.column("tokens", sa.BigInteger),
     )
-    latest: dict = {}
+    blocks = sa.table(
+        "budget_blocks",
+        sa.column("block_key", sa.String),
+        sa.column("scope_id", sa.Integer),
+        sa.column("kind", sa.String),
+        sa.column("reason", sa.Text),
+    )
+    series: dict = {}
     rows = bind.execute(
         sa.select(metrics.c.project_id, metrics.c.name, metrics.c.value)
         .where(metrics.c.name.in_(["run_cost_usd", "run_tokens"]))
         .order_by(metrics.c.id)
     )
     for project_id, name, value in rows:
-        if value is None or not math.isfinite(value) or value < 0:
-            continue
-        latest.setdefault(project_id, {})[name] = float(value)  # la dernière valeur gagne
-    for project_id, values in latest.items():
-        micro = _micro(values.get("run_cost_usd", 0.0))
-        tokens = int(math.ceil(values.get("run_tokens", 0.0)))
-        if not micro and not tokens:
+        series.setdefault(project_id, {"run_cost_usd": [], "run_tokens": []})[name].append(value)
+    for project_id, by_name in series.items():
+        usd, usd_issues = _analyze(by_name["run_cost_usd"])
+        tokens_f, token_issues = _analyze(by_name["run_tokens"])
+        micro = _micro(usd)
+        tokens = int(math.ceil(tokens_f))
+        ambiguous = [("run_cost_usd", usd, usd_issues), ("run_tokens", tokens_f, token_issues)]
+        if not micro and not tokens and not (usd_issues or token_issues):
             continue
         key = f"project:{project_id}"
         bind.execute(
@@ -196,6 +243,21 @@ def _import_legacy_cumulative_metrics() -> None:
             )
         )
         scope_id = bind.execute(sa.select(scopes.c.id).where(scopes.c.scope_key == key)).scalar_one()
+        for name, bound, issues in ambiguous:
+            if issues:
+                bind.execute(
+                    sa.insert(blocks).values(
+                        block_key=f"legacy-history:{key}:{name}",
+                        scope_id=scope_id,
+                        kind="ambiguous_history",
+                        reason=(
+                            f"historique {name} ambigu ({'; '.join(issues[:4])}) : importé = borne au MAXIMUM "
+                            f"observé ({bound!r}), PAS la dépense totale établie — résolution explicite requise"
+                        )[:2000],
+                    )
+                )
+        if not micro and not tokens:
+            continue
         rid = f"legacy-import:{key}"
         bind.execute(
             sa.insert(reservations).values(
@@ -225,6 +287,8 @@ def _import_legacy_cumulative_metrics() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_budget_blocks_scope_id", table_name="budget_blocks")
+    op.drop_table("budget_blocks")
     op.drop_index("ix_budget_events_reservation_id", table_name="budget_events")
     op.drop_index("ix_budget_events_scope_id", table_name="budget_events")
     op.drop_table("budget_events")

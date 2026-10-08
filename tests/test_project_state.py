@@ -46,6 +46,7 @@ def test_metadata_declares_all_tables():
         "budget_scopes",
         "budget_reservations",
         "budget_events",
+        "budget_blocks",
     }
 
 

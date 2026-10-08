@@ -24,8 +24,10 @@ Capacité budgétaire déclarée par l'agent (``budget_enforcement``) — mode s
 - ``"in-runner"`` : le runner contrôle chaque appel du framework d'agent, MAIS les commandes du workspace
   disposent de la même clé et d'un réseau libre : elles peuvent appeler le fournisseur hors de tout contrôle.
   Avec une clé FACTURABLE, ce n'est pas une barrière effective → refus en strict (le mode ``advisory`` reste
-  disponible, la limite est documentée). Sans exposition en dollars (abonnement : 0 $ par token), le plafond de
-  tokens est appliqué sur les appels du framework et la limite résiduelle est documentée.
+  disponible, la limite est documentée). Sans exposition en dollars (abonnement : 0 $ par token), un plafond USD
+  SEUL est accepté (0 $ établi par l'absence autoritaire de facturation) ; un plafond de TOKENS strict est refusé :
+  le backend abonnement ne garantit pas le plafond de sortie en amont et les commandes du workspace ont les
+  credentials montés, il n'existe donc pas de borne effective et non contournable.
 """
 
 from __future__ import annotations
@@ -138,7 +140,7 @@ def _chain_models(agent: object, model: str) -> list:
     return models or [model]
 
 
-def _require_enforceable(agent: object, billable: bool) -> None:
+def _require_enforceable(agent: object, billable: bool, snap) -> None:
     """Matrice d'enforcement (voir l'en-tête du module) : refuse ce qui ne peut pas être borné en strict."""
     enforcement = getattr(agent, "budget_enforcement", None)
     name = type(agent).__name__
@@ -163,6 +165,14 @@ def _require_enforceable(agent: object, billable: bool) -> None:
                 f"agent {name} : le contrôle 'in-runner' ne borne que les appels du framework ; une commande du "
                 "workspace dispose de la même clé FACTURABLE et d'un réseau libre — pas de barrière effective, donc "
                 "pas de garantie stricte en dollars. Utiliser l'abonnement (0 $/token) ou BUDGET_MODE=advisory",
+            )
+        if snap.cap_tokens is not None:
+            raise BudgetRefused(
+                REFUSED_UNBOUNDED,
+                f"agent {name} : un plafond de TOKENS strict exige une borne effective et non contournable. Le "
+                "backend abonnement ne garantit pas le plafond de sortie en amont et les commandes du workspace "
+                "disposent des credentials montés : 0 $ établi, mais aucune garantie de tokens. Retirer "
+                "MAX_TOKENS_BUDGET (plafond USD seul) ou utiliser BUDGET_MODE=advisory",
             )
         return
     raise BudgetRefused(REFUSED_UNBOUNDED, f"agent {name} : capacité budgétaire inconnue ({enforcement!r}) : refusé")
@@ -199,7 +209,7 @@ def allocate_worker(
     capped = snap.strict and (snap.cap_micro_usd is not None or snap.cap_tokens is not None)
     model, billable = _coder_model_and_billable(settings)
     if capped:
-        _require_enforceable(agent, billable)
+        _require_enforceable(agent, billable, snap)
     share = _setting(settings, "BUDGET_WORKER_SHARE", DEFAULT_WORKER_SHARE)
     if not 0 < share <= 1:
         raise BudgetRefused(

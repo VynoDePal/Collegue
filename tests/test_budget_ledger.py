@@ -16,6 +16,7 @@ from collegue.state.budget_ledger import (
     REFUSED_BLOCKED,
     REFUSED_CAP_TOKENS,
     REFUSED_CAP_USD,
+    BudgetIdentityError,
     BudgetLedgerError,
     cap_to_micro,
     usd_to_micro,
@@ -632,3 +633,301 @@ def test_a_persistence_error_on_reserve_refuses_instead_of_proceeding(manager, m
 def test_unknown_scope_is_refused(manager):
     with pytest.raises(BudgetRefused):
         manager.budget_ledger.reserve("project:999", usd=0.1, tokens=0)
+
+
+# --- causes de blocage INDÉPENDANTES ---------------------------------------------------------------------------
+
+
+def _capped(manager, **kw):
+    ledger = manager.budget_ledger
+    key = ledger.create_planning_scope(max_cost_usd=1, max_tokens=1000, **kw).scope_key
+    return ledger, key
+
+
+def _unknown_call(ledger, key, reason="appel incomplet"):
+    reservation = ledger.reserve(key, tokens=20, usd=0.02)
+    ledger.mark_unknown(reservation.reservation_id, reason=reason)
+    return reservation.reservation_id
+
+
+def test_settling_an_unknown_call_never_lifts_an_independent_bound_violation(manager):
+    ledger, key = _capped(manager)
+    rid = _unknown_call(ledger, key)
+    ledger.block(key, reason="borne du fournisseur démentie", event_key="bound-1")
+    assert ledger.snapshot(key).blocked_reason == "appel incomplet"  # la plus ancienne cause s'affiche
+
+    ledger.resolve_unknown(rid, usd=0.01, tokens=10, event_key="resolve-1", reason="relevé fournisseur")
+
+    snap = ledger.snapshot(key)
+    assert snap.blocked and snap.blocked_reason == "borne du fournisseur démentie"  # la cause restante, pas l'ancienne
+    assert [b["block_key"] for b in ledger.open_blocks(key)] == ["bound-1"]
+    with pytest.raises(BudgetRefused) as refused:
+        ledger.reserve(key, tokens=1, usd=0.001)
+    assert refused.value.code == REFUSED_BLOCKED
+
+
+def test_each_cause_is_resolved_explicitly_and_the_scope_unblocks_only_when_none_remains(manager):
+    ledger, key = _capped(manager)
+    rid = _unknown_call(ledger, key)
+    ledger.block(key, reason="borne démentie", event_key="bound-1")
+    ledger.block(key, reason="blocage manuel", event_key="manual-1", kind="manual")
+
+    ledger.resolve_block(key, "bound-1", event_key="r-bound", reason="hypothèse corrigée")
+    assert ledger.snapshot(key).blocked  # usage inconnu + cause manuelle restent
+    ledger.resolve_unknown(rid, usd=0.01, tokens=10, event_key="r-unknown")
+    assert ledger.snapshot(key).blocked_reason == "blocage manuel"
+    assert ledger.resolve_block(key, "manual-1", event_key="r-manual", reason="vérifié") is True
+    snap = ledger.snapshot(key)
+    assert not snap.blocked and snap.blocked_reason is None and ledger.open_blocks(key) == []
+
+
+def test_blocks_survive_a_restart_and_a_resolution_is_idempotent(url):
+    first = ProjectStateManager.from_url(url, create=True)
+    ledger, key = _capped(first)
+    ledger.block(key, reason="borne démentie", event_key="bound-1")
+    restarted = ProjectStateManager.from_url(url).budget_ledger
+    assert restarted.snapshot(key).blocked and len(restarted.open_blocks(key)) == 1
+    assert restarted.resolve_block(key, "bound-1", event_key="r1", reason="ok") is True
+    assert restarted.resolve_block(key, "bound-1", event_key="r1", reason="ok") is False  # rejeu identique
+    assert not ProjectStateManager.from_url(url).budget_ledger.snapshot(key).blocked
+
+
+def test_a_block_on_an_uncapped_scope_becomes_blocking_once_a_cap_is_configured(manager):
+    ledger = manager.budget_ledger
+    key = ledger.create_planning_scope().scope_key  # aucun plafond : rien à protéger encore
+    ledger.block(key, reason="borne démentie", event_key="bound-1")
+    assert not ledger.snapshot(key).blocked
+    ledger.create_planning_scope(scope_key=key, max_cost_usd=1)  # un plafond apparaît
+    assert ledger.snapshot(key).blocked_reason == "borne démentie"
+
+
+def test_a_block_key_replayed_with_another_scope_or_meaning_is_refused(manager):
+    ledger = manager.budget_ledger
+    one = ledger.create_planning_scope(scope_key="planning:one", max_cost_usd=1).scope_key
+    two = ledger.create_planning_scope(scope_key="planning:two", max_cost_usd=1).scope_key
+    ledger.block(one, reason="borne démentie", event_key="bound-failure")
+    ledger.block(one, reason="borne démentie", event_key="bound-failure")  # rejeu identique : idempotent
+    assert len(ledger.open_blocks(one)) == 1
+    with pytest.raises(BudgetIdentityError):
+        ledger.block(two, reason="borne démentie", event_key="bound-failure")  # autre scope
+    with pytest.raises(BudgetIdentityError):
+        ledger.block(one, reason="autre motif", event_key="bound-failure")  # autre sens
+    with pytest.raises(BudgetIdentityError):
+        ledger.block(one, reason="borne démentie", event_key="bound-failure", kind="manual")  # autre type
+    assert not ledger.snapshot(two).blocked  # la seconde cause n'a pas été perdue en silence : elle a été refusée
+
+
+def test_a_resolution_key_replayed_with_another_scope_cause_or_amount_is_refused(manager):
+    ledger = manager.budget_ledger
+    one = ledger.create_planning_scope(scope_key="planning:one", max_cost_usd=1).scope_key
+    two = ledger.create_planning_scope(scope_key="planning:two", max_cost_usd=1).scope_key
+    ledger.block(one, reason="a", event_key="b1")
+    ledger.block(one, reason="b", event_key="b2")
+    ledger.block(two, reason="c", event_key="b3")
+    ledger.resolve_block(one, "b1", event_key="resolution", reason="corrigé")
+    assert ledger.resolve_block(one, "b1", event_key="resolution", reason="corrigé") is False
+    with pytest.raises(BudgetIdentityError):
+        ledger.resolve_block(two, "b3", event_key="resolution", reason="corrigé")  # autre scope
+    with pytest.raises(BudgetIdentityError):
+        ledger.resolve_block(one, "b2", event_key="resolution", reason="corrigé")  # autre cause
+    with pytest.raises(BudgetIdentityError):
+        ledger.resolve_block(one, "b1", event_key="resolution", reason="corrigé", usd=0.5)  # autre montant
+    with pytest.raises(BudgetIdentityError):
+        ledger.resolve_block(one, "b1", event_key="resolution", reason="autre justification")
+    assert ledger.snapshot(two).blocked and [b["block_key"] for b in ledger.open_blocks(one)] == ["b2"]
+
+
+def test_concurrent_resolutions_of_an_unknown_call_never_erase_a_concurrent_block(url):
+    """Règlement sans rapport + blocage en parallèle, sur des connexions réelles : le blocage reste, toujours."""
+    manager = ProjectStateManager.from_url(url, create=True)
+    ledger, key = _capped(manager)
+    rids = [ledger.reserve(key, tokens=20, usd=0.02).reservation_id for i in range(6)]
+    for i, rid in enumerate(rids):  # réserver d'abord TOUT, puis passer en inconnu (un inconnu bloque les réservations)
+        ledger.mark_unknown(rid, reason=f"appel {i}")
+    barrier = threading.Barrier(len(rids) + 1)
+    errors = []
+
+    def resolver(rid):
+        other = ProjectStateManager.from_url(url).budget_ledger
+        barrier.wait()
+        try:
+            other.resolve_unknown(rid, usd=0.001, tokens=1, event_key=f"r:{rid}")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    def blocker():
+        other = ProjectStateManager.from_url(url).budget_ledger
+        barrier.wait()
+        try:
+            other.block(key, reason="borne démentie", event_key="bound-1")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=resolver, args=(rid,)) for rid in rids] + [threading.Thread(target=blocker)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, errors
+    snap = ledger.snapshot(key)
+    assert snap.unknown_usd == 0 and snap.blocked and snap.blocked_reason == "borne démentie"
+
+
+def test_concurrent_block_keys_with_different_scopes_keep_exactly_one_winner(url):
+    manager = ProjectStateManager.from_url(url, create=True)
+    ledger = manager.budget_ledger
+    keys = [ledger.create_planning_scope(scope_key=f"planning:s{i}", max_cost_usd=1).scope_key for i in range(6)]
+    barrier = threading.Barrier(len(keys))
+    outcomes = []
+
+    def worker(scope):
+        other = ProjectStateManager.from_url(url).budget_ledger
+        barrier.wait()
+        try:
+            other.block(scope, reason="borne démentie", event_key="shared-key")
+            outcomes.append("ok")
+        except BudgetIdentityError:
+            outcomes.append("contradiction")
+        except BaseException as exc:  # noqa: BLE001
+            outcomes.append(repr(exc))
+
+    threads = [threading.Thread(target=worker, args=(k,)) for k in keys]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert outcomes.count("ok") == 1 and outcomes.count("contradiction") == len(keys) - 1, outcomes
+    assert sum(1 for k in keys if ledger.snapshot(k).blocked) == 1
+
+
+# --- historique legacy : dernier cumul, ambiguïté bloquante ---------------------------------------------------
+
+INF = float("inf")
+# nom -> (série coût, série tokens, (consommé µ$, tokens), clés de blocs ambigus attendues)
+LEGACY_SCENARIOS = {
+    "increasing": ([0.2, 0.9], [400.0, 900.0], (900_000, 900), []),
+    "decreasing": ([0.9, 0.2], [900.0, 400.0], (900_000, 900), ["run_cost_usd", "run_tokens"]),
+    "decreasing-cost-only": ([0.9, 0.2], [400.0, 900.0], (900_000, 900), ["run_cost_usd"]),
+    "invalid-value": ([0.5, INF, 0.7], [100.0], (700_000, 100), ["run_cost_usd"]),
+    "negative-value": ([0.5, -1.0], [100.0], (500_000, 100), ["run_cost_usd"]),
+    "only-invalid": ([INF], [], (0, 0), ["run_cost_usd"]),
+    "zero": ([0.0], [0.0], (0, 0), []),
+    "no-history": ([], [], (0, 0), []),
+}
+
+
+def _seed_legacy(manager, pid, cost, tokens):
+    for value in cost:
+        manager.add_metric(pid, name="run_cost_usd", value=value)
+    for value in tokens:
+        manager.add_metric(pid, name="run_tokens", value=value)
+
+
+def _legacy_view(ledger, pid, cap=5.0):
+    snap = ledger.scope_for_project(pid, max_cost_usd=cap, max_tokens=10_000_000)
+    blocks = sorted(b["block_key"].rsplit(":", 1)[-1] for b in ledger.open_blocks(snap.scope_key))
+    return (snap.consumed_micro_usd, snap.consumed_tokens), blocks, snap.blocked
+
+
+@pytest.mark.parametrize("scenario", list(LEGACY_SCENARIOS))
+def test_legacy_history_imports_the_last_cumulative_and_blocks_when_ambiguous(manager, scenario):
+    cost, tokens, expected, anomalies = LEGACY_SCENARIOS[scenario]
+    pid = manager.create_project(name="legacy")
+    _seed_legacy(manager, pid, cost, tokens)
+
+    consumed, blocks, blocked = _legacy_view(manager.budget_ledger, pid)
+
+    assert consumed == expected  # jamais la somme des cumuls ; en cas de décroissance, la borne au maximum observé
+    assert blocks == sorted(anomalies) and blocked is bool(anomalies)
+    assert _legacy_view(manager.budget_ledger, pid) == (consumed, blocks, blocked)  # rejeu : import unique
+
+
+def test_an_ambiguous_history_stays_blocked_until_the_operator_resolves_it_with_the_established_spend(manager):
+    pid = manager.create_project(name="legacy")
+    _seed_legacy(manager, pid, [0.9, 0.2], [])
+    ledger = manager.budget_ledger
+    snap = ledger.scope_for_project(pid, max_cost_usd=5.0)
+    assert snap.blocked and "PAS la dépense totale établie" in snap.blocked_reason
+    assert "ambigu" in snap.blocked_reason
+    (block,) = ledger.open_blocks(snap.scope_key)
+    assert block["kind"] == "ambiguous_history"
+
+    ledger.resolve_block(
+        snap.scope_key, block["block_key"], event_key="resolve-history", reason="relevé fournisseur", usd=1.5, tokens=0
+    )
+
+    after = ledger.snapshot(snap.scope_key)
+    assert not after.blocked and after.consumed_usd == pytest.approx(0.9 + 1.5)  # la dépense établie s'ajoute
+
+
+def test_an_ambiguous_history_recorded_without_a_cap_blocks_once_a_cap_appears(manager):
+    pid = manager.create_project(name="legacy")
+    _seed_legacy(manager, pid, [0.9, 0.2], [])
+    ledger = manager.budget_ledger
+    assert not ledger.scope_for_project(pid).blocked  # aucun plafond : rien à protéger encore, mais la cause est notée
+    assert ledger.scope_for_project(pid, max_cost_usd=5.0).blocked
+
+
+def test_analyze_legacy_series_flags_nan_and_decreases_and_keeps_the_maximum():
+    from collegue.state.budget_ledger import analyze_legacy_series
+
+    assert analyze_legacy_series([0.2, 0.9]) == (0.9, [])
+    bound, issues = analyze_legacy_series([0.9, float("nan"), 0.2, None, -3])
+    assert bound == 0.9 and len(issues) == 4 and any("décroissante" in i for i in issues)
+
+
+def _migrate_sqlite_between(tmp_path, monkeypatch, seed):
+    """Alembic jusqu'à 0010, ``seed(url)`` insère l'historique, puis 0011 : la voie MIGRATION."""
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    from alembic import command
+
+    root = Path(__file__).resolve().parents[1]
+    url = f"sqlite:///{tmp_path / 'migrated.db'}"
+    monkeypatch.setenv("STATE_DATABASE_URL", url)
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    command.upgrade(cfg, "0010")
+    seed(url)
+    command.upgrade(cfg, "0011")
+    return url, cfg, command
+
+
+@pytest.mark.parametrize("scenario", list(LEGACY_SCENARIOS))
+def test_the_migration_import_has_the_same_semantics_as_the_lazy_create_all_import(tmp_path, monkeypatch, scenario):
+    from sqlalchemy import create_engine, text
+
+    cost, tokens, _expected, _anomalies = LEGACY_SCENARIOS[scenario]
+    lazy_mgr = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'lazy.db'}", create=True)
+    lazy_pid = lazy_mgr.create_project(name="legacy")
+    _seed_legacy(lazy_mgr, lazy_pid, cost, tokens)
+    lazy = _legacy_view(lazy_mgr.budget_ledger, lazy_pid)
+
+    holder = {}
+
+    def seed(url):
+        engine = create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO projects (name, phase, status) VALUES ('legacy', '1', 'active')"))
+            holder["pid"] = conn.execute(text("SELECT id FROM projects")).scalar_one()
+            for name, series in (("run_cost_usd", cost), ("run_tokens", tokens)):
+                for value in series:
+                    conn.execute(
+                        text(
+                            "INSERT INTO metrics (project_id, ts, name, value) VALUES (:p, CURRENT_TIMESTAMP, :n, :v)"
+                        ),
+                        {"p": holder["pid"], "n": name, "v": value},
+                    )
+        engine.dispose()
+
+    url, cfg, command = _migrate_sqlite_between(tmp_path, monkeypatch, seed)
+    migrated = _legacy_view(ProjectStateManager.from_url(url, create=False).budget_ledger, holder["pid"])
+
+    assert migrated == lazy  # même consommé, mêmes causes d'ambiguïté, même blocage
+
+    command.downgrade(cfg, "0010")
+    command.upgrade(cfg, "0011")  # rejeu après downgrade : une seule importation
+    assert _legacy_view(ProjectStateManager.from_url(url, create=False).budget_ledger, holder["pid"]) == lazy

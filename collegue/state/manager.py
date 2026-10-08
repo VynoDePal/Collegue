@@ -216,6 +216,38 @@ class ProjectStateManager:
             s.flush()
             return project.id
 
+    def create_project_in_cycle(
+        self,
+        scope_key: str,
+        claim_token: str,
+        *,
+        name: str,
+        spec: Optional[str] = None,
+        deadline: Optional[datetime] = None,
+        phase: str = "0",
+        status: str = "active",
+        plan_sync_config: Optional[dict] = None,
+    ) -> int:
+        """Crée le projet d'un cycle de planification ET le lie à son scope budgétaire, en UNE transaction.
+
+        Le droit exclusif du cycle (``claim_token``) est vérifié en compare-and-set dans la même transaction :
+        un arrêt avant le commit ne laisse ni projet sans scope ni scope lié à un projet fantôme ; un droit
+        perdu ou échu annule la création. La dépense déjà engagée (SPEC) reste au scope, qui reste celui du cycle.
+        """
+        with self.session() as s:
+            project = Project(
+                name=name,
+                spec=spec,
+                deadline=deadline,
+                phase=phase,
+                status=status,
+                plan_sync_config=plan_sync_config,
+            )
+            s.add(project)
+            s.flush()
+            self.budget_ledger.bind_new_project_in_session(s, scope_key, claim_token, project.id)
+            return project.id
+
     def get_project(self, project_id: int) -> Optional[Project]:
         # Eager-load des relations : l'objet retourné est détaché (session fermée)
         # mais ``project.tasks`` / ``.decisions`` … restent accessibles sans

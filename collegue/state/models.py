@@ -379,6 +379,10 @@ class BudgetScope(Base):
     unknown_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     unknown_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Cycle de planification (scope encore sans projet) : un seul appelant à la fois. Jeton + échéance
+    # compare-and-set ; vidés à la liaison au projet ou à la libération.
+    claim_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    claim_expires_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     # Dernier échec de planification conservé (la SPEC échouée a quand même pu coûter).
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
@@ -455,3 +459,32 @@ class BudgetEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
     )
+
+
+class BudgetBlock(Base):
+    """Cause de blocage INDÉPENDANTE d'un scope (borne démentie, historique ambigu, blocage manuel).
+
+    L'usage inconnu d'un appel n'est pas listé ici : il vit dans l'état ``unknown`` de la réservation.
+    Résoudre l'usage d'un appel ne lève donc jamais une de ces causes ; chacune se résout explicitement.
+    """
+
+    __tablename__ = "budget_blocks"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('bound_violation', 'ambiguous_history', 'manual')",
+            name="ck_budget_blocks_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    block_key: Mapped[str] = mapped_column(String(192), nullable=False, unique=True)
+    scope_id: Mapped[int] = mapped_column(
+        ForeignKey("budget_scopes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    resolution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

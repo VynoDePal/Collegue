@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -74,9 +75,11 @@ class _UsageDeltaEmitter:
 # seul dans l'image.
 #
 # Ce que la garde établit, et ce qu'elle n'établit PAS :
-# - le prompt est borné par les OCTETS UTF-8 du payload complet transmis (messages, outils, schémas) : un
-#   tokenizer à repli octet ne produit jamais plus de tokens que d'octets (familles listées ou attestées) ;
-#   une famille inconnue ou une modalité non textuelle n'est pas bornable : le modèle est écarté ;
+# - le prompt est borné par les OCTETS UTF-8 de la requête SÉRIALISÉE (messages, outils, schémas, structure et
+#   séparateurs compris) : un tokenizer à repli octet ne produit jamais plus de tokens que d'octets. Valable
+#   pour un couple (endpoint, famille) connu (``gemini/gemini…``, ``openai/gpt-…`` ou ``gpt-…`` en abonnement)
+#   ou attesté par l'opérateur — pas pour un simple préfixe de nom ; sinon, ou pour une modalité non textuelle,
+#   le modèle est écarté ;
 # - la sortie est bornée par ``max_output_tokens`` du LLM (obligatoire) ; que le fournisseur l'honore est une
 #   hypothèse, d'où le contrôle a posteriori (compteurs SDK) ;
 # - une erreur HTTP ne prouve pas l'absence de facturation : seuls les rejets avant traitement (400/401/403/404/
@@ -92,7 +95,43 @@ class _UsageDeltaEmitter:
 
 BUDGET_MARKER = "[collegue-budget]"
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
-BYTE_BOUNDED_PREFIXES = ("gpt-", "chatgpt", "o1", "o3", "o4", "gemini", "gemma", "claude")
+# Identités EXACTES (jamais des préfixes de nom) dont la famille de tokenizer est documentée — même liste que
+# ``collegue.core.llm.budget_guard.HOSTED_KNOWN_MODELS`` (un test vérifie l'égalité : ce script est copié seul).
+HOSTED_KNOWN_MODELS = {
+    "gemini": frozenset(
+        {
+            "gemini-3.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-pro-preview",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it",
+        }
+    ),
+    "openai": frozenset(
+        {
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.5",
+            "o1",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+        }
+    ),
+}
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
 PER_MESSAGE_FRAMING_TOKENS = 16
 PER_TOOL_FRAMING_TOKENS = 64
 REQUEST_FRAMING_TOKENS = 64
@@ -134,31 +173,37 @@ class UnboundablePayload(ValueError):
     """Modalité non textuelle : ses tokens ne se déduisent pas de ses octets."""
 
 
-def _payload_bytes(value, _depth=0) -> int:
+def _plain(value, _depth=0):
+    """Réduit ``value`` à des types JSON ; refuse ce qui n'est pas du texte (image, audio, binaire…)."""
     if _depth > 64:
         raise UnboundablePayload("payload trop profond")
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        return len(value.encode("utf-8", errors="surrogatepass"))
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else str(value)
     if isinstance(value, (bytes, bytearray)):
         raise UnboundablePayload("contenu binaire")
-    if isinstance(value, (int, float, bool)):
-        return len(str(value))
     if isinstance(value, dict):
         if str(value.get("type", "")).lower() in _NON_TEXT_PART_TYPES or any(
             str(key).lower() in _NON_TEXT_PART_TYPES for key in value
         ):
             raise UnboundablePayload(f"modalité non textuelle ({value.get('type')!r})")
-        return sum(_payload_bytes(k, _depth + 1) + _payload_bytes(v, _depth + 1) for k, v in value.items())
+        return {str(k): _plain(v, _depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
-        return sum(_payload_bytes(item, _depth + 1) for item in value)
+        return [_plain(item, _depth + 1) for item in value]
     dump = getattr(value, "model_dump", None)
     if callable(dump):
-        return _payload_bytes(dump(), _depth + 1)
+        return _plain(dump(), _depth + 1)
     if hasattr(value, "__dict__"):
-        return _payload_bytes(vars(value), _depth + 1)
-    return len(str(value).encode("utf-8", errors="surrogatepass"))
+        return _plain(vars(value), _depth + 1)
+    return str(value)
+
+
+def _payload_bytes(value) -> int:
+    """Octets UTF-8 de la requête SÉRIALISÉE (structure et séparateurs compris) : borne haute du texte découpé."""
+    if value is None:
+        return 0
+    return len(json.dumps(_plain(value), ensure_ascii=False, separators=(", ", ": ")).encode("utf-8", "surrogatepass"))
 
 
 def classify_failure(exc: BaseException, *, strict: bool = True):
@@ -195,6 +240,7 @@ class BudgetGuard:
         strict=True,
         max_attempts=1,
         attested_models=(),
+        subscription=False,
         clock=None,
         sleep=None,
         exit_fn=None,
@@ -207,6 +253,7 @@ class BudgetGuard:
         self.strict = strict
         self.max_attempts = max(1, int(max_attempts))
         self.attested_models = tuple(m.strip().lower() for m in attested_models if m and m.strip())
+        self.subscription = bool(subscription)
         # Résolus à l'appel (et non figés à la définition) : horloge/sommeil substituables.
         self._clock = clock or (lambda: time.time())
         self._sleep = sleep or (lambda seconds: time.sleep(seconds))
@@ -222,10 +269,26 @@ class BudgetGuard:
         return self.prices.get(model)
 
     def _byte_bounded(self, model) -> bool:
-        # ``fournisseur/modèle`` (format LiteLLM) : le tokenizer est celui de la famille du fournisseur OU du modèle.
-        parts = [part for part in model.strip().lower().split("/") if part]
-        known = BYTE_BOUNDED_PREFIXES + self.attested_models
-        return any(part.startswith(known) for part in (parts[0], parts[-1])) if parts else False
+        """« tokens ≤ octets » est justifié pour une IDENTITÉ exacte sur un endpoint connu, pas pour un préfixe.
+
+        - ``gemini/<identité Gemini/Gemma connue>`` : endpoint hébergé Gemini ;
+        - ``openai/<identité OpenAI connue>`` ou nom nu SOUS ``LLM_SUBSCRIPTION=1`` : backend OpenAI ;
+        - sinon : uniquement une identité ATTESTÉE EXACTEMENT par l'opérateur (``--byte-bounded-models``).
+        Un instantané daté (``-AAAA-MM-JJ``, ``-AAAAMMJJ``) d'une identité connue est admis.
+        """
+        name = model.strip().lower()
+        provider, _, bare = name.rpartition("/")
+        undated = _SNAPSHOT_SUFFIX.sub("", bare)
+        if name in self.attested_models or bare in self.attested_models or undated in self.attested_models:
+            return True
+        family = (
+            "gemini"
+            if provider == "gemini"
+            else "openai"
+            if provider == "openai" or (not provider and self.subscription)
+            else None
+        )
+        return family is not None and (bare in HOSTED_KNOWN_MODELS[family] or undated in HOSTED_KNOWN_MODELS[family])
 
     def needs_price(self) -> bool:
         return bool(self.max_usd and self.billable)
@@ -437,6 +500,7 @@ def _guard_from_args(args) -> "BudgetGuard | None":
         strict=args.strict,
         max_attempts=int(os.environ.get("OH_NUM_RETRIES", "8")) + 1,
         attested_models=[m for m in (args.byte_bounded_models or "").split(",")],
+        subscription=os.environ.get("LLM_SUBSCRIPTION", "") == "1",
     )
 
 
