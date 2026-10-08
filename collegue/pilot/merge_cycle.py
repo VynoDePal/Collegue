@@ -89,7 +89,13 @@ def verify_local_sync(
     """Le clone local est sur la fusion distante : ``HEAD == merge_sha`` (tree identique à la preuve) ou, si la base a
     légitimement avancé depuis, ``merge_sha`` est un ancêtre de ``HEAD``. Lève :class:`LocalSyncError` sinon."""
     from collegue.executor.command import LocalCommandRunner
+    from collegue.executor.git_boundary import WorkspaceError, require_trusted_checkout
 
+    # Checkout de l'OPÉRATEUR uniquement (comme la resynchronisation) : jamais un workspace géré écrit par l'agent.
+    try:
+        require_trusted_checkout(repo_source, role="repo_source")
+    except WorkspaceError as exc:
+        raise LocalSyncError(str(exc)) from exc
     command_runner = runner or LocalCommandRunner()
 
     def git(*args: str):

@@ -68,3 +68,17 @@ def test_clone_that_does_not_contain_the_merge_is_refused(repo):
 def test_unreadable_head_is_refused(tmp_path):
     with pytest.raises(LocalSyncError):
         verify_local_sync(str(tmp_path / "absent"), "a" * 40, "b" * 40)
+
+
+def test_a_managed_workspace_is_never_inspected_as_the_operator_checkout(repo, monkeypatch):
+    """Le contrôle de resynchronisation ne s'exécute que sur le checkout de confiance de l'opérateur."""
+    from collegue.executor import git_boundary
+
+    merge_sha, tree = _commit(repo, "b.txt")
+
+    def untrusted(path, *, role="source"):
+        raise git_boundary.WorkspaceError(f"{role} git refusée ({path}) : workspace géré")
+
+    monkeypatch.setattr(git_boundary, "require_trusted_checkout", untrusted)
+    with pytest.raises(LocalSyncError, match="refusée"):
+        verify_local_sync(str(repo), merge_sha, tree)
