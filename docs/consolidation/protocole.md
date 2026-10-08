@@ -300,3 +300,17 @@ La vague 1 est close (PR #608 et #609, `main` = `9862b39`). La vague 2 (A : regi
 - **Usage inconnu / historique ambigu** : réservation conservée, suite stricte bloquée avec un motif durable, résolution par l'opérateur ; un cumul historique décroissant ou invalide bloque jusqu'à résolution.
 - **Prompts** : l'ancien état d'une installation précédente est importé sans être modifié ; le nouvel état gagne toujours.
 - **Preuves restant à la CI** : Python 3.11, image Docker et smoke, wheel complet avec verrous, PostgreSQL sur le runner. Toute suppression d'une de ces preuves est une régression.
+
+## 11. Vague 3 (préparation)
+
+La vague 2 est close (PR #610, `main` = `58355a4`). La vague 3 (A : preuve de livraison commune BUILD/IMPROVE, oracles conservés, veto qualité, intégrité du contenu publié ; B : opt-in de fusion, politique SHA/checks/base commune, rulesets, reprise durable après fusion et synchronisation, classification des chemins sensibles) a son protocole, sa répartition, son contrat de preuve et sa checklist dans `docs/consolidation/w3-integration.md`. **État : préparation, aucune garantie livrée.**
+
+Points d'attaque propres à cette vague (à rejouer sur le SHA figé, entrées publiques, témoin bénin et motif du refus vérifiés) :
+- **Preuve** : rechargement par une nouvelle instance du manager, identités exactes, refus des preuves absentes, d'une autre PR, d'un ancien SHA, d'un contenu altéré ; jamais reconstruite depuis le corps de PR.
+- **Contenu** : arbre Git complet et reconstruit depuis le distant ; binaire, lien, suppression, mode, fichier de base modifié ou module ignoré nécessaire à l'oracle ⇒ refus.
+- **Oracles** : mêmes empreintes, rouge par assertion en phase d'appel sur la préimage puis vert ; collecte, import, zéro test, skip, `xfail`, rapport incomplet ⇒ refus ; contrats livrés rejoués (BUILD et IMPROVE).
+- **Qualité** : couverture en baisse, mesure requise absente, revue bloquante ⇒ refus malgré un meilleur score.
+- **Fusion** : défaut désactivé ; SHA exact émis ; checks (classiques et rulesets, `app_id`, pagination) présents et réussis ; tête ou base déplacée avant et pendant l'appel ; **pas de garantie atomique sur la base via l'API REST** ; restrictions de faible risque conservées pour locks, requirements, Dockerfiles, `pyproject.toml` et migrations empaquetées.
+- **Reprise** : fusion distante confirmée puis synchronisation en échec ⇒ pas de seconde fusion, pas de tâche suivante sur un checkout périmé ; reprise après crash entre l'appel distant et l'écriture locale.
+
+Les limites de la vague 2 (strict borné aux transports bornables, abonnement USD seul, droit de planification 2 h, aucune campagne réelle) restent valables et ne sont pas arrondies.

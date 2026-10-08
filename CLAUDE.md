@@ -26,5 +26,8 @@ Spécificités Claude Code :
   n'est pas un succès : le dire. Voir « Livraison et merge » dans `AGENTS.md`.
 - Vague 2 : lire `docs/consolidation/w2-integration.md` (propriété des fichiers, raccordements, checklist). Caches et
   artefacts sous `/tmp/<rôle>-…`, jamais dans `~/.cache`.
+- Vague 3 (en préparation) : lire `docs/consolidation/w3-integration.md` (propriété des fichiers, contrat de preuve,
+  checklist d'intégration). Ne jamais intégrer une branche avant réception de son SHA figé et d'une instruction distincte ;
+  ne pas présenter la comparaison de base d'un `merge_pr` comme atomique (l'API REST n'a pas d'`expected_base_sha`).
 - Écrire son rapport et ses preuves sous `~/.codex/collegue-consolidation/20260928/{reports,evidence}/`
   avec le préfixe `w<N>-<rôle>`, puis terminer la passe : le manager reprend la même session.
