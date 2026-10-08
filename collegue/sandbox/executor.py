@@ -1,8 +1,10 @@
 """Exécuteur de code en sandbox Docker isolé (C8, brief §6).
 
 Garde-fou critique : le code généré n'est **jamais** exécuté sur l'hôte. Toute
-commande tourne dans un conteneur Docker éphémère, durci, qui ne monte **que** le
-workspace du projet — pas le reste du système de fichiers hôte.
+commande tourne dans un conteneur Docker éphémère, durci, qui ne monte que le
+workspace du projet — plus, OPT-IN et validés, un cache pip et les creds d'abonnement —
+pas le reste du système de fichiers hôte. Aucun de ces montages n'expose jamais un
+répertoire de contrôle Git (``git_control_exposure``).
 
 Durcissement appliqué :
 - réseau coupé (``--network none``), capabilities droppées (``--cap-drop ALL``),
@@ -31,7 +33,9 @@ différée en Phase 2 ; le pilote Phase 3 câblera cet exécuteur).
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -52,10 +56,18 @@ SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
 # ``collegue.executor.git_boundary``). Ce répertoire — hooks/config/refs/index,
 # référence de base HEAD — est l'AUTORITÉ des opérations Git hôte ; il ne doit
 # JAMAIS être monté dans un conteneur (l'agent et les tests y écriraient). Le
-# sandbox refuse donc tout montage qui l'inclut (cf. _validate_workspace).
+# sandbox refuse donc tout montage qui l'expose, à toute profondeur (cf. git_control_exposure).
 GIT_CONTROL_MARKER = ".collegue-git-control"
 # Le répertoire de contrôle d'un workspace ``/x/workspace`` est ``/x/workspace.control``.
 GIT_CONTROL_SUFFIX = ".control"
+
+# Bornes du parcours qui vérifie qu'un montage n'expose aucun répertoire de contrôle (voir
+# ``git_control_exposure``). Au-delà, le montage est REFUSÉ (fail-closed), jamais autorisé.
+# DIRS borne à la fois les répertoires parcourus ET la file en attente (une file qui grossit
+# sans borne serait un parcours sans limite) ; ENTRIES borne chaque entrée itérée, fichiers compris.
+GIT_CONTROL_SCAN_MAX_DIRS = 250_000
+GIT_CONTROL_SCAN_MAX_ENTRIES = 1_000_000
+GIT_CONTROL_SCAN_MAX_DEPTH = 64
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
@@ -86,26 +98,134 @@ def git_control_reason(path: str) -> Optional[str]:
     return None
 
 
-def _git_control_within(path: str) -> Optional[str]:
-    """Chemin d'un répertoire de contrôle Git contenu dans ``path`` (ou ``path`` lui-même).
+# Seules ces erreurs ÉTABLISSENT une absence (le chemin n'existe pas, ou un composant n'est pas un
+# répertoire). Toute autre (EACCES, EPERM, EIO, ELOOP, ETIMEDOUT…) empêche d'exclure un contrôle.
+_ABSENCE_ERRNOS = (errno.ENOENT, errno.ENOTDIR)
 
-    Fail-closed : ``path`` est refusé s'il porte le marqueur de contrôle, ou si
-    l'un de ses enfants DIRECTS le porte (cas d'un montage du parent
-    ``collegue-exec-*`` qui contiendrait ``workspace`` ET son répertoire de
-    contrôle). Un dépôt de travail ordinaire n'est pas concerné.
+
+def _lstat_or_none(path: str):
+    """``os.lstat`` ; ``None`` UNIQUEMENT si l'absence est établie. Toute autre erreur est propagée.
+
+    ``os.path.lexists`` / ``isdir`` ne conviennent pas ici : ils transforment ``PermissionError`` en
+    « absent », ce qui ferait passer pour inexistant un contrôle sous un parent non traversable alors
+    que le démon Docker, lui, résout le bind avec ses propres privilèges.
     """
-    if os.path.lexists(os.path.join(path, GIT_CONTROL_MARKER)):
-        return path
     try:
-        with os.scandir(path) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False) and os.path.lexists(
-                    os.path.join(entry.path, GIT_CONTROL_MARKER)
-                ):
-                    return entry.path
-    except OSError:
+        return os.lstat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENCE_ERRNOS:
+            return None
+        raise
+
+
+def _resolve_mount_path(path: str) -> tuple:
+    """``(chemin canonique, existe)`` d'un chemin de montage, ou ``OSError`` si indécidable.
+
+    Résolution STRICTE des alias/liens (``realpath(strict=True)``) du plus long préfixe existant, puis
+    ajout du reste inexistant (workspace ou cache « à créer »). Une absence n'est admise que si
+    ``lstat`` l'établit (ENOENT/ENOTDIR) ; un lien pendant (cible absente, donc susceptible de devenir un
+    contrôle), une boucle de liens ou toute erreur d'accès propagent l'erreur ⇒ refus.
+    """
+    current = os.path.abspath(os.fspath(path))
+    remainder: list = []
+    while True:
+        try:
+            resolved = os.path.realpath(current, strict=True)
+            break
+        except OSError as exc:
+            if exc.errno not in _ABSENCE_ERRNOS:
+                raise
+        if _lstat_or_none(current) is not None:
+            raise OSError(errno.ELOOP, "lien symbolique pendant (cible absente)", current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            raise OSError(errno.ENOENT, "racine introuvable", current)
+        remainder.append(os.path.basename(current))
+        current = parent
+    for name in reversed(remainder):
+        resolved = os.path.join(resolved, name)
+    return resolved, not remainder
+
+
+def git_control_exposure(path: str) -> Optional[str]:
+    """Raison pour laquelle monter ``path`` exposerait un répertoire de contrôle Git, ou ``None``.
+
+    Garantie (valable pour TOUT bind mount : workspace, cache pip, creds d'abonnement, et le
+    montage d'abonnement de ``sampling_ctx``) — un chemin est accepté seulement si, après
+    canonicalisation (résolution stricte : alias, liens, ``..``, chemin relatif), AUCUN répertoire
+    portant le marqueur de contrôle n'est :
+
+    * ``path`` lui-même, ni l'un de ses ancêtres (monter l'intérieur d'un contrôle en exposerait
+      une partie) ;
+    * contenu dans ``path`` à une profondeur quelconque ≤ ``GIT_CONTROL_SCAN_MAX_DEPTH``.
+
+    Le parcours est itératif, ne suit AUCUN lien symbolique (ni boucle, ni lien vers l'hôte), et
+    borné de trois façons : répertoires parcourus ET file en attente ≤ ``GIT_CONTROL_SCAN_MAX_DIRS``,
+    entrées itérées (fichiers compris, comptées à mesure) ≤ ``GIT_CONTROL_SCAN_MAX_ENTRIES``,
+    profondeur ≤ ``GIT_CONTROL_SCAN_MAX_DEPTH``.
+
+    **Une erreur n'est jamais une absence.** Seules ENOENT/ENOTDIR, établies par ``lstat``, rendent
+    un chemin « à créer » (accepté : rien à exposer). Toute autre erreur de résolution, de ``lstat``
+    ou de lecture — ``EACCES`` d'un parent non traversable (que le démon Docker, plus privilégié,
+    franchirait), ``ELOOP``, lien pendant, ``EIO``… — ainsi que tout dépassement de borne ⇒ REFUS
+    (« vérification impossible »). L'état vit sur le disque (marqueur) : le contrôle reste valable
+    après reprise du processus. Un marqueur planté dans un arbre le fait refuser (faux positif
+    assumé) et ne peut jamais autoriser quoi que ce soit.
+
+    AUCUNE dispense pour un workspace « géré » : être apparié à SON contrôle frère ne prouve pas
+    l'absence d'AUTRES contrôles dans l'arbre (``prepare_workspace(dest_root=<ws>/nested)`` en
+    place un sous le montage). Le coût (≈ 0,06 s pour 30 000 répertoires) ne justifie pas une
+    exception ; en contrepartie un arbre piégé par l'agent est refusé, fail-closed.
+    """
+    try:
+        real, exists = _resolve_mount_path(path)
+        current = real
+        while True:  # soi-même et tous les ancêtres
+            if _lstat_or_none(os.path.join(current, GIT_CONTROL_MARKER)) is not None:
+                return f"{current} est (ou contient en ancêtre) un répertoire de contrôle Git"
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        if not exists or not stat.S_ISDIR(os.lstat(real).st_mode):
+            return None  # absent (à créer, établi par lstat) ou fichier : rien à parcourir
+        stack = [(real, 0)]
+        visited = 0
+        entries_seen = 0
+        while stack:
+            directory, depth = stack.pop()
+            visited += 1
+            if visited > GIT_CONTROL_SCAN_MAX_DIRS:
+                return f"vérification impossible : plus de {GIT_CONTROL_SCAN_MAX_DIRS} répertoires sous {real}"
+            if depth > GIT_CONTROL_SCAN_MAX_DEPTH:
+                return f"vérification impossible : profondeur > {GIT_CONTROL_SCAN_MAX_DEPTH} sous {real}"
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > GIT_CONTROL_SCAN_MAX_ENTRIES:
+                        return f"vérification impossible : plus de {GIT_CONTROL_SCAN_MAX_ENTRIES} entrées sous {real}"
+                    if entry.name == GIT_CONTROL_MARKER:
+                        return f"{directory} est un répertoire de contrôle Git contenu dans le montage"
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append((entry.path, depth + 1))
+                        if len(stack) > GIT_CONTROL_SCAN_MAX_DIRS:
+                            return (
+                                f"vérification impossible : plus de {GIT_CONTROL_SCAN_MAX_DIRS} "
+                                f"répertoires en attente sous {real}"
+                            )
         return None
-    return None
+    except (OSError, ValueError) as exc:
+        return f"vérification impossible ({type(exc).__name__}: {exc})"
+
+
+def _refuse_if_git_control_exposed(path: str, label: str) -> None:
+    reason = git_control_exposure(path)
+    if reason is not None:
+        raise ValueError(
+            f"{label} refusé : montage exposant les métadonnées Git de contrôle ({reason}) — "
+            "monter uniquement le répertoire de travail ou un répertoire ordinaire, jamais un ancêtre "
+            "ni le répertoire de contrôle"
+        )
 
 
 @dataclass
@@ -125,9 +245,11 @@ class SandboxResult:
 class DockerSandbox:
     """Exécute des commandes dans un conteneur Docker isolé et durci.
 
-    Isolation (AC#1 « ne peut pas lire le FS hôte ») : seul ``workspace`` est monté
-    (sur ``/workspace``) ; aucun autre chemin hôte n'est exposé — sauf un cache pip
-    OPT-IN sur ``/tmp/.pip_cache`` si ``pip_cache_dir`` est fourni (#496).
+    Isolation (AC#1 « ne peut pas lire le FS hôte ») : ``workspace`` est monté (sur
+    ``/workspace``) ; aucun autre chemin hôte n'est exposé — sauf, OPT-IN, un cache pip
+    sur ``/tmp/.pip_cache`` si ``pip_cache_dir`` est fourni (#496) et les creds
+    d'abonnement si ``subscription_auth_dir`` l'est. Les TROIS sources de montage passent
+    par ``git_control_exposure`` : aucune n'expose le contrôle Git, à aucune profondeur.
     Persistance (AC#2) : ``workspace`` est un répertoire réel réutilisé d'une
     exécution à l'autre.
     """
@@ -208,12 +330,7 @@ class DockerSandbox:
             root = os.path.realpath(os.path.abspath(self.workspace_root))
             if os.path.commonpath([ws, root]) != root:
                 raise ValueError(f"workspace hors du répertoire autorisé {root}: {ws}")
-        control = _git_control_within(ws)
-        if control is not None:
-            raise ValueError(
-                f"workspace refusé : il contient les métadonnées Git de contrôle ({control}) — "
-                "monter uniquement le répertoire de travail, jamais son parent ni le répertoire de contrôle"
-            )
+        _refuse_if_git_control_exposed(workspace, "workspace")  # chemin BRUT : un lien pendant doit rester visible
         return ws
 
     def _build_run_argv(self, cmd: Union[str, List[str]], workspace: str, name: Optional[str] = None) -> List[str]:
@@ -252,6 +369,7 @@ class DockerSandbox:
             cache = os.path.realpath(os.path.abspath(self.pip_cache_dir))
             if ":" in cache or cache == os.path.sep:
                 raise ValueError(f"pip_cache_dir invalide (':' ou racine): {cache}")
+            _refuse_if_git_control_exposed(self.pip_cache_dir, "pip_cache_dir")
             argv += ["-v", f"{cache}:{SANDBOX_PIP_CACHE_MOUNT}", "-e", f"PIP_CACHE_DIR={SANDBOX_PIP_CACHE_MOUNT}"]
         # Creds d'abonnement (Codex/ChatGPT) : montage RW, cible fixe (HOME du worker).
         # Même validation que le cache pip ; hors confinement workspace_root (les creds
@@ -260,6 +378,7 @@ class DockerSandbox:
             auth = os.path.realpath(os.path.abspath(self.subscription_auth_dir))
             if ":" in auth or auth == os.path.sep:
                 raise ValueError(f"subscription_auth_dir invalide (':' ou racine): {auth}")
+            _refuse_if_git_control_exposed(self.subscription_auth_dir, "subscription_auth_dir")
             # Cible = $HOME/.openhands du worker. HOME effectif = override ``env['HOME']``
             # (sinon le défaut /tmp injecté plus bas). Les creds NE peuvent PAS vivre sous
             # /tmp (le ``--tmpfs /tmp`` masquerait le bind) → fail-loud, sinon le montage
@@ -302,7 +421,7 @@ class DockerSandbox:
             argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
         argv += [
             "-v",
-            f"{ws}:/workspace",  # SEUL chemin hôte monté
+            f"{ws}:/workspace",  # le workspace ; les montages OPT-IN (cache pip, creds) sont ajoutés plus haut
             "-w",
             "/workspace",
             self.image,
