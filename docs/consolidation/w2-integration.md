@@ -152,6 +152,12 @@ Section ajoutée à l'intégration ; les résultats chiffrés, les SHA et les pr
   Le correctif d'usage Python 3.11 de A (`5b8a438`, `sample_with_timeout` : `asyncio.timeout` à la place de `asyncio.wait_for`)
   est intégré par un second merge `--no-ff` : sous 3.11, `wait_for` exécute la coroutine dans une tâche enfant et l'usage
   écrit dans la `ContextVar` y restait enfermé. Les suites complètes sont exécutées sous **3.11 et 3.12** avec les verrous.
+  Le correctif `uv` de B (`d72446b`, `uv==0.11.33` dans le job d'audit, la résolution des verrous et l'image OpenHands) est
+  intégré par un troisième merge `--no-ff` : le job `Dependency audit` de la PR #610 était rouge sur `5d37700` parce que
+  `uv 0.9.28` (GHSA-pjjw-68hj-v9mw, GHSA-4gg8-gxpx-9rph) était installé dans l'environnement audité. L'audit n'est pas
+  contourné. `pyproject.toml` et les six verrous sont inchangés ; leur ligne d'en-tête `# uv: 0.9.28` reste vraie comme
+  provenance historique (informative, ignorée par la comparaison), `generate` écrira `0.11.33`. Version unique :
+  `UV_VERSION` de `scripts/locks.py`, vérifiée par test contre le workflow et le Dockerfile.
 - **Raccords mécaniques réalisés** (commits séparés) :
   1. `0011_budget_ledger.py` : `alembic/versions/` → `collegue/migrations/versions/`, mêmes identifiants (`0011`/`0010`), blob
      identique à celui de A au moment du déplacement (le fichier contient la table `budget_blocks` et les champs de claim) ;
