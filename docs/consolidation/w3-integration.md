@@ -1,9 +1,13 @@
 # Vague 3 — protocole et checklist d'intégration (C)
 
-**État : en préparation.** Document rédigé **avant** les livraisons de A et B. Il ne décrit aucun résultat de leur travail et
-n'annonce aucune garantie déjà livrée : il fixe la répartition, le contrat de preuve et ce que C vérifie quand le manager
-communique leurs SHA figés. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole et checklists précédentes :
-[`protocole.md`](protocole.md) ; vague 2 : [`w2-integration.md`](w2-integration.md).
+**État : intégré localement, non publié.** Le document a été rédigé **avant** les livraisons de A et B ; les §1 à §6
+décrivent le protocole et la checklist, qui restent la référence de revue. Intégration : lot A `ee15e0b` et lot B `c4e63c6`
+fusionnés `--no-ff` sur la branche de C (résultats chiffrés, SHA et preuves : `reports/w3-c-integration.md`, hors dépôt).
+Les §3 (« points de raccord existants ») décrivent l'état de `58355a4`, **avant** les lots : ils ne décrivent plus le
+code courant. Les garanties ne sont établies que sur le SHA figé ; les cinq checks distants et les revues restent à
+observer. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole et checklists précédentes :
+[`protocole.md`](protocole.md) ; vague 2 : [`w2-integration.md`](w2-integration.md) ; lots : [`w3-quality.md`](w3-quality.md)
+(A) et [`w3-merge.md`](w3-merge.md) (B).
 
 - **Base commune** : `main` = `58355a44469360c6212689f094d26199c48535ea` (PR #610, arbre `c20f5f8227795ab5e677c332da8299252108f312`, parent unique `9862b39`, cinq checks du push verts).
 - **Branches** : A `codex/consolidation-w3-a`, B `codex/consolidation-w3-b`, C `codex/consolidation-w3-c` (même base, développement parallèle).
@@ -33,7 +37,7 @@ Les éléments ci-dessous sont le **contrat de départ**. Rien n'est encore livr
 
 ### Concurrence distante : ce qui n'est pas garanti
 
-L'API REST de fusion protège la **tête** avec `sha` ; elle n'offre **aucun** paramètre atomique `expected_base_sha`. Aujourd'hui `PullRequestClient.merge_pr` (`prs.py`) fait un `GET` de la PR, compare tête/base attendues (`expected_head_sha`, `expected_base_branch`, `expected_base_sha`), puis un `PUT` avec `sha` : la comparaison de **base** est une lecture suivie d'un appel, donc non atomique. Aucun texte, test ni rapport ne doit présenter cette comparaison comme une garantie atomique. La précondition de base doit venir d'une protection stricte réellement applicable côté serveur à la branche **et** à l'acteur de fusion (ruleset actif, branche à jour exigée, aucun bypass applicable) ; sinon l'automatisme est refusé avec la limite expliquée. Les protections du dépôt ne sont jamais modifiées pour rendre un test vert.
+L'API REST de fusion protège la **tête** avec `sha` ; elle n'offre **aucun** paramètre atomique `expected_base_sha`. Aujourd'hui `PRCommands.merge_pr` (`prs.py`) fait un `GET` de la PR, compare tête/base attendues (`expected_head_sha`, `expected_base_branch`, `expected_base_sha`), puis un `PUT` avec `sha` : la comparaison de **base** est une lecture suivie d'un appel, donc non atomique. Aucun texte, test ni rapport ne doit présenter cette comparaison comme une garantie atomique. La précondition de base doit venir d'une protection stricte réellement applicable côté serveur à la branche **et** à l'acteur de fusion (ruleset actif, branche à jour exigée, aucun bypass applicable) ; sinon l'automatisme est refusé avec la limite expliquée. Les protections du dépôt ne sont jamais modifiées pour rendre un test vert.
 
 ## 3. Points de raccord existants (lus sur `58355a4`, avant tout travail de A/B)
 
@@ -44,7 +48,7 @@ Constats factuels, à re-vérifier contre les SHA livrés ; ils décrivent l'ét
 | Activation du merge-bot BUILD | `collegue/pilot/runtime.py` (≈ l. 513) : `bool(getattr(settings_obj, "BUILD_AUTO_MERGE", True)) and not dry_run` — **activé par défaut**, y compris le repli `getattr` |
 | Merge-bot | `_try_merge_pr` (≈ l. 319) appelle `prs.merge_pr(owner, repo, number, method="squash")` **sans SHA**, avec relances courtes ; `_merge_in_review_prs` (≈ l. 350) lit les tâches `in_review`, ne contrôle ni tête, ni checks, ni preuve |
 | Synchronisation | Après un merge réussi, la tâche passe à `merged` **avant** `_resync_repo_source` ; un échec de resync n'est qu'un `logger.warning`, la tâche reste `merged` et la suivante peut partir d'un clone périmé |
-| Client de fusion | `PullRequestClient.merge_pr` : idempotent (PR déjà fusionnée), compare tête/base par lecture avant le `PUT` (non atomique, cf. § 2), `sha` dans le corps seulement si `expected_head_sha` fourni |
+| Client de fusion | `PRCommands.merge_pr` : idempotent (PR déjà fusionnée), compare tête/base par lecture avant le `PUT` (non atomique, cf. § 2), `sha` dans le corps seulement si `expected_head_sha` fourni |
 | Phase 5 | `collegue/pilot/automerge.py` : `maybe_auto_merge` exige déjà un SHA de tête connu et transmet `expected_head_sha/base_branch/base_sha` ; `auto_merge_promotion` lit tête et checks (`prs.get_commit_checks`) ; `is_sensitive` (≈ l. 147) bloque `*.lock`, `.env*`, `.github/`, `migrations/`, `alembic/versions/`, extensions/basenames exécutables |
 | Classification | Écarts relevés à la fin de la vague 2 : `requirements.txt`, `requirements-lock.txt`, `Dockerfile.openhands`, `docker/sandbox/Dockerfile.openhands` et les six `locks/*.txt` échappent à `is_sensitive` ; la migration empaquetée (`collegue/migrations/versions/…`) et `pyproject.toml` restent protégés (à vérifier) |
 | Livraison BUILD | `executor/pipeline.py` : `execute_issue(...)` → `ExecutionOutcome` (`success`, `stage`, `quality_report`, `pr`, `final_status`, `reason`) ; `executor/pr.py` : `capture_delivery_snapshot`, `verify_delivery_snapshot` (dérive du workspace), `open_pr` (idempotent : `find_pr_by_head` ⇒ `skipped`), `PrResult` (`skipped_binaries`, `skipped_symlinks`) ; la preuve n'est portée que par le corps de PR (marqueur de hash de diff) |
@@ -111,9 +115,17 @@ Constats factuels, à re-vérifier contre les SHA livrés ; ils décrivent l'ét
 
 Refuser et renvoyer à l'auteur si : une garantie est annoncée sans preuve sur SHA figé ; un test adverse repose sur un mock incomplet ; le témoin bénin manque ; la preuve se lit dans le corps de PR ou un paramètre d'appelant ; une base déplacée n'est détectée que par une lecture antérieure à l'appel ; un check manquant, sauté ou inaccessible est traité comme vert ; un format non représentable est publié sans refus ; une protection, un nom de check ou un seuil est modifié ; une dépendance est ajoutée sans arbitrage.
 
-## 7. Limites de cette préparation
+## 7. Raccords réalisés et limites
 
-- Aucun code de A ou de B n'a été lu en cours de développement et rien n'est intégré ; les interfaces citées sont celles du brief du manager, pas encore vérifiées contre des SHA.
-- Les numéros de ligne cités décrivent `58355a4` et peuvent bouger.
-- Aucune exécution : cette passe est documentaire (contrôle de références et `git diff --check` seulement).
-- Les dispositifs de test de raccord (§ 5) restent à écrire à l'intégration, sur les interfaces effectivement livrées ; ils ne modifieront aucun fichier de A ou de B.
+- **Tests de raccord (propriété C)** : `tests/w3_remote_bridge.py` (un `FakeGitHubServer` de B dont commits, branches et commits de fusion
+  sont les objets d'un VRAI dépôt Git bare de `FakeRemote` de A, derrière les clients de production `BranchCommands`,
+  `FileCommands`, `PRCommands` détournés au seul niveau de `_request_json`), `tests/w3_publication.py` (clients complets pour les
+  tests historiques), `tests/test_w3_integration_build.py`, `tests/test_w3_integration_improve.py`. Aucune preuve, aucun
+  `verify_fn`, aucune politique de fusion injectés ; la resynchronisation et `verify_local_sync` lisent le commit de fusion réel.
+- **Mécanique uniquement** : exports publics `TaskMerge` / `TaskMergeConflictError` (`collegue/state/__init__.py`) ; deux étapes
+  CI PostgreSQL dédiées (état de fusion : 23 tests ; preuves de livraison : 5 tests) en plus de celle du registre de budget (21),
+  planchers égaux aux comptes exacts ; défaut de `BUILD_AUTO_MERGE` dans README/docs ; clients complets dans les anciens tests de
+  pilote/runtime/e2e/budget (les anciens doubles de publication ne suffisent plus, sans drapeau de contournement).
+- **Limites** : deux PR simultanées validées sur la même base ne sont pas toutes deux fusionnables (la seconde reste ouverte avec
+  une base périmée) ; une PR empilée d'IMPROVE n'est validable vers `main` qu'après sa parente ; Contents API texte seul ; journal
+  non signé ; jeton d'application GitHub refusé ; oracle non résistant à du code malveillant dans le même interpréteur.
