@@ -587,28 +587,85 @@ async def test_a_client_timeout_is_unknown_and_not_retried(env):
 # --- l'échéance s'applique PENDANT l'appel et les backoffs ------------------------------------------------------
 
 
+class _ScriptedDeadline:
+    """Échéance PILOTÉE par l'état logique du scénario, jamais par la vitesse de préparation de la machine.
+
+    ``BudgetBinding.remaining_seconds()`` calcule ``deadline - maintenant`` ; cet objet répond à ``-`` avec le temps
+    restant que le scénario veut faire voir à la VRAIE garde, en fonction du nombre d'appels réellement émis
+    (``state``). Une échéance « maintenant + 50 ms » fixée avant la création du contexte, le snapshot, l'estimation et
+    la réservation pouvait expirer AVANT la première émission sur un runner lent (CI) : la preuve dépendait de la
+    vitesse. Ici la garde, le registre, l'estimation, la réservation, les erreurs HTTP et l'annulation asyncio restent
+    RÉELS ; seule la source du temps restant est contrôlée. ``reads`` garde chaque lecture (appels émis, restant).
+    """
+
+    def __init__(self, remaining_for_state, state):
+        self._remaining_for_state = remaining_for_state
+        self._state = state
+        self.reads = []
+
+    def __sub__(self, _now):
+        emitted = self._state()
+        remaining = self._remaining_for_state(emitted)
+        self.reads.append((emitted, remaining))
+        return timedelta(seconds=remaining)
+
+
 async def test_the_deadline_cancels_an_in_flight_call_and_leaves_its_usage_unknown(env):
+    """Appel RÉELLEMENT entré puis annulé par asyncio à l'échéance : réservation inconnue et bloquante."""
     gate = asyncio.Event()
+    entered, cancelled = asyncio.Event(), []
 
     async def hang():
-        await gate.wait()
+        entered.set()
+        try:
+            await gate.wait()  # ne rend jamais la main : seule l'annulation asyncio le sort de là
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
 
     client = FakeClient([hang, _response()])
-    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=150)
+    # Avant l'émission : 80 ms de temps restant (la VRAIE temporisation d'asyncio démarre à l'entrée de l'appel, donc
+    # la lenteur des préliminaires est sans effet) ; une fois l'appel émis : l'échéance est atteinte (0 s).
+    deadline = _ScriptedDeadline(lambda emitted: 0.08 if emitted == 0 else 0.0, lambda: len(client.calls))
     with pytest.raises(BudgetRefused) as refused:
         await _sample(_ctx(client), env, deadline=deadline)
-    assert refused.value.code == REFUSED_DEADLINE
+
+    assert refused.value.code == REFUSED_DEADLINE and "pendant l'appel" in str(refused.value)
+    assert entered.is_set() and cancelled == [True]  # l'appel était entré, asyncio l'a VRAIMENT annulé
+    assert len(client.calls) == 1
     snap = env.ledger.snapshot(env.key)
-    assert snap.unknown_usd > 0 and snap.blocked and len(client.calls) == 1
+    assert snap.unknown_usd > 0 and snap.blocked  # usage inconnu, jamais zéro
+    assert [r.state for r in env.ledger.reservations(env.key)] == ["unknown"]
+    assert (0, 0.08) in deadline.reads and (1, 0.0) in deadline.reads  # lu avant l'émission ET après l'entrée
 
 
 async def test_a_backoff_that_would_cross_the_deadline_emits_no_further_call(env):
+    """429 réellement émise et libérée ; le backoff dépasserait l'échéance ⇒ le DEUXIÈME appel n'est pas émis."""
     client = FakeClient([_status_error(429), _response()])
-    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=50)
+    # Avant la première émission : 5 s restantes (aucun refus possible avant l'appel). Après la 429 : 0,1 s restante,
+    # moins que tout backoff (0,25 à 0,5 s avec backoff_base=0,5 et gigue) ⇒ seul le veto de backoff peut refuser.
+    deadline = _ScriptedDeadline(lambda emitted: 5.0 if emitted == 0 else 0.1, lambda: len(client.calls))
     with pytest.raises(BudgetRefused) as refused:
         await _sample(_ctx(client, max_retries=3), env, deadline=deadline)
-    assert refused.value.code == REFUSED_DEADLINE and len(client.calls) == 1
-    assert env.ledger.snapshot(env.key).reserved_usd == 0.0  # la 429 rejetée est libérée
+
+    assert refused.value.code == REFUSED_DEADLINE
+    assert "trop proche pour retenter" in str(refused.value)  # le motif précis du veto de backoff
+    assert len(client.calls) == 1  # la première émission a bien eu lieu, la seconde est refusée
+    (first,) = env.ledger.reservations(env.key)  # AUCUNE seconde réservation n'a été prise
+    assert first.state == "released"  # la 429 rejetée est libérée
+    assert env.ledger.snapshot(env.key).reserved_usd == 0.0
+    assert not env.ledger.snapshot(env.key).blocked  # un refus de backoff n'est pas un usage inconnu
+    assert (0, 5.0) in deadline.reads and (1, 0.1) in deadline.reads  # la décision a été prise APRÈS la 429
+
+
+async def test_an_expired_deadline_before_the_first_emission_is_a_different_refusal(env):
+    """Témoin : le refus AVANT émission (0 appel) est distinct du veto de backoff (1 appel, motif différent)."""
+    client = FakeClient([_response()])
+    deadline = _ScriptedDeadline(lambda emitted: -1.0, lambda: len(client.calls))
+    with pytest.raises(BudgetRefused) as refused:
+        await _sample(_ctx(client), env, deadline=deadline)
+    assert refused.value.code == REFUSED_DEADLINE and "aucun nouvel appel n'est émis" in str(refused.value)
+    assert client.calls == [] and env.ledger.reservations(env.key) == []
 
 
 async def test_the_strict_subscription_sampler_gets_a_bounded_output_and_no_internal_retry(usd_env, tmp_path):
