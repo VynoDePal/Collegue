@@ -20,10 +20,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
 
-from collegue.executor.delivery_proof import OracleEvidence, OracleRun
+from collegue.executor.delivery_proof import OracleEvidence, OracleRun, derive_oracle_passed
 from collegue.executor.oracle import (
     STATUS_GREEN,
     STATUS_RED_ASSERTION,
@@ -358,7 +358,7 @@ def contract_evidence(
                 False,
                 "preuve négative invalide sur la préimage" + (f" : {preimage.reason}" if preimage.reason else ""),
             )
-    return OracleEvidence(
+    evidence = OracleEvidence(
         task_id=contract.task_id,
         role=contract.role,
         source_sha256=contract.source_sha256,
@@ -370,6 +370,17 @@ def contract_evidence(
         passed=ok,
         reason=reason,
     )
+    # Le verdict est DÉDUIT des faits (statuts ET compteurs) : jamais plus indulgent que la règle de la preuve.
+    # (le rôle ``current`` exige la preuve négative au niveau de la PREUVE ; ici on ne juge que la cohérence des faits avec
+    # l'attente de ce rejeu : un rejeu sans préimage fournie reste un rejeu candidat seul.)
+    derived = derive_oracle_passed(
+        replace(evidence, role="delivered") if expected_preimage == PREIMAGE_NOT_REQUIRED else evidence
+    )
+    if ok != derived:
+        evidence = replace(
+            evidence, passed=derived, reason=reason or "faits de l'oracle incohérents avec un verdict favorable"
+        )
+    return evidence
 
 
 def replay_contracts(

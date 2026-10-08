@@ -154,6 +154,119 @@ def test_ignored_and_residual_inputs_are_removed_before_the_checks(bench):
     assert content.tree_sha == _independent_tree(ws)
 
 
+def _inert_git_dir(tmp_path, name="inert") -> Path:
+    """Vrai répertoire `.git` INERTE (aucun hook, aucune config active), construit hors du workspace."""
+    scratch = tmp_path / f"scratch-{name}"
+    scratch.mkdir()
+    git(scratch, "init", "-q", "-b", "main")
+    return scratch / ".git"
+
+
+def _hidden_package(ws: Path) -> Path:
+    package = ws / "build" / "pkg"  # `build/` est ignoré par le .gitignore de la base
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 7\n")
+    return package
+
+
+@pytest.mark.parametrize("variant", ["git-dir", "gitfile", "git-symlink"])
+def test_an_ignored_package_hiding_a_nested_git_entry_is_purged_like_any_ignored_input(bench, tmp_path, variant):
+    """`git clean -fdx` (un seul -f) SAUTE un répertoire contenant un `.git` : le package restait, nourrissait les tests,
+    et n'était pas livré. Toutes les formes d'entrée Git imbriquée doivent être purgées."""
+    ws = Path(bench.ws.path)
+    package = _hidden_package(ws)
+    if variant == "git-dir":
+        import shutil
+
+        shutil.copytree(_inert_git_dir(tmp_path), package / ".git")
+    elif variant == "gitfile":
+        (package / ".git").write_text("gitdir: /nonexistent/elsewhere\n")
+    else:
+        os.symlink(_inert_git_dir(tmp_path), package / ".git")
+    (ws / "feature.py").write_text("FEATURE = 1\n")
+
+    content = seal_tested_content(bench.ws.path)
+
+    assert not (ws / "build").exists(), f"package ignoré avec .git imbriqué ({variant}) resté dans le workspace"
+    assert any("build" in name for name in content.ignored_inputs_removed)
+    assert content.tree_sha == _independent_tree(ws)
+    if variant == "git-symlink":
+        assert (tmp_path / "scratch-inert" / ".git" / "HEAD").exists()  # la cible d'un lien n'est JAMAIS touchée
+
+
+def test_plain_ignored_files_and_a_benign_self_contained_change_still_work(bench):
+    ws = Path(bench.ws.path)
+    (ws / "build").mkdir()
+    (ws / "build" / "gen.py").write_text("GENERATED = 1\n")
+    (ws / "feature.py").write_text("FEATURE = 1\n")
+    content = seal_tested_content(bench.ws.path)
+    assert not (ws / "build").exists() and (ws / "feature.py").read_text() == "FEATURE = 1\n"
+    assert content.tree_sha == _independent_tree(ws)
+
+
+def test_agent_payload_inside_the_root_git_copy_is_never_an_input_of_the_checks(bench):
+    """La copie `<workspace>/.git` est écrite par l'agent : un fichier qu'il y dépose n'est pas livré."""
+    ws = Path(bench.ws.path)
+    (ws / ".git" / "manager_payload.txt").write_text("7\n")
+    (ws / "feature.py").write_text("FEATURE = 1\n")
+    seal_tested_content(bench.ws.path)
+    assert not (ws / ".git" / "manager_payload.txt").exists()
+    assert (ws / ".git").is_dir() and not (ws / ".git").is_symlink()  # reconstruite, pas supprimée
+    assert (ws / ".git" / "HEAD").is_file()
+
+
+def test_a_root_git_replaced_by_a_link_or_a_gitfile_is_rebuilt_without_touching_the_target(bench, tmp_path):
+    ws = Path(bench.ws.path)
+    outside = tmp_path / "outside-git"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("hôte\n")
+    for replace_with in ("symlink", "gitfile"):
+        shutil_target = ws / ".git"
+        if shutil_target.is_symlink() or shutil_target.is_file():
+            shutil_target.unlink()
+        else:
+            import shutil
+
+            shutil.rmtree(shutil_target)
+        if replace_with == "symlink":
+            os.symlink(outside, shutil_target)
+        else:
+            shutil_target.write_text(f"gitdir: {outside}\n")
+        seal_tested_content(bench.ws.path)
+        assert (ws / ".git").is_dir() and not (ws / ".git").is_symlink(), replace_with
+        assert (outside / "keep.txt").read_text() == "hôte\n"
+
+
+def test_a_non_ignored_nested_repository_is_never_silently_absorbed(bench, tmp_path):
+    import shutil
+
+    ws = Path(bench.ws.path)
+    nested = ws / "vendor"
+    nested.mkdir()
+    shutil.copytree(_inert_git_dir(tmp_path, "empty"), nested / ".git")  # dépôt sans commit : non livrable
+    with pytest.raises(DeliveryProofError):
+        seal_tested_content(bench.ws.path)
+
+
+def test_residues_that_cannot_be_purged_refuse_the_seal_instead_of_certifying_a_content(bench):
+    ws = Path(bench.ws.path)
+    locked = ws / "build" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "data.py").write_text("X = 1\n")
+    locked.chmod(0o000)  # l'agent peut retirer les permissions : Git ne peut plus rien supprimer là
+    try:
+        content = None
+        try:
+            content = seal_tested_content(bench.ws.path)
+        except DeliveryProofError:
+            pass
+        # soit le résidu a été réellement purgé, soit le scellement est refusé : jamais un contenu certifié avec lui
+        assert content is None or not (ws / "build").exists()
+    finally:
+        if locked.exists():
+            locked.chmod(0o755)
+
+
 def test_sealing_is_deterministic_and_content_sha_follows_the_content(bench):
     first = seal_tested_content(bench.ws.path)
     again = seal_tested_content(bench.ws.path)
@@ -276,8 +389,141 @@ def test_improve_phase_demands_coverage_and_secret_scan_verdicts():
     )
 
 
+# --- invariants PUBLICS de la preuve (verdicts synthétiques) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("phase", [PHASE_BUILD, PHASE_IMPROVE])
+def test_a_mandatory_verdict_cannot_be_made_optional_to_tolerate_its_failure(phase):
+    for name in MANDATORY_VERDICTS[phase]:
+        verdicts = [Verdict(n, True, True) for n in MANDATORY_VERDICTS[phase] if n != name]
+        verdicts.append(Verdict(name, False, False, "échec déclaré facultatif"))
+        assert derive_passed(tuple(verdicts), (), phase, False) is False, name
+        verdicts[-1] = Verdict(name, False, True, "réussi mais facultatif")
+        assert derive_passed(tuple(verdicts), (), phase, False) is False, name  # une obligation doit être REQUISE
+
+
+def test_the_draft_forces_phase_obligations_to_be_required(bench):
+    content = seal_tested_content(bench.ws.path)
+    draft = ProofDraft(phase=PHASE_BUILD, content=content)
+    draft.add("content_integrity", True)
+    draft.add("review", True)
+    draft.add("tests", False, "rouge", required=False)  # tentative de rendre l'échec toléré
+    assert next(v for v in draft.verdicts if v.name == "tests").required is True
+    assert draft.passed is False
+
+
+def _facts(**kw):
+    return OracleRun(phase=kw.pop("phase", "candidate"), **kw)
+
+
+def _evidence(**kw):
+    base = dict(
+        task_id=1,
+        role="current",
+        source_sha256="a" * 64,
+        contract_sha256="b" * 64,
+        provenance_sha256="c" * 64,
+        expected_preimage="red-assertion",
+        preimage=_facts(phase="preimage", status="red-assertion", executed=1, failed=1, assertion_failures=1),
+        candidate=_facts(status="green", executed=1, passed=1),
+        passed=True,
+    )
+    base.update(kw)
+    return OracleEvidence(**base)
+
+
+def test_the_oracle_verdict_is_deduced_from_its_facts_not_from_its_boolean():
+    from collegue.executor.delivery_proof import derive_oracle_passed
+
+    assert derive_oracle_passed(_evidence()) is True  # témoin sain : rouge par assertion puis vert
+    adverse = {
+        "préimage en erreur de collecte, candidat tout-ignoré": dict(
+            preimage=_facts(phase="preimage", status="invalid", collection_errors=1),
+            candidate=_facts(status="invalid", executed=0, skipped=1),
+        ),
+        "candidat ignoré seulement": dict(candidate=_facts(status="invalid", executed=1, skipped=1)),
+        "candidat vert déclaré sans test exécuté": dict(candidate=_facts(status="green", executed=0, passed=0)),
+        "candidat vert déclaré mais compteurs d'échec": dict(
+            candidate=_facts(status="green", executed=2, passed=1, failed=1)
+        ),
+        "candidat vert déclaré avec xfail": dict(candidate=_facts(status="green", executed=2, passed=1, xfailed=1)),
+        "préimage verte (l'oracle ne discrimine pas)": dict(
+            preimage=_facts(phase="preimage", status="green", executed=1, passed=1)
+        ),
+        "préimage rouge hors assertion": dict(
+            preimage=_facts(
+                phase="preimage", status="red-assertion", executed=1, failed=1, assertion_failures=0, errors=1
+            )
+        ),
+        "préimage absente": dict(preimage=None),
+        "contrat courant sans preuve négative exigée": dict(expected_preimage="not-required", preimage=None),
+        "exigence inconnue": dict(expected_preimage="whatever"),
+        "candidat absent": dict(candidate=None),
+    }
+    for label, change in adverse.items():
+        assert derive_oracle_passed(_evidence(**change)) is False, label
+    delivered = _evidence(role="delivered", expected_preimage="not-required", preimage=None)
+    assert derive_oracle_passed(delivered) is True  # un contrat livré n'est pas exigé rouge
+
+
+def test_an_inconsistent_oracle_cannot_make_a_proof_pass_be_persisted_or_be_loaded(bench, state_url):
+    manager = ProjectStateManager.from_url(state_url, create=True)
+    project_id = manager.create_project(name="invariants")
+    content = seal_tested_content(bench.ws.path)
+    draft = ProofDraft(phase=PHASE_BUILD, content=content, contracts_required=True)
+    for name in MANDATORY_VERDICTS[PHASE_BUILD]:
+        draft.add(name, True)
+    draft.add("contracts", True, "l'appelant affirme que les contrats passent")
+    draft.oracles.append(
+        _evidence(
+            preimage=_facts(phase="preimage", status="invalid", collection_errors=1),
+            candidate=_facts(status="invalid", executed=0, skipped=1),
+            passed=True,
+        )
+    )
+    assert draft.passed is False
+    proof = seal_proof(
+        draft, owner=OWNER, repo=REPO, project_id=project_id, pr_number=7, head_sha="1" * 40, base_sha="2" * 40
+    )
+    assert proof.passed is False
+    with pytest.raises(DeliveryProofError, match="incohérent"):
+        persist_delivery_proof(manager, proof)  # une preuve incohérente n'entre pas dans l'état durable
+    # même écrite à la main dans le journal, la relecture la refuse
+    from collegue.executor.delivery_proof import _canonical, _record_without_id
+
+    record = _record_without_id(proof)
+    record["proof_id"] = proof.proof_id
+    manager.record_decision(
+        project_id, f"delivery-proof:v1:{OWNER}/{REPO}#7@{'1' * 40}:{proof.proof_id}", _canonical(record)
+    )
+    with pytest.raises(DeliveryProofError, match="incohérent"):
+        load_delivery_proof(manager, project_id, owner=OWNER, repo=REPO, pr_number=7, head_sha="1" * 40)
+
+
+def test_a_failed_mandatory_verdict_declared_optional_is_refused_on_reload(bench, state_url):
+    manager = ProjectStateManager.from_url(state_url, create=True)
+    project_id = manager.create_project(name="invariants-2")
+    content = seal_tested_content(bench.ws.path)
+    draft = ProofDraft(phase=PHASE_BUILD, content=content)
+    draft.add("content_integrity", True)
+    draft.add("review", True)
+    draft.verdicts.append(Verdict("tests", False, False, "rouge déclaré facultatif"))  # contourne add()
+    proof = seal_proof(
+        draft, owner=OWNER, repo=REPO, project_id=project_id, pr_number=7, head_sha="1" * 40, base_sha="2" * 40
+    )
+    assert proof.passed is False and proof.verdict("tests").passed is False
+    forged = replace(proof, passed=True)
+    forged = replace(forged, proof_id=compute_proof_id(forged))
+    with pytest.raises(DeliveryProofError):
+        persist_delivery_proof(manager, forged)
+
+
 def _oracle(task_id=1, *, passed=True):
-    run = OracleRun(phase="candidate", status="green", executed=1, passed=1)
+    """Oracle livré dont le verdict est cohérent avec ses faits (vert réel, ou ignoré donc invalide)."""
+    if passed:
+        run = OracleRun(phase="candidate", status="green", executed=1, passed=1)
+    else:
+        run = OracleRun(phase="candidate", status="invalid", reason="ignoré", executed=1, skipped=1)
     return OracleEvidence(
         task_id=task_id,
         role="delivered",

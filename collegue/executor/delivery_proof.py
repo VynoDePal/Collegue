@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -173,6 +174,8 @@ class ProofDraft:
     delivered_paths: Tuple[str, ...] = ()
 
     def add(self, name: str, passed: bool, reason: str = "", *, required: bool = True) -> None:
+        # Une obligation de phase est TOUJOURS requise : on ne peut pas la déclarer facultative pour qu'un échec soit toléré.
+        required = required or name in MANDATORY_VERDICTS.get(self.phase, ())
         # Un verdict ne se remplace jamais en silence : le dernier verdict d'un même nom fait foi, mais
         # un échec ne peut pas être effacé par un succès postérieur du même nom (fail-closed).
         for index, existing in enumerate(self.verdicts):
@@ -187,32 +190,94 @@ class ProofDraft:
         return derive_passed(tuple(self.verdicts), tuple(self.oracles), self.phase, self.contracts_required)
 
 
+def _run_is_green(run: Optional[OracleRun]) -> bool:
+    """Un candidat est vert si des tests ont RÉELLEMENT tourné, tous réussis, sans rien d'ignoré ni d'en erreur."""
+    return (
+        run is not None
+        and run.status == "green"
+        and run.executed >= 1
+        and run.passed == run.executed
+        and run.failed == 0
+        and run.skipped == 0
+        and run.xfailed == 0
+        and run.xpassed == 0
+        and run.collection_errors == 0
+        and run.errors == 0
+    )
+
+
+def _run_is_red_by_assertion(run: Optional[OracleRun]) -> bool:
+    """Un rouge n'est une preuve négative que si TOUS les échecs sont des assertions de la phase call d'un test exécuté."""
+    return (
+        run is not None
+        and run.status == "red-assertion"
+        and run.executed >= 1
+        and run.failed >= 1
+        and run.assertion_failures == run.failed
+        and run.collection_errors == 0
+        and run.errors == 0
+        and run.skipped == 0
+        and run.xfailed == 0
+        and run.xpassed == 0
+    )
+
+
+def derive_oracle_passed(oracle: OracleEvidence) -> bool:
+    """Verdict d'un oracle DÉDUIT des faits qu'il porte (jamais du booléen ``passed`` fourni).
+
+    Candidat vert ; si la preuve négative est exigée (contrat courant) : préimage rouge par assertion. Le rôle ``current``
+    exige toujours la preuve négative ; un contrat déjà livré n'est pas exigé rouge.
+    """
+    if oracle.role == "current" and oracle.expected_preimage != "red-assertion":
+        return False
+    if oracle.expected_preimage not in ("red-assertion", "not-required"):
+        return False
+    if not _run_is_green(oracle.candidate):
+        return False
+    if oracle.expected_preimage == "red-assertion":
+        return _run_is_red_by_assertion(oracle.preimage)
+    return True
+
+
 def derive_passed(
     verdicts: Sequence[Verdict], oracles: Sequence[OracleEvidence], phase: str, contracts_required: bool
 ) -> bool:
-    """Résultat DÉRIVÉ : tous les verdicts requis passent, toutes les obligations de phase sont présentes."""
-    names = {v.name for v in verdicts}
+    """Résultat DÉRIVÉ : tous les verdicts requis passent, toutes les obligations de phase sont présentes ET requises.
+
+    Une obligation de phase déclarée ``required=False`` n'est pas satisfaite (sinon un échec serait toléré) ; les oracles
+    sont jugés d'après leurs faits (:func:`derive_oracle_passed`), pas d'après leur booléen ``passed``.
+    """
+    by_name = {v.name: v for v in verdicts}
     for mandatory in MANDATORY_VERDICTS.get(phase, ()):
-        if mandatory not in names:
+        verdict = by_name.get(mandatory)
+        if verdict is None or not verdict.required or not verdict.passed:
             return False
     if contracts_required:
-        if not oracles or "contracts" not in names:
+        contracts = by_name.get("contracts")
+        if not oracles or contracts is None or not contracts.required:
             return False
-        if not all(o.passed for o in oracles):
-            return False
+    if not all(derive_oracle_passed(o) for o in oracles):
+        return False
     return all(v.passed for v in verdicts if v.required) and bool(verdicts)
 
 
 def describe_refusal(draft: "ProofDraft") -> str:
     """Motif lisible d'une preuve incomplète/refusée : verdicts requis en échec + obligations de phase absentes."""
     failing = [v for v in draft.verdicts if v.required and not v.passed]
+    failing += [
+        v
+        for v in draft.verdicts
+        if not v.required and not v.passed and v.name in MANDATORY_VERDICTS.get(draft.phase, ())
+    ]
     present = {v.name for v in draft.verdicts}
     missing = [name for name in MANDATORY_VERDICTS.get(draft.phase, ()) if name not in present]
     if draft.contracts_required and "contracts" not in present:
         missing.append("contracts")
     parts = [f"{v.name} ({v.reason})" if v.reason else v.name for v in failing] + [f"{n} (absent)" for n in missing]
     if draft.contracts_required:
-        parts += [f"oracle tâche {o.task_id} ({o.reason or 'refusé'})" for o in draft.oracles if not o.passed]
+        parts += [
+            f"oracle tâche {o.task_id} ({o.reason or 'refusé'})" for o in draft.oracles if not derive_oracle_passed(o)
+        ]
     return "PREUVE DE LIVRAISON INCOMPLÈTE OU REFUSÉE — " + " ; ".join(parts or ["obligation requise non satisfaite"])
 
 
@@ -286,6 +351,56 @@ def manifest_sha256(rows: Sequence[Tuple[str, str, str]]) -> str:
     return digest.hexdigest()
 
 
+# Le ``.git`` racine du workspace est la copie jetable de l'agent : il n'est jamais purgé par Git (``-e``) mais RECONSTRUIT.
+_CLEAN_ARGS = ("clean", "-ffdx", "-e", "/.git")
+
+
+def _residues(repo: TrustedGit) -> Tuple[str, ...]:
+    """Chemins que ``git clean`` retirerait (non suivis ou ignorés), dépôts imbriqués et gitfiles compris (``-ff``)."""
+    listing = repo.must(*_CLEAN_ARGS[:2], "-n", *_CLEAN_ARGS[2:], what="inventaire des résidus non livrables")
+    names = tuple(
+        line[len("Would remove ") :].strip() for line in listing.splitlines() if line.startswith("Would remove ")
+    )
+    return tuple(name for name in names if name.rstrip("/") != ".git")
+
+
+def _purge_residues(repo: TrustedGit, workspace_path: str, names: Sequence[str]) -> None:
+    """Supprime les résidus : ``git clean -ff`` d'abord, puis suppression confinée de ce qui lui résiste.
+
+    ``-ff`` : sans le second ``-f``, Git IGNORE un répertoire contenant un ``.git`` (dépôt imbriqué inerte) et le laisse
+    nourrir les tests. Une entrée que Git ne sait pas retirer (répertoire sans permission posé par l'agent) est
+    supprimée sans jamais suivre de lien ni sortir du workspace ; si elle subsiste, l'appelant refuse la livraison.
+    """
+    repo.run(*_CLEAN_ARGS[:2], "-q", *_CLEAN_ARGS[2:])
+    from collegue.executor.git_boundary import _remove_entry
+
+    root = os.path.realpath(workspace_path)
+    for name in _residues(repo):
+        if not name or name.startswith(('"', "/")) or ".." in name.split("/"):
+            continue  # nom cité/absolu/traversant : jamais interprété ; il restera et fera refuser la livraison
+        target = os.path.join(root, name.rstrip("/"))
+        parent = os.path.realpath(os.path.dirname(target))
+        if parent == root or parent.startswith(root + os.sep):
+            _remove_entry(target)
+
+
+def _reset_agent_view(repo: TrustedGit, workspace_path: str) -> None:
+    """Reconstruit ``<workspace>/.git`` depuis le contrôle ; à défaut le retire. Jamais de contenu de l'agent conservé."""
+    from collegue.executor.git_boundary import _remove_entry
+
+    dest = os.path.join(workspace_path, ".git")
+    refreshed = False
+    try:
+        refreshed = bool(repo.refresh_agent_view())
+    except Exception:  # noqa: BLE001 - la vue de l'agent est jetable : on retombe sur sa suppression
+        refreshed = False
+    if refreshed and os.path.isdir(dest) and not os.path.islink(dest):
+        return
+    _remove_entry(dest)
+    if os.path.lexists(dest):
+        raise DeliveryProofError("vue Git de l'agent impossible à reconstruire ni à retirer : contenu non fiable")
+
+
 def seal_tested_content(
     workspace_path: str,
     *,
@@ -315,17 +430,20 @@ def seal_tested_content(
         removed: Tuple[str, ...] = ()
         purged = 0
         if purge_ignored:
-            listing = repo.run("clean", "-fdxn")
-            names = tuple(
-                line[len("Would remove ") :].strip()
-                for line in listing.stdout.splitlines()
-                if line.startswith("Would remove ")
-            )
-            names = tuple(name for name in names if name.rstrip("/") != ".git")
+            names = _residues(repo)
             if names:
-                repo.must("clean", "-fdxq", what="purge des résidus non livrables")
+                _purge_residues(repo, workspace_path, names)
+                leftovers = _residues(repo)
+                if leftovers:
+                    raise DeliveryProofError(
+                        "résidus non livrables impossibles à purger (ils auraient pu nourrir les tests sans être "
+                        "livrés) : " + ", ".join(leftovers[:10])
+                    )
             purged = len(names)
             removed = names[:MAX_PURGED_LISTED]
+            # La copie ``<workspace>/.git`` appartient à l'agent : tout fichier qu'il y a écrit (ou un lien qu'il y a
+            # posé) serait une entrée des tests absente de la livraison. Elle est RECONSTRUITE depuis le contrôle.
+            _reset_agent_view(repo, workspace_path)
         tree = repo.must("write-tree", what="write-tree du contenu testé").strip()
         base = repo.head()
         base_tree = repo.must("rev-parse", f"{base}^{{tree}}", what="arbre de la base").strip()
@@ -529,6 +647,7 @@ def persist_delivery_proof(manager: Any, proof: DeliveryProof) -> int:
     """Enregistre la preuve (immuable : jamais écrasée) dans le journal de décisions du projet."""
     if manager is None or not hasattr(manager, "record_decision"):
         raise DeliveryProofError("aucun manager d'état : la preuve ne peut pas être persistée")
+    _validate(proof)  # une preuve incohérente n'entre jamais dans l'état durable
     record = _record_without_id(proof)
     record["proof_id"] = proof.proof_id
     return int(manager.record_decision(proof.project_id, _decision_summary(proof), rationale=_canonical(record)))
@@ -679,6 +798,11 @@ def _validate(proof: DeliveryProof) -> None:
         for label in ("source_sha256", "contract_sha256", "provenance_sha256"):
             if not _SHA256_RE.fullmatch(getattr(oracle, label)):
                 raise _bad(f"empreinte d'oracle invalide ({label})")
+        if bool(oracle.passed) != derive_oracle_passed(oracle):
+            raise _bad(
+                f"verdict de l'oracle de la tâche {oracle.task_id} incohérent avec ses faits "
+                "(statuts, compteurs, preuve négative)"
+            )
 
 
 def load_delivery_proof(

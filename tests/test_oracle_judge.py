@@ -288,6 +288,63 @@ def test_the_oracle_sees_the_project_through_cwd_and_the_workspace_on_sys_path(t
     assert red.status == STATUS_RED_ASSERTION and red.assertion_failures == 1
 
 
+# --- complétude : une limite de capacité ne produit jamais un vert ni un rouge partiel ------------------------------
+
+
+PARAMETRIZED_LAST_FAILS = (
+    "import pytest\n"
+    "@pytest.mark.parametrize('i', range(1800))\n"
+    "def test_contract(i):\n"
+    "    assert i != 1799, 'dernier cas'\n"
+)
+
+
+def test_1800_parametrized_tests_where_only_the_last_fails_are_never_reported_green(tmp_path):
+    """pytest dit « 1 failed, 1799 passed » : un rapport plafonné à 5000 événements voyait 1667 appels, tous verts."""
+    run, report, result, _ws = judge(tmp_path, PARAMETRIZED_LAST_FAILS, timeout=120.0)
+    assert result.exit_code == 1  # le process lui-même est rouge
+    assert run.status != STATUS_GREEN
+    assert run.status == STATUS_RED_ASSERTION and run.executed == 1800 and run.assertion_failures == 1
+
+
+def test_1800_parametrized_tests_all_passing_is_green_with_complete_events(tmp_path):
+    source = PARAMETRIZED_LAST_FAILS.replace("i != 1799", "i >= 0")
+    run, report, result, _ws = judge(tmp_path, source, timeout=120.0)
+    assert result.exit_code == 0 and run.status == STATUS_GREEN and run.executed == run.passed == 1800
+    assert report["collected"]["task-1"] == 1800
+
+
+def test_a_report_capacity_limit_makes_the_proof_unavailable_not_green(tmp_path, monkeypatch):
+    """Quand la limite est atteinte (ici abaissée), les événements manquent : invalide, quel que soit le verdict de pytest."""
+    import collegue.executor.oracle as oracle
+
+    monkeypatch.setattr(oracle, "MAX_REPORT_ITEMS", 90)  # 30 tests ≈ 90 événements (setup/call/teardown)
+    source_green = "import pytest\n@pytest.mark.parametrize('i', range(40))\ndef test_c(i):\n    assert i >= 0\n"
+    source_last_fails = source_green.replace("i >= 0", "i != 39")
+    for name, source in (("green", source_green), ("last-fails", source_last_fails)):
+        (tmp_path / name).mkdir()
+        run, _report, result, _ws = judge(tmp_path / name, source)
+        assert run.status == STATUS_INVALID and "événements incomplets" in run.reason, (name, run)
+    assert result.exit_code == 1  # pytest, lui, voyait bien l'échec : le rapport tronqué ne peut pas le masquer
+
+
+def test_oracles_sharing_the_report_capacity_are_each_judged_on_complete_events(tmp_path, monkeypatch):
+    import collegue.executor.oracle as oracle
+
+    monkeypatch.setattr(oracle, "MAX_REPORT_ITEMS", 100)
+    small = "def test_a():\n    assert True\n"  # 3 événements
+    big = (
+        "import pytest\n@pytest.mark.parametrize('i', range(40))\ndef test_b(i):\n    assert i >= 0\n"  # 120 événements
+    )
+    report, _result, _ws = run_oracles(tmp_path, [("task-1", small), ("task-2", big), ("task-3", small)])
+    statuses = {
+        label: judge_oracle_run(report, label, phase="candidate").status for label in ("task-1", "task-2", "task-3")
+    }
+    assert statuses["task-1"] == STATUS_GREEN  # tenu dans la capacité avant le dépassement
+    assert statuses["task-2"] == STATUS_INVALID  # événements tronqués
+    assert statuses["task-3"] == STATUS_INVALID  # la capacité est PARTAGÉE : plus aucun événement pour lui
+
+
 # --- protocole du rapport -------------------------------------------------------------------------------------
 
 

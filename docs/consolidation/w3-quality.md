@@ -25,8 +25,17 @@ du workspace) :
 | Étape | Effet |
 |---|---|
 | `git add -A` | l'index de contrôle représente exactement ce que Git publierait (`.gitignore` respecté) |
-| `git clean -fdx` | **purge** de tout ce qui n'est pas dans cet arbre : fichiers ignorés ou résiduels. Un module « ignoré mais nécessaire » fait échouer les tests au lieu de les faire réussir. Les sorties régénérables (caches, `node_modules`) sont reconstruites par le gate lui-même |
+| `git clean -ffdx -e /.git` | **purge** de tout ce qui n'est pas dans cet arbre : fichiers ignorés ou résiduels. Un module « ignoré mais nécessaire » fait échouer les tests au lieu de les faire réussir. Les sorties régénérables (caches, `node_modules`) sont reconstruites par le gate lui-même |
 | `write-tree` | `tree_sha` : arbre COMPLET (modes, suppressions, fichiers de base inclus) ; `content_sha256` = empreinte du manifeste `ls-tree` |
+
+**Entrées Git non livrables.** `-ff` (deux fois `-f`) est indispensable : avec un seul `-f`, Git SAUTE tout répertoire qui
+contient un `.git` (dépôt imbriqué inerte, gitfile, lien) et un package ignoré ainsi « protégé » nourrissait les tests sans être
+livré. La purge est vérifiée (un second inventaire doit être vide, sinon `DeliveryProofError`), complétée par une suppression
+confinée pour ce que Git ne sait pas retirer (répertoire sans permission), et ne suit jamais un lien. Le `.git` RACINE du workspace
+est la copie jetable de l'agent : aucune de ses données n'est une autorité ; il est **reconstruit depuis le contrôle** après chaque
+scellement (ou retiré s'il ne peut l'être) — un fichier déposé dans `.git/` ou un `.git` remplacé par un lien/gitfile ne peut donc
+pas servir d'entrée aux tests. Un dépôt imbriqué NON ignoré est soit un gitlink (`160000`, refusé par `assert_representable`),
+soit un échec explicite du scellement (dépôt sans commit).
 
 Après les contrôles, `verify_tested_content` relit l'index (`update-index --really-refresh` puis `diff-files`) : tout
 fichier SUIVI (base comprise, pas seulement le diff) dont le contenu, le mode ou le type a changé pendant le gate invalide la
@@ -65,6 +74,12 @@ persistée, B la refuse (`no_proof`).
 `head_sha`, `base_sha`, `base_tree_sha`, `tree_sha`, `phase` (`build`/`improve`), `passed`, `verdicts`, `oracles`,
 `contracts_required`, `content_sha256`, `delivered_paths`, `ignored_inputs_removed`, `created_at`.
 
+Invariants publics (construction, persistance ET relecture) : une obligation de phase doit être présente ET **requise** (un
+verdict obligatoire déclaré `required=False` ne la satisfait pas, `ProofDraft.add` force `required=True`) ; le verdict de chaque
+oracle est **déduit de ses faits** (`derive_oracle_passed` : candidat vert avec ≥ 1 test exécuté, tous réussis, rien d'ignoré ni en
+erreur ; contrat courant : préimage rouge par assertion avec `échecs == assertions`, sans erreur de collecte) et jamais de son
+booléen `passed` ; `persist_delivery_proof` et `load_delivery_proof` refusent toute preuve dont l'un de ces invariants est faux.
+
 `passed` est **dérivé** (`derive_passed`) : tous les verdicts requis passent ET toutes les obligations de phase sont
 présentes (BUILD : `content_integrity`, `tests`, `review` ; IMPROVE : + `coverage`, `secret_scan`) ET, si des contrats sont
 exigés, `contracts` est présent avec des oracles tous verts. `load_delivery_proof(manager, project_id, *, owner, repo,
@@ -89,6 +104,10 @@ fiable, jamais « le dernier gagne »), le code de sortie RÉEL du process doit 
 tronquée par le sandbox (la sortie est bornée à 10 Mio, tête conservée ; `--show-capture=no` borne le bruit) ou un délai ne
 prouvent rien, et chaque test collecté doit avoir un cycle de vie complet (`setup`/`call`/`teardown`) — un nombre de tests
 collectés différent du nombre de tests avec événements (session interrompue, rapport borné) est invalide.
+
+**Capacité** : le rapport garde au plus `MAX_REPORT_ITEMS` événements (15 000, partagés par TOUS les oracles d'un même run). Au-delà,
+les événements manquent et chaque oracle concerné est `invalid` (« événements incomplets ») — jamais vert ni rouge partiel, même
+quand pytest voit l'échec (1800 tests dont seul le dernier échoue : rouge exact ; limite abaissée : `invalid`).
 
 **Preuve négative** (contrat COURANT uniquement) : le MÊME oracle (même SHA-256) exécuté sur la préimage (clone neuf à la
 base testée, jamais le workspace de l'agent) doit être `red-assertion`, puis `green` sur le candidat. Les contrats déjà

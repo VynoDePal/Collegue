@@ -7,8 +7,10 @@ bénin qui aboutit par le même chemin et du motif précis du refus (jamais un `
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,13 @@ from github_fakes import FakeRemote, git, make_source_repo
 from oracle_sandbox import LocalOracleSandbox
 
 from collegue.executor import AgentResult, FakeReviewer, IssueSpec, execute_issue
-from collegue.executor.delivery_proof import load_delivery_proof
+from collegue.executor.delivery_proof import (
+    DeliveryProofError,
+    Verdict,
+    compute_proof_id,
+    load_delivery_proof,
+    persist_delivery_proof,
+)
 from collegue.executor.quality_gate import ReviewFindingLite, StoredAcceptanceChecker
 from collegue.planner import generate_acceptance_tests
 from collegue.planner.plan_review import approve_plan
@@ -69,7 +77,7 @@ def world(tmp_path):
     source = make_source_repo(
         tmp_path / "source",
         {"base.py": "BASE = 'original'\n", "existing.txt": "original\n"},
-        gitignore="hidden_contract.py\n",
+        gitignore="hidden_contract.py\nhidden_pkg/\n",
     )
     manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}", create=True)
     project_id = manager.create_project(name="demo")
@@ -112,7 +120,7 @@ async def test_benign_delivery_publishes_the_tested_tree_and_persists_a_loadable
     assert remote.files_at(head) == {
         "feature.py": "FEATURE = True\n",
         "existing.txt": "modifié\n",
-        ".gitignore": "hidden_contract.py\n",
+        ".gitignore": "hidden_contract.py\nhidden_pkg/\n",
     }
     # arbre publié == arbre testé, calculé par git côté distant (pas par le code de production)
     assert remote.tree_of(remote.branch_sha(head)) == outcome.tested_content.tree_sha == proof.tree_sha
@@ -145,6 +153,39 @@ async def test_rerun_on_the_same_head_reuses_the_immutable_proof(world):
     assert second.pr.skipped is True and second.pr.number == first.pr.number
     assert second.proof.proof_id == first.proof.proof_id  # pas de seconde vérité
     assert len(world.manager.get_decision_journal(world.project_id, "delivery-proof:v1:")) == 1
+
+
+async def test_identical_rerun_with_a_new_manager_instance_is_idempotent_and_a_real_conflict_is_refused(world):
+    agent = Writes({"feature.py": "FEATURE = True\n"})
+    first = await deliver(world, agent)
+    url = f"sqlite:///{world.tmp / 'state.db'}"
+    world.manager = ProjectStateManager.from_url(url, create=False)  # reprise après redémarrage
+    second = await deliver(world, agent)
+    assert first.success and second.success, second.error
+    assert second.proof.proof_id == first.proof.proof_id
+    third_instance = ProjectStateManager.from_url(url, create=False)
+    loaded = load_delivery_proof(
+        third_instance, world.project_id, owner=OWNER, repo=REPO, pr_number=first.pr.number, head_sha=first.pr.head_sha
+    )
+    assert loaded == first.proof
+    assert len(third_instance.get_decision_journal(world.project_id, "delivery-proof:v1:")) == 1
+
+    # VRAI conflit : une autre preuve valide, de contenu différent, existe déjà pour la même tête ⇒ refus, pas d'écrasement
+    other = replace(first.proof, verdicts=first.proof.verdicts + (Verdict("extra", False, True, "autre vérité"),))
+    other = replace(other, proof_id=compute_proof_id(other))
+    persist_delivery_proof(world.manager, other)
+    refused = await deliver(world, agent)
+    assert not refused.success and refused.proof is None
+    assert "preuve" in refused.error
+    with pytest.raises(DeliveryProofError, match="distinctes"):
+        load_delivery_proof(
+            world.manager,
+            world.project_id,
+            owner=OWNER,
+            repo=REPO,
+            pr_number=first.pr.number,
+            head_sha=first.pr.head_sha,
+        )
 
 
 # --- format non représentable : refus explicite AVANT toute écriture --------------------------------------------------
@@ -237,6 +278,67 @@ async def test_an_ignored_module_needed_by_the_tests_cannot_make_them_pass(world
     assert not outcome.success and outcome.stage == "gate" and outcome.proof is None
     assert "hidden_contract" in outcome.quality_report.test_output
     assert world.remote.calls == []
+
+
+class _PayloadAgent(Writes):
+    """Écrit un module/une donnée dans une entrée Git NON livrable, lue ensuite par le code métier."""
+
+    def __init__(self, mode):
+        super().__init__({})
+        self.mode = mode
+
+    def implement_issue(self, workspace, issue):
+        root = Path(workspace)
+        if self.mode == "nested-ignored-repo":
+            package = root / "hidden_pkg"
+            package.mkdir()
+            (package / "__init__.py").write_text("VALUE = 42\n")
+            scratch = root.parent / "inert-source"
+            scratch.mkdir()
+            git(scratch, "init", "-q", "-b", "main")
+            shutil.copytree(scratch / ".git", package / ".git")  # vrai `.git` inerte dans le package ignoré
+            (root / "feature.py").write_text("from hidden_pkg import VALUE\nFEATURE = VALUE\n")
+        elif self.mode == "ignored-plain":
+            (root / "hidden_pkg").mkdir()
+            (root / "hidden_pkg" / "__init__.py").write_text("VALUE = 42\n")
+            (root / "feature.py").write_text("from hidden_pkg import VALUE\nFEATURE = VALUE\n")
+        elif self.mode == "root-git-payload":
+            (root / ".git" / "manager_payload.txt").write_text("42\n")
+            (root / "feature.py").write_text(
+                "from pathlib import Path\n"
+                "FEATURE = int((Path(__file__).parent / '.git' / 'manager_payload.txt').read_text())\n"
+            )
+        else:  # témoin autonome
+            (root / "feature.py").write_text("FEATURE = 42\n")
+        return AgentResult(success=True)
+
+
+@pytest.mark.parametrize("mode", ["nested-ignored-repo", "ignored-plain", "root-git-payload"])
+async def test_inputs_hidden_in_git_metadata_or_ignored_packages_cannot_make_the_checks_pass(world, mode):
+    """Famille « contenu non livré servant aux tests » : le gate exécute le vrai code métier ; l'entrée est purgée
+    (package ignoré, dépôt imbriqué) ou reconstruite (copie `.git` de l'agent) AVANT les contrôles."""
+    sandbox = ImportSandbox()
+    outcome = await deliver(world, _PayloadAgent(mode), sandbox=sandbox)
+    assert sandbox.runs and sandbox.runs[0] != 0, "les tests ont réussi grâce à une entrée non livrée"
+    assert not outcome.success and outcome.proof is None and outcome.stage == "gate"
+    assert world.remote.calls == [] and world.manager.get_decision_journal(world.project_id, "delivery-proof") == []
+
+
+async def test_the_self_contained_witness_still_succeeds_and_rebuilds_from_the_published_tree(world):
+    sandbox = ImportSandbox()
+    outcome = await deliver(world, _PayloadAgent("self-contained"), sandbox=sandbox)
+    assert outcome.success, outcome.error
+    assert sandbox.runs == [0]
+    delivered = world.tmp / "delivered"
+    delivered.mkdir()
+    for path, text in world.remote.files_at(outcome.pr.head).items():
+        (delivered / path).write_text(text)
+    rebuilt = subprocess.run(
+        [sys.executable, "-B", "-c", "from feature import FEATURE; assert FEATURE == 42"],
+        cwd=delivered,
+        capture_output=True,
+    )
+    assert rebuilt.returncode == 0  # reconstruction depuis l'arbre PUBLIÉ : même résultat que dans le workspace
 
 
 # --- revue bloquante ---------------------------------------------------------------------------------------------------

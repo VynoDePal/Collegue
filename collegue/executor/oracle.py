@@ -29,7 +29,7 @@ from collegue.executor.delivery_proof import OracleRun
 
 ORACLE_MARKER = "@@COLLEGUE-ORACLE-REPORT"
 ORACLE_END = "@@END@@"
-MAX_REPORT_ITEMS = 5000
+MAX_REPORT_ITEMS = 15000  # événements (setup/call/teardown) partagés par TOUS les oracles d'un run ; au-delà : invalide
 
 STATUS_GREEN = "green"
 STATUS_RED_ASSERTION = "red-assertion"
