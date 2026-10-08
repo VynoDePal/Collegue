@@ -6,9 +6,15 @@ existant) et une :class:`~collegue.executor.agent.IssueSpec`, et on produit un
 dédiée** ``collegue/issue-<N>``, avec le **commit de base** mémorisé.
 
 Opération **hôte** par nature : le dépôt source vit sur l'hôte (pas dans un
-sandbox), donc le clone/branche se fait en local. C'est de la plomberie git sur
-un dépôt de confiance/fixture ; l'exécution de code non fiable (l'agent, les
-tests) viendra plus tard et passera, elle, par le :class:`DockerSandbox`.
+sandbox), donc le clone/branche se fait en local. L'exécution de code non fiable
+(l'agent, les tests) passe, elle, par le :class:`DockerSandbox`.
+
+**Frontière Git (vague 1).** Le workspace monté dans le sandbox est écrit par du
+code non fiable : son ``.git`` n'est JAMAIS une source de confiance. Les
+métadonnées de contrôle (config, hooks, refs, index, ``HEAD`` = base de
+livraison) vivent dans ``<workspace>.control``, hors de tout montage ; le
+``.git`` du workspace n'est qu'une copie jetable pour l'agent. Toute opération
+git hôte sur un workspace passe par :mod:`collegue.executor.git_boundary`.
 """
 
 from __future__ import annotations
@@ -23,6 +29,14 @@ from typing import Optional
 
 from collegue.executor.agent import IssueSpec
 from collegue.executor.command import LocalCommandRunner
+from collegue.executor.git_boundary import (
+    TrustedGit,
+    WorkspaceError,
+    control_dir_for,
+    create_managed_workspace,
+    require_trusted_checkout,
+)
+from collegue.sandbox.executor import GIT_CONTROL_MARKER
 
 BRANCH_PREFIX = "collegue/issue-"
 
@@ -36,10 +50,6 @@ class Workspace:
     path: str  # racine du clone (à monter dans le sandbox pour l'exécution)
     branch: str  # branche dédiée à l'issue
     base_commit: str  # SHA du commit de base (avant le travail de l'agent)
-
-
-class WorkspaceError(RuntimeError):
-    """Échec de préparation du workspace (source invalide, git en erreur…)."""
 
 
 def branch_for_issue(number: int) -> str:
@@ -62,7 +72,18 @@ def resync_repository_base(
     rester fail-closed (notamment avant la Phase 4).
 
     ``runner`` est injectable pour tester l'ordre merge → resync → amélioration.
+
+    ``repo_source`` est le checkout de l'OPÉRATEUR : il n'est jamais monté dans un
+    sandbox (les workspaces de tâche en sont des clones), donc sa config reste la
+    sienne (credentials, LFS…) et le runner local par défaut est légitime. Un workspace
+    géré ou un répertoire de contrôle, eux, sont refusés (``False``, fail-closed) : ce
+    runner sans isolation ne doit jamais opérer sur un dépôt écrit par du code non fiable.
     """
+    try:
+        require_trusted_checkout(repo_source, role="repo_source")
+    except WorkspaceError as exc:
+        logger.error("resync refusé : %s", exc)
+        return False
     command_runner = runner or LocalCommandRunner()
     fetched = command_runner.run_command(["git", "fetch", "origin", base], repo_source)
     if not getattr(fetched, "ok", False):
@@ -80,6 +101,11 @@ def prepare_workspace(
 ) -> Workspace:
     """Clone ``repo_source`` dans un workspace dédié sur une branche par issue.
 
+    Le workspace est un **workspace géré** : ses métadonnées Git de contrôle
+    (config, hooks, refs, index, ``HEAD`` = ``base_commit``) sont créées dans
+    ``<workspace>.control``, hors de tout montage ; ``<workspace>/.git`` n'est
+    qu'une copie jetable pour l'agent (cf. :mod:`collegue.executor.git_boundary`).
+
     Args:
         repo_source: chemin d'un dépôt git existant (working tree avec ``.git``).
         issue: l'issue à traiter (son numéro nomme la branche).
@@ -95,28 +121,85 @@ def prepare_workspace(
     source = os.path.realpath(os.path.abspath(repo_source))
     if not os.path.isdir(os.path.join(source, ".git")):
         raise WorkspaceError(f"repo_source n'est pas un dépôt git: {repo_source}")
+    # Jamais cloner un workspace d'une tentative précédente (écrit par l'agent/les tests).
+    require_trusted_checkout(source, role="repo_source")
 
+    owns_parent = dest_root is None
     parent = dest_root or tempfile.mkdtemp(prefix="collegue-exec-")
     os.makedirs(parent, exist_ok=True)
     dest = os.path.join(parent, "workspace")
-
-    runner = LocalCommandRunner()
-
-    clone = runner.run_command([git_bin, "clone", "--quiet", source, dest], parent)
-    if not clone.ok:
-        raise WorkspaceError(f"git clone a échoué: {clone.stderr.strip() or clone.stdout.strip()}")
-
-    head = runner.run_command([git_bin, "rev-parse", "HEAD"], dest)
-    if not head.ok or not head.stdout.strip():
-        raise WorkspaceError(f"impossible de lire le commit de base: {head.stderr.strip()}")
-    base_commit = head.stdout.strip()
+    control = control_dir_for(dest)
+    preexisting = (os.path.lexists(dest), os.path.lexists(control))
 
     branch = branch_for_issue(issue.number)
-    checkout = runner.run_command([git_bin, "checkout", "-q", "-b", branch], dest)
-    if not checkout.ok:
-        raise WorkspaceError(f"git checkout -b {branch} a échoué: {checkout.stderr.strip()}")
+    try:
+        dest, base_commit = create_managed_workspace(source, parent=parent, branch=branch, git_bin=git_bin)
+    except BaseException:
+        # Un échec ne laisse ni workspace à moitié créé ni répertoire de contrôle orphelin.
+        if owns_parent:
+            shutil.rmtree(parent, ignore_errors=True)
+        else:
+            if not preexisting[0]:
+                shutil.rmtree(dest, ignore_errors=True)
+            if not preexisting[1]:
+                shutil.rmtree(control, ignore_errors=True)
+        raise
 
     return Workspace(path=dest, branch=branch, base_commit=base_commit)
+
+
+def managed_repo(workspace: Workspace | str, *, git_bin: str = "git") -> TrustedGit:
+    """:class:`TrustedGit` d'un workspace géré — **fail-closed** s'il n'en est pas un.
+
+    Un workspace sans répertoire de contrôle (dossier quelconque, ``Workspace``
+    construit à la main) n'est pas une source fiable de hooks/config/base HEAD :
+    on ne retombe JAMAIS silencieusement sur son ``.git``.
+    """
+    path = getattr(workspace, "path", workspace)
+    repo = TrustedGit.locate(path, git_bin=git_bin)
+    if repo is None:
+        raise WorkspaceError(
+            f"workspace non géré (aucun répertoire de contrôle Git) : {path} — opération git hôte refusée (fail-closed)"
+        )
+    return repo
+
+
+def trusted_base(workspace: Workspace | str, *, git_bin: str = "git") -> str:
+    """SHA de la base de livraison FIABLE courante (``HEAD`` du contrôle).
+
+    ``Workspace.base_commit`` est la base au moment du clone ; après un
+    :func:`advance_base` (compounding) c'est cette fonction qui fait foi.
+    """
+    return managed_repo(workspace, git_bin=git_bin).head()
+
+
+def refresh_agent_view(workspace: Workspace | str, *, git_bin: str = "git") -> bool:
+    """Régénère la copie jetable ``<workspace>/.git`` depuis le contrôle (best-effort).
+
+    À appeler UNE fois après une cascade de :func:`apply_seed_diff`/:func:`advance_base`
+    passés en ``refresh_view=False`` (avant que l'agent ne tourne : l'hôte n'écrit
+    jamais dans le workspace après l'exécution du code non fiable).
+    """
+    return managed_repo(workspace, git_bin=git_bin).refresh_agent_view()
+
+
+def advance_base(
+    workspace: Workspace | str,
+    message: str,
+    *,
+    git_bin: str = "git",
+    email: str = "collegue-bot@users.noreply.github.com",
+    name: str = "Collègue Bot",
+    refresh_view: bool = True,
+) -> bool:
+    """Commite l'état courant dans le contrôle : il devient la nouvelle base fiable.
+
+    Utilisé par le compounding (#545) pour que ``capture_diff`` ne renvoie que les
+    changements du round courant. ``False`` si rien n'a pu être commité.
+    """
+    return managed_repo(workspace, git_bin=git_bin).commit_all(
+        message, email=email, name=name, refresh_view=refresh_view
+    )
 
 
 def cleanup_workspace(workspace_or_path) -> None:
@@ -152,6 +235,12 @@ def cleanup_workspace(workspace_or_path) -> None:
             return
         target = path
     shutil.rmtree(target, ignore_errors=True)
+    if target == path:
+        # ``dest_root`` fourni par l'appelant : le répertoire de contrôle frère n'est
+        # pas sous ``target`` — on ne le supprime que s'il porte NOTRE marqueur.
+        control = control_dir_for(path)
+        if not os.path.islink(control) and os.path.isfile(os.path.join(control, GIT_CONTROL_MARKER)):
+            shutil.rmtree(control, ignore_errors=True)
 
 
 def sweep_stale_temp_clones(
@@ -191,7 +280,7 @@ def sweep_stale_temp_clones(
     return removed
 
 
-def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") -> bool:
+def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git", refresh_view: bool = True) -> bool:
     """Ré-applique le diff d'une tentative précédente sur un clone neuf (#436).
 
     **Best-effort** : un diff qui ne s'applique plus (conflit réel, diff
@@ -206,27 +295,12 @@ def apply_seed_diff(workspace: Workspace, diff: str, *, git_bin: str = "git") ->
     avait bougé (« base déplacée », ×13 sur le run FacNor v4). Le clone étant
     complet, les blobs de base sont présents ; s'ils manquent, git retombe de
     lui-même sur l'application directe.
+
+    Passe par la frontière Git (:func:`managed_repo`) : le patch — dérivé du
+    travail d'un agent — est appliqué avec le ``GIT_DIR`` de contrôle, jamais avec
+    le ``.git`` du workspace. Un workspace non géré lève :class:`WorkspaceError`
+    (fail-closed, pas de repli silencieux).
     """
     if not (diff or "").strip():
         return False
-    runner = LocalCommandRunner()
-    fd, patch_path = tempfile.mkstemp(prefix="collegue-seed-", suffix=".diff")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(diff if diff.endswith("\n") else diff + "\n")
-        result = runner.run_command([git_bin, "apply", "-3", "--whitespace=nowarn", patch_path], workspace.path)
-        if not result.ok:
-            logger.warning(
-                "seed_diff inapplicable sur %s (conflit réel avec le main avancé ?)"
-                " — la tentative repart du clone vierge : %s",
-                workspace.path,
-                (result.stderr or result.stdout or "").strip()[:300],
-            )
-            # #479 : l'apply simple était atomique, pas le 3-way — un conflit
-            # laisse des marqueurs <<<<<<< et des ajouts indexés dans l'arbre.
-            # On restaure le clone vierge promis par le fallback (#436).
-            runner.run_command([git_bin, "reset", "--hard", "--quiet"], workspace.path)
-            runner.run_command([git_bin, "clean", "-fdq"], workspace.path)
-        return bool(result.ok)
-    finally:
-        os.unlink(patch_path)
+    return managed_repo(workspace, git_bin=git_bin).apply_seed(diff, refresh_view=refresh_view)

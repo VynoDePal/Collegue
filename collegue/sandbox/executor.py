@@ -48,6 +48,15 @@ SANDBOX_PIP_CACHE_MOUNT = "/tmp/.pip_cache"
 # le fail-loud si HOME pointe sous /tmp (cf. _build_run_argv).
 SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
 
+# Marqueur posé dans le répertoire de contrôle Git d'un workspace (frontière Git,
+# ``collegue.executor.git_boundary``). Ce répertoire — hooks/config/refs/index,
+# référence de base HEAD — est l'AUTORITÉ des opérations Git hôte ; il ne doit
+# JAMAIS être monté dans un conteneur (l'agent et les tests y écriraient). Le
+# sandbox refuse donc tout montage qui l'inclut (cf. _validate_workspace).
+GIT_CONTROL_MARKER = ".collegue-git-control"
+# Le répertoire de contrôle d'un workspace ``/x/workspace`` est ``/x/workspace.control``.
+GIT_CONTROL_SUFFIX = ".control"
+
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
 
@@ -58,6 +67,45 @@ TIMEOUT_NOTE = "[sandbox] délai dépassé après"
 
 class SandboxUnavailable(RuntimeError):
     """Docker indisponible, ou refus de s'exécuter (ex. en root)."""
+
+
+def git_control_reason(path: str) -> Optional[str]:
+    """Raison pour laquelle ``path`` n'est PAS un checkout de confiance, ``None`` sinon.
+
+    Un workspace géré (répertoire de contrôle frère) a pu être monté en RW et exécuté :
+    il est écrit par du code non fiable ; un répertoire de contrôle est l'autorité de la
+    frontière Git. Ni l'un ni l'autre ne doit servir de source de clone ni recevoir de
+    commande git hôte hors de la frontière (``collegue.executor.git_boundary``).
+    Pure : deux ``lexists``, aucune lecture git.
+    """
+    workspace = os.path.abspath(os.fspath(path))
+    if os.path.lexists(os.path.join(workspace, GIT_CONTROL_MARKER)):
+        return "répertoire de contrôle Git (autorité de la frontière, jamais une source ni un cwd)"
+    if os.path.lexists(os.path.join(workspace + GIT_CONTROL_SUFFIX, GIT_CONTROL_MARKER)):
+        return "workspace géré : écrit par du code non fiable, git hôte réservé à la frontière"
+    return None
+
+
+def _git_control_within(path: str) -> Optional[str]:
+    """Chemin d'un répertoire de contrôle Git contenu dans ``path`` (ou ``path`` lui-même).
+
+    Fail-closed : ``path`` est refusé s'il porte le marqueur de contrôle, ou si
+    l'un de ses enfants DIRECTS le porte (cas d'un montage du parent
+    ``collegue-exec-*`` qui contiendrait ``workspace`` ET son répertoire de
+    contrôle). Un dépôt de travail ordinaire n'est pas concerné.
+    """
+    if os.path.lexists(os.path.join(path, GIT_CONTROL_MARKER)):
+        return path
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False) and os.path.lexists(
+                    os.path.join(entry.path, GIT_CONTROL_MARKER)
+                ):
+                    return entry.path
+    except OSError:
+        return None
+    return None
 
 
 @dataclass
@@ -160,6 +208,12 @@ class DockerSandbox:
             root = os.path.realpath(os.path.abspath(self.workspace_root))
             if os.path.commonpath([ws, root]) != root:
                 raise ValueError(f"workspace hors du répertoire autorisé {root}: {ws}")
+        control = _git_control_within(ws)
+        if control is not None:
+            raise ValueError(
+                f"workspace refusé : il contient les métadonnées Git de contrôle ({control}) — "
+                "monter uniquement le répertoire de travail, jamais son parent ni le répertoire de contrôle"
+            )
         return ws
 
     def _build_run_argv(self, cmd: Union[str, List[str]], workspace: str, name: Optional[str] = None) -> List[str]:

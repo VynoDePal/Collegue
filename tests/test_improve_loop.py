@@ -397,29 +397,34 @@ def test_seed_promoted_diffs_reapplies_and_commits(git_repo):
 def test_seed_promoted_diffs_applies_two_in_cascade(git_repo):
     # Deux diffs promus successifs (diff2 capturé SUR base+diff1) réappliqués en
     # cascade sur un clone neuf → les deux fichiers présents (3-way en série).
+    #
+    # Frontière Git (vague 1) : la base avance par ``advance_base`` (commit dans le
+    # contrôle de confiance), plus par un commit dans le ``.git`` du workspace que
+    # l'agent/les tests peuvent écrire. Le « clone neuf » est un vrai second workspace.
     from collegue.executor.agent import IssueSpec
     from collegue.executor.runner import capture_diff
-    from collegue.executor.workspace import prepare_workspace
+    from collegue.executor.workspace import advance_base, prepare_workspace
     from collegue.improve.loop import _seed_promoted_diffs
 
     ws = prepare_workspace(git_repo, IssueSpec(number=3, title="t"))
     with open(os.path.join(ws.path, "a.py"), "w") as fh:
         fh.write("A = 1\n")
     diff1, _ = capture_diff(ws)
-    _git(ws.path, "-c", "user.email=t@e.x", "-c", "user.name=t", "commit", "-q", "-m", "a")
+    assert advance_base(ws, "a")
     with open(os.path.join(ws.path, "b.py"), "w") as fh:
         fh.write("B = 2\n")
-    diff2, _ = capture_diff(ws)  # capturé contre base+diff1 (b.py seul)
-    # remet à l'état vierge (clone neuf) : ni a.py ni b.py
-    _git(ws.path, "reset", "--hard", "HEAD~1")
-    _git(ws.path, "clean", "-fdq")
-    assert not os.path.exists(os.path.join(ws.path, "a.py"))
-    assert not os.path.exists(os.path.join(ws.path, "b.py"))
+    diff2, files2 = capture_diff(ws)  # capturé contre base+diff1 (b.py seul)
+    assert files2 == ("b.py",)
+    assert "a.py" not in diff2
 
-    applied = _seed_promoted_diffs(ws, [diff1, diff2])
+    fresh = prepare_workspace(git_repo, IssueSpec(number=4, title="t"))  # clone neuf : ni a.py ni b.py
+    assert not os.path.exists(os.path.join(fresh.path, "a.py"))
+    assert not os.path.exists(os.path.join(fresh.path, "b.py"))
+
+    applied = _seed_promoted_diffs(fresh, [diff1, diff2])
     assert applied == 2
-    assert os.path.exists(os.path.join(ws.path, "a.py"))
-    assert os.path.exists(os.path.join(ws.path, "b.py"))
+    assert os.path.exists(os.path.join(fresh.path, "a.py"))
+    assert os.path.exists(os.path.join(fresh.path, "b.py"))
 
 
 def test_seed_promoted_diffs_skips_inapplicable(git_repo):
@@ -618,3 +623,188 @@ async def test_forwards_configured_test_command_to_measure(git_repo, manager):
     )
     assert seen, "measure_fn jamais appelé"
     assert set(seen) == {"make check"}, f"measure() doit recevoir la commande de test configurée, reçu {seen}"
+
+
+# --- frontière hôte : noms de fichiers d'un agent et audit de dépendances ---------------------
+
+
+def _install_fake_ruff(tmp_path, monkeypatch):
+    """Faux ruff : ajoute une ligne à chaque ``*.py`` reçu (réécrit donc à travers un lien)."""
+    import collegue.improve.metrics as metrics_mod
+
+    script = tmp_path / "fake-ruff"
+    script.write_text(
+        '#!/bin/sh\nfor a in "$@"; do case "$a" in *.py) printf "# ruff-touched\\n" >> "$a";; esac; done\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(metrics_mod, "_find_ruff", lambda: str(script))
+
+
+async def test_loop_agent_symlink_never_makes_the_host_rewrite_an_outside_file(
+    git_repo, manager, tmp_path, monkeypatch
+):
+    """Comportement public de la boucle : l'agent crée ``escape.py`` → fichier hôte ; l'auto-fix (#549)
+    n'a le droit ni de le suivre ni de le réécrire, mais traite toujours le fichier légitime."""
+    from pathlib import Path
+
+    from collegue.executor import AgentResult
+
+    _install_fake_ruff(tmp_path, monkeypatch)
+    outside = tmp_path / "host-secret.py"
+    outside.write_text("import os\nSECRET=1\n")
+
+    class _SymlinkAgent:
+        def implement_issue(self, workspace, issue):
+            # appelé à chaque round (et le compounding réapplique un diff) : idempotent
+            link = os.path.join(workspace, "escape.py")
+            if not os.path.lexists(link):
+                os.symlink(outside, link)
+            Path(workspace, "feature.py").write_text("VALUE=1\n")
+            return AgentResult(success=True)
+
+    after_diffs = []
+
+    class _Probe:
+        def __init__(self):
+            self.i = 0
+
+        async def __call__(self, workspace, ctx, *, sandbox=None, reviewer=None, diff="", weights=None):
+            if diff:
+                after_diffs.append(diff)
+            self.i += 1
+            return _metrics([0.5, 0.7][min(self.i - 1, 1)])
+
+    result = await run_improvement(
+        manager.create_project(name="symlink"),
+        git_repo,
+        ctx=None,
+        agent=_SymlinkAgent(),
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        dry_run=True,
+        plateau_rounds=1,
+        measure_fn=_Probe(),
+    )
+
+    assert outside.read_text() == "import os\nSECRET=1\n"  # fichier hôte intact
+    assert len(result.promoted) == 1
+    assert "# ruff-touched" in after_diffs[0]  # le fichier légitime, lui, a bien été traité
+    assert "SECRET" not in after_diffs[0]  # et rien du contenu hôte n'entre dans le diff mesuré/livré
+
+
+def _commit_requirements(git_repo, text="click==8.1.7\n"):
+    with open(os.path.join(git_repo, "requirements.txt"), "w") as fh:
+        fh.write(text)
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-q", "-m", "requirements")
+
+
+class _CoverageAuditSandbox:
+    """Couverture 50 % → 90 % dès que ``feature.py`` existe ; réponse configurable pour pip-audit."""
+
+    def __init__(self, audit):
+        self.audit = audit
+        self.commands = []
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.commands.append(command)
+        if "pip-audit" in command:
+            return self.audit
+        cover = 90 if os.path.exists(os.path.join(workspace, "feature.py")) else 50
+        return SandboxResult(exit_code=0, stdout=f"TOTAL          10      1    {cover}%\n", stderr="")
+
+
+class _CountingAgent(FakeCodeAgent):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.calls = 0
+
+    def implement_issue(self, workspace, issue):
+        self.calls += 1
+        return super().implement_issue(workspace, issue)
+
+
+def _audit_measure():
+    import functools
+
+    from collegue.improve.metrics import measure
+
+    return functools.partial(
+        measure,
+        dep_vulns_enabled=True,
+        security_scan_fn=lambda ws: (0, 0.0),
+        quality_scan_fn=lambda ws: (0, 0, True),
+        doc_coverage_fn=lambda ws: 1.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "audit",
+    [
+        SandboxResult(exit_code=127, stdout="", stderr="sh: 1: pip-audit: not found"),
+        SandboxResult(exit_code=124, stdout="", stderr="[sandbox] délai dépassé", timed_out=True),
+        SandboxResult(exit_code=1, stdout="", stderr="ERROR: unsupported requirement"),
+    ],
+    ids=["outil-absent", "timeout", "echec"],
+)
+async def test_loop_refuses_to_improve_when_the_dep_audit_is_unavailable(git_repo, manager, audit):
+    """Audit ACTIVÉ mais indisponible : la baseline est non fiable, l'agent (coûteux) ne tourne pas et
+    rien n'est promu — l'échec de l'outil n'est jamais lu comme « 0 vulnérabilité »."""
+    _commit_requirements(git_repo)
+    agent = _CountingAgent(files={"feature.py": "VALUE = 1\n"})
+    sandbox = _CoverageAuditSandbox(audit)
+
+    result = await run_improvement(
+        manager.create_project(name="audit-off"),
+        git_repo,
+        ctx=None,
+        agent=agent,
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        sandbox=sandbox,
+        dry_run=True,
+        plateau_rounds=1,
+        measure_fn=_audit_measure(),
+    )
+
+    assert agent.calls == 0
+    assert result.promoted == [] and result.initial_score is None
+    assert result.rejected and result.rejected[0][0] == "baseline"
+    assert any("pip-audit" in c for c in sandbox.commands)  # tenté DANS le sandbox, jamais sur l'hôte
+
+
+async def test_loop_promotes_normally_when_the_dep_audit_is_valid(git_repo, manager):
+    _commit_requirements(git_repo)
+    agent = _CountingAgent(files={"feature.py": "VALUE = 1\n"})
+    sandbox = _CoverageAuditSandbox(
+        SandboxResult(
+            exit_code=0,
+            stdout='{"dependencies": [{"name": "click", "version": "8.1.7", "vulns": []}], "fixes": []}',
+            stderr="",
+        )
+    )
+
+    result = await run_improvement(
+        manager.create_project(name="audit-on"),
+        git_repo,
+        ctx=None,
+        agent=agent,
+        owner="o",
+        repo="r",
+        manager=manager,
+        budget=_Budget(),
+        clients=_clients(),
+        sandbox=sandbox,
+        dry_run=True,
+        plateau_rounds=1,
+        measure_fn=_audit_measure(),
+    )
+
+    assert agent.calls >= 1
+    assert len(result.promoted) == 1

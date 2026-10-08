@@ -529,6 +529,14 @@ async def execute_issue(
     :func:`run_quality_gate` (``test_command``, ``frontend_gate``…) — c'est le
     canal de configuration du gate par projet/runtime, sans coupler l'exécuteur
     à la config.
+
+    **Frontière Git (vague 1)** : le workspace créé ici est un workspace *géré*
+    (métadonnées Git de contrôle hors montage, cf. :mod:`collegue.executor.git_boundary`).
+    Toutes les opérations git hôte qui suivent l'exécution du code non fiable — seed,
+    capture, recapture après remédiation — passent par la frontière ; le ``.git`` du
+    workspace n'est jamais lu. ``runner`` (défaut ``None`` = production) est donc
+    REFUSÉ sur un workspace géré : il est réservé aux fixtures non gérées des tests
+    unitaires de ``run_issue``/``capture_diff``, pas à ce pipeline.
     """
     persist = not dry_run  # les transitions d'état n'ont lieu qu'en exécution réelle
     final_status: Optional[str] = None
