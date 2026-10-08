@@ -63,7 +63,7 @@ class _Branches:
 class World:
     """Source opérateur + distant nu où la livraison de T1 a été fusionnée hors moteur."""
 
-    def __init__(self, root: Path, *, synced: bool):
+    def __init__(self, root: Path, *, synced: bool, independent: bool = False):
         self.source = root / "source"
         self.source.mkdir()
         git(self.source, "init", "-q", "-b", "main")
@@ -88,11 +88,14 @@ class World:
         self.state = ProjectStateManager.from_url(self.db_url, create=True)
         self.project_id = self.state.create_project(name="resume", spec="# Deux tâches dépendantes\n")
         self.first = self.state.add_task(self.project_id, title="Dependency")
-        self.second = self.state.add_task(self.project_id, title="Consumer", depends_on=[self.first])
+        self.second = self.state.add_task(
+            self.project_id, title="Consumer", depends_on=None if independent else [self.first]
+        )
         approve_plan(self.state, self.project_id)
         self.state.update_task_status(self.first, "in_review")
         self.visits = []
         self.merge_requests = []
+        self.discovery = "ok"  # "ok" | "unavailable" (panne GitHub) | "none" (PR introuvable)
 
     def head(self):
         return git(self.source, "rev-parse", "HEAD")
@@ -103,6 +106,10 @@ class World:
 
         class Prs:
             def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+                if world.discovery == "unavailable":
+                    raise OSError("panne temporaire de l'API GitHub")
+                if world.discovery == "none":
+                    return None
                 if head == f"collegue/issue-{world.first}":
                     return SimpleNamespace(
                         number=11,
@@ -261,3 +268,111 @@ async def test_a_managed_workspace_is_never_accepted_as_the_operator_checkout(st
         max_iterations=1,
     )
     assert result.stop_reason == "repo_sync_failed" and stale.visits == []
+
+
+# ── le blocage « fusion connue, synchronisation non prouvée » survit au redémarrage ───────────────
+
+
+@pytest.fixture
+def twin(tmp_path):
+    """Deux tâches INDÉPENDANTES (aucune dépendance stricte ne protège T2) ; clone périmé."""
+    return World(tmp_path, synced=False, independent=True)
+
+
+def reopen(world):
+    """Nouveau processus : nouveau gestionnaire sur la même base."""
+    world.state = ProjectStateManager.from_url(world.db_url)
+    return world
+
+
+@pytest.mark.parametrize("discovery", ["unavailable", "none"])
+async def test_sync_barrier_survives_a_restart_even_when_github_discovery_fails_afterwards(twin, discovery):
+    first = await twin.run(sync_base_fn=lambda *_: False)
+    assert first.stop_reason == "repo_sync_failed" and twin.visits == []
+    rows = twin.state.list_task_merges(twin.project_id)
+    assert [(r.task_id, r.state, r.merge_sha, r.pr_number) for r in rows] == [
+        (twin.first, "merged_unsynced", twin.merge_sha, 11)
+    ], "le fait « fusion connue, synchronisation non prouvée » est persisté"
+
+    reopen(twin)
+    twin.discovery = discovery
+    still_broken = await twin.run(sync_base_fn=lambda *_: False)
+    assert twin.visits == [], "T2 (indépendante) ne part JAMAIS d'un clone sans le contenu livré"
+    assert still_broken.stop_reason in {"repo_sync_failed", "merge_sync_pending"}
+    assert twin.state.get_task(twin.first).status == "in_review"
+
+    reopen(twin)
+    await twin.run()  # sync réelle + verify_local_sync réel, découverte toujours en panne
+    assert twin.state.get_task(twin.first).status == "merged"
+    assert twin.state.get_task(twin.first).status == "merged" and twin.head() == twin.merge_sha
+    assert twin.visits == [{"task": twin.second, "dependency_present": True, "managed": True}]
+    assert twin.merge_requests == [], "aucune seconde fusion"
+    assert [r.state for r in twin.state.list_task_merges(twin.project_id)] == ["synced"]
+
+
+class SimulatedCrash(BaseException):
+    """Mort du processus entre la persistance de la barrière et la synchronisation."""
+
+
+async def test_crash_between_observation_and_sync_is_resumed_from_the_known_merge_sha(twin):
+    def die(src, base):
+        raise SimulatedCrash()
+
+    with pytest.raises(SimulatedCrash):
+        await twin.run(sync_base_fn=die)
+    assert twin.visits == []
+    assert [r.state for r in reopen(twin).state.list_task_merges(twin.project_id)] == ["merged_unsynced"]
+
+    twin.discovery = "unavailable"
+    await twin.run()
+    assert twin.state.get_task(twin.first).status == "merged" and twin.merge_requests == []
+    assert [v["dependency_present"] for v in twin.visits] == [True]
+
+
+@pytest.mark.parametrize("failure", ["returns_false", "raises"])
+async def test_failed_sync_is_recorded_and_retried_without_discovery(twin, failure):
+    def broken(src, base):
+        if failure == "raises":
+            raise RuntimeError("git indisponible")
+        return False
+
+    await twin.run(sync_base_fn=broken)
+    (row,) = twin.state.list_task_merges(twin.project_id)
+    assert row.state == "merged_unsynced" and row.last_error and "resynchronisation" in row.last_error
+
+    reopen(twin).discovery = "unavailable"
+    await twin.run()
+    assert twin.state.get_task(twin.first).status == "merged" and len(twin.visits) == 1
+
+
+async def test_unproved_sync_is_not_accepted_on_resume_and_keeps_the_barrier(twin):
+    """La resync « réussit » mais la fusion enregistrée n'est pas dans le clone : barrière conservée."""
+
+    await twin.run(sync_base_fn=lambda *_: False)
+    reopen(twin).discovery = "unavailable"
+    (row,) = twin.state.list_task_merges(twin.project_id)
+    result = await twin.run(sync_base_fn=lambda *_: True, merge_sync_verify_fn=_refuse_verify)
+    assert twin.visits == [] and result.stop_reason in {"repo_sync_failed", "merge_sync_pending"}
+    assert twin.state.get_task_merge(twin.first).state == "merged_unsynced" and row.merge_sha == twin.merge_sha
+
+
+def _refuse_verify(src, sha, tree):
+    raise RuntimeError("le clone local ne contient pas la fusion")
+
+
+async def test_unreadable_or_unwritable_state_stays_blocking(twin, monkeypatch):
+    """Erreur de persistance de la barrière : jamais de tâche lancée (ni marquage merged)."""
+
+    def refuse(*a, **k):
+        raise RuntimeError("base d'état indisponible")
+
+    monkeypatch.setattr(twin.state, "begin_external_task_merge", refuse)
+    result = await twin.run(sync_base_fn=lambda *_: True)
+    assert twin.visits == [] and result.stop_reason == "repo_sync_failed"
+    assert twin.state.get_task(twin.first).status == "in_review"
+
+    monkeypatch.undo()
+    monkeypatch.setattr(twin.state, "list_task_merges", refuse)
+    with pytest.raises(RuntimeError, match="indisponible"):
+        await twin.run(sync_base_fn=lambda *_: True)
+    assert twin.visits == []

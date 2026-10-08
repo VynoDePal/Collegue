@@ -689,7 +689,13 @@ async def run_project_from_settings(
                 project_id=project_id,
                 repo_source=repo_source,
                 base=base,
-                resync_fn=lambda src, br, **kw: _resync_repo_source(src, br, **kw),
+                # La barrière injectée (``sync_base_fn``) vaut aussi pour la reprise d'un cycle inachevé : même résync que
+                # le handoff, et un test/opérateur qui la remplace ne la voit jamais contournée par le défaut.
+                resync_fn=(
+                    (lambda src, br, **kw: sync_base_fn(src, br))
+                    if sync_base_fn is not None
+                    else (lambda src, br, **kw: _resync_repo_source(src, br, **kw))
+                ),
                 verify_fn=merge_sync_verify_fn,
             )
             if stuck:

@@ -179,6 +179,104 @@ def case_acknowledge_only_clears_an_attention_row_at_the_expected_revision(url, 
     assert manager.acknowledge_task_merge(task_id, expected_revision=1) is False
 
 
+def _begin_external(manager, task_id, **overrides):
+    kwargs = dict(owner="o", repo="r", base_branch="main", pr_number=11, merge_sha=MERGE)
+    kwargs.update(overrides)
+    return manager.begin_external_task_merge(task_id, **kwargs)
+
+
+def case_external_merge_barrier_is_durable_idempotent_and_carries_no_invented_proof(url, manager):
+    _, task_id = _task(manager)
+    row = _begin_external(manager, task_id)
+    assert (row.origin, row.state, row.revision, row.merge_sha, row.pr_number) == (
+        "external",
+        "merged_unsynced",
+        0,
+        MERGE,
+        11,
+    )
+    assert (row.head_sha, row.base_sha, row.tree_sha, row.proof_id, row.merge_method) == (None,) * 5
+    assert _begin_external(manager, task_id).revision == 0, "idempotent pour la même PR et le même SHA"
+    reread = ProjectStateManager.from_url(url).get_task_merge(task_id)
+    assert (reread.origin, reread.state, reread.merge_sha) == ("external", "merged_unsynced", MERGE)
+    with pytest.raises(TaskMergeConflictError):
+        _begin_external(manager, task_id, merge_sha=H2)  # autre fusion pendant que la barrière est active
+    assert manager.get_task(task_id).status == "in_review"
+
+
+def case_external_merge_settles_with_the_task_in_one_transaction_and_can_be_reopened(url, manager):
+    _, task_id = _task(manager)
+    row = _begin_external(manager, task_id)
+    row = manager.transition_task_merge(
+        task_id,
+        expected_state="merged_unsynced",
+        expected_revision=row.revision,
+        new_state="merged_unsynced",
+        last_error="resynchronisation échouée",
+    )
+    assert row.revision == 1 and row.last_error and row.origin == "external" and row.merge_sha == MERGE
+    assert manager.get_task(task_id).status == "in_review"
+    manager.transition_task_merge(
+        task_id, expected_state="merged_unsynced", expected_revision=1, new_state="synced", complete_task=True
+    )
+    assert manager.get_task(task_id).status == "merged"
+    with pytest.raises(TaskMergeConflictError):
+        _begin_external(manager, task_id)  # même fusion déjà synchronisée : rien à rouvrir
+    again = _begin_external(manager, task_id, pr_number=12, merge_sha=H2)  # tâche rejouée -> autre PR
+    assert (again.state, again.revision, again.pr_number, again.merge_sha, again.origin) == (
+        "merged_unsynced",
+        3,
+        12,
+        H2,
+        "external",
+    )
+
+
+def case_external_and_engine_cycles_exclude_each_other_while_unfinished(url, manager):
+    _, engine_task = _task(manager, "E")
+    _begin(manager, engine_task)
+    with pytest.raises(TaskMergeConflictError):
+        _begin_external(manager, engine_task)
+    _, external_task = _task(manager, "X")
+    _begin_external(manager, external_task)
+    with pytest.raises(TaskMergeConflictError):
+        _begin(manager, external_task)
+    # une ligne externe SYNCHRONISÉE peut être rouverte par le moteur : l'origine redevient « engine »
+    manager.transition_task_merge(
+        external_task, expected_state="merged_unsynced", expected_revision=0, new_state="synced", complete_task=True
+    )
+    reopened = _begin(manager, external_task, pr_number=13)
+    assert (reopened.origin, reopened.state, reopened.proof_id, reopened.merge_sha) == (
+        "engine",
+        "merge_pending",
+        PROOF,
+        None,
+    )
+
+
+def case_database_constraints_forbid_an_invented_or_missing_proof(url, manager):
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    _, task_id = _task(manager)
+    _begin_external(manager, task_id)
+    for statement in (
+        # une ligne externe ne porte AUCUNE ancre de livraison
+        "UPDATE task_merges SET proof_id = '%s' WHERE task_id = :t" % PROOF,
+        "UPDATE task_merges SET head_sha = '%s' WHERE task_id = :t" % H1,
+        # ... et ne peut pas redevenir « en attente »/sans SHA de fusion
+        "UPDATE task_merges SET merge_sha = NULL WHERE task_id = :t",
+        "UPDATE task_merges SET state = 'merge_pending' WHERE task_id = :t",
+        "UPDATE task_merges SET origin = 'engine' WHERE task_id = :t",  # ancres manquantes pour un cycle moteur
+        "UPDATE task_merges SET origin = 'autre' WHERE task_id = :t",
+    ):
+        with pytest.raises(IntegrityError):
+            with manager.session() as session:
+                session.execute(text(statement), {"t": task_id})
+    row = manager.get_task_merge(task_id)
+    assert (row.origin, row.state, row.proof_id, row.merge_sha) == ("external", "merged_unsynced", None, MERGE)
+
+
 def case_exactly_one_of_many_concurrent_processes_wins_the_compare_and_set(url, manager):
     _, task_id = _task(manager)
     _begin(manager, task_id)
@@ -269,9 +367,17 @@ def run_alembic_upgrade_0011_to_0012(url):
         assert version() == "0012" and head_revisions() == ["0012"]
         schema = inspect(engine)
         assert "task_merges" in schema.get_table_names()
-        assert {"task_id", "state", "revision", "head_sha", "base_sha", "tree_sha", "proof_id", "merge_sha"} <= {
-            c["name"] for c in schema.get_columns("task_merges")
-        }
+        assert {
+            "task_id",
+            "state",
+            "revision",
+            "origin",
+            "head_sha",
+            "base_sha",
+            "tree_sha",
+            "proof_id",
+            "merge_sha",
+        } <= {c["name"] for c in schema.get_columns("task_merges")}
         assert "ix_task_merges_project_id" in {i["name"] for i in schema.get_indexes("task_merges")}
         assert {
             "ck_task_merges_state",
@@ -281,6 +387,8 @@ def run_alembic_upgrade_0011_to_0012(url):
             "ck_task_merges_sha_lengths",
             "ck_task_merges_required_text",
             "ck_task_merges_state_merge_sha",
+            "ck_task_merges_origin",
+            "ck_task_merges_origin_anchors",
         } <= {c["name"] for c in schema.get_check_constraints("task_merges")}
         checks = {c["name"]: c["sqltext"] for c in schema.get_check_constraints("task_merges")}
         assert (
@@ -295,6 +403,14 @@ def run_alembic_upgrade_0011_to_0012(url):
         with pytest.raises(IntegrityError):
             with engine.begin() as conn:
                 conn.execute(text("UPDATE task_merges SET state = 'nope' WHERE task_id = :t"), {"t": task_id})
+        external = migrated.add_task(project_id, "fusion externe", status="in_review")  # barrière « hors moteur »
+        ext_row = migrated.begin_external_task_merge(
+            external, owner="o", repo="r", base_branch="main", pr_number=21, merge_sha=MERGE
+        )
+        assert (ext_row.origin, ext_row.state, ext_row.proof_id) == ("external", "merged_unsynced", None)
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM task_merges WHERE task_id = :t"), {"t": external})
+            conn.execute(text("DELETE FROM tasks WHERE id = :t"), {"t": external})
         extra = migrated.add_task(project_id, "éphémère", status="in_review")  # cascade : tâche supprimée -> cycle
         _begin(migrated, extra, pr_number=12)
         with migrated.session() as session:  # le gestionnaire active les FK (PRAGMA) sur SQLite

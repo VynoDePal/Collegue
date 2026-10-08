@@ -865,3 +865,28 @@ async def test_repo_sync_failed_from_an_external_merge_skips_the_final_drain_and
     assert result.stop_reason == "repo_sync_failed" and improvement == []
     assert world.server.merge_calls() == [], "aucune fusion n'est émise par le drain"
     assert world.status(1) == "in_review"
+
+
+async def test_external_merge_barrier_blocks_the_merge_bot_and_resumes_without_any_put(world, monkeypatch):
+    """Cycle ``external`` inachevé (fusion hors moteur, sync non prouvée) : la boucle du merge-bot n'émet AUCUN PUT, le
+    run s'arrête ``merge_sync_pending`` tant que la sync échoue, puis reprend (tâche ``merged``) quand elle réussit."""
+    task_id, _pr = world.add_task(1)
+    world.manager.begin_external_task_merge(
+        task_id, owner=OWNER, repo=REPO, base_branch="main", pr_number=11, merge_sha="d" * 40
+    )
+    world.sync.ok = False
+    calls = []
+    awaiting = ProjectRunResult(stop_reason="awaiting_merge", iterations=1, processed=[])
+
+    blocked = await _run(world, monkeypatch, run_calls=calls, passes=[awaiting])
+
+    assert blocked.stop_reason == cycle.STOP_SYNC_PENDING and calls == []
+    assert world.server.merge_calls() == [] and world.status(1) == "in_review"
+
+    world.restart()
+    world.sync.ok = True
+    resumed = await _run(world, monkeypatch, run_calls=calls)
+
+    assert world.cycle_row(1).state == "synced" and world.status(1) == "merged"
+    assert world.server.merge_calls() == [], "reprise sans aucune fusion"
+    assert resumed.stop_reason != cycle.STOP_SYNC_PENDING

@@ -341,6 +341,12 @@ TASK_MERGE_STATES = frozenset(
     {TASK_MERGE_PENDING, TASK_MERGE_UNSYNCED, TASK_MERGE_SYNCED, TASK_MERGE_ATTENTION, TASK_MERGE_ABANDONED}
 )
 TASK_MERGE_METHODS = frozenset({"squash", "merge"})
+# Origine du cycle : ``engine`` = fusion émise par le merge-bot (preuve de livraison, ancres complètes) ;
+# ``external`` = PR fusionnée HORS moteur (opérateur, autre outil) : seul le fait « fusion distante connue
+# (SHA), synchronisation locale non prouvée » est durable — aucune preuve de livraison n'est inventée.
+TASK_MERGE_ORIGIN_ENGINE = "engine"
+TASK_MERGE_ORIGIN_EXTERNAL = "external"
+TASK_MERGE_ORIGINS = frozenset({TASK_MERGE_ORIGIN_ENGINE, TASK_MERGE_ORIGIN_EXTERNAL})
 
 
 class TaskMerge(Base):
@@ -352,13 +358,25 @@ class TaskMerge(Base):
             "state IN ('merge_pending', 'merged_unsynced', 'synced', 'attention', 'abandoned')",
             name="ck_task_merges_state",
         ),
-        CheckConstraint("merge_method IN ('squash', 'merge')", name="ck_task_merges_merge_method"),
+        CheckConstraint(
+            "merge_method IS NULL OR merge_method IN ('squash', 'merge')", name="ck_task_merges_merge_method"
+        ),
+        CheckConstraint("origin IN ('engine', 'external')", name="ck_task_merges_origin"),
         CheckConstraint("pr_number > 0", name="ck_task_merges_pr_positive"),
         CheckConstraint("revision >= 0", name="ck_task_merges_revision_nonnegative"),
         CheckConstraint(
-            "length(head_sha) = 40 AND length(base_sha) = 40 AND length(tree_sha) = 40 "
-            "AND length(proof_id) = 64 AND (merge_sha IS NULL OR length(merge_sha) = 40)",
+            "(head_sha IS NULL OR length(head_sha) = 40) AND (base_sha IS NULL OR length(base_sha) = 40) "
+            "AND (tree_sha IS NULL OR length(tree_sha) = 40) AND (proof_id IS NULL OR length(proof_id) = 64) "
+            "AND (merge_sha IS NULL OR length(merge_sha) = 40)",
             name="ck_task_merges_sha_lengths",
+        ),
+        CheckConstraint(
+            "(origin = 'engine' AND head_sha IS NOT NULL AND base_sha IS NOT NULL AND tree_sha IS NOT NULL "
+            "AND proof_id IS NOT NULL AND merge_method IS NOT NULL) "
+            "OR (origin = 'external' AND head_sha IS NULL AND base_sha IS NULL AND tree_sha IS NULL "
+            "AND proof_id IS NULL AND merge_method IS NULL AND merge_sha IS NOT NULL "
+            "AND state IN ('merged_unsynced', 'synced', 'attention'))",
+            name="ck_task_merges_origin_anchors",
         ),
         CheckConstraint(
             "length(trim(owner)) > 0 AND length(trim(repo)) > 0 AND length(trim(base_branch)) > 0",
@@ -383,12 +401,16 @@ class TaskMerge(Base):
     repo: Mapped[str] = mapped_column(String(255), nullable=False)
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=TASK_MERGE_ORIGIN_ENGINE, server_default=TASK_MERGE_ORIGIN_ENGINE
+    )
     # Ancres vérifiées avant l'écriture : tête testée, base de confiance, tree complet, identifiant de la preuve.
-    head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
-    base_sha: Mapped[str] = mapped_column(String(40), nullable=False)
-    tree_sha: Mapped[str] = mapped_column(String(40), nullable=False)
-    proof_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    merge_method: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Toutes NULL (et seulement alors) pour ``origin='external'`` : aucune preuve de livraison n'existe.
+    head_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    base_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    tree_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    proof_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    merge_method: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     merge_sha: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

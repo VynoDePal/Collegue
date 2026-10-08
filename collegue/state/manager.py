@@ -39,6 +39,8 @@ from collegue.state.models import (
     TASK_MERGE_ABANDONED,
     TASK_MERGE_ATTENTION,
     TASK_MERGE_METHODS,
+    TASK_MERGE_ORIGIN_ENGINE,
+    TASK_MERGE_ORIGIN_EXTERNAL,
     TASK_MERGE_PENDING,
     TASK_MERGE_STATES,
     TASK_MERGE_SYNCED,
@@ -541,6 +543,7 @@ class ProjectStateManager:
                 ):
                     for key, value in payload.items():
                         setattr(existing, key, value)
+                    existing.origin = TASK_MERGE_ORIGIN_ENGINE
                     existing.state = TASK_MERGE_PENDING
                     existing.revision = existing.revision + 1
                     existing.merge_sha = None
@@ -551,7 +554,8 @@ class ProjectStateManager:
                     return existing
                 raise TaskMergeConflictError(
                     f"la tâche {task_id} a déjà un cycle de fusion ({existing.state}, PR #{existing.pr_number}, "
-                    f"tête {existing.head_sha[:12]}) — à réconcilier avant toute nouvelle fusion"
+                    f"{'tête ' + existing.head_sha[:12] if existing.head_sha else 'fusion ' + str(existing.merge_sha)[:12]}) "
+                    "— à réconcilier avant toute nouvelle fusion"
                 )
         except IntegrityError as exc:
             existing = self.get_task_merge(task_id)
@@ -559,6 +563,87 @@ class ProjectStateManager:
                 if all(getattr(existing, k) == v for k, v in payload.items()):
                     return existing
             raise TaskMergeConflictError(f"création concurrente d'un cycle de fusion pour la tâche {task_id}") from exc
+
+    def begin_external_task_merge(
+        self,
+        task_id: int,
+        *,
+        owner: str,
+        repo: str,
+        base_branch: str,
+        pr_number: int,
+        merge_sha: str,
+    ) -> TaskMerge:
+        """Persiste « PR fusionnée HORS moteur (SHA connu), synchronisation locale non prouvée » AVANT de tenter la sync.
+
+        Ligne ``origin='external'`` directement en ``merged_unsynced`` : seuls la PR et le SHA de fusion sont connus, les
+        ancres de livraison (tête/base/tree/preuve) restent NULL — aucune preuve n'est inventée. Idempotent pour la même
+        PR et le même SHA ; une ligne ``synced``/``abandoned`` antérieure est rouverte (révision incrémentée). Une
+        ligne inachevée d'une AUTRE identité (cycle moteur, autre SHA) lève :class:`TaskMergeConflictError`.
+        """
+        if not isinstance(task_id, int) or isinstance(task_id, bool) or task_id <= 0:
+            raise ValueError(f"task_id de fusion invalide: {task_id!r}")
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+            raise ValueError(f"numéro de PR de fusion invalide: {pr_number!r}")
+        payload = {
+            "owner": _phase5_text(owner, "owner", max_length=255),
+            "repo": _phase5_text(repo, "repo", max_length=255),
+            "base_branch": _phase5_text(base_branch, "branche de base", max_length=255),
+            "pr_number": pr_number,
+            "merge_sha": _phase5_sha(merge_sha, "SHA de fusion"),
+        }
+        anchors_cleared = {
+            "origin": TASK_MERGE_ORIGIN_EXTERNAL,
+            "head_sha": None,
+            "base_sha": None,
+            "tree_sha": None,
+            "proof_id": None,
+            "merge_method": None,
+            "last_error": None,
+        }
+        try:
+            with self.session() as s:
+                task = s.get(Task, task_id)
+                if task is None:
+                    raise ValueError(f"tâche de fusion introuvable: {task_id}")
+                existing = s.get(TaskMerge, task_id)
+                if existing is None:
+                    row = TaskMerge(
+                        task_id=task_id,
+                        project_id=task.project_id,
+                        state=TASK_MERGE_UNSYNCED,
+                        revision=0,
+                        **anchors_cleared,
+                        **payload,
+                    )
+                    s.add(row)
+                    s.flush()
+                    return row
+                same = existing.origin == TASK_MERGE_ORIGIN_EXTERNAL and all(
+                    getattr(existing, k) == v for k, v in payload.items()
+                )
+                if existing.state in (TASK_MERGE_ABANDONED, TASK_MERGE_SYNCED) and not (
+                    existing.state == TASK_MERGE_SYNCED and same
+                ):
+                    for key, value in {**anchors_cleared, **payload}.items():
+                        setattr(existing, key, value)
+                    existing.state = TASK_MERGE_UNSYNCED
+                    existing.revision = existing.revision + 1
+                    s.flush()
+                    return existing
+                if existing.state == TASK_MERGE_UNSYNCED and same:
+                    return existing
+                raise TaskMergeConflictError(
+                    f"la tâche {task_id} a déjà un cycle de fusion ({existing.origin}/{existing.state}, "
+                    f"PR #{existing.pr_number}) — à réconcilier avant d'enregistrer une fusion externe"
+                )
+        except IntegrityError as exc:
+            existing = self.get_task_merge(task_id)
+            if existing is not None and existing.state == TASK_MERGE_UNSYNCED:
+                return existing
+            raise TaskMergeConflictError(
+                f"enregistrement concurrent de la fusion externe de la tâche {task_id}"
+            ) from exc
 
     def get_task_merge(self, task_id: int) -> Optional[TaskMerge]:
         with self.session() as s:

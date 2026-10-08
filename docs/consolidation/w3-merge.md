@@ -91,22 +91,30 @@ la règle serveur).
 
 ## 4 bis. Fusion survenue HORS moteur (opérateur, autre outil)
 
-Avec `BUILD_AUTO_MERGE=false` (défaut), les PR sont fusionnées à la main : aucun cycle `task_merges` n'existe, mais le
-clone opérateur (`repo_source`) est périmé. `driver.reconcile_in_review_tasks` (appelé au démarrage de `run_project`)
-ne marque plus jamais une tâche `merged` sur la seule foi de GitHub :
+Avec `BUILD_AUTO_MERGE=false` (défaut), les PR sont fusionnées à la main : le clone opérateur (`repo_source`) est périmé et
+aucun cycle du merge-bot n'existe. Le driver ne marque plus jamais une tâche `merged` sur la seule foi de GitHub, et le
+blocage survit au redémarrage :
 
-1. une seule resynchronisation du clone de **confiance** (`sync_base_fn`, défaut `resync_repository_base`, qui refuse un
-   workspace géré) couvre toutes les PR fusionnées hors moteur ;
-2. chaque `merge_commit_sha` est prouvé présent dans le clone (`verify_local_sync(..., None)` : `HEAD == sha` ou ancêtre) ;
-3. seulement alors la tâche passe `merged`.
+1. **Persister d'abord.** `driver.reconcile_in_review_tasks` écrit, AVANT toute tentative de synchronisation,
+   `manager.begin_external_task_merge(task_id, owner, repo, base_branch, pr_number, merge_sha)` : une ligne `task_merges`
+   `origin='external'`, `state='merged_unsynced'`, `merge_sha` = commit de fusion distant. Tête/base/tree/`proof_id`/méthode
+   restent **NULL** (contraintes `ck_task_merges_origin_anchors`) : aucune preuve de livraison n'est inventée. Si la
+   persistance échoue (ou si GitHub ne donne pas de `merge_commit_sha`), la tâche reste bloquée : aucune synchronisation n'est
+   tentée sans barrière durable.
+2. **Synchroniser et prouver.** Une seule resynchronisation du clone de confiance (`sync_base_fn`, défaut
+   `resync_repository_base`, qui refuse un workspace géré), puis `verify_local_sync(repo, merge_sha, None)` (`HEAD == sha` ou
+   ancêtre). Succès : `synced` + tâche `merged` dans UNE transaction (`transition_task_merge(..., complete_task=True)`). Échec :
+   le cycle reste `merged_unsynced`, `last_error` mémorise la raison, la tâche reste `in_review`.
+3. **Relire avant tout travail.** À chaque `run_project` réel, `driver.resume_external_merges` relit les cycles
+   `origin='external'` `merged_unsynced` **sans GitHub** et reprend depuis le SHA enregistré (sync réelle + vérification
+   réelle) AVANT toute tâche et avant la découverte des PR ; la barrière du runtime (`merge_cycle.resume_cycles`, même
+   `sync_base_fn` si injectée) fait de même avant `run_project`. Découverte GitHub en panne, PR introuvable ou crash entre la
+   persistance et la sync : sans effet sur la barrière. Une erreur de lecture de l'état se propage (le run échoue).
+4. **Arrêt.** Tant qu'un tel cycle est inachevé : `repo_sync_failed` (driver, `pending_reviews`) ou `merge_sync_pending`
+   (runtime) AVANT toute tâche, dépendante ou non ; ni drain final ni handoff Phase 4. Le moteur n'émet jamais de `PUT` sur ce
+   chemin : reprise sans nouvelle fusion. Un cycle `origin='engine'` reste du ressort exclusif du merge-bot/runtime.
 
-Échec (resync `False` / exception, fusion absente du clone, SHA de fusion inconnu, clone non fourni) : la tâche **reste
-`in_review`** (aucune écriture), l'événement d'audit `task_reconciled` porte `outcome=merged_unsynced` et la raison, et
-`run_project` rend `repo_sync_failed` (`pending_reviews` = ces tâches) **avant toute tâche, dépendante ou non**. Le runtime
-n'enchaîne alors ni drain final ni handoff Phase 4. Le prochain démarrage rejoue la réconciliation : reprise sans aucune
-nouvelle fusion (le moteur n'émet pas de `PUT` sur ce chemin). Une tâche portant un cycle `task_merges` inachevé
-(`merge_pending`, `merged_unsynced`, `attention`) est laissée à ce cycle. Les gardes budget/deadline ne sont pas touchées
-(la réconciliation ne dépense rien et précède la boucle).
+Les gardes budget/deadline ne sont pas touchées (la reprise ne dépense rien et précède la boucle).
 
 Procédure opérateur : un cycle `attention` n'est levé que par `acknowledge_task_merge` après inspection ; la ligne est alors
 supprimée, la tâche reste `in_review` et la passe suivante revalide la PR (preuve, base, checks) ou, si elle a été fusionnée
@@ -122,8 +130,8 @@ testés : les 13 chemins de `w3-manager-sensitive-paths-before.json`.
 
 ## 6. Migration `0012_task_merges`
 
-Additive : crée `task_merges` (PK `task_id` → `tasks` cascade, `project_id`, `state`, `revision`, ancres, `merge_sha`,
-`last_error`, contraintes CHECK) et `ix_task_merges_project_id`. Aucune table ni colonne existante modifiée ; une base
+Additive : crée `task_merges` (PK `task_id` → `tasks` cascade, `project_id`, `state`, `revision`, `origin` (`engine`|`external`),
+ancres (NULL seulement pour `external`), `merge_sha`, `last_error`, contraintes CHECK) et `ix_task_merges_project_id`. Aucune table ni colonne existante modifiée ; une base
 migrée jusqu'à 0011 reste compatible (table vide = aucun cycle). Downgrade : retire la seule table.
 Aucun cycle n'existe pour les tâches `in_review` antérieures : leur PR est traitée comme n'importe quelle PR sans
 cycle, donc **sans preuve de livraison elle est refusée** (jamais reconstruite depuis le texte de la PR) et reste pour

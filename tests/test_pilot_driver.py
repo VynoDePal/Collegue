@@ -1484,6 +1484,43 @@ async def test_infra_noise_does_not_clobber_actionable_feedback(repo, manager):
     assert "ReadTimeoutError" not in ctx  # le bruit réseau n'est PAS ré-injecté
 
 
+async def test_infra_noise_after_a_functional_failure_never_changes_the_branch_given_to_the_next_attempts(
+    repo, manager, monkeypatch
+):
+    """Régression (variable locale ``base`` qui masquait le paramètre branche) : après une erreur fonctionnelle puis un
+    aléa infra, la tentative suivante recevait le TEXTE du feedback comme branche de base."""
+    from collegue.pilot import driver
+
+    bases = []
+    real_execute = driver.execute_issue
+
+    async def spy(*args, **kwargs):
+        bases.append(kwargs.get("base"))
+        return await real_execute(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "execute_issue", spy)
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_RecordingAgent(),
+        sandbox=_InfraThenGreenSandbox(),
+        max_task_attempts=3,
+        sleep_fn=_sleep,
+        base="release/9",
+    )
+
+    assert result.stop_reason == "completed"
+    assert bases == ["release/9"] * 3, "la branche de base reste celle du paramètre à CHAQUE tentative"
+    assert manager.get_tasks(pid)[0].status == "in_review"
+
+
 async def test_infra_noise_suffix_is_replaced_not_stacked(repo, manager):
     """#459 : une SÉRIE d'aléas infra ne fait pas gonfler last_error — le suffixe
     est remplacé ; à l'échec terminal, le feedback persisté reste le diagnostic
@@ -2554,3 +2591,90 @@ async def test_a_task_owned_by_an_unfinished_merge_cycle_is_left_to_that_cycle(r
 
     assert manager.get_task(first).status == "in_review", "le cycle durable, pas le driver, clôt cette tâche"
     assert calls == [] and result.stop_reason != "repo_sync_failed"
+
+
+# --- barrière durable relue par le driver SEUL (sans runtime ni découverte GitHub) -------------------
+
+
+def _external_row(manager, first, sha="c" * 40):
+    return manager.begin_external_task_merge(
+        first, owner="o", repo="r", base_branch="main", pr_number=11, merge_sha=sha
+    )
+
+
+async def test_driver_resumes_a_persisted_external_barrier_without_any_github_discovery(repo, manager):
+    pid, first, sibling, dependent = _external_merge_project(manager)
+    _external_row(manager, first)
+    events, verified = [], []
+
+    class _NoDiscovery(_PRs):
+        def find_pr_by_head(self, *a, **k):
+            raise AssertionError("la reprise d'une barrière persistée ne consulte pas GitHub")
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=PrClients(branches=_Branches(), files=_Files(), prs=_NoDiscovery()),
+        agent=_OrderedAgent(events),
+        require_merged_deps=True,
+        max_inflight_reviews=5,
+        sync_base_fn=lambda src, base: events.append(("sync", src, base)) or True,
+        merge_verify_fn=lambda src, sha, tree: verified.append((sha, tree)),
+    )
+
+    assert verified == [("c" * 40, None)] and events[0][0] == "sync"
+    assert manager.get_task(first).status == "merged" and manager.get_task_merge(first).state == "synced"
+    assert ("agent", dependent) in events and result.stop_reason != "repo_sync_failed"
+
+
+async def test_driver_keeps_a_persisted_barrier_when_the_sync_is_still_failing(repo, manager):
+    pid, first, _sibling, _dependent = _external_merge_project(manager)
+    _external_row(manager, first)
+    events = []
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_OrderedAgent(events),
+        sync_base_fn=lambda *_: False,
+        merge_verify_fn=lambda *_: None,
+    )
+
+    assert result.stop_reason == "repo_sync_failed" and result.pending_reviews == [first]
+    assert not [e for e in events if isinstance(e, tuple)], "aucune tâche lancée"
+    row = manager.get_task_merge(first)
+    assert row.state == "merged_unsynced" and "resynchronisation" in row.last_error
+    assert manager.get_task(first).status == "in_review"
+
+
+async def test_driver_ignores_engine_cycles_which_belong_to_the_runtime_barrier(repo, manager):
+    pid, first, _sibling, _dependent = _external_merge_project(manager)
+    row = manager.begin_task_merge(
+        first,
+        owner="o",
+        repo="r",
+        base_branch="main",
+        pr_number=11,
+        head_sha="1" * 40,
+        base_sha="2" * 40,
+        tree_sha="3" * 40,
+        proof_id="a" * 64,
+        merge_method="squash",
+    )
+    manager.transition_task_merge(
+        first, expected_state=row.state, expected_revision=0, new_state="merged_unsynced", merge_sha="c" * 40
+    )
+    calls = []
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        sync_base_fn=lambda *a: calls.append(a) or True,
+        merge_verify_fn=lambda *_: None,
+    )
+    assert manager.get_task_merge(first).state == "merged_unsynced" and manager.get_task(first).status == "in_review"
