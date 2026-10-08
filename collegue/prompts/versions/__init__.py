@@ -13,9 +13,12 @@ def get_versions_file() -> Path:
     Récupère le chemin du fichier de versions.
 
     Returns:
-        Path vers le fichier versions.json
+        Path vers le fichier versions.json (état modifiable sous ``$COLLEGUE_HOME/prompts/versions``,
+        le même que celui de ``PromptVersionManager`` — jamais dans le paquet installé)
     """
-    return Path(__file__).parent / "versions.json"
+    from ..storage import default_versions_dir
+
+    return default_versions_dir() / "versions.json"
 
 
 def load_version_metrics(tool_name: str, version: str) -> Optional[Dict[str, Any]]:
@@ -67,6 +70,7 @@ def save_version_metrics(tool_name: str, version: str, metrics: Dict[str, Any]) 
             data[tool_name] = {}
         data[tool_name][version] = metrics
 
+        versions_file.parent.mkdir(parents=True, exist_ok=True)
         with open(versions_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 

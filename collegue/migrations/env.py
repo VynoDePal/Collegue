@@ -1,22 +1,20 @@
-"""Environnement Alembic pour le store d'état projet (C6).
+"""Environnement Alembic pour le store d'état projet (C6), embarqué dans le paquet ``collegue``.
 
-Résout l'URL de connexion dans l'ordre : variable d'env ``STATE_DATABASE_URL``,
-puis ``settings.STATE_DATABASE_URL``, puis ``sqlalchemy.url`` d'alembic.ini.
-``target_metadata`` pointe sur ``collegue.state.models.Base`` (autogenerate).
+Résout l'URL de connexion dans l'ordre : URL explicite (``collegue.migrations.alembic_config(url)``),
+variable d'env ``STATE_DATABASE_URL``, ``settings.STATE_DATABASE_URL``, puis ``sqlalchemy.url``
+d'``alembic.ini`` (cf. ``collegue.migrations.env_url``). ``target_metadata`` pointe sur
+``collegue.state.models.Base`` (autogenerate). Aucune manipulation de ``sys.path`` : le paquet est
+importable parce qu'il est installé (ou que la racine du checkout est dans le chemin).
 """
 
-import os
-import sys
 from logging.config import fileConfig
-from pathlib import Path
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Rendre le package `collegue` importable quand Alembic est lancé depuis la racine.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from collegue.state.models import Base  # noqa: E402
+from collegue.migrations import URL_ATTRIBUTE
+from collegue.migrations.env_url import resolve_url
+from collegue.state.models import Base
 
 config = context.config
 
@@ -30,25 +28,8 @@ target_metadata = Base.metadata
 
 
 def _resolve_url() -> str:
-    """URL de connexion : env > settings > alembic.ini. Erreur claire si absente."""
-    url = os.getenv("STATE_DATABASE_URL")
-    if not url:
-        # except ImportError seulement : une ValidationError pydantic / un .env
-        # cassé doit remonter (sinon on masque la vraie cause en "pas d'URL").
-        try:
-            from collegue.config import settings
-
-            url = settings.STATE_DATABASE_URL
-        except ImportError:
-            url = None
-    if not url:
-        url = config.get_main_option("sqlalchemy.url")
-    if not url:
-        raise RuntimeError(
-            "Aucune URL de base : définissez STATE_DATABASE_URL (env) ou "
-            "settings.STATE_DATABASE_URL avant de lancer les migrations."
-        )
-    return url
+    """URL de connexion : explicite > env > settings > alembic.ini. Erreur claire si absente."""
+    return resolve_url(config.attributes.get(URL_ATTRIBUTE), config.get_main_option("sqlalchemy.url"))
 
 
 def run_migrations_offline() -> None:

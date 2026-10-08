@@ -35,16 +35,23 @@ class EnhancedPromptEngine(PromptEngine):
             Override for the YAML seed directory. Defaults to the
             ``collegue/prompts/templates/tools`` tree in the installed package.
         storage_dir:
-            Override for the on-disk JSON store. Defaults to the package
-            ``collegue/prompts/templates`` directory (``versions/versions.json``
-            lives alongside).
+            Override for the on-disk JSON store. Defaults to ``$COLLEGUE_HOME/prompts``
+            (categories, generated templates and ``versions/versions.json``) — never
+            the installed package, which may be read-only.
         """
         super().__init__(storage_path=storage_dir)
         self.version_manager = PromptVersionManager(storage_dir)
         self.language_optimizer = LanguageOptimizer()
         self.performance_cache: Dict[str, Dict[str, float]] = {}
         self.templates: Dict[str, PromptTemplate] = {}
-        self.tool_templates_dir = templates_dir or os.path.join(os.path.dirname(__file__), "..", "templates", "tools")
+        if templates_dir:
+            self.tool_templates_dir = templates_dir
+        else:
+            from ..storage import seed_templates_dir
+
+            # Graines embarquées dans le paquet : leur absence est une erreur franche (FileNotFoundError),
+            # jamais un dossier vide créé en silence dans le site-packages.
+            self.tool_templates_dir = str(seed_templates_dir())
         self._load_tool_templates()
         self._log_templates_loaded()
 

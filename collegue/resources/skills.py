@@ -11,31 +11,28 @@ logger = logging.getLogger(__name__)
 
 
 def get_skills_dir() -> Path:
-    """
-    Trouve le dossier skills/ en utilisant les mêmes priorités que l'ancien système
+    """Dossier des skills : override opérateur ``COLLEGUE_SKILLS_DIR``, sinon les skills EMBARQUÉES dans le
+    paquet (``collegue/skills``).
+
+    Aucun repli sur le répertoire courant ni sur ``/app/skills`` : ils masqueraient un wheel qui
+    n'embarquerait pas ses skills. Un override explicite invalide est une erreur, jamais ignoré.
     """
     import os
 
-    candidates = []
+    from collegue.pkgdata import resource_dir
 
     env_path = os.environ.get("COLLEGUE_SKILLS_DIR")
     if env_path:
-        candidates.append(("env", Path(env_path)))
-
-    candidates.append(("__file__", Path(__file__).resolve().parent.parent.parent / "skills"))
-    candidates.append(("cwd", Path.cwd() / "skills"))
-    candidates.append(("workdir", Path("/app/skills")))
-
-    for label, path in candidates:
+        path = Path(env_path).expanduser()
         if path.is_dir():
-            logger.info("SKILLS_DIR résolu via %s: %s", label, path)
+            logger.info("SKILLS_DIR résolu via env: %s", path)
             return path
+        logger.error("COLLEGUE_SKILLS_DIR=%s n'est pas un dossier : skills non chargées", path)
+        return path
 
-    logger.error(
-        "Dossier skills/ introuvable! Chemins testés: %s",
-        ", ".join(f"{label}={path}" for label, path in candidates),
-    )
-    return candidates[1][1]
+    path = resource_dir("skills")
+    logger.info("SKILLS_DIR résolu via le paquet: %s", path)
+    return path
 
 
 def register_skills(app: Any, app_state: dict):
