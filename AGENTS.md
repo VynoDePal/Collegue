@@ -57,7 +57,14 @@ Détail et inventaire : `docs/consolidation/w1-isolation.md`.
 - `LocalCommandRunner` est réservé aux fixtures de confiance et aux lectures sur `repo_source` ; il refuse (126) un workspace
   géré. Jamais un défaut de production sur un workspace : `runner=None` passe par la frontière, un workspace non géré lève
   `WorkspaceError` (fail-closed, aucun repli silencieux). Un runner injecté est refusé sur un workspace géré.
-- Le sandbox ne monte que le répertoire de travail, jamais le contrôle ni son parent (`GIT_CONTROL_MARKER`).
+- **Tous** les bind mounts passent par `collegue.sandbox.executor.git_control_exposure` : workspace, cache pip, auth
+  d'abonnement de `DockerSandbox`, et auth (RW) + script (RO) du sampler de `core/llm/sampling_ctx.py`. Un montage est
+  refusé s'il est, contient (à toute profondeur, parcours borné sans suivre de liens) ou se trouve sous un répertoire
+  portant `GIT_CONTROL_MARKER`. **Aucune dispense**, pas même pour un workspace géré (un autre contrôle peut y être
+  imbriqué). Une erreur n'est jamais une absence : seules `ENOENT`/`ENOTDIR` établies par `lstat` autorisent un chemin « à
+  créer » ; `EACCES`, lien pendant, boucle, bornes dépassées ⇒ refus (le démon Docker, plus privilégié, franchirait un
+  parent non traversable). N'utiliser ni `os.path.exists`/`isdir`/`lexists` pour décider d'une exposition, ni un second
+  constructeur de `docker run -v` hors de cette garde.
 - Noms de fichiers venant de l'agent : lus ou écrits sur l'hôte seulement via `collegue.sandbox.paths.workspace_file`
   (ni `..`, ni lien symbolique suivi, ni sortie du workspace). L'audit de dépendances ne s'exécute jamais sur l'hôte ; une
   mesure indisponible est refusée (composite non fini), jamais comptée comme zéro.
@@ -96,10 +103,14 @@ Interdits : assouplir un test pour cacher une régression, `xfail`/`skip` opport
 1. C fusionne les commits de A/B dans la branche de vague, résout les raccordements mécaniques, retourne les conflits fonctionnels aux auteurs.
 2. C lance le niveau 2, puis donne au manager le SHA exact et les résultats. Codex teste (niveau 3).
 3. C pousse la branche de vague et ouvre la PR vers `main` **seulement après consigne du manager**.
-4. **Fusion uniquement si** : acceptation écrite de Codex sur le **SHA exact** de la tête de PR **et** les 5 checks requis verts sur ce SHA — `Ruff`, `Pytest (Python 3.11)`, `Pytest (Python 3.12)`, `Dependency audit`, `Docker build`.
-5. Tout changement de SHA (commit, merge de `main`, correction) invalide l'acceptation et les preuves concernées : les refaire sur le nouveau SHA.
-6. Pas de bypass : ni force-push, ni contournement du ruleset, ni admin merge, ni reconfiguration des protections, ni modification des noms de checks requis.
-7. Après la fusion, vérifier `main` (SHA, CI) avant de démarrer la vague suivante.
+4. **Livraison en deux étapes.**
+   - *Étape 1 — C publie et observe, sans fusionner.* Après l'ouverture de la PR, C observe les 5 checks requis — `Ruff`, `Pytest (Python 3.11)`, `Pytest (Python 3.12)`, `Dependency audit`, `Docker build` — **et** les revues (automatiques ou humaines) sur la tête. Il rapporte au manager : URL, SHA de tête et de base, résultat de chaque check, état de chaque revue, texte intégral de chaque finding (fichier, ligne) avec son évaluation.
+   - *Étape 2 — Codex ordonne.* Après cet examen, Codex donne l'instruction de fusion finale **sur cette tête exacte**. C fusionne alors seulement (squash, tête attendue contrôlée) et vérifie `main` ensuite. Sans instruction pour ce SHA, C ne fusionne pas, même si tout est vert.
+5. **Portée de l'acceptation.** L'acceptation du manager porte sur la révision **et** sur les éléments connus au moment où elle est donnée. Tout nouveau finding de revue distante pertinent pour les critères de la vague est transmis au manager **avant** la fusion, pour arbitrage explicite (corriger maintenant, ou accepter une limite justifiée). C ne le reporte pas de sa propre initiative à la vague suivante et ne se contente pas de l'ajouter aux limites de la PR. Le manager tranche dans le périmètre déjà autorisé : l'utilisateur n'est pas sollicité pour cela.
+6. **Une preuve absente n'est jamais une preuve réussie.** Check manquant, en attente, ignoré ou annulé ; revue non faite, en cours ou en échec (quota, indisponibilité) ; test non exécuté : cela se rapporte tel quel et ne se présente jamais comme un succès ni comme une absence de finding.
+7. Tout changement de SHA (commit, merge de `main`, correction) invalide l'acceptation et les preuves concernées : les refaire sur le nouveau SHA.
+8. Pas de bypass : ni force-push, ni contournement du ruleset, ni admin merge, ni auto-merge différé sur une tête mouvante, ni reconfiguration des protections, ni modification des noms de checks requis.
+9. Après la fusion, vérifier `main` (SHA, arbre identique à l'arbre accepté, 5 checks du push) avant de démarrer la vague suivante. Une vague n'est **clôturée** qu'une fois `main` vérifié et aucun finding pertinent resté ouvert ; une vague livrée avec un finding ouvert est « livrée partiellement, non clôturée ».
 
 ### Budget et effets externes
 

@@ -37,9 +37,12 @@ Chaque vague est livrée et vérifiée sur `main` avant la suivante.
 4. C intègre (§4), applique la checklist (§5), lance le niveau 2 et écrit `w<N>-c.md`.
 5. Codex teste le SHA intégré sur un checkout propre (niveau 3). Une correction est renvoyée à son auteur (ou raccordement mécanique par C) ; on reprend en 4 sur le **nouveau** SHA.
 6. Sur consigne du manager : C pousse la branche de vague et ouvre la PR vers `main`.
-7. C attend l'acceptation Codex sur le SHA exact de la tête de PR **et** les 5 checks requis verts sur ce SHA.
-8. C fusionne ; la méthode de fusion est celle que les protections du dépôt autorisent. Aucun bypass.
-9. Vérification de `main` après fusion (SHA, CI) avant la vague suivante.
+7. **Étape 1 (C)** : C observe les 5 checks requis et les revues sur la tête exacte, puis rapporte au manager URL, SHA tête/base, résultat de chaque check, état de chaque revue et texte de chaque finding, avec son évaluation. Il ne fusionne pas.
+8. **Arbitrage (Codex)** : le manager examine ce rapport. Tout finding pertinent pour les critères de la vague est tranché explicitement (correction maintenant, ou limite justifiée) **avant** toute fusion. Une correction change le SHA et repasse par les étapes 4 à 7.
+9. **Étape 2 (C)** : sur l'instruction finale de Codex pour cette tête exacte, C fusionne (squash, tête attendue contrôlée, aucun bypass). La méthode de fusion est celle que les protections du dépôt autorisent.
+10. Vérification de `main` après fusion (SHA, arbre identique à l'arbre accepté, 5 checks du push) avant la vague suivante.
+
+Une revue absente, en cours ou en échec (quota) et un check manquant ou ignoré sont rapportés tels quels : ils ne valent jamais succès.
 
 ## 4. Procédure d'intégration (C)
 
@@ -229,3 +232,59 @@ de A ou de B réécrit). Intersection des fichiers modifiés par A et B : **vide
   (`TestHealthServer` ne saute plus : il échoue).
 - La campagne `integration` n'a pas été lancée (payante). Seul `test_real_delegation_engine_evaluation`, déterministe, a
   été exécuté seul, hors ligne (namespace réseau vide) ; sa clé factice ne sert qu'à lever le `skipif`.
+
+## 9. Suivi correctif de la vague 1 (livrée partiellement, non clôturée)
+
+**Contexte.** La PR #608 est fusionnée (`fe763b5`, arbre identique à `e996f4f`, 5 checks du push verts), mais la vague 1 **n'est pas clôturée**. La revue automatisée Codex GitHub a produit, après le rapport de C, deux findings P2 sur la tête fusionnée ; C les avait laissés dans les limites de la PR. Le manager a décidé de les **corriger avant la vague 2** et a établi, par reproduction sur `e996f4f`, que le périmètre réel est plus large (règle d'arbitrage : `AGENTS.md`, « Livraison et merge », points 5 et 6). A et B repartent de `fe763b5` sur `codex/consolidation-w1-followup-{a,b}` ; C sur `codex/consolidation-w1-followup-c`. C n'intègre leurs commits qu'une fois leurs SHA finaux communiqués par le manager.
+
+**Constats du manager (preuves `evidence/w1-manager-followup-before.json`, `w1-manager-nested-control-candidate.json`, sonde `manager_w1_followup_probe.py`).**
+- Sur `e996f4f`, la garde de montage laisse passer : un workspace ancêtre plus haut contenant `deep/project/workspace.control` ; ce même contrôle fourni comme `pip_cache_dir` ; un ancêtre fourni comme `pip_cache_dir` ; ce contrôle fourni comme `subscription_auth_dir`. Seuls le workspace et ses enfants directs étaient contrôlés.
+- `entrypoint.sh` : `HEALTH_READY_ATTEMPTS=abc` et `MCP_READY_ATTEMPTS=abc` ne sont pas rejetés (`[` en erreur dans un `if` que `set -e` ignore : attente sans fin tant que le service n'est pas prêt).
+- Premier candidat de correctif de A (retour du manager) : une dispense pour un workspace apparié est **contournable** par un workspace géré imbriqué sous un autre (`outer/workspace/nested/workspace.control` accepté). Toute dispense doit être exacte, pas par préfixe de chemin.
+
+### 9.1 Checklist — montages du sandbox (lot A)
+
+Preuve attendue pour chaque ligne : un test rouge sur `fe763b5`, vert ensuite, avec assertion de comportement (le refus lui-même), pas un `ImportError`.
+
+- [ ] **Inventaire de tous les montages hôte** produits par `DockerSandbox._build_run_argv` : workspace (`{ws}:/workspace`), cache pip (`pip_cache_dir` → `/tmp/.pip_cache`), auth d'abonnement (`subscription_auth_dir` → `{home}/.openhands`), plus tout montage ajouté. Chacun passe par **la même** garde ; le commentaire « SEUL chemin hôte monté » (`sandbox/executor.py`) est mis à jour.
+- [ ] **Autres sites `docker run`** (`git grep -nE '"docker"|docker_bin'`) : `collegue/core/llm/sampling_ctx.py` (~l. 311-335) construit son propre `docker run -v {subscription_auth_dir}:/home/sandbox/.openhands` (RW, `--network host`) **hors** `DockerSandbox`. Soit il est routé par la même garde, soit la raison de le laisser est écrite et testée. Ne pas supposer que `DockerSandbox` est le seul point de montage.
+- [ ] **Positions du contrôle par rapport à la source montée**, pour chaque type de montage : la source est elle-même un contrôle (marqueur) ; contrôle enfant direct ; contrôle descendant profond (plusieurs niveaux) ; contrôle dans un ancêtre ; contrôle atteint via un lien symbolique (source résolue par `realpath`).
+- [ ] **Contrôle imbriqué** : `outer/workspace/nested/workspace.control` (reproduction du manager) est refusé. Si une dispense « workspace apparié » existe, elle ne compare pas des préfixes de chemin, ne s'applique qu'au contrôle exact du workspace monté (qui est **frère** du workspace, donc hors du montage), et un test prouve qu'un contrôle d'un **autre** workspace sous le montage reste refusé, y compris sous un workspace géré légitime.
+- [ ] **Bornage du scan** : profondeur, nombre d'entrées et temps bornés ; **dépassement ⇒ refus** (fail-closed), jamais « autorisé faute de temps ». Test sur un arbre volumineux (par ex. milliers de fichiers type `node_modules`) : coût raisonnable, aucun parcours de liens (`followlinks` interdit), aucune sortie du répertoire monté.
+- [ ] **Erreurs fail-closed** : à `fe763b5`, `_git_control_within` fait `except OSError: return None`, soit un **échec ouvert**. Vérifier que `PermissionError`, répertoire illisible, entrée disparue pendant le scan et erreur de `lstat` refusent le montage, avec un message qui ne cite ni contenu ni noms de fichiers d'authentification.
+- [ ] **Reprise et cycle de vie** : workspace repris (`kept_workspace`) ou recréé ; contrôle déposé après la validation (fenêtre entre validation et `docker run`) : limite écrite si non fermable, ou validation refaite à la construction de l'argv. Tous les points d'entrée (`run_command`, `run_tests`, appel direct de `_build_run_argv`) traversent la garde.
+- [ ] **Non-régression bénigne** : workspace ordinaire avec `.git` ordinaire, cache pip partagé ordinaire hors de tout workspace, répertoire d'auth ordinaire, workspace géré légitime (contrôle frère hors montage) : toujours montés. Chemins contenant `:` toujours refusés pour les trois montages.
+- [ ] **Sonde du manager** : `python evidence/manager_w1_followup_probe.py <worktree> <sortie.json>` rend `blocked: true` pour les quatre cas de montage ; le cas imbriqué de `w1-manager-nested-control-candidate.json` rend `blocked: true`. Rejouer aussi la sonde Git de la vague 1 (`manager_git_probe.py --expect-safe`).
+- [ ] `docs/consolidation/w1-isolation.md` décrit la garde finale et ses limites ; le test d'inventaire des sous-processus reste vert ; aucun nouveau fichier hors périmètre de A (`collegue/sandbox/**` et tests correspondants, plus `sampling_ctx.py` seulement si le manager l'ajoute).
+
+### 9.2 Checklist — `entrypoint.sh` (lot B)
+
+- [ ] **Validation préalable**, avant tout démarrage de processus : `HEALTH_READY_ATTEMPTS` et `MCP_READY_ATTEMPTS` sont des entiers positifs en décimal avec une borne haute documentée ; `READY_POLL_INTERVAL` est un nombre positif borné. Sont rejetés : `abc`, vide, `0`, négatif, `1.5`, `1e3`, valeurs avec espaces ou signe, valeur énorme (débordement de `[ -ge ]` sous `dash`). Les défauts (30, 120, 1) sont inchangés.
+- [ ] **Échec explicite** : code non nul propre à la validation, message sur stderr nommant la variable fautive, ni `health_server.py` ni `fastmcp` démarrés, aucun processus fils orphelin, code non converti en 0 par `cleanup`. La sous-commande `mcp-ready` n'est pas affectée.
+- [ ] **Sonde curl du health server bornée** : la boucle `until curl -s -f http://localhost:4122/_health` n'a ni `--max-time` ni `--connect-timeout` à `fe763b5` (la sonde MCP en a un, 3 s). Un health server qui accepte la connexion mais ne répond jamais doit faire sortir l'entrypoint en échec dans un délai borné et **calculable** (au plus tentatives × (intervalle + délai de la sonde)), test à l'appui avec un faux serveur qui bloque.
+- [ ] **Cohérence des autres sondes** : le healthcheck Compose et `HEALTHCHECK_CMD` de `scripts/ci_docker_smoke.sh` doivent rester identiques (test `test_smoke_runs_exactly_the_healthcheck_command_declared_in_compose`) ; si la commande du healthcheck change, les deux et le test changent ensemble.
+- [ ] **Pas de régression de cycle de vie** : code exact de `fastmcp` restitué, MCP sorti avant d'être prêt = échec, mort du health server en service = échec, arrêt par SIGTERM propre, tests de `test_entrypoint_lifecycle.py` non assouplis.
+- [ ] **Tests non vacuants** : chaque cas rouge sur `fe763b5` échoue sur l'assertion (par ex. « rejeté » faux, délai dépassé), et une mutation qui retire la validation ou le délai de curl fait échouer un test. Exécution sous le `sh` de l'image (`dash`), pas seulement `bash`.
+- [ ] **Sonde du manager** : la partie `entrypoint` de `manager_w1_followup_probe.py` rend `rejected: true` pour les deux compteurs.
+- [ ] `docs/consolidation/w1-auth-ci.md` et `.env.example` documentent les bornes ; le smoke Docker et les 5 noms de checks sont inchangés ; fichiers limités au périmètre de B (`entrypoint.sh`, `scripts/ci_docker_smoke.sh` si nécessaire, tests correspondants, docs de lot).
+
+### 9.3 Intégration et livraison du suivi (C)
+
+1. Attendre les SHA finaux communiqués par le manager ; vérifier qu'ils descendent de `fe763b5` et que l'intersection des fichiers modifiés par A et B est vide.
+2. Fusion `--no-ff` par SHA dans `codex/consolidation-w1-followup-c`, puis recherche des usages oubliés (`git grep -nE '"-v"|pip_cache_dir|subscription_auth_dir|READY_(ATTEMPTS|POLL)'`), suite complète hors `integration`, `ruff check` et `ruff format --check collegue tests`, sondes du manager, rouge sur la base `fe763b5` pour chaque test de défaut annoncé (§4).
+3. Codex valide (niveau 3). Puis, sur consigne : push de la branche, PR vers `main`, **étape 1** de livraison (observer checks et revues, rapporter), arbitrage Codex, **étape 2** (fusion sur instruction pour la tête exacte), vérification de `main`.
+4. La vague 1 n'est clôturée qu'après cette vérification de `main` et la fermeture des deux findings.
+
+### 9.4 Interfaces, changements de comportement et limites du suivi (pour la PR corrective)
+
+Lots intégrés : A `d3a8786071b691926a4ee491cc479d88cbc25c71` (garde de montage), B `fd9a48ec9d9a555decbea4e84646c342ad3cf3b3` (readiness de l'entrypoint), tous deux depuis `fe763b5`, intersection vide. Résultats et SHA du candidat : `reports/w1-c-followup-integration.md`.
+
+**Interfaces.** `git_control_exposure(path)` (`collegue/sandbox/executor.py`) remplace `_git_control_within` ; bornes `GIT_CONTROL_SCAN_MAX_DIRS` (250 000), `GIT_CONTROL_SCAN_MAX_ENTRIES` (1 000 000), `GIT_CONTROL_SCAN_MAX_DEPTH` (64). `LocalSamplingContext._validated_subscription_mounts()` applique la même garde au sampler. `entrypoint.sh` : compteurs 1–999999, `READY_POLL_INTERVAL` de 0.001 à 3600 s, code de sortie **2** sur réglage invalide, sondes curl `--connect-timeout 2 --max-time 3`, pauses interruptibles.
+
+**Changements de comportement à annoncer.**
+1. Un workspace, un cache pip ou un répertoire d'auth dont l'arbre contient un répertoire de contrôle, ou qui se trouve sous l'un d'eux, est refusé. Un marqueur `.collegue-git-control` planté par l'agent dans son workspace fait refuser les lancements suivants du sandbox sur ce workspace (faux positif assumé, fail-closed ; il ne peut jamais autoriser quoi que ce soit).
+2. Un arbre monté de plus de 250 000 répertoires, 1 000 000 entrées ou 64 niveaux est refusé (« vérification impossible »). Un projet de très grande taille (par ex. `node_modules` énorme dans le workspace) peut donc être refusé ; le coût mesuré par A est de l'ordre de 0,06 s pour 30 000 répertoires, par lancement de conteneur.
+3. Un chemin dont la vérification est impossible (`EACCES`, lien pendant, boucle de liens, erreur d'E/S) est refusé au lieu d'être traité comme absent.
+4. Un réglage de readiness invalide (`abc`, `0`, `1.5`, valeur énorme, blanc…) fait sortir le conteneur en **code 2** sans rien démarrer ; avec `restart: always`, Compose le relance donc en boucle jusqu'à correction de la variable (lire les logs). Une variable vide (`VAR=`) équivaut à absente.
+
+**Limites (à ne pas arrondir).** Fenêtre entre la vérification et le `docker run` (un marqueur créé entre les deux n'est pas vu) ; le démon Docker reste privilégié et le sandbox garde le workspace en lecture-écriture ; le healthcheck Compose lance `curl -f` sans `--max-time`, borné seulement par son `timeout: 5s` ; Python 3.11 n'est pas exécuté localement (preuve : check `Pytest (Python 3.11)` de la PR) ; les revues externes (Copilot, Codex GitHub) ne sont examinées que lorsqu'elles sont disponibles : leur absence est rapportée telle quelle et ne vaut ni succès ni prérequis ; seuls les cinq checks CI restent obligatoires au ruleset.

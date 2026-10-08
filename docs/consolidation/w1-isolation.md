@@ -38,8 +38,8 @@ Le workspace est monté en lecture-écriture dans le conteneur où tournent l'ag
    `.collegue-git-control` apparié au chemin réel du workspace) et matérialise le
    workspace sur `collegue/issue-N` depuis ce contrôle. Le contrôle contient la
    config, les refs, l'index et le `HEAD` = **base de livraison**. Il n'est jamais
-   monté : `DockerSandbox._validate_workspace` refuse tout montage qui contient le
-   marqueur (montage du parent `collegue-exec-*` ou du contrôle lui-même).
+   monté : `DockerSandbox` refuse tout bind mount qui l'expose, à toute profondeur
+   (workspace, cache pip, creds d'abonnement — voir « Garantie des montages »).
 2. **Une seule porte.** Toute opération git hôte sur un workspace passe par
    `TrustedGit` : `GIT_DIR` = contrôle, `GIT_WORK_TREE` = workspace, environnement
    **reconstruit de zéro** (HOME vide, ni config système/globale, aucun `GIT_*`
@@ -142,6 +142,65 @@ invalide/tronqué/incomplet ou dépendance ignorée (`skip_reason`) ⇒ `dep_aud
 `composite=-inf` (le gate rejette avant comme après) — jamais « 0 vulnérabilité ». `dep_vulns_fn` injecté reste
 prioritaire (une valeur négative ou une exception ⇒ même refus). **Prérequis opérationnel** : l'image sandbox doit
 embarquer `pip-audit` ; sinon l'audit activé refuse la mesure (voir limites).
+
+## Garantie des montages (suivi W1)
+
+`git_control_exposure(path)` (`collegue/sandbox/executor.py`) est appliqué à **toutes** les sources de `-v` :
+1. le workspace (`DockerSandbox._validate_workspace`) ;
+2. `pip_cache_dir` et 3. `subscription_auth_dir` (`DockerSandbox._build_run_argv`) — réglages d'opérateur, donc
+   chemins d'entrée ;
+4. le montage d'auth RW **et** le script sampler RO de `LocalSamplingContext._sample_subscription`
+   (`collegue/core/llm/sampling_ctx.py`), qui construit son propre `docker run` hors `DockerSandbox`.
+
+Le refus est levé avant toute construction d'argv / avant tout appel du runner : aucune commande Docker n'est émise
+(`ValueError` côté sandbox, `RuntimeError` côté sampler).
+
+Un chemin est accepté seulement si, après `realpath` (alias, symlinks, `..`, chemin relatif), aucun répertoire
+portant le marqueur `.collegue-git-control` n'est :
+
+1. le chemin lui-même, ou **l'un de ses ancêtres** (monter l'intérieur d'un contrôle en exposerait une partie) ;
+2. **contenu dans le chemin, à toute profondeur** ≤ 64 (ancêtre lointain du contrôle : `deep/project/workspace.control`).
+
+Propriétés :
+
+- **Aucune dispense, y compris pour un workspace géré.** Être apparié à SON contrôle frère ne prouve pas l'absence
+  d'AUTRES contrôles dans l'arbre : `prepare_workspace(dest_root=<ws>/nested)` place `inner.control` sous le montage
+  de `outer`. Tout arbre monté est donc parcouru. Conséquence assumée : un arbre piégé par l'agent (marqueur forgé,
+  sous-répertoire illisible, énorme) fait REFUSER son propre montage — jamais l'autoriser.
+- **Parcours borné et sans lien** : itératif, `scandir(follow_symlinks=False)` — ni boucle, ni lien vers l'hôte
+  suivi. Trois bornes (constantes de module) : répertoires parcourus **et file en attente** ≤ 250 000
+  (`GIT_CONTROL_SCAN_MAX_DIRS`), entrées itérées — fichiers compris, comptées à mesure — ≤ 1 000 000
+  (`GIT_CONTROL_SCAN_MAX_ENTRIES`), profondeur ≤ 64 (`GIT_CONTROL_SCAN_MAX_DEPTH`). Un répertoire géant est donc
+  coupé pendant son itération, pas après l'avoir entièrement empilé.
+- **Une erreur n'est jamais une absence.** `os.path.lexists`/`isdir` avalent `PermissionError` et ne sont pas
+  utilisés pour conclure à l'absence : un contrôle sous un parent non traversable paraîtrait inexistant alors que le
+  démon Docker, plus privilégié, le monterait. La résolution est stricte (`realpath(strict=True)` du plus long préfixe
+  existant, `lstat` pour chaque marqueur) ; **seules ENOENT/ENOTDIR** établissent qu'un chemin est « à créer » (accepté).
+  Toute autre erreur (EACCES, EPERM, EIO, ELOOP, ETIMEDOUT…), un lien symbolique pendant (cible absente, donc
+  susceptible de devenir un contrôle) ou une boucle de liens ⇒ refus. Le chemin BRUT fourni est vérifié (pas son
+  `realpath` non strict, qui masquerait un lien pendant).
+- **Fail-closed** : erreur de lecture (permission, disparition), dépassement de borne, `OSError` ⇒ refus
+  (« vérification impossible »). Un arbre énorme est refusé plutôt que parcouru sans limite : l'opérateur doit
+  alors monter un répertoire plus petit.
+- **Sans état en mémoire** : la décision ne dépend que du marqueur sur disque ; elle vaut donc après reprise du
+  processus, pour un contrôle restauré, et pour chaque appel.
+- **Compatibilité** : un chemin absent (workspace ou cache à créer) est accepté — seuls ses ancêtres existants
+  sont examinés. Les répertoires ordinaires (frères d'un contrôle compris) sont acceptés. Coût mesuré : ≈ 0,06 s
+  pour 30 000 répertoires.
+- **Sampler d'abonnement** : en plus, le script monté `:ro` doit être un fichier régulier (un répertoire exposerait
+  son arbre) et aucun des deux chemins ne peut contenir `:` (injection d'options de `-v`) ; les chemins canoniques
+  sont ceux qui sont montés. Le routage fournisseur/modèle n'est pas modifié.
+- **Faux positif assumé** : un marqueur planté dans un arbre fait refuser ce montage.
+
+Tests de permissions (`tests/test_sandbox_git_control_mounts.py`) : en non-root, vraies permissions (`chmod`) ;
+en root (CI, `unshare -Urn`) ou avec `COLLEGUE_FORCE_INJECTED_EACCES=1`, `chmod` est sans effet donc EACCES est
+injecté sur la SEULE opération concernée (`lstat/stat/scandir` d'un parent fermé ; `scandir` seul pour un parent
+« traversable mais non listable », où `lstat` doit rester réel). Aucun skip ; la nature de la preuve est enregistrée
+(`proof=real-permissions-uid-nonroot` ou `injected-eacces-root`, visible dans `--junitxml`).
+
+Limite : le test porte sur le disque au moment de la construction de l'argv ; un contrôle créé *après* par un autre
+processus entre la vérification et `docker run` n'est pas couvert (course locale, hors modèle de menace : seul l'hôte
+écrit des contrôles).
 
 ## Limites explicites (non couvert par ce lot)
 
