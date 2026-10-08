@@ -93,9 +93,11 @@ jobs:
 
       # Source -> verrou : une dérive de pyproject.toml sans régénération échoue ici (hors ligne), puis
       # une résolution fraîche à la date de gel doit reproduire exactement les verrous commités.
+      # uv est épinglé À LA VERSION EXACTE de scripts/locks.py (UV_VERSION) : pip-audit audite ensuite cet
+      # environnement, uv compris (0.9.28 était affecté par GHSA-pjjw-68hj-v9mw et GHSA-4gg8-gxpx-9rph).
       - name: Verify locks match pyproject.toml
         run: |
-          pip install uv==0.9.28
+          pip install uv==0.11.33
           python scripts/locks.py check --recompile
 
       - name: Run pip-audit

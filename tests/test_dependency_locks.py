@@ -355,3 +355,126 @@ def test_ci_verifies_the_built_wheel_in_a_clean_environment() -> None:
     steps = _run_steps(_workflow("tests.yml")["jobs"]["dependency-audit"])
 
     assert any("scripts/verify_wheel.py" in s for s in steps)
+
+
+# --- uv de résolution : version corrigée, unique et appliquée (avis GHSA-pjjw-68hj-v9mw / GHSA-4gg8-gxpx-9rph) --------
+#
+# Défaut d'origine (CI de la PR #610, job « Dependency audit » rouge) : le workflow installait `uv==0.9.28` dans
+# l'environnement que `pip-audit --strict` audite ensuite ; 0.9.28 est affecté par GHSA-pjjw-68hj-v9mw (corrigé en 0.11.6)
+# et GHSA-4gg8-gxpx-9rph (corrigé en 0.11.15). La même version était copiée dans l'image OpenHands.
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def _workflow_uv_pins() -> list[str]:
+    text = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    return re.findall(r"pip install uv==([0-9][0-9.]*)", text)
+
+
+def _dockerfile_uv_tags() -> list[str]:
+    text = (ROOT / "docker" / "sandbox" / "Dockerfile.openhands").read_text(encoding="utf-8")
+    return re.findall(r"ghcr\.io/astral-sh/uv:([^\s]+)", text)
+
+
+def test_pinned_uv_is_above_the_floor_fixing_both_advisories() -> None:
+    assert _version_tuple(locks.UV_MIN_SAFE_VERSION) == (0, 11, 15)
+    assert _version_tuple(locks.UV_VERSION) >= _version_tuple(locks.UV_MIN_SAFE_VERSION)
+    assert _version_tuple("0.9.28") < _version_tuple(locks.UV_MIN_SAFE_VERSION), (
+        "0.9.28 reste le contre-exemple vulnérable"
+    )
+
+
+def test_workflow_and_dockerfile_use_the_exact_same_uv_as_the_lock_tool() -> None:
+    assert _workflow_uv_pins() == [locks.UV_VERSION], "le job d'audit doit installer exactement UV_VERSION"
+    assert _dockerfile_uv_tags() == [locks.UV_VERSION], "l'image OpenHands doit copier exactement UV_VERSION"
+    for path in (ROOT / ".github" / "workflows").glob("*.yml"):
+        pins = re.findall(r"\buv==([0-9][0-9.]*)", path.read_text(encoding="utf-8"))
+        assert set(pins) <= {locks.UV_VERSION}, f"{path.name}: version d'uv divergente {pins}"
+    pins = re.findall(r"\buv(?:==|:)([0-9][0-9.]*)", (ROOT / "docker" / "sandbox" / "Dockerfile.openhands").read_text())
+    assert set(pins) <= {locks.UV_VERSION}
+
+
+def test_the_audit_job_still_audits_strictly_with_uv_installed_before_the_audit() -> None:
+    """Pas de contournement : uv reste dans l'environnement audité, l'audit reste strict et sans avis ignoré."""
+
+    steps = _workflow("tests.yml")["jobs"]["dependency-audit"]["steps"]
+    scripts = [str(step.get("run", "")) for step in steps]
+    index_uv = next(i for i, s in enumerate(scripts) if "pip install uv==" in s)
+    index_audit = next(i for i, s in enumerate(scripts) if "pip-audit" in s)
+
+    assert index_uv < index_audit
+    audit = scripts[index_audit]
+    assert "pip-audit --strict --desc" in audit
+    assert "--ignore-vuln" not in audit and "--skip-editable" not in audit
+    assert not any("pip uninstall" in s or "uv" in s and "rm " in s for s in scripts)
+
+
+def _fake_uv(directory: Path, version: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "uv"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "--version" ]; then echo "uv {version} (x86_64-unknown-linux-gnu)"; exit 0; fi\n'
+        f'echo "$@" >> "{directory}/calls.log"\n'
+        "exit 3\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_recompile_refuses_any_other_uv_before_resolving_anything(sandbox_repo: Path, tmp_path: Path) -> None:
+    import os
+
+    fake = _fake_uv(tmp_path / "bin", "0.9.28")
+    env = {**os.environ, "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}"}
+
+    completed = subprocess.run(
+        [sys.executable, str(sandbox_repo / "scripts" / "locks.py"), "check", "--recompile", "lint"],
+        capture_output=True,
+        text=True,
+        cwd=sandbox_repo,
+        env=env,
+        timeout=120,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert f"uv 0.9.28 trouvé, uv=={locks.UV_VERSION} requis" in completed.stdout
+    assert "GHSA-pjjw-68hj-v9mw" in completed.stdout
+    assert not (fake.parent / "calls.log").exists(), "aucune résolution ne doit être lancée avec un uv non conforme"
+
+
+def test_recompile_accepts_the_pinned_uv_version_and_runs_the_resolution(sandbox_repo: Path, tmp_path: Path) -> None:
+    import os
+
+    fake = _fake_uv(tmp_path / "bin", locks.UV_VERSION)
+    env = {**os.environ, "PATH": f"{fake.parent}{os.pathsep}{os.environ['PATH']}"}
+
+    completed = subprocess.run(
+        [sys.executable, str(sandbox_repo / "scripts" / "locks.py"), "check", "--recompile", "lint"],
+        capture_output=True,
+        text=True,
+        cwd=sandbox_repo,
+        env=env,
+        timeout=120,
+    )
+
+    assert "requis" not in completed.stdout, "la version épinglée est acceptée"
+    assert "pip compile" in (fake.parent / "calls.log").read_text(encoding="utf-8"), "la résolution a bien été tentée"
+
+
+def test_uv_version_subcommand_prints_the_single_source_pin() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(LOCKS_SCRIPT), "uv-version"], capture_output=True, text=True, cwd=ROOT, timeout=60
+    )
+
+    assert completed.returncode == 0 and completed.stdout.strip() == locks.UV_VERSION
+
+
+def test_locks_record_the_uv_that_generated_them_without_platform_noise() -> None:
+    for path in sorted((ROOT / "locks").glob("*.txt")):
+        header = locks.parse_lock(path.read_text(encoding="utf-8")).headers.get("uv", "")
+        assert re.fullmatch(r"\d+\.\d+\.\d+", header), f"{path.name}: en-tête uv inattendu {header!r}"
+        assert _version_tuple(header) >= (0, 9, 28)
