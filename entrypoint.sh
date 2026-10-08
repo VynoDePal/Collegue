@@ -25,6 +25,16 @@
 # Réglages (valeurs par défaut adaptées au conteneur) :
 #   COLLEGUE_APP_DIR (/app) · READY_POLL_INTERVAL (1, secondes) ·
 #   HEALTH_READY_ATTEMPTS (30) · MCP_READY_ATTEMPTS (120)
+#
+# Validation (mode http uniquement, AVANT de démarrer le moindre processus) :
+#   - variable absente OU vide (`VAR=`) → valeur par défaut ci-dessus ;
+#   - HEALTH_READY_ATTEMPTS / MCP_READY_ATTEMPTS : entier décimal strictement positif, sans signe
+#     ni zéro initial, 1 à 999999 (plage comparable par `[` sur tout shell) ;
+#   - READY_POLL_INTERVAL : secondes, entier ou décimal à 3 décimales au plus (`0.05`), de 0.001 à
+#     3600 (pas de notation scientifique, de signe, d'inf/nan ni d'espace) ;
+#   - toute autre valeur (y compris blanche) est refusée : message sur stderr, code 2, aucun
+#     processus lancé. Le mode stdio et la sous-commande mcp-ready ne lisent pas ces réglages.
+# Chaque sonde curl est bornée (--max-time) : une connexion bloquée ne suspend pas l'attente.
 
 set -e
 
@@ -35,7 +45,7 @@ MCP_ATTEMPTS="${MCP_READY_ATTEMPTS:-120}"
 
 # Code HTTP renvoyé par le MCP à une requête initialize (000 = rien n'écoute).
 mcp_http_status() {
-    curl -s -o /dev/null -w '%{http_code}' --max-time 3 -X POST http://localhost:4121/mcp/ \
+    curl -s -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 3 -X POST http://localhost:4121/mcp/ \
         -H 'Content-Type: application/json' \
         -H 'Accept: application/json, text/event-stream' \
         -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"entrypoint","version":"0"}}}' \
@@ -70,8 +80,63 @@ if [ "${MCP_TRANSPORT:-http}" = "stdio" ]; then
         --no-banner
 fi
 
+# --- Validation des réglages de readiness (mode http), avant tout processus -------------------
+# Un compteur non numérique ferait échouer `[ ... -ge ... ]` dans un `if`, ce que `set -e` ne
+# rattrape pas : boucle d'attente infinie. On refuse donc d'emblée toute valeur hors format.
+invalid_setting() {
+    echo "ERROR: $1='$2' invalide : $3" >&2
+    exit 2
+}
+
+# Entier décimal strictement positif, sans zéro initial, 1 à 999999.
+check_attempts() {
+    case "$2" in
+        ''|*[!0-9]*|0*) invalid_setting "$1" "$2" "entier décimal de 1 à 999999 attendu (sans signe, espace ni zéro initial)" ;;
+    esac
+    if [ "${#2}" -gt 6 ]; then
+        invalid_setting "$1" "$2" "entier décimal de 1 à 999999 attendu (valeur trop grande)"
+    fi
+}
+
+# Secondes : entier ou décimal à 3 décimales au plus, de 0.001 à 3600 (sans zéro initial inutile).
+check_interval() {
+    interval_format="durée en secondes attendue, ex. 1 ou 0.05 (3 décimales max, de 0.001 à 3600)"
+    case "$2" in
+        ''|*[!0-9.]*|.*|*.|*.*.*) invalid_setting "$1" "$2" "$interval_format" ;;
+    esac
+    interval_int="${2%%.*}"
+    interval_frac=""
+    case "$2" in *.*) interval_frac="${2#*.}" ;; esac
+    if [ "${#interval_int}" -gt 4 ] || [ "${#interval_frac}" -gt 3 ]; then
+        invalid_setting "$1" "$2" "$interval_format"
+    fi
+    case "$interval_int" in
+        0?*) invalid_setting "$1" "$2" "$interval_format" ;;
+    esac
+    # Parties entière (<= 4 chiffres, sans zéro initial) et décimale : comparaisons sans débordement.
+    if [ "$interval_int" -gt 3600 ]; then
+        invalid_setting "$1" "$2" "durée maximale 3600 secondes"
+    fi
+    if [ "$interval_int" -eq 3600 ]; then
+        case "$interval_frac" in
+            *[1-9]*) invalid_setting "$1" "$2" "durée maximale 3600 secondes" ;;
+        esac
+    fi
+    if [ "$interval_int" -eq 0 ]; then
+        case "$interval_frac" in
+            *[1-9]*) ;;
+            *) invalid_setting "$1" "$2" "la durée doit être strictement positive (minimum 0.001)" ;;
+        esac
+    fi
+}
+
+check_attempts HEALTH_READY_ATTEMPTS "$HEALTH_ATTEMPTS"
+check_attempts MCP_READY_ATTEMPTS "$MCP_ATTEMPTS"
+check_interval READY_POLL_INTERVAL "$POLL_INTERVAL"
+
 HEALTH_PID=""
 MCP_PID=""
+NAP_PID=""
 
 # Arrête tous les processus fils puis sort avec le statut demandé ($1, 0 par défaut).
 # Le statut est transmis explicitement : le nettoyage ne le remplace jamais par 0.
@@ -81,11 +146,21 @@ cleanup() {
     echo "Shutting down services (exit code $status)..."
     if [ -n "$MCP_PID" ]; then kill "$MCP_PID" 2>/dev/null || true; fi
     if [ -n "$HEALTH_PID" ]; then kill "$HEALTH_PID" 2>/dev/null || true; fi
+    if [ -n "$NAP_PID" ]; then kill "$NAP_PID" 2>/dev/null || true; fi
     wait 2>/dev/null || true
     exit "$status"
 }
 
 trap 'cleanup 0' TERM INT
+
+# Pause interruptible : `sleep` en arrière-plan + `wait` laisse SIGTERM/SIGINT déclencher le trap
+# tout de suite (un `sleep` au premier plan retarderait l'arrêt jusqu'à la fin de la pause).
+nap() {
+    sleep "$POLL_INTERVAL" &
+    NAP_PID=$!
+    wait "$NAP_PID" 2>/dev/null || true
+    NAP_PID=""
+}
 
 is_running() {
     [ -n "$1" ] && kill -0 "$1" 2>/dev/null
@@ -98,7 +173,7 @@ HEALTH_PID=$!
 # Attendre que le health server soit prêt (attente bornée, échec sinon)
 echo "Waiting for health server to be ready..."
 attempt=0
-until curl -s -f http://localhost:4122/_health > /dev/null 2>&1; do
+until curl -s -f --connect-timeout 2 --max-time 3 http://localhost:4122/_health > /dev/null 2>&1; do
     if ! is_running "$HEALTH_PID"; then
         if wait "$HEALTH_PID"; then health_status=0; else health_status=$?; fi
         HEALTH_PID=""
@@ -112,7 +187,7 @@ until curl -s -f http://localhost:4122/_health > /dev/null 2>&1; do
         cleanup 1
     fi
     echo "Health server not ready yet (attempt $attempt/$HEALTH_ATTEMPTS), retrying in ${POLL_INTERVAL}s..."
-    sleep "$POLL_INTERVAL"
+    nap
 done
 echo "Health server is ready!"
 
@@ -142,7 +217,7 @@ until mcp_is_ready; do
         cleanup 1
     fi
     echo "MCP server not ready yet (attempt $attempt/$MCP_ATTEMPTS), retrying in ${POLL_INTERVAL}s..."
-    sleep "$POLL_INTERVAL"
+    nap
 done
 echo "MCP server is ready!"
 
@@ -163,7 +238,7 @@ while is_running "$MCP_PID"; do
         if [ "$health_status" -eq 0 ]; then health_status=1; fi
         cleanup "$health_status"
     fi
-    sleep "$POLL_INTERVAL"
+    nap
 done
 
 # Le MCP s'est arrêté seul : restituer son code exact (le nettoyage ne le masque pas).
