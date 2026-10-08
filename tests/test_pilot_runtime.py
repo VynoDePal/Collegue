@@ -49,6 +49,13 @@ def _clients():
     return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
 
 
+def _published_clients(repo):
+    """Clients COMPLETS pour un run réel (vrai dépôt Git distant) : voir ``tests/w3_publication.py``."""
+    from w3_publication import published_clients
+
+    return published_clients(repo)
+
+
 class _Budget:
     """Budget toujours OK (déterministe, sans collecteur global)."""
 
@@ -102,7 +109,7 @@ async def _run(manager, git_repo, pid, *, dry_run):
         sandbox=_Sandbox(),
         agent=FakeCodeAgent(),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=_clients() if dry_run else _published_clients(git_repo),
         budget=_Budget(),
     )
 
@@ -247,7 +254,7 @@ async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
         sandbox=_Sandbox(),
         agent=_UsageAgent(),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=_published_clients(git_repo),
         budget=_Budget(),
     )
     assert result.stop_reason == "awaiting_merge"  # usage compté, mais PR non mergée

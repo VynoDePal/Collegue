@@ -76,6 +76,13 @@ def _clients():
     return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
 
 
+def _published_clients(repo, base="main"):
+    """Clients COMPLETS pour un run réel (vrai dépôt Git distant) : voir ``tests/w3_publication.py``."""
+    from w3_publication import published_clients
+
+    return published_clients(repo, base)
+
+
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
@@ -126,7 +133,7 @@ async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, a
         budget=budget or _always(),
         sandbox=sandbox or _Sandbox(ok=True),
         reviewer=FakeReviewer(),
-        clients=clients or _clients(),
+        clients=clients or (_clients() if dry_run else _published_clients(repo)),
         dry_run=dry_run,
         **kw,
     )
@@ -216,7 +223,7 @@ async def test_real_run_advances_states_but_does_not_promote_unmerged_mvp(repo, 
     assert result.project_status is None  # #580 : PRs ouvertes != MVP intégré
     assert all(t.status == "in_review" for t in manager.get_tasks(pid))
     assert manager.get_project(pid).status != "improving"
-    assert result.opened_prs == [101, 101]
+    assert result.opened_prs == [101, 102]  # numérotation du vrai dépôt distant factice (une PR par tâche)
 
 
 # --- arrêts ---------------------------------------------------------------------
@@ -571,8 +578,36 @@ class _ReconcilePRs(_PRs):
         return value
 
 
-def _reconcile_clients(mapping):
-    return PrClients(branches=_Branches(), files=_Files(), prs=_ReconcilePRs(mapping))
+class _ScriptedThenPublishingPRs:
+    """Réconciliation scriptée (``state="all"``, par branche) ET publication RÉELLE (``state="open"``, vrai dépôt distant).
+
+    Le démarrage du run relit l'état des PR existantes via ``find_pr_by_head(..., state="all")`` (réponses scriptées du
+    test) ; la livraison d'une tâche relancée passe, elle, par le vrai dépôt Git distant (``FakeRemote``) afin que sa preuve
+    soit vérifiée contre de vrais objets Git.
+    """
+
+    def __init__(self, mapping, published):
+        self._scripted = _ReconcilePRs(mapping)
+        self._published = published
+        self.queries = self._scripted.queries
+
+    def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+        if state == "all":
+            return self._scripted.find_pr_by_head(owner, repo, head, base=base, state=state)
+        return self._published.find_pr_by_head(owner, repo, head, base=base, state=state)
+
+    def __getattr__(self, name):
+        return getattr(self._published, name)
+
+
+def _reconcile_clients(mapping, repo=None):
+    """Sans ``repo`` : aucune livraison attendue (doubles minimaux). Avec ``repo`` : la livraison est réelle."""
+    if repo is None:
+        return PrClients(branches=_Branches(), files=_Files(), prs=_ReconcilePRs(mapping))
+    published = _published_clients(repo)
+    return PrClients(
+        branches=published.branches, files=published.files, prs=_ScriptedThenPublishingPRs(mapping, published.prs)
+    )
 
 
 async def test_reconcile_merged_pr_updates_state_and_unblocks_strict(repo, manager):
@@ -584,7 +619,7 @@ async def test_reconcile_merged_pr_updates_state_and_unblocks_strict(repo, manag
     manager.update_task_status(s0.id, "in_review")
     branch = f"collegue/issue-{s0.id}"
     clients = _reconcile_clients(
-        {branch: SimpleNamespace(number=72, state="closed", merged=True, merge_commit_sha="a" * 40)}
+        {branch: SimpleNamespace(number=72, state="closed", merged=True, merge_commit_sha="a" * 40)}, repo
     )
     result = await _run(
         manager,
@@ -610,7 +645,7 @@ async def test_reconcile_closed_pr_requeues_with_feedback(repo, manager):
     t0 = manager.get_tasks(pid)[0]
     manager.update_task_status(t0.id, "in_review")
     branch = f"collegue/issue-{t0.id}"
-    clients = _reconcile_clients({branch: SimpleNamespace(number=64, state="closed", merged=False)})
+    clients = _reconcile_clients({branch: SimpleNamespace(number=64, state="closed", merged=False)}, repo)
     agent = _RecordingAgent()
     result = await _run(manager, repo, pid, dry_run=False, clients=clients, agent=agent)
     assert result.iterations == 1  # relivrée dans ce run
@@ -1514,6 +1549,7 @@ async def test_infra_noise_after_a_functional_failure_never_changes_the_branch_g
         max_task_attempts=3,
         sleep_fn=_sleep,
         base="release/9",
+        clients=_published_clients(repo, base="release/9"),
     )
 
     assert result.stop_reason == "completed"
