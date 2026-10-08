@@ -274,3 +274,17 @@ Preuve attendue pour chaque ligne : un test rouge sur `fe763b5`, vert ensuite, a
 2. Fusion `--no-ff` par SHA dans `codex/consolidation-w1-followup-c`, puis recherche des usages oubliés (`git grep -nE '"-v"|pip_cache_dir|subscription_auth_dir|READY_(ATTEMPTS|POLL)'`), suite complète hors `integration`, `ruff check` et `ruff format --check collegue tests`, sondes du manager, rouge sur la base `fe763b5` pour chaque test de défaut annoncé (§4).
 3. Codex valide (niveau 3). Puis, sur consigne : push de la branche, PR vers `main`, **étape 1** de livraison (observer checks et revues, rapporter), arbitrage Codex, **étape 2** (fusion sur instruction pour la tête exacte), vérification de `main`.
 4. La vague 1 n'est clôturée qu'après cette vérification de `main` et la fermeture des deux findings.
+
+### 9.4 Interfaces, changements de comportement et limites du suivi (pour la PR corrective)
+
+Lots intégrés : A `d3a8786071b691926a4ee491cc479d88cbc25c71` (garde de montage), B `fd9a48ec9d9a555decbea4e84646c342ad3cf3b3` (readiness de l'entrypoint), tous deux depuis `fe763b5`, intersection vide. Résultats et SHA du candidat : `reports/w1-c-followup-integration.md`.
+
+**Interfaces.** `git_control_exposure(path)` (`collegue/sandbox/executor.py`) remplace `_git_control_within` ; bornes `GIT_CONTROL_SCAN_MAX_DIRS` (250 000), `GIT_CONTROL_SCAN_MAX_ENTRIES` (1 000 000), `GIT_CONTROL_SCAN_MAX_DEPTH` (64). `LocalSamplingContext._validated_subscription_mounts()` applique la même garde au sampler. `entrypoint.sh` : compteurs 1–999999, `READY_POLL_INTERVAL` de 0.001 à 3600 s, code de sortie **2** sur réglage invalide, sondes curl `--connect-timeout 2 --max-time 3`, pauses interruptibles.
+
+**Changements de comportement à annoncer.**
+1. Un workspace, un cache pip ou un répertoire d'auth dont l'arbre contient un répertoire de contrôle, ou qui se trouve sous l'un d'eux, est refusé. Un marqueur `.collegue-git-control` planté par l'agent dans son workspace fait refuser les lancements suivants du sandbox sur ce workspace (faux positif assumé, fail-closed ; il ne peut jamais autoriser quoi que ce soit).
+2. Un arbre monté de plus de 250 000 répertoires, 1 000 000 entrées ou 64 niveaux est refusé (« vérification impossible »). Un projet de très grande taille (par ex. `node_modules` énorme dans le workspace) peut donc être refusé ; le coût mesuré par A est de l'ordre de 0,06 s pour 30 000 répertoires, par lancement de conteneur.
+3. Un chemin dont la vérification est impossible (`EACCES`, lien pendant, boucle de liens, erreur d'E/S) est refusé au lieu d'être traité comme absent.
+4. Un réglage de readiness invalide (`abc`, `0`, `1.5`, valeur énorme, blanc…) fait sortir le conteneur en **code 2** sans rien démarrer ; avec `restart: always`, Compose le relance donc en boucle jusqu'à correction de la variable (lire les logs). Une variable vide (`VAR=`) équivaut à absente.
+
+**Limites (à ne pas arrondir).** Fenêtre entre la vérification et le `docker run` (un marqueur créé entre les deux n'est pas vu) ; le démon Docker reste privilégié et le sandbox garde le workspace en lecture-écriture ; le healthcheck Compose lance `curl -f` sans `--max-time`, borné seulement par son `timeout: 5s` ; Python 3.11 n'est pas exécuté localement (preuve : check `Pytest (Python 3.11)` de la PR) ; les revues externes (Copilot, Codex GitHub) ne sont examinées que lorsqu'elles sont disponibles : leur absence est rapportée telle quelle et ne vaut ni succès ni prérequis ; seuls les cinq checks CI restent obligatoires au ruleset.

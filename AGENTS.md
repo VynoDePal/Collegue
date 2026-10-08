@@ -57,7 +57,14 @@ Détail et inventaire : `docs/consolidation/w1-isolation.md`.
 - `LocalCommandRunner` est réservé aux fixtures de confiance et aux lectures sur `repo_source` ; il refuse (126) un workspace
   géré. Jamais un défaut de production sur un workspace : `runner=None` passe par la frontière, un workspace non géré lève
   `WorkspaceError` (fail-closed, aucun repli silencieux). Un runner injecté est refusé sur un workspace géré.
-- Le sandbox ne monte que le répertoire de travail, jamais le contrôle ni son parent (`GIT_CONTROL_MARKER`).
+- **Tous** les bind mounts passent par `collegue.sandbox.executor.git_control_exposure` : workspace, cache pip, auth
+  d'abonnement de `DockerSandbox`, et auth (RW) + script (RO) du sampler de `core/llm/sampling_ctx.py`. Un montage est
+  refusé s'il est, contient (à toute profondeur, parcours borné sans suivre de liens) ou se trouve sous un répertoire
+  portant `GIT_CONTROL_MARKER`. **Aucune dispense**, pas même pour un workspace géré (un autre contrôle peut y être
+  imbriqué). Une erreur n'est jamais une absence : seules `ENOENT`/`ENOTDIR` établies par `lstat` autorisent un chemin « à
+  créer » ; `EACCES`, lien pendant, boucle, bornes dépassées ⇒ refus (le démon Docker, plus privilégié, franchirait un
+  parent non traversable). N'utiliser ni `os.path.exists`/`isdir`/`lexists` pour décider d'une exposition, ni un second
+  constructeur de `docker run -v` hors de cette garde.
 - Noms de fichiers venant de l'agent : lus ou écrits sur l'hôte seulement via `collegue.sandbox.paths.workspace_file`
   (ni `..`, ni lien symbolique suivi, ni sortie du workspace). L'audit de dépendances ne s'exécute jamais sur l'hôte ; une
   mesure indisponible est refusée (composite non fini), jamais comptée comme zéro.
