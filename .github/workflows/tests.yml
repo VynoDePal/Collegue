@@ -37,6 +37,24 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    # Service PostgreSQL ÉPHÉMÈRE du job (détruit avec lui) : la preuve de réservations concurrentes du registre de
+    # budget exige un vrai PostgreSQL, pas un mock. Le mot de passe est celui du service jetable, pas un secret.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      COLLEGUE_TEST_POSTGRES_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +73,31 @@ jobs:
 
       - name: Verify locks match pyproject.toml
         run: python scripts/locks.py check
+
+      # Preuve PostgreSQL RÉELLE, dans ce job requis : un échec, un test sauté ou désélectionné, une collecte
+      # tronquée ou un service absent rendent le job rouge (le rapport JUnit doit couvrir tout ce qui est collecté).
+      # Le plancher (21) est un minimum : à relever si des cas sont ajoutés, jamais à abaisser pour masquer une perte.
+      - name: PostgreSQL budget ledger - real concurrency proof
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          test -n "${COLLEGUE_TEST_POSTGRES_URL:-}"
+          # -o addopts= : mêmes options pour la collecte et l'exécution (le « -q » du pyproject masquerait les identifiants,
+          # et aucun marqueur ne doit pouvoir désélectionner cette preuve).
+          expected="$(pytest tests/test_budget_ledger_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests PostgreSQL collectés: ${expected}"
+          pytest tests/test_budget_ledger_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-budget.xml
+          python scripts/ci_require_junit.py pg-budget.xml --min-tests 21 --expect-tests "${expected}"
+
+      - name: Upload PostgreSQL proof report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-budget-junit-${{ matrix.python-version }}
+          path: pg-budget.xml
+          if-no-files-found: warn
 
       - name: Run pytest with coverage
         env:
