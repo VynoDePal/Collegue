@@ -126,12 +126,17 @@ jobs:
           docker run --rm collegue-sandbox-openhands:pr-check \
             python -c "from openhands.tools.terminal.definition import TerminalAction; assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; assert TerminalAction.model_validate({'command': 'canonical', 'commands': 'ignored'}).command == 'canonical'"
 
-      - name: Smoke test — container starts
-        run: |
-          docker run --rm -d --name collegue-smoke \
-            -e LLM_API_KEY=test-key \
-            -e LLM_MODEL=test-model \
-            collegue:ci &
-          sleep 5
-          docker logs collegue-smoke || true
-          docker stop collegue-smoke || true
+      # Prouve que le service est PRÊT (santé + MCP initialize), pas seulement lancé :
+      # attente bornée, échec si le conteneur sort ou reste indisponible, journaux
+      # conservés, aucun réseau ni appel LLM (cf. scripts/ci_docker_smoke.sh).
+      - name: Smoke test — container starts and serves
+        timeout-minutes: 5
+        run: bash scripts/ci_docker_smoke.sh collegue:ci
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-logs
+          path: smoke-logs/
+          if-no-files-found: warn

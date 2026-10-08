@@ -9,9 +9,15 @@
 #   - Sentry/GitHub réels si fournis (sinon les tests se skippent proprement)
 #   - en opt-in, le cycle produit plan→run→PR→cleanup sur un dépôt fixture dédié
 #
-# Les tests `integration` skippent quand un prérequis manque : le rapport liste
-# les skips (-rs) et l'étape « Bilan » échoue si TOUT a été skippé (un nightly
-# vert par vacuité serait une fausse assurance).
+# Les tests `integration` skippent quand un prérequis manque. Le statut du job est
+# fidèle à pytest :
+#   - l'étape pytest propage EXACTEMENT le code de sortie de pytest (`| tee` sans
+#     pipefail avait marqué « success » un run à 1 failed, 7 passed, 7 skipped) ;
+#   - l'étape « Bilan » lit le rapport JUnit (structuré, pas le wording de pytest),
+#     échoue sur tout échec/erreur ou si RIEN n'a été exécuté, et liste les skips
+#     comme NON exécutés ;
+#   - le job « Statut du produit E2E » dit explicitement quand le cycle produit
+#     n'a pas tourné : un nightly vert ne le prouve alors PAS.
 
 name: Integration (nightly)
 
@@ -93,26 +99,33 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.INTEGRATION_GITHUB_TOKEN }}
           SENTRY_AUTH_TOKEN: ${{ secrets.INTEGRATION_SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.INTEGRATION_SENTRY_ORG }}
+        shell: bash
         # --override-ini neutralise l'addopts `-m 'not integration'` du pyproject ;
         # -rs liste chaque skip avec sa raison (lisible dans le log du run).
         run: |
+          # `pytest | tee` renvoie par défaut le statut de tee (0) : on lit donc
+          # explicitement le statut de CHAQUE commande du pipeline (PIPESTATUS), sans
+          # dépendre du shell fourni par le runner. stderr est fusionné dans le journal.
+          set -o pipefail
+          set +e
           pytest tests/ -m integration --override-ini="addopts=" -rs -v \
-            --junitxml=integration-report.xml | tee pytest-integration.log
+            --junitxml=integration-report.xml 2>&1 | tee pytest-integration.log
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          echo "Code de sortie pytest: ${statuses[0]} (tee: ${statuses[1]})"
+          if (( statuses[0] != 0 )); then
+            exit "${statuses[0]}"
+          fi
+          if (( statuses[1] != 0 )); then
+            echo "::error::Le journal pytest n'a pas pu être écrit (tee: ${statuses[1]})."
+            exit "${statuses[1]}"
+          fi
 
-      - name: Bilan — refuser un nightly « vert par vacuité »
+      - name: Bilan — verdict structuré (JUnit), jamais vert par vacuité
         if: always()
-        run: |
-          if [ ! -f pytest-integration.log ]; then
-            echo "::error::Aucun log pytest — le run n'a pas démarré."; exit 1
-          fi
-          summary=$(tail -n 3 pytest-integration.log)
-          echo "Résumé : $summary"
-          if echo "$summary" | grep -qE "[1-9][0-9]* (passed|failed|error)"; then
-            echo "Au moins un test integration a tourné."
-          else
-            echo "::error::Tous les tests integration ont été skippés (aucun exercé) — vérifier services/secrets."
-            exit 1
-          fi
+        env:
+          PYTEST_OUTCOME: ${{ steps.pytest.outcome }}
+        run: python scripts/ci_integration_bilan.py junit integration-report.xml --pytest-outcome "$PYTEST_OUTCOME"
 
       - name: Upload report
         if: always()
@@ -122,6 +135,7 @@ jobs:
           path: |
             integration-report.xml
             pytest-integration.log
+          if-no-files-found: warn
 
   build-sandbox-openhands:
     name: Build image sandbox OpenHands (#404)
@@ -321,6 +335,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
         run: python -m collegue.pilot.nightly_e2e cleanup
+
+  e2e-status:
+    name: Statut du produit E2E (jamais vert par skip)
+    needs: [product-e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      PRODUCT_E2E_RESULT: ${{ needs.product-e2e.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # `skipped` = opt-in non activé : code 0 mais annoncé NON EXÉCUTÉ (annotation +
+      # résumé du run). failure/cancelled/inconnu échouent.
+      - name: Publier le statut du cycle produit
+        run: python3 scripts/ci_integration_bilan.py e2e --result "$PRODUCT_E2E_RESULT"
 
   notify-failure:
     name: Notifier l'échec nightly (#404)

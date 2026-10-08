@@ -17,8 +17,15 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     APP_DESCRIPTION: str = "Assistant de développement intelligent"
 
-    HOST: str = "0.0.0.0"
+    # Loopback par défaut : `python collegue/app.py` n'est joignable que depuis la machine.
+    # Une exposition distante est un choix explicite (HOST=0.0.0.0) et impose OAUTH_ENABLED=true.
+    # Dans Docker, le conteneur écoute sur 0.0.0.0 via entrypoint.sh (--host) ; c'est la
+    # PUBLICATION hôte (docker-compose.yml, COLLEGUE_PUBLISH_HOST) qui reste sur loopback.
+    HOST: str = "127.0.0.1"
     PORT: int = 4121
+    # Adresse HÔTE sur laquelle docker-compose.yml publie les ports (défaut compose : 127.0.0.1).
+    # Purement informatif pour l'application : sert à avertir d'une exposition distante sans OAuth.
+    COLLEGUE_PUBLISH_HOST: Optional[str] = None
     DEBUG: bool = True
 
     LLM_API_KEY: Optional[str] = None
@@ -368,12 +375,17 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_oauth_config(self) -> "Settings":
         if self.OAUTH_ENABLED:
-            if not self.OAUTH_JWKS_URI and not self.OAUTH_PUBLIC_KEY:
+            # Une valeur vide ou blanche équivaut à une valeur absente (fail-closed au démarrage).
+            jwks_uri = (self.OAUTH_JWKS_URI or "").strip()
+            public_key = (self.OAUTH_PUBLIC_KEY or "").strip()
+            if not jwks_uri and not public_key:
                 raise ValueError("OAUTH_ENABLED est true mais ni OAUTH_JWKS_URI ni OAUTH_PUBLIC_KEY n'est configuré.")
-            if self.OAUTH_JWKS_URI and not self.OAUTH_JWKS_URI.startswith("http"):
+            if jwks_uri and not jwks_uri.startswith("http"):
                 raise ValueError(f"OAUTH_JWKS_URI doit être une URL HTTP/HTTPS valide. Reçu: {self.OAUTH_JWKS_URI}")
-            if not self.OAUTH_ISSUER:
+            if not (self.OAUTH_ISSUER or "").strip():
                 raise ValueError("OAUTH_ISSUER est requis lorsque OAUTH_ENABLED est true.")
+            if not (self.OAUTH_ALGORITHM or "").strip():
+                raise ValueError("OAUTH_ALGORITHM ne peut pas être vide lorsque OAUTH_ENABLED est true.")
         return self
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
