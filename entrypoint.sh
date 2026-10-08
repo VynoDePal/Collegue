@@ -42,11 +42,13 @@ mcp_http_status() {
         2>/dev/null || true
 }
 
-# Prêt = le serveur répond en HTTP : 2xx, ou 4xx (ex. 401 d'un MCP protégé par OAuth).
-# 000 (rien à l'écoute) et 5xx (serveur en erreur) ne sont pas « prêt ».
+# Prêt = l'endpoint MCP répond à un initialize COMPLET (bon chemin, bon Accept) par un succès
+# (2xx) ou par le refus d'authentification attendu d'un endpoint protégé par OAuth (401/403).
+# Tout le reste n'est pas « prêt » : 000 (rien à l'écoute), 404 (mauvais chemin), 405/406
+# (mauvais contrat), 400, 408, 429 et 5xx.
 mcp_is_ready() {
     case "$(mcp_http_status)" in
-        2??|4??) return 0 ;;
+        2??|401|403) return 0 ;;
     esac
     return 1
 }

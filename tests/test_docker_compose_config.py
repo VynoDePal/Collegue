@@ -274,7 +274,7 @@ class TestComposePublishesOnLoopbackByDefault:
         command = " ".join(str(item) for item in healthcheck["test"])
 
         assert ":4122/_health" in command
-        # Même critère que l'entrypoint (2xx/4xx = à l'écoute), testé dans test_entrypoint_lifecycle.py.
+        # Même critère que l'entrypoint (2xx ou 401/403 = à l'écoute ; 404/405/406/5xx rejetés), testé dans test_entrypoint_lifecycle.py.
         assert "entrypoint.sh mcp-ready" in command
 
     @pytest.mark.skipif(

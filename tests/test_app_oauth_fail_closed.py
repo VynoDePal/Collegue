@@ -66,6 +66,9 @@ import collegue.app as collegue_app
 
 auth = collegue_app.app.auth
 result = {"auth": None if auth is None else type(auth).__name__, "status": None}
+if auth is not None:
+    result["algorithm"] = getattr(auth, "algorithm", None)
+    result["required_scopes"] = list(getattr(auth, "required_scopes", None) or [])
 
 if probe:
     from starlette.testclient import TestClient
@@ -220,3 +223,23 @@ def test_jwt_failures_do_not_affect_local_mode() -> None:
         assert completed.returncode == 0, (inject, completed.stderr[-2000:])
         assert result is not None
         assert result["auth"] is None
+
+
+def test_blank_algorithm_blocks_startup_before_building_the_app() -> None:
+    completed, result = _run_app(oauth_env={**_jwks_env(), "OAUTH_ALGORITHM": "   "})
+
+    assert result is None
+    assert completed.returncode != 0
+    assert "OAUTH_ALGORITHM" in completed.stderr
+    assert CONSTRUCTED_MARKER not in completed.stderr
+
+
+def test_configured_algorithm_and_scopes_reach_the_running_verifier() -> None:
+    env = {**_jwks_env(), "OAUTH_ALGORITHM": "ES256", "OAUTH_REQUIRED_SCOPES": "mcp.read, mcp.write"}
+    completed, result = _run_app(oauth_env=env, probe=True)
+
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert result["auth"] == "JWTVerifier"
+    assert result["algorithm"] == "ES256"
+    assert result["required_scopes"] == ["mcp.read", "mcp.write"]
+    assert result["status"] == 401

@@ -31,6 +31,14 @@ def is_loopback_host(host: Optional[str]) -> bool:
         return False
 
 
+def normalize_scopes(raw: Any) -> list[str]:
+    """Liste de scopes sans entrées vides ou blanches (accepte « a,b » ou une liste)."""
+    if raw is None:
+        return []
+    items = raw.split(",") if isinstance(raw, str) else list(raw)
+    return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+
+
 def build_auth_provider(cfg: Any) -> Optional[Any]:
     """Retourne le fournisseur d'authentification FastMCP, ou ``None`` en mode local explicite.
 
@@ -64,6 +72,8 @@ def build_auth_provider(cfg: Any) -> Optional[Any]:
     jwks_uri = (cfg.OAUTH_JWKS_URI or "").strip()
     public_key = (cfg.OAUTH_PUBLIC_KEY or "").strip()
     issuer = (cfg.OAUTH_ISSUER or "").strip()
+    algorithm = (getattr(cfg, "OAUTH_ALGORITHM", None) or "").strip()
+    scopes = normalize_scopes(getattr(cfg, "OAUTH_REQUIRED_SCOPES", None))
 
     if jwks_uri:
         key_material = {"jwks_uri": jwks_uri}
@@ -82,8 +92,20 @@ def build_auth_provider(cfg: Any) -> Optional[Any]:
             "OAUTH_ENABLED=true mais OAUTH_ISSUER n'est pas configuré : refus de démarrer sans l'authentification demandée."
         )
 
+    if not algorithm:
+        # Sans algorithme explicite, la politique de signature ne serait pas celle de la configuration.
+        raise OAuthConfigurationError(
+            "OAUTH_ENABLED=true mais OAUTH_ALGORITHM est vide : refus de démarrer sans l'authentification demandée."
+        )
+
     try:
-        provider = JWTVerifier(**key_material, issuer=issuer, audience=cfg.OAUTH_AUDIENCE)
+        provider = JWTVerifier(
+            **key_material,
+            issuer=issuer,
+            audience=cfg.OAUTH_AUDIENCE,
+            algorithm=algorithm,
+            required_scopes=scopes or None,
+        )
     except Exception as exc:
         raise OAuthConfigurationError(
             f"OAUTH_ENABLED=true mais l'initialisation de JWTVerifier a échoué ({type(exc).__name__}: {exc}) : "

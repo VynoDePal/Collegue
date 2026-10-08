@@ -17,6 +17,8 @@ pouvoir servir quoi que ce soit d'anonyme (un test espionne la construction de `
 | `OAUTH_ENABLED=true`, ni `OAUTH_JWKS_URI` ni `OAUTH_PUBLIC_KEY` | avertissement, serveur **sans auth** | démarrage refusé (déjà par la validation de `Settings`, puis par le constructeur) |
 | valeurs vides ou blanches (`OAUTH_JWKS_URI`, `OAUTH_PUBLIC_KEY`, `OAUTH_ISSUER`) | clé blanche acceptée | traitées comme absentes → démarrage refusé |
 | `OAUTH_ISSUER` absent | refusé par `Settings` | refusé aussi par le constructeur (défense en profondeur) |
+| `OAUTH_ALGORITHM` vide/blanc | non contrôlé | démarrage refusé (`Settings` et constructeur) |
+| `OAUTH_ALGORITHM`, `OAUTH_REQUIRED_SCOPES` | lus mais **ignorés** | transmis tels quels (après normalisation) à `JWTVerifier(algorithm=…, required_scopes=…)` |
 | configuration valide (JWKS ou clé publique) | auth active | inchangé : requêtes sans jeton → `401` + `WWW-Authenticate: Bearer` |
 | `OAUTH_ENABLED=false` (défaut) | pas d'auth | inchangé, mais **explicite** : journal « mode local explicite, SANS authentification » |
 
@@ -40,9 +42,11 @@ distante. Ce n'est **pas** un refus (décision de politique laissée au manager)
 | SIGTERM / SIGINT (`docker stop`) | arrêt propre, code 0, **aucun** processus fils ne survit |
 
 - « Prêt » = le **health server ET le MCP** répondent. Le MCP est prêt quand une requête
-  `initialize` reçoit un code HTTP **2xx ou 4xx** (un `401` est la réponse normale d'un MCP
-  protégé par OAuth) ; `000` (rien à l'écoute) et `5xx` ne le sont pas. La bannière
-  « All services started successfully! » n'apparaît qu'à ce moment.
+  `initialize` **complète** (`POST /mcp/`, `Accept: application/json, text/event-stream`) reçoit
+  un **2xx** ou le refus d'authentification attendu d'un endpoint protégé (**401/403**).
+  Sont rejetés : `000` (rien à l'écoute), `404` (mauvais chemin), `405`/`406` (mauvais contrat),
+  `400`, `408`, `429` et `5xx`. La bannière « All services started successfully! » n'apparaît
+  qu'à ce moment.
 - Réglages : `COLLEGUE_APP_DIR` (`/app`), `READY_POLL_INTERVAL` (1 s), `HEALTH_READY_ATTEMPTS`
   (30), `MCP_READY_ATTEMPTS` (120).
 - Sous-commande `./entrypoint.sh mcp-ready` : ne démarre rien, code 0 si le MCP répond selon le
@@ -162,7 +166,7 @@ Les noms des checks requis sont inchangés : `Ruff`, `Pytest (Python 3.11)`,
 | Fichier | Couvre |
 |---|---|
 | `tests/test_app_oauth_fail_closed.py` | démarrage réel (sous-processus) : local, OAuth JWKS/clé publique (401 sans jeton), constructeur en erreur, import absent, clé absente/vide/blanche ; jamais de `FastMCP` construit sur un refus |
-| `tests/test_server_auth.py` | `build_auth_provider`, valeurs blanches, issuer, loopback, avertissements d'exposition |
+| `tests/test_server_auth.py` | `build_auth_provider`, valeurs blanches, issuer, algorithme, scopes exacts, loopback, avertissements d'exposition |
 | `tests/test_entrypoint_lifecycle.py` | `entrypoint.sh` avec faux `fastmcp`/health/`curl` : codes exacts, jamais « prêt » à tort, timeouts, mort du health server, SIGTERM, aucun processus survivant, `mcp-ready`, stdio |
 | `tests/test_docker_compose_config.py` | cinq publications en loopback, variables séparées, `docker compose config` réel, healthcheck MCP |
 | `tests/test_ci_nightly_pipeline.py` | étape pytest du workflow contre un faux `pytest` (codes 1/2/3/5), bilan JUnit, statut E2E |
@@ -170,9 +174,9 @@ Les noms des checks requis sont inchangés : `Ruff`, `Pytest (Python 3.11)`,
 
 ## 7. Limites connues
 
-- `OAUTH_REQUIRED_SCOPES` et `OAUTH_ALGORITHM` sont lus par `Settings` mais **non transmis** à
-  `JWTVerifier` (`required_scopes`, `algorithm`) : les scopes configurés ne sont pas imposés.
-  Comportement inchangé (imposer les scopes peut verrouiller des déploiements existants) ; à décider.
+- Les scopes requis sont désormais **imposés** : un déploiement dont les jetons n'ont pas les
+  scopes de `OAUTH_REQUIRED_SCOPES` verra ses requêtes refusées. Vérifier la configuration
+  Keycloak avant mise à jour.
 - Le smoke n'a pas été exécuté sur une vraie image dans cette vague (pas de build Docker
   local) : la preuve réelle sera le job « Docker build » de la CI distante. Il a été exécuté
   contre le vrai `entrypoint.sh` et le vrai serveur via un shim `docker` (voir le rapport).

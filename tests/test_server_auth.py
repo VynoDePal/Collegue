@@ -21,6 +21,8 @@ def _cfg(**overrides) -> SimpleNamespace:
         "OAUTH_PUBLIC_KEY": None,
         "OAUTH_ISSUER": "https://idp.example.invalid/realm",
         "OAUTH_AUDIENCE": "collegue",
+        "OAUTH_ALGORITHM": "RS256",
+        "OAUTH_REQUIRED_SCOPES": [],
         "HOST": "127.0.0.1",
     }
     values.update(overrides)
@@ -67,6 +69,8 @@ def test_jwks_configuration_builds_the_verifier_with_issuer_and_audience(recordi
             "jwks_uri": "https://idp.example.invalid/jwks",
             "issuer": "https://idp.example.invalid/realm",
             "audience": "collegue",
+            "algorithm": "RS256",
+            "required_scopes": None,
         }
     ]
 
@@ -82,7 +86,7 @@ def test_public_key_configuration_builds_the_verifier(recording_verifier) -> Non
 def test_jwks_takes_precedence_over_public_key(recording_verifier) -> None:
     build_auth_provider(_cfg(OAUTH_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----"))
 
-    assert set(recording_verifier.calls[0]) == {"jwks_uri", "issuer", "audience"}
+    assert set(recording_verifier.calls[0]) == {"jwks_uri", "issuer", "audience", "algorithm", "required_scopes"}
 
 
 def test_constructor_failure_blocks_startup_and_keeps_the_cause(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,7 +143,7 @@ def test_blank_key_material_counts_as_missing(recording_verifier, blank: str) ->
 def test_blank_jwks_falls_back_to_a_real_public_key(recording_verifier) -> None:
     build_auth_provider(_cfg(OAUTH_JWKS_URI="  ", OAUTH_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----"))
 
-    assert set(recording_verifier.calls[0]) == {"public_key", "issuer", "audience"}
+    assert set(recording_verifier.calls[0]) == {"public_key", "issuer", "audience", "algorithm", "required_scopes"}
 
 
 def test_blank_issuer_blocks_startup(recording_verifier) -> None:
@@ -147,6 +151,86 @@ def test_blank_issuer_blocks_startup(recording_verifier) -> None:
         build_auth_provider(_cfg(OAUTH_ISSUER="   "))
 
     assert recording_verifier.calls == []
+
+
+def test_algorithm_is_forwarded_exactly(recording_verifier) -> None:
+    build_auth_provider(_cfg(OAUTH_ALGORITHM="ES256"))
+
+    assert recording_verifier.calls[0]["algorithm"] == "ES256"
+
+
+def test_algorithm_is_stripped_before_forwarding(recording_verifier) -> None:
+    build_auth_provider(_cfg(OAUTH_ALGORITHM="  PS256 "))
+
+    assert recording_verifier.calls[0]["algorithm"] == "PS256"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t", None])
+def test_blank_algorithm_blocks_startup(recording_verifier, blank) -> None:
+    with pytest.raises(OAuthConfigurationError, match="OAUTH_ALGORITHM"):
+        build_auth_provider(_cfg(OAUTH_ALGORITHM=blank))
+
+    assert recording_verifier.calls == []
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (["mcp.read"], ["mcp.read"]),
+        (["mcp.read", "mcp.write", "admin"], ["mcp.read", "mcp.write", "admin"]),
+        ("mcp.read,mcp.write", ["mcp.read", "mcp.write"]),
+        (" mcp.read , ,mcp.write ,", ["mcp.read", "mcp.write"]),
+        (["  mcp.read ", "", "   ", "mcp.write"], ["mcp.read", "mcp.write"]),
+        ([], None),
+        ("", None),
+        ("  ,  ", None),
+        (None, None),
+    ],
+)
+def test_required_scopes_are_forwarded_exactly_and_normalised(recording_verifier, configured, expected) -> None:
+    build_auth_provider(_cfg(OAUTH_REQUIRED_SCOPES=configured))
+
+    assert recording_verifier.calls[0]["required_scopes"] == expected
+
+
+def test_scope_policy_is_forwarded_with_a_public_key_too(recording_verifier) -> None:
+    build_auth_provider(
+        _cfg(
+            OAUTH_JWKS_URI=None,
+            OAUTH_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----",
+            OAUTH_ALGORITHM="ES256",
+            OAUTH_REQUIRED_SCOPES="a,b",
+        )
+    )
+
+    call = recording_verifier.calls[0]
+    assert (call["algorithm"], call["required_scopes"]) == ("ES256", ["a", "b"])
+
+
+def test_real_jwt_verifier_accepts_the_forwarded_policy() -> None:
+    """Le vrai JWTVerifier installé expose bien algorithm/required_scopes et les applique."""
+
+    provider = build_auth_provider(_cfg(OAUTH_ALGORITHM="ES256", OAUTH_REQUIRED_SCOPES=["mcp.read", "mcp.write"]))
+
+    assert provider.algorithm == "ES256"
+    assert list(provider.required_scopes) == ["mcp.read", "mcp.write"]
+
+
+def test_disabled_oauth_ignores_algorithm_policy() -> None:
+    assert build_auth_provider(_cfg(OAUTH_ENABLED=False, OAUTH_ALGORITHM="")) is None
+
+
+def test_settings_reject_a_blank_algorithm_when_oauth_is_enabled() -> None:
+    from collegue.config import Settings
+
+    with pytest.raises(ValueError, match="OAUTH_ALGORITHM"):
+        Settings(
+            _env_file=None,
+            OAUTH_ENABLED=True,
+            OAUTH_JWKS_URI="https://idp.example.invalid/jwks",
+            OAUTH_ISSUER="https://idp.example.invalid/realm",
+            OAUTH_ALGORITHM="   ",
+        )
 
 
 def test_configuration_error_is_a_runtime_error() -> None:

@@ -5,7 +5,7 @@ Exigences vérifiées (vague 1, lot B) :
 - un échec de ``fastmcp run`` (dont OAuth fail-closed) sort en NON-ZÉRO, avec le code exact ;
   le trap/cleanup ne le convertit jamais en 0 ;
 - le health server seul ne suffit pas : « All services started successfully! » n'est affiché que
-  quand le MCP répond réellement (2xx, ou 4xx comme le 401 d'OAuth), sinon sortie non nulle
+  quand le MCP répond réellement (2xx, ou 401/403 d'un endpoint protégé par OAuth), sinon sortie non nulle
   après une attente bornée ;
 - aucun processus fils ne survit à la sortie (le cleanup tue MCP ET health server).
 
@@ -56,15 +56,22 @@ while :; do sleep 0.1; done
 """
 
 # Faux curl : health -> 0 quand le faux health server est « up » ; MCP -> code HTTP configurable.
+# Le faux MCP vérifie le contrat de la requête comme le vrai : sans le header Accept attendu il
+# répond 406, sans initialize complet 400, hors du chemin /mcp/ 404, hors POST 405.
 _FAKE_CURL = r"""#!/bin/sh
-url=""; want_code=0; post=0; fail=0
-for arg in "$@"; do
-  case "$arg" in
-    http://*) url="$arg" ;;
+url=""; want_code=0; method=GET; accept_ok=0; body=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     -w) want_code=1 ;;
-    -X) post=1 ;;
-    -f|-s|-fsS|-sf|-sS) case "$arg" in *f*) fail=1 ;; esac ;;
+    -X) method="$2"; shift ;;
+    -H) case "$2" in
+          [Aa]ccept:*application/json*text/event-stream*) accept_ok=1 ;;
+        esac
+        shift ;;
+    -d) body="$2"; shift ;;
+    http://*) url="$1" ;;
   esac
+  shift
 done
 case "$url" in
   *:4122/*)
@@ -76,11 +83,18 @@ case "$url" in
       exit 7
     fi
     code=$(cat "$STATE/mcp_code" 2>/dev/null || echo 200)
+    case "$url" in
+      */mcp/) ;;
+      *) code=404 ;;
+    esac
+    [ "$method" = POST ] || code=405
+    [ "$accept_ok" = 1 ] || code=406
+    case "$body" in
+      *'"method":"initialize"'*'"protocolVersion"'*'"clientInfo"'*) ;;
+      *) code=400 ;;
+    esac
     if [ "$want_code" = 1 ]; then printf '%s' "$code"; exit 0; fi
-    # GET nu : comme un vrai serveur MCP, refusé (405/406) ; POST : réponse JSON-RPC.
-    if [ "$post" = 1 ]; then echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exit 0; fi
-    [ "$fail" = 1 ] && exit 22
-    exit 0 ;;
+    echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exit 0 ;;
   *) echo "faux curl: URL inattendue: $*" >&2; exit 99 ;;
 esac
 """
@@ -240,9 +254,9 @@ def test_mcp_answering_5xx_is_not_ready(harness: Harness) -> None:
     harness.assert_no_survivors()
 
 
-@pytest.mark.parametrize("code", ["200", "401", "406"])
-def test_mcp_answering_2xx_or_4xx_is_ready(harness: Harness, code: str) -> None:
-    """Un 401 est la réponse normale d'un MCP protégé par OAuth : le service est bien à l'écoute."""
+@pytest.mark.parametrize("code", ["200", "202", "401", "403"])
+def test_mcp_answering_2xx_or_auth_status_is_ready(harness: Harness, code: str) -> None:
+    """401/403 : réponse attendue d'un MCP protégé par OAuth, le service est bien à l'écoute."""
 
     (harness.state / "mcp_code").write_text(code, encoding="utf-8")
     proc = harness.start()
@@ -251,6 +265,20 @@ def test_mcp_answering_2xx_or_4xx_is_ready(harness: Harness, code: str) -> None:
     proc.send_signal(signal.SIGTERM)
 
     assert _finish(proc) == 0
+    harness.assert_no_survivors()
+
+
+@pytest.mark.parametrize("code", ["400", "404", "405", "406", "408", "429", "500", "502", "503"])
+def test_mcp_answering_wrong_path_or_contract_or_error_is_not_ready(harness: Harness, code: str) -> None:
+    """404/405/406 signalent un mauvais chemin ou contrat ; 5xx une erreur serveur : jamais « prêt »."""
+
+    (harness.state / "mcp_code").write_text(code, encoding="utf-8")
+
+    proc = harness.start(MCP_READY_ATTEMPTS="5")
+
+    assert _finish(proc) != 0, harness.output()
+    assert BANNER not in harness.output()
+    assert "not ready after" in harness.output()
     harness.assert_no_survivors()
 
 
@@ -318,7 +346,11 @@ def _run_subcommand(harness: Harness, *args: str) -> subprocess.CompletedProcess
     )
 
 
-@pytest.mark.parametrize(("code", "expected_rc"), [("200", 0), ("401", 0), ("406", 0), ("503", 1), ("500", 1)])
+@pytest.mark.parametrize(
+    ("code", "expected_rc"),
+    [("200", 0), ("202", 0), ("401", 0), ("403", 0)]
+    + [(c, 1) for c in ("400", "404", "405", "406", "408", "429", "500", "502", "503")],
+)
 def test_mcp_ready_subcommand_is_the_compose_healthcheck_criterion(
     harness: Harness, code: str, expected_rc: int
 ) -> None:

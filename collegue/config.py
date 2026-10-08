@@ -384,6 +384,8 @@ class Settings(BaseSettings):
                 raise ValueError(f"OAUTH_JWKS_URI doit être une URL HTTP/HTTPS valide. Reçu: {self.OAUTH_JWKS_URI}")
             if not (self.OAUTH_ISSUER or "").strip():
                 raise ValueError("OAUTH_ISSUER est requis lorsque OAUTH_ENABLED est true.")
+            if not (self.OAUTH_ALGORITHM or "").strip():
+                raise ValueError("OAUTH_ALGORITHM ne peut pas être vide lorsque OAUTH_ENABLED est true.")
         return self
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
