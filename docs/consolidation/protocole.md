@@ -288,3 +288,7 @@ Lots intégrés : A `d3a8786071b691926a4ee491cc479d88cbc25c71` (garde de montage
 4. Un réglage de readiness invalide (`abc`, `0`, `1.5`, valeur énorme, blanc…) fait sortir le conteneur en **code 2** sans rien démarrer ; avec `restart: always`, Compose le relance donc en boucle jusqu'à correction de la variable (lire les logs). Une variable vide (`VAR=`) équivaut à absente.
 
 **Limites (à ne pas arrondir).** Fenêtre entre la vérification et le `docker run` (un marqueur créé entre les deux n'est pas vu) ; le démon Docker reste privilégié et le sandbox garde le workspace en lecture-écriture ; le healthcheck Compose lance `curl -f` sans `--max-time`, borné seulement par son `timeout: 5s` ; Python 3.11 n'est pas exécuté localement (preuve : check `Pytest (Python 3.11)` de la PR) ; les revues externes (Copilot, Codex GitHub) ne sont examinées que lorsqu'elles sont disponibles : leur absence est rapportée telle quelle et ne vaut ni succès ni prérequis ; seuls les cinq checks CI restent obligatoires au ruleset.
+
+## 10. Vague 2
+
+La vague 1 est close (PR #608 et #609, `main` = `9862b39`). La vague 2 (A : registre de budget transactionnel durable et exécution bornée ; B : wheel installable, ressources, migrations existantes, dépendances verrouillées depuis `pyproject.toml`) a son propre protocole d'intégration et sa checklist : [`w2-integration.md`](w2-integration.md). Les règles de livraison (deux étapes, arbitrage des findings avant fusion, preuve absente ≠ succès, cinq checks requis, aucun bypass) sont inchangées (`AGENTS.md`).

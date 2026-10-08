@@ -24,5 +24,7 @@ Spécificités Claude Code :
 - Revues distantes : tout finding pertinent est transmis au manager **avant** fusion pour arbitrage ; ne jamais le
   reporter seul à la vague suivante ni le noyer dans les limites de la PR. Une revue absente ou un check manquant
   n'est pas un succès : le dire. Voir « Livraison et merge » dans `AGENTS.md`.
+- Vague 2 : lire `docs/consolidation/w2-integration.md` (propriété des fichiers, raccordements, checklist). Caches et
+  artefacts sous `/tmp/<rôle>-…`, jamais dans `~/.cache`.
 - Écrire son rapport et ses preuves sous `~/.codex/collegue-consolidation/20260928/{reports,evidence}/`
   avec le préfixe `w<N>-<rôle>`, puis terminer la passe : le manager reprend la même session.

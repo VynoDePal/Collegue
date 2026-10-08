@@ -112,6 +112,15 @@ Interdits : assouplir un test pour cacher une régression, `xfail`/`skip` opport
 8. Pas de bypass : ni force-push, ni contournement du ruleset, ni admin merge, ni auto-merge différé sur une tête mouvante, ni reconfiguration des protections, ni modification des noms de checks requis.
 9. Après la fusion, vérifier `main` (SHA, arbre identique à l'arbre accepté, 5 checks du push) avant de démarrer la vague suivante. Une vague n'est **clôturée** qu'une fois `main` vérifié et aucun finding pertinent resté ouvert ; une vague livrée avec un finding ouvert est « livrée partiellement, non clôturée ».
 
+### Vague 2 (budget durable ; distribution installable)
+
+Base `9862b39` (vague 1 close). Protocole d'intégration, raccordements et checklist : `docs/consolidation/w2-integration.md`.
+- A possède le registre de budget, `state/{models,manager}.py`, la migration `0011` et le runtime/worker de dépense ; B possède le packaging, les locks, les ressources, les migrations **existantes**, les workflows et les Dockerfiles. C ne déplace que **mécaniquement** `0011` vers l'emplacement des migrations embarquées (mêmes IDs `revision="0011"`, `down_revision="0010"`, même contenu) et ne réécrit aucun comportement de A ou B.
+- Une garantie de concurrence PostgreSQL se prouve sur un **service réel**, jamais sur un mock ; les mesures SQLite et PostgreSQL sont rapportées séparément ; un test sauté faute de service n'est pas un succès. Ne jamais déclencher le nightly existant pour cela (il appelle des modèles).
+- Un transport dont les appels ou les coûts ne sont pas bornables n'est **pas** présenté comme garanti en mode strict ; un compteur après réponse ou un timeout seul ne borne pas le coût.
+- Les scripts worker copiés dans l'image sandbox (`oh_runner.py`, `oh_sampler.py`) n'importent pas `collegue` : tout import ajouté exige un `COPY` correspondant.
+- Disque limité (racine ≈ 1,6 Go, `/tmp` ≈ 6,8 Go) : caches (`UV_CACHE_DIR`, `PIP_CACHE_DIR`) et artefacts propres sous `/tmp/<rôle>-…`, dépendances partagées en lecture seule, aucun build Docker lourd local (la CI fait foi pour l'image).
+
 ### Budget et effets externes
 
 - Aucun appel LLM/API réel, aucun build Docker lourd ni téléchargement volumineux sans consigne. Ressources limitées (~6,5 GiB de RAM, ~4 GiB de disque) : builds sérialisés par `flock ~/.codex/collegue-consolidation/20260928/heavy.lock`, preuve de build de préférence par la CI distante, aucun nettoyage global, ni suppression d'images ou de caches de l'utilisateur.
