@@ -137,6 +137,7 @@ async def test_uses_isolated_random_temp_file_and_passes_on_green(tmp_path):
     sb = _green()
     out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sb)
     assert out.passed is True
+    assert out.exit_code == 0
     assert list(tmp_path.iterdir()) == []  # aucun chemin du dépôt n'est créé/écrasé
     command = sb.commands[0]
     assert "python -I -c" in command  # pytest importé avant d'exposer le workspace
@@ -154,6 +155,39 @@ async def test_fails_on_red(tmp_path):
 
     out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=_red())
     assert out.passed is False  # verdict OBJECTIF = exit code pytest
+    assert out.exit_code == 1
+    assert out.error is None
+
+
+@pytest.mark.parametrize("exit_code", [2, 3, 4, 124, 125, 126, 127])
+async def test_non_test_failure_exit_codes_are_infrastructure_errors(tmp_path, exit_code):
+    async def _gen(prompt, system):
+        return "def test_contract():\n    assert observed_contract()\n"
+
+    sandbox = _Sandbox(SandboxResult(exit_code=exit_code, stdout="runner failed", stderr=""))
+    out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sandbox)
+
+    assert out.passed is False
+    assert out.exit_code == exit_code
+    assert "infrastructure" in (out.error or "")
+
+
+async def test_dependency_install_failure_is_not_a_valid_red_oracle(tmp_path):
+    async def _gen(prompt, system):
+        return "def test_contract():\n    assert observed_contract()\n"
+
+    sandbox = _Sandbox(
+        SandboxResult(
+            exit_code=1,
+            stdout="[gate] installation des dépendances en échec — tests lancés quand même (#414)\n1 failed",
+            stderr="",
+        )
+    )
+    out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sandbox)
+
+    assert out.passed is False
+    assert out.exit_code == 1
+    assert "installation" in (out.error or "")
 
 
 async def test_exit5_no_tests_collected_is_failure(tmp_path):
@@ -164,6 +198,7 @@ async def test_exit5_no_tests_collected_is_failure(tmp_path):
     sb = _Sandbox(SandboxResult(exit_code=5, stdout="no tests ran", stderr=""))
     out = await LLMAcceptanceChecker(sample_fn=_gen).check(str(tmp_path), DIFF, ISSUE_AC, None, sandbox=sb)
     assert out.passed is False
+    assert out.exit_code == 5
     assert out.error and "collecté" in out.error
 
 
@@ -231,6 +266,7 @@ async def test_stored_checker_runs_exact_approved_source_without_llm(tmp_path):
     out = await checker.check(str(tmp_path), "diff hostile ignoré", issue, _NoSampling(), sandbox=sandbox)
 
     assert out.passed is True and out.error is None
+    assert out.exit_code == 0
     assert out.oracle_sha256 == _task.acceptance_test_sha256
     assert approvals and approvals[0][1] == 3
     assert len(sandbox.commands) == 1

@@ -14,6 +14,7 @@ dans le manifeste durable du smoke.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import math
@@ -1033,6 +1034,69 @@ class NightlyE2ERunner:
             raise NightlyE2EError("HEAD local de la fixture différent du SPEC synchronisé")
         return destination
 
+    def _run_baseline_acceptance(
+        self,
+        workspace: str,
+        *,
+        project_id: int,
+        task_id: int,
+        issue_number: int,
+    ):
+        """Exécute l'oracle approuvé sur la base encore non conforme, sans secret LLM.
+
+        Le même :class:`StoredAcceptanceChecker` et le même sandbox de gate que le
+        RUN produit sont utilisés. Le test ne reçoit ni diff ni contexte de sampling :
+        il recharge l'artefact QA durable, vérifie le plan approuvé et rend uniquement
+        le verdict objectif de pytest.
+        """
+        from collegue.config import Settings
+        from collegue.executor.quality_gate import StoredAcceptanceChecker
+        from collegue.pilot.driver import _issue_from_task
+        from collegue.pilot.runtime import _build_gate_sandbox
+
+        manager = self._manager()
+        task = manager.get_task(task_id)
+        if (
+            task is None
+            or int(getattr(task, "project_id", 0) or 0) != project_id
+            or int(getattr(task, "issue_number", 0) or 0) != issue_number
+        ):
+            raise NightlyE2EError("tâche durable introuvable pour le contrôle négatif de l'oracle")
+        issue = _issue_from_task(task)
+        if int(issue.number) != issue_number or int(getattr(issue, "source_task_id", 0) or 0) != task_id:
+            raise NightlyE2EError("identité d'issue incohérente pour le contrôle négatif de l'oracle")
+        checker = StoredAcceptanceChecker(manager=manager, project_id=project_id)
+        sandbox = _build_gate_sandbox(Settings())
+        return asyncio.run(
+            checker.check(
+                workspace,
+                "",
+                issue,
+                None,
+                sandbox=sandbox,
+            )
+        )
+
+    @staticmethod
+    def _require_baseline_rejection(outcome, *, oracle_sha256: str) -> int:
+        """Exige un vrai test rouge (pytest 1), pas un vert ni une panne du runner."""
+        if getattr(outcome, "oracle_sha256", None) != oracle_sha256:
+            raise NightlyE2EError("le contrôle négatif n'a pas exécuté l'oracle QA approuvé exact")
+        if bool(getattr(outcome, "skipped", False)):
+            raise NightlyE2EError("le contrôle négatif de l'oracle a été ignoré")
+        if getattr(outcome, "error", None):
+            raise NightlyE2EError("le contrôle négatif a rencontré une erreur au lieu d'un test rouge")
+        if getattr(outcome, "passed", None) is not False:
+            raise NightlyE2EError("l'oracle accepte la fixture non conforme avant le codeur")
+        exit_code = getattr(outcome, "exit_code", None)
+        if exit_code != 1:
+            raise NightlyE2EError(
+                "la fixture non conforme doit être rejetée par pytest avec exit 1, sans erreur de collecte/exécution"
+            )
+        if not str(getattr(outcome, "output", "") or "").strip():
+            raise NightlyE2EError("le contrôle négatif ne fournit aucune sortie pytest vérifiable")
+        return exit_code
+
     def run(self) -> dict[str, Any]:
         cfg = self.config
         root_sha = self._guard_fixture(require_seed=True)
@@ -1147,8 +1211,33 @@ class NightlyE2ERunner:
             if stored_spec.get("content") != spec:
                 raise NightlyE2EError("SPEC.md distant différent du contrat approuvé")
 
-            self._authorize_head_creation(manifest, issue_numbers[0])
+            # L'oracle QA est du code non fiable : son clone est distinct de
+            # celui qui sera remis au codeur et détruit immédiatement après le
+            # verdict, même si le test tente de modifier /workspace.
+            baseline_path = self._clone_base(manifest.base_sha)
+            try:
+                baseline_outcome = self._run_baseline_acceptance(
+                    baseline_path,
+                    project_id=project_id,
+                    task_id=task_id,
+                    issue_number=issue_numbers[0],
+                )
+                baseline_exit_code = self._require_baseline_rejection(
+                    baseline_outcome,
+                    oracle_sha256=oracle_sha256,
+                )
+            finally:
+                shutil.rmtree(os.path.dirname(baseline_path), ignore_errors=True)
+            print(
+                f"oracle QA rouge avant code: exit={baseline_exit_code} sha256:{oracle_sha256}",
+                file=sys.stderr,
+            )
+            if self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch) != manifest.base_sha:
+                raise NightlyE2EError("la base éphémère a bougé pendant le contrôle négatif de l'oracle")
 
+            # N'autoriser le codeur à créer sa branche qu'après la preuve que le
+            # contrat manque réellement sur la base immuable.
+            self._authorize_head_creation(manifest, issue_numbers[0])
             source_path = self._clone_base(manifest.base_sha)
             if self.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch) != manifest.base_sha:
                 raise NightlyE2EError("la base éphémère a bougé entre le clone et le RUN")
@@ -1228,6 +1317,8 @@ class NightlyE2ERunner:
                 "pr_number": opened_prs[0],
                 "base_branch": cfg.base_branch,
                 "head_sha": pr.head_sha,
+                "acceptance_negative_control_exit_code": baseline_exit_code,
+                "acceptance_rejected_base": True,
                 "acceptance_passed": True,
                 "acceptance_oracle_sha256": oracle_sha256,
             }
