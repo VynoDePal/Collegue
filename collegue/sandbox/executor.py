@@ -54,6 +54,8 @@ SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
 # JAMAIS être monté dans un conteneur (l'agent et les tests y écriraient). Le
 # sandbox refuse donc tout montage qui l'inclut (cf. _validate_workspace).
 GIT_CONTROL_MARKER = ".collegue-git-control"
+# Le répertoire de contrôle d'un workspace ``/x/workspace`` est ``/x/workspace.control``.
+GIT_CONTROL_SUFFIX = ".control"
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
 TIMEOUT_EXIT_CODE = 124
@@ -65,6 +67,23 @@ TIMEOUT_NOTE = "[sandbox] délai dépassé après"
 
 class SandboxUnavailable(RuntimeError):
     """Docker indisponible, ou refus de s'exécuter (ex. en root)."""
+
+
+def git_control_reason(path: str) -> Optional[str]:
+    """Raison pour laquelle ``path`` n'est PAS un checkout de confiance, ``None`` sinon.
+
+    Un workspace géré (répertoire de contrôle frère) a pu être monté en RW et exécuté :
+    il est écrit par du code non fiable ; un répertoire de contrôle est l'autorité de la
+    frontière Git. Ni l'un ni l'autre ne doit servir de source de clone ni recevoir de
+    commande git hôte hors de la frontière (``collegue.executor.git_boundary``).
+    Pure : deux ``lexists``, aucune lecture git.
+    """
+    workspace = os.path.abspath(os.fspath(path))
+    if os.path.lexists(os.path.join(workspace, GIT_CONTROL_MARKER)):
+        return "répertoire de contrôle Git (autorité de la frontière, jamais une source ni un cwd)"
+    if os.path.lexists(os.path.join(workspace + GIT_CONTROL_SUFFIX, GIT_CONTROL_MARKER)):
+        return "workspace géré : écrit par du code non fiable, git hôte réservé à la frontière"
+    return None
 
 
 def _git_control_within(path: str) -> Optional[str]:

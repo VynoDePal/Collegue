@@ -19,7 +19,7 @@ from collegue.improve import (
     persist,
 )
 from collegue.improve.metrics import DEFAULT_COVERAGE_COMMAND
-from collegue.sandbox import SandboxResult
+from collegue.sandbox import SandboxResult, SandboxUnavailable
 from collegue.state import ProjectStateManager
 
 COV_OUTPUT = """Name        Stmts   Miss  Cover   Missing
@@ -328,11 +328,16 @@ def test_default_doc_coverage_ast(tmp_path):
     assert cov == pytest.approx(0.5)
 
 
-def test_default_dep_audit_noop_without_pip_audit(tmp_path):
-    # pip-audit absent (ou pas de requirements) → 0 (no-op), jamais d'exception.
+def test_default_dep_audit_without_requirements_is_zero_and_never_calls_the_sandbox(tmp_path):
+    # Rien de déclaré à auditer (pas de requirements.txt) → 0, sans rien lancer.
     from collegue.improve.metrics import _default_dep_audit
 
-    assert _default_dep_audit(str(tmp_path)) == 0  # pas de requirements.txt
+    class _Boom:
+        def run_tests(self, *a, **k):
+            raise AssertionError("aucun audit sans requirements.txt")
+
+    assert _default_dep_audit(str(tmp_path), sandbox=_Boom()) == 0
+    assert _default_dep_audit(str(tmp_path)) == 0
 
 
 async def test_measure_tests_red_and_no_coverage():
@@ -514,3 +519,282 @@ def test_persist_writes_metrics(tmp_path):
     assert manager.get_metrics(pid, "composite")[0].value == pytest.approx(0.4)
     assert manager.get_metrics(pid, "security_weighted")[0].value == pytest.approx(5.0)
     assert manager.get_metrics(pid, "tests_passed")[0].value == 1.0
+
+
+# --- frontière hôte : noms de fichiers d'un agent (autofix / docstrings) ------------------------
+
+
+def _install_fake_ruff(tmp_path, monkeypatch):
+    """Faux ruff déterministe : ajoute une ligne à CHAQUE ``*.py`` reçu (comme ruff --fix réécrit
+    le fichier désigné, y compris à travers un lien symbolique). Aucune dépendance à un vrai ruff."""
+    import collegue.improve.metrics as metrics_mod
+
+    script = tmp_path / "fake-ruff"
+    script.write_text(
+        '#!/bin/sh\nfor a in "$@"; do case "$a" in *.py) printf "# ruff-touched\\n" >> "$a";; esac; done\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(metrics_mod, "_find_ruff", lambda: str(script))
+    return script
+
+
+def test_autofix_lint_never_rewrites_outside_the_workspace_or_through_links(tmp_path, monkeypatch):
+    import os
+
+    from collegue.improve.metrics import autofix_lint
+
+    _install_fake_ruff(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "target.py"
+    target.write_text("import os\nx=1\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "ok.py").write_text("y=2\n")
+    os.symlink(target, ws / "link.py")  # lien vers un fichier HORS workspace
+    os.symlink(outside, ws / "linkdir")  # répertoire intermédiaire lié vers l'extérieur
+    os.symlink(ws / "ok.py", ws / "alias.py")  # lien INTERNE : on n'écrit jamais à travers un lien
+    (ws / "sub").mkdir()
+
+    names = [
+        "ok.py",
+        "link.py",
+        "linkdir/target.py",
+        "alias.py",
+        "../outside/target.py",
+        str(target),  # chemin absolu hors workspace
+        "sub/../../outside/target.py",
+        "",
+        "nul\x00.py",
+    ]
+    assert autofix_lint(str(ws), names) == 1  # seul ok.py est traité
+
+    assert target.read_text() == "import os\nx=1\n"  # rien n'a été réécrit hors workspace
+    assert (ws / "ok.py").read_text().count("# ruff-touched") == 2  # 1 fichier x (check --fix + format)
+
+
+def test_autofix_lint_accepts_a_nested_regular_file_given_relative_or_absolute(tmp_path, monkeypatch):
+    from collegue.improve.metrics import autofix_lint
+
+    _install_fake_ruff(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    (ws / "pkg").mkdir(parents=True)
+    (ws / "pkg" / "mod.py").write_text("x=1\n")
+    assert autofix_lint(str(ws), ["pkg/mod.py"]) == 1
+    assert autofix_lint(str(ws), [str(ws / "pkg" / "mod.py")]) == 1  # absolu mais SOUS le workspace
+    assert (ws / "pkg" / "mod.py").read_text().count("# ruff-touched") == 4
+
+
+def test_default_doc_coverage_never_reads_files_behind_links(tmp_path):
+    import os
+
+    from collegue.improve.metrics import _default_doc_coverage
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "documented.py").write_text('"""Doc."""\n\n\ndef a():\n    """d"""\n\n\ndef b():\n    """d"""\n')
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "bare.py").write_text("def undocumented():\n    pass\n")
+    os.symlink(outside / "documented.py", ws / "linked.py")
+    os.symlink(outside, ws / "linkdir")
+
+    # sans suivre les liens : module sans docstring + fonction sans docstring → 0/2
+    assert _default_doc_coverage(str(ws)) == 0.0
+
+
+# --- audit de dépendances : jamais sur l'hôte, fail-closed --------------------------------------
+
+_AUDIT_OK_2_VULNS = (
+    '{"dependencies": [{"name": "flask", "version": "0.5", "vulns": [{"id": "PYSEC-1"}, {"id": "PYSEC-2"}]},'
+    ' {"name": "click", "version": "8.1.7", "vulns": []}], "fixes": []}'
+)
+_AUDIT_OK_CLEAN = '{"dependencies": [{"name": "click", "version": "8.1.7", "vulns": []}], "fixes": []}'
+
+
+class _AuditSandbox:
+    """Sandbox factice : couverture pour les tests, réponse configurable pour pip-audit."""
+
+    def __init__(self, *, exit_code=0, stdout="", stderr="", timed_out=False, raises=None):
+        self.audit = SandboxResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out)
+        self.raises = raises
+        self.calls = []
+
+    def run_tests(self, workspace, command="pytest -q"):
+        self.calls.append((workspace, command))
+        if "pip-audit" in command:
+            if self.raises is not None:
+                raise self.raises
+            return self.audit
+        return SandboxResult(exit_code=0, stdout=COV_OUTPUT, stderr="")
+
+    @property
+    def audit_calls(self):
+        return [c for c in self.calls if "pip-audit" in c[1]]
+
+
+async def _measure_with_audit(workspace, sandbox, **kwargs):
+    return await measure(
+        str(workspace),
+        ctx=None,
+        sandbox=sandbox,
+        security_scan_fn=_scan(0, 0.0),
+        quality_scan_fn=_quality(0, 0),
+        doc_coverage_fn=lambda ws: 1.0,
+        dep_vulns_enabled=True,
+        **kwargs,
+    )
+
+
+def _ws_with_requirements(tmp_path, text="click==8.1.7\n"):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    (ws / "requirements.txt").write_text(text)
+    return ws
+
+
+async def test_dep_audit_valid_result_counts_vulns_inside_the_sandbox(tmp_path):
+    ws = _ws_with_requirements(tmp_path)
+    clean = await _measure_with_audit(ws, _AuditSandbox(stdout=_AUDIT_OK_CLEAN))
+    sandbox = _AuditSandbox(exit_code=1, stdout=_AUDIT_OK_2_VULNS)  # pip-audit sort 1 quand il trouve des vulns
+    dirty = await _measure_with_audit(ws, sandbox)
+
+    assert clean.dep_audit_measured and clean.dep_vulns == 0
+    assert dirty.dep_audit_measured and dirty.dep_vulns == 2
+    assert dirty.composite < clean.composite  # les vulns pénalisent le composite
+    (workspace, command) = sandbox.audit_calls[0]
+    assert workspace == str(ws)
+    assert "--no-deps" in command and "--disable-pip" in command  # aucune résolution pip
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(exit_code=127, stderr="sh: 1: pip-audit: not found"),  # outil absent de l'image sandbox
+        dict(exit_code=124, timed_out=True, stderr="[sandbox] délai dépassé après 120s"),  # timeout
+        dict(exit_code=1, stderr="ERROR: requirement 'evil' is not pinned to an exact version"),  # échec
+        dict(exit_code=0, stdout="pas du json"),
+        dict(exit_code=0, stdout="{}"),  # forme inattendue
+        dict(exit_code=0, stdout='{"dependencies": "x"}'),
+        dict(exit_code=2, stdout=_AUDIT_OK_CLEAN),  # mauvais code de sortie malgré un JSON propre
+        dict(exit_code=0, stdout=_AUDIT_OK_CLEAN[:40] + "\n[sandbox] sortie tronquée à 10 octets"),  # tronqué
+        dict(  # dépendance non auditée : jamais un faux 0
+            exit_code=0,
+            stdout='{"dependencies": [{"name": "privé", "version": "1.0", "skip_reason": "not on PyPI"}], "fixes": []}',
+        ),
+        dict(raises=SandboxUnavailable("docker indisponible")),
+    ],
+    ids=[
+        "outil-absent",
+        "timeout",
+        "echec",
+        "non-json",
+        "forme-vide",
+        "forme-invalide",
+        "mauvais-code",
+        "tronque",
+        "dependance-non-auditee",
+        "sandbox-indisponible",
+    ],
+)
+async def test_dep_audit_failure_is_refused_never_zero_vulnerabilities(tmp_path, kwargs):
+    import math
+
+    ws = _ws_with_requirements(tmp_path)
+    ok = await _measure_with_audit(ws, _AuditSandbox(stdout=_AUDIT_OK_CLEAN))
+
+    m = await _measure_with_audit(ws, _AuditSandbox(**kwargs))
+
+    assert m.dep_audit_measured is False
+    assert m.dep_vulns == -1
+    assert not math.isfinite(m.composite) and m.composite < ok.composite  # jamais meilleur que 0 vuln
+    # et le gate rejette, avant comme après (le composite non fini ne peut compenser rien)
+    from collegue.improve.gate import evaluate
+
+    assert evaluate(ok, m).accepted is False
+    assert evaluate(m, ok).accepted is False
+
+
+def test_default_dep_audit_without_any_isolation_is_refused(tmp_path):
+    from collegue.improve.metrics import DepAuditUnavailable, _default_dep_audit
+
+    ws = _ws_with_requirements(tmp_path)
+    with pytest.raises(DepAuditUnavailable):
+        _default_dep_audit(str(ws))  # pas de sandbox : on ne se rabat JAMAIS sur l'hôte
+    with pytest.raises(DepAuditUnavailable):
+        _default_dep_audit(str(ws), sandbox=object())
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        "-e git+https://evil.example/pkg.git#egg=pkg\n",
+        "evil @ file:///workspace/evil-pkg\n",
+        "./evil-pkg\n",
+        "evil @ git+ssh://git@evil.example/evil.git@main\n",
+        "-r /etc/passwd\n--index-url https://evil.example/simple\nrequests==2.0\n",
+    ],
+    ids=["vcs-editable", "file-url", "chemin-local", "vcs-ssh", "include-et-index"],
+)
+async def test_dep_audit_hostile_requirements_never_reach_a_host_resolver(tmp_path, monkeypatch, requirements):
+    """Exigence VCS/locale hostile : ni pip, ni pip-audit, ni aucun sous-process ne tourne sur l'hôte."""
+    import os
+    import shutil
+    import subprocess
+
+    witness = tmp_path / "host-witness"
+    fake_tool = tmp_path / "bin" / "pip-audit"
+    fake_tool.parent.mkdir()
+    fake_tool.write_text(f"#!/bin/sh\nprintf executed >> '{witness}'\nexit 1\n")
+    fake_tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_tool.parent}{os.pathsep}{os.environ['PATH']}")
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: str(fake_tool) if name == "pip-audit" else real_which(name, *a, **k)
+    )
+
+    def _no_host_process(*a, **k):
+        raise AssertionError(f"sous-process hôte interdit pendant l'audit: {a[:1]}")
+
+    monkeypatch.setattr(subprocess, "run", _no_host_process)
+    monkeypatch.setattr(subprocess, "Popen", _no_host_process)
+    monkeypatch.setattr(os, "system", _no_host_process)
+
+    ws = _ws_with_requirements(tmp_path, requirements)
+    # le sandbox (isolé) échoue comme le ferait pip-audit --no-deps --disable-pip sur une exigence non épinglée
+    sandbox = _AuditSandbox(exit_code=1, stderr="ERROR: unsupported requirement")
+
+    m = await _measure_with_audit(ws, sandbox)
+
+    assert not witness.exists()
+    assert len(sandbox.audit_calls) == 1
+    assert m.dep_audit_measured is False and m.composite == float("-inf")
+
+
+async def test_dep_audit_injected_fn_is_preserved_and_fails_closed(tmp_path):
+    ws = _ws_with_requirements(tmp_path)
+    sandbox = _AuditSandbox()
+
+    ok = await _measure_with_audit(ws, sandbox, dep_vulns_fn=lambda w: 3)
+    boom = await _measure_with_audit(ws, sandbox, dep_vulns_fn=lambda w: (_ for _ in ()).throw(RuntimeError("panne")))
+    negative = await _measure_with_audit(ws, sandbox, dep_vulns_fn=lambda w: -5)
+
+    assert ok.dep_audit_measured and ok.dep_vulns == 3
+    assert boom.dep_audit_measured is False and negative.dep_audit_measured is False
+    assert sandbox.audit_calls == []  # une fn injectée remplace l'audit par défaut (aucun appel sandbox)
+
+
+async def test_dep_audit_disabled_or_without_requirements_costs_nothing(tmp_path):
+    sandbox = _AuditSandbox()
+    off = await measure(
+        str(tmp_path),
+        ctx=None,
+        sandbox=sandbox,
+        security_scan_fn=_scan(0, 0.0),
+        quality_scan_fn=_quality(0, 0),
+        doc_coverage_fn=lambda ws: 1.0,
+    )
+    absent = await _measure_with_audit(tmp_path, sandbox)  # pas de requirements.txt : rien à auditer
+    assert off.dep_vulns == 0 and off.dep_audit_measured
+    assert absent.dep_vulns == 0 and absent.dep_audit_measured
+    assert sandbox.audit_calls == []

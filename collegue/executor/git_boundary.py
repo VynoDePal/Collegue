@@ -51,12 +51,18 @@ import threading
 from typing import Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from collegue.executor.command import COMMAND_NOT_FOUND_EXIT_CODE
-from collegue.sandbox.executor import GIT_CONTROL_MARKER, TIMEOUT_EXIT_CODE, SandboxResult
+from collegue.sandbox.executor import (
+    GIT_CONTROL_MARKER,
+    GIT_CONTROL_SUFFIX,
+    TIMEOUT_EXIT_CODE,
+    SandboxResult,
+    git_control_reason,
+)
 
 logger = logging.getLogger(__name__)
 
 # Le répertoire de contrôle d'un workspace ``/x/workspace`` est ``/x/workspace.control``.
-CONTROL_SUFFIX = ".control"
+CONTROL_SUFFIX = GIT_CONTROL_SUFFIX
 
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024
@@ -269,6 +275,19 @@ def locate_control(workspace_path: Union[str, os.PathLike]) -> Optional[str]:
     if recorded != os.path.realpath(workspace):
         raise WorkspaceError(f"répertoire de contrôle Git apparié à un autre workspace: {control}")
     return control
+
+
+def require_trusted_checkout(path: Union[str, os.PathLike], *, role: str = "source") -> None:
+    """Refuse (``WorkspaceError``) un chemin qui n'est pas un checkout de CONFIANCE.
+
+    Un checkout de confiance est celui de l'opérateur (``repo_source``) ou un clone que
+    l'hôte vient de créer et qui n'a jamais été monté : jamais un workspace géré (écrit par
+    l'agent/les tests) ni un répertoire de contrôle. Sert de garde aux sources de clone
+    (``prepare_workspace``, ``prepare_revert``, clone de santé) et à la resynchronisation.
+    """
+    reason = git_control_reason(path)
+    if reason is not None:
+        raise WorkspaceError(f"{role} git refusée ({os.fspath(path)}) : {reason}")
 
 
 def _decode_name(raw: bytes) -> str:

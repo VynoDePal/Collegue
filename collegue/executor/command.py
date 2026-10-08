@@ -25,10 +25,12 @@ import subprocess
 import tempfile
 from typing import List, Optional, Protocol, Union, runtime_checkable
 
-from collegue.sandbox.executor import TIMEOUT_EXIT_CODE, SandboxResult
+from collegue.sandbox.executor import TIMEOUT_EXIT_CODE, SandboxResult, git_control_reason
 
 # Code de sortie conventionnel quand le binaire est introuvable (cf. shell 127).
 COMMAND_NOT_FOUND_EXIT_CODE = 127
+# Code de sortie d'un refus explicite (cf. shell 126 : commande non exécutable).
+REFUSED_EXIT_CODE = 126
 
 
 @runtime_checkable
@@ -68,6 +70,16 @@ class LocalCommandRunner:
         return text
 
     def run_command(self, cmd: Union[str, List[str]], workspace: str) -> SandboxResult:
+        # Filet de sécurité de la frontière Git : ce runner n'a AUCUNE isolation, il ne
+        # doit donc jamais opérer dans un workspace géré (écrit par l'agent/les tests) ni
+        # dans un répertoire de contrôle — même si un appelant l'y pousse par défaut.
+        reason = git_control_reason(workspace)
+        if reason is not None:
+            return SandboxResult(
+                exit_code=REFUSED_EXIT_CODE,
+                stdout="",
+                stderr=f"[local] refusé : {reason}",
+            )
         argv = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
         out_f = tempfile.NamedTemporaryFile(prefix="local-out-", delete=False)
         err_f = tempfile.NamedTemporaryFile(prefix="local-err-", delete=False)

@@ -34,6 +34,7 @@ from collegue.executor.git_boundary import (
     WorkspaceError,
     control_dir_for,
     create_managed_workspace,
+    require_trusted_checkout,
 )
 from collegue.sandbox.executor import GIT_CONTROL_MARKER
 
@@ -71,7 +72,18 @@ def resync_repository_base(
     rester fail-closed (notamment avant la Phase 4).
 
     ``runner`` est injectable pour tester l'ordre merge → resync → amélioration.
+
+    ``repo_source`` est le checkout de l'OPÉRATEUR : il n'est jamais monté dans un
+    sandbox (les workspaces de tâche en sont des clones), donc sa config reste la
+    sienne (credentials, LFS…) et le runner local par défaut est légitime. Un workspace
+    géré ou un répertoire de contrôle, eux, sont refusés (``False``, fail-closed) : ce
+    runner sans isolation ne doit jamais opérer sur un dépôt écrit par du code non fiable.
     """
+    try:
+        require_trusted_checkout(repo_source, role="repo_source")
+    except WorkspaceError as exc:
+        logger.error("resync refusé : %s", exc)
+        return False
     command_runner = runner or LocalCommandRunner()
     fetched = command_runner.run_command(["git", "fetch", "origin", base], repo_source)
     if not getattr(fetched, "ok", False):
@@ -109,6 +121,8 @@ def prepare_workspace(
     source = os.path.realpath(os.path.abspath(repo_source))
     if not os.path.isdir(os.path.join(source, ".git")):
         raise WorkspaceError(f"repo_source n'est pas un dépôt git: {repo_source}")
+    # Jamais cloner un workspace d'une tentative précédente (écrit par l'agent/les tests).
+    require_trusted_checkout(source, role="repo_source")
 
     owns_parent = dest_root is None
     parent = dest_root or tempfile.mkdtemp(prefix="collegue-exec-")

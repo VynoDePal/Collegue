@@ -1216,3 +1216,175 @@ def test_seed_cascade_refreshes_the_agent_view_once_and_stays_consistent(source,
     assert refresh_agent_view(fresh) is True
     assert _git(fresh.path, "log", "--oneline").stdout.count("\n") == 2
     assert _git(fresh.path, "status", "--porcelain").stdout.strip() == ""
+
+
+# --- inventaire (suite vague 1) : un workspace géré n'est jamais source ni cwd local ------------------
+
+
+def test_local_command_runner_refuses_a_managed_workspace_and_its_control_dir(source, tmp_path, witness):
+    """Filet de sécurité : même poussé « par défaut » par un appelant, le runner local sans isolation
+    ne lance rien dans un workspace géré (écrit par l'agent) ni dans un répertoire de contrôle."""
+    from collegue.executor import LocalCommandRunner
+
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+    _plant_fsmonitor_absolute(Path(ws.path), witness)
+    runner = LocalCommandRunner()
+
+    for cwd in (ws.path, ws.path + ".control"):
+        res = runner.run_command(["git", "status", "--porcelain"], cwd)
+        assert res.exit_code == 126 and "refusé" in res.stderr, cwd
+    assert not witness.exists()
+    # un checkout de confiance (fixture/operateur) reste utilisable
+    assert runner.run_command(["git", "rev-parse", "HEAD"], source).ok
+
+
+def test_a_managed_workspace_is_never_a_clone_source(source, tmp_path):
+    from collegue.executor.revert import RevertError, prepare_revert
+    from collegue.executor.workspace import resync_repository_base
+
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+    sha = ws.base_commit
+
+    with pytest.raises(WorkspaceError, match="repo_source"):
+        prepare_workspace(ws.path, ISSUE, dest_root=str(tmp_path / "again"))
+    with pytest.raises(RevertError, match="repo_source"):
+        prepare_revert(ws.path, sha)
+    assert resync_repository_base(ws.path, "main") is False
+    assert resync_repository_base(ws.path + ".control", "main") is False
+    assert not (tmp_path / "again" / "workspace").exists()
+
+
+def test_main_health_check_refuses_a_managed_workspace_as_source(source, tmp_path):
+    from collegue.pilot.guard import check_main_health
+
+    ws = prepare_workspace(source, ISSUE, dest_root=str(tmp_path / "out"))
+
+    class _NeverRun:
+        def run_tests(self, *a, **k):
+            raise AssertionError("aucun test ne doit tourner sur une source non fiable")
+
+    health = check_main_health(ws.path, sandbox=_NeverRun(), command="pytest -q")
+    assert health.healthy is False and "clone de main impossible" in health.reason
+
+
+def test_guard_revert_chain_runs_through_the_hardened_runner_by_default(two_commit_source, tmp_path, witness):
+    """guard_post_merge sans runner injecté : clone de santé et revert passent par le runner durci, donc
+    une config d'un clone que l'hôte vient de créer ne peut rien exécuter même si l'on la pollue."""
+    from collegue.pilot.guard import RevertPolicy, guard_post_merge
+
+    src, sha2 = two_commit_source
+    hook = _script(tmp_path / "hook", witness)
+    _append_config(Path(src), f"[core]\n\tfsmonitor = {hook}")  # config OPÉRATEUR : l'hôte la lit lui-même
+
+    # …mais le clone créé par l'hôte n'hérite jamais de la config de la source :
+    class _RedSandbox:
+        def run_tests(self, workspace, command="pytest -q"):
+            _plant_fsmonitor_absolute(Path(workspace), witness)  # les « tests » polluent le clone monté
+            _plant_hooks_dir(Path(workspace), witness)
+            return SandboxResult(exit_code=1, stdout="1 failed", stderr="")
+
+    outcome = guard_post_merge(
+        src,
+        sha2,
+        sandbox=_RedSandbox(),
+        policy=RevertPolicy(enabled=True, revert_enabled=True),
+    )
+
+    assert outcome.checked and outcome.healthy is False
+    assert outcome.reverted is True, outcome.reason
+    assert Path(outcome.revert.workspace, "file.txt").read_text() == "v1\n"
+    # ni la config de la source (rev-parse local de confiance, sans fsmonitor) ni le clone pollué par les « tests »
+    assert not witness.exists()
+
+
+# --- quality gate : un nom/lien de l'agent ne fait ni lire ni réécrire l'hôte ---------------------------
+
+
+def test_requirements_remediation_never_writes_through_a_symlink(tmp_path):
+    from collegue.executor.quality_gate import remediate_missing_requirements
+
+    outside = tmp_path / "host-requirements.txt"
+    outside.write_text("fastapi\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    os.symlink(outside, ws / "requirements.txt")
+    log = "E   ModuleNotFoundError: No module named 'httpx'\n"
+
+    assert remediate_missing_requirements(str(ws), log) == ()
+    assert outside.read_text() == "fastapi\n"  # jamais réécrit à travers le lien
+
+    # cas bénin : un vrai fichier est toujours remédié
+    (ws / "requirements.txt").unlink()
+    (ws / "requirements.txt").write_text("fastapi\n")
+    assert remediate_missing_requirements(str(ws), log) == ("httpx",)
+
+
+def test_gate_detectors_ignore_files_behind_links_leaving_the_workspace(tmp_path):
+    from collegue.executor.quality_gate import _detect_asgi_app, frontend_gate_command, requirement_keys_present
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+    (outside / "package.json").write_text('{"scripts": {"build": "x", "test": "y"}}')
+    (outside / "requirements.txt").write_text("requests==2.0\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    os.symlink(outside / "main.py", ws / "main.py")
+    os.symlink(outside / "package.json", ws / "package.json")
+    os.symlink(outside / "requirements.txt", ws / "requirements.txt")
+
+    assert _detect_asgi_app(str(ws)) is None
+    assert frontend_gate_command(str(ws)) is None
+    assert requirement_keys_present(str(ws)) == frozenset()
+
+
+# --- garde-fou statique : tout usage de sous-process hôte du paquet est inventorié ----------------------
+
+# Chemin -> justification précise. Un nouvel usage non listé fait échouer ce test : il faut alors
+# l'ajouter ICI avec la preuve que sa source/son cwd est de confiance, ou le router par la frontière.
+_HOST_PROCESS_INVENTORY = {
+    "collegue/executor/git_boundary.py": "la frontière elle-même (env durci, GIT_DIR de contrôle)",
+    "collegue/executor/command.py": "LocalCommandRunner : refuse les workspaces gérés (git_control_reason)",
+    "collegue/sandbox/executor.py": "docker run/kill/version : l'isolation elle-même",
+    "collegue/executor/quality_gate.py": "uniquement dans des gabarits de script (chaînes) exécutés DANS le sandbox",
+    "collegue/improve/metrics.py": "ruff sur chemins CONFINÉS (workspace_file) ; audit de dépendances en sandbox",
+    "collegue/pilot/nightly_e2e.py": "clone public neuf d'une fixture + sous-process CLI produit ; jamais un workspace",
+    "collegue/autonomous/proactive_monitor.py": "ChangeDetector sur repo_path configuré par l'opérateur ; jamais un workspace",
+    "collegue/core/llm/sampling_ctx.py": "CLI de sampling LLM ; sans rapport avec git/workspace",
+    "collegue/tools/clients/kubernetes.py": "kubectl ; sans rapport avec git/workspace",
+}
+
+
+def test_host_subprocess_usage_is_inventoried():
+    import re
+
+    root = Path(__file__).resolve().parent.parent / "collegue"
+    pattern = re.compile(r"^\s*(?:import subprocess|from subprocess import)|\bos\.system\(|\bos\.popen\(", re.M)
+    found = {
+        str(path.relative_to(root.parent)): path
+        for path in root.rglob("*.py")
+        if pattern.search(path.read_text(encoding="utf-8"))
+    }
+    unknown = sorted(set(found) - set(_HOST_PROCESS_INVENTORY))
+    assert not unknown, f"usage de sous-process hôte non inventorié (frontière Git) : {unknown}"
+    stale = sorted(set(_HOST_PROCESS_INVENTORY) - set(found))
+    assert not stale, f"entrées d'inventaire périmées : {stale}"
+
+
+def test_local_command_runner_default_is_never_used_on_a_workspace_by_the_engine():
+    """Les seuls ``LocalCommandRunner()`` implicites restants visent ``repo_source`` (checkout opérateur)."""
+    import re
+
+    root = Path(__file__).resolve().parent.parent / "collegue"
+    allowed = {
+        # (fichier, justification) : tous lisent/resynchronisent le checkout de l'opérateur
+        "collegue/executor/workspace.py": "resync_repository_base(repo_source) — garde require_trusted_checkout",
+        "collegue/pilot/guard.py": "rev-parse HEAD de repo_source (checkout opérateur) — jamais un clone/workspace",
+        "collegue/pilot/remote_revert.py": "_verify_synced_repository(repo_source) — checkout opérateur resynchronisé",
+    }
+    users = {
+        str(path.relative_to(root.parent))
+        for path in root.rglob("*.py")
+        if re.search(r"or LocalCommandRunner\(\)|= LocalCommandRunner\(\)", path.read_text(encoding="utf-8"))
+    }
+    assert users == set(allowed), sorted(users ^ set(allowed))

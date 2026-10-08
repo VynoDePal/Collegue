@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from collegue.executor.command import CommandRunner, LocalCommandRunner
-from collegue.executor.git_boundary import HardenedGitRunner
+from collegue.executor.git_boundary import HardenedGitRunner, require_trusted_checkout
 from collegue.executor.revert import RevertError, RevertResult, prepare_revert
 from collegue.executor.workspace import cleanup_workspace
 
@@ -84,6 +84,7 @@ def _clone_main(repo_source: str, *, runner: CommandRunner, git_bin: str) -> str
     source = os.path.realpath(os.path.abspath(repo_source))
     if not os.path.isdir(os.path.join(source, ".git")):
         raise RuntimeError(f"repo_source n'est pas un dépôt git: {repo_source}")
+    require_trusted_checkout(source, role="repo_source")  # jamais un workspace géré
     parent = tempfile.mkdtemp(prefix="collegue-health-")
     dest = os.path.join(parent, "workspace")
     clone = runner.run_command([git_bin, "clone", "--quiet", source, dest], parent)

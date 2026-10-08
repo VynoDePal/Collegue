@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from collegue.executor.command import CommandRunner
-from collegue.executor.git_boundary import HardenedGitRunner
+from collegue.executor.git_boundary import HardenedGitRunner, WorkspaceError, require_trusted_checkout
 
 # SHA git (court ou complet). Validé avant d'être passé à ``git`` (défense en
 # profondeur : l'argv n'est pas un shell, mais on refuse tout ce qui n'est pas un SHA).
@@ -118,6 +118,10 @@ def prepare_revert(
     source = os.path.realpath(os.path.abspath(repo_source))
     if not os.path.isdir(os.path.join(source, ".git")):
         raise RevertError(f"repo_source n'est pas un dépôt git: {repo_source}")
+    try:
+        require_trusted_checkout(source, role="repo_source")
+    except WorkspaceError as exc:  # workspace géré / répertoire de contrôle : jamais une source
+        raise RevertError(str(exc)) from exc
 
     owns_parent = dest_root is None
     parent = dest_root or tempfile.mkdtemp(prefix="collegue-revert-")
