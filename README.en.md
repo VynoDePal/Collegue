@@ -24,6 +24,31 @@ Endpoints:
 | `http://localhost:4121/mcp/` | MCP Server (HTTP transport) |
 | `http://localhost:4122/_health` | Healthcheck |
 
+> **Network: loopback by default.** `docker compose up` publishes **every** port on `127.0.0.1`
+> (MCP `4121`, health `4122`, Keycloak `4123`, dashboard `4125`, nginx `8088`): nothing is reachable
+> from the network. The server listens on `0.0.0.0` **inside** the container; only the host-side
+> publication is restricted. Three independent variables (in `.env`) change the publish address:
+>
+> | Variable | Ports |
+> |----------|-------|
+> | `COLLEGUE_PUBLISH_HOST` | MCP `4121`, health `4122`, nginx `8088` |
+> | `COLLEGUE_DASHBOARD_PUBLISH_HOST` | Streamlit dashboard `4125` (**no authentication**) |
+> | `COLLEGUE_KEYCLOAK_PUBLISH_HOST` | Keycloak `4123` (`start-dev`, do not expose as is) |
+>
+> **Remote exposure** (e.g. `COLLEGUE_PUBLISH_HOST=0.0.0.0`) is an explicit choice, to be used only
+> with `OAUTH_ENABLED=true`. It is **not** enforced: without OAuth the server only logs a warning and
+> stays reachable without authentication. Exposing the MCP does not open the dashboard or Keycloak.
+> A TLS reverse proxy is still recommended.
+>
+> **OAuth is fail-closed.** With `OAUTH_ENABLED=true`, if authentication cannot be established
+> (`JWTVerifier` missing, constructor error, neither `OAUTH_JWKS_URI` nor `OAUTH_PUBLIC_KEY`, empty
+> `OAUTH_ISSUER` or `OAUTH_ALGORITHM`), the server **refuses to start** and the container exits with a
+> non-zero code (Compose restarts it per `restart: always`: read its logs). The no-authentication mode
+> exists only via `OAUTH_ENABLED=false` (default), explicit and logged. `OAUTH_ALGORITHM` and
+> `OAUTH_REQUIRED_SCOPES` are **actually enforced** on every token: a token lacking the configured
+> scopes is rejected (check your tokens before upgrading). Outside Docker, `HOST` now defaults to
+> `127.0.0.1`.
+
 ### Configure your IDE
 
 #### Claude Code (CLI)
@@ -147,7 +172,8 @@ Overview **by theme** (full list and default values in
 | `LLM_MODEL_*` / `LLM_PROVIDER_*` | Per-**role** model/provider (CODER, QA, PLANNER, REVIEWER) | |
 | `LLM_RATE_LIMIT_*` | Per-client LLM call limits (per minute / day) | |
 | `CACHE_ENABLED` / `CACHE_TTL` | Tool response cache | |
-| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | OAuth authentication (**off** by default) | |
+| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | OAuth authentication (**off** by default; **fail-closed** when enabled: see "Network" above) | |
+| `COLLEGUE_PUBLISH_HOST` / `COLLEGUE_DASHBOARD_PUBLISH_HOST` / `COLLEGUE_KEYCLOAK_PUBLISH_HOST` | Docker port publish address (`127.0.0.1` by default) | |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | GitHub integration (watchdog, PRs) | |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Sentry observability | |
 | `STATE_DATABASE_URL` | Autonomous engine durable state (Postgres/SQLite) | |

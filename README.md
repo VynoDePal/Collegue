@@ -24,6 +24,32 @@ Endpoints :
 | `http://localhost:4121/mcp/` | Serveur MCP (transport HTTP) |
 | `http://localhost:4122/_health` | Healthcheck |
 
+> **Réseau : loopback par défaut.** `docker compose up` publie **tous** les ports sur `127.0.0.1`
+> (MCP `4121`, health `4122`, Keycloak `4123`, dashboard `4125`, nginx `8088`) : rien n'est joignable
+> depuis le réseau. Le serveur écoute sur `0.0.0.0` **à l'intérieur** du conteneur ; seule la
+> publication côté hôte est restreinte. Trois variables indépendantes (dans `.env`) changent l'adresse
+> de publication :
+>
+> | Variable | Ports concernés |
+> |----------|-----------------|
+> | `COLLEGUE_PUBLISH_HOST` | MCP `4121`, health `4122`, nginx `8088` |
+> | `COLLEGUE_DASHBOARD_PUBLISH_HOST` | dashboard Streamlit `4125` (**aucune authentification**) |
+> | `COLLEGUE_KEYCLOAK_PUBLISH_HOST` | Keycloak `4123` (`start-dev`, à ne pas exposer tel quel) |
+>
+> **Exposition distante** (par ex. `COLLEGUE_PUBLISH_HOST=0.0.0.0`) : choix explicite, à n'utiliser
+> qu'avec `OAUTH_ENABLED=true`. Ce n'est **pas** imposé : sans OAuth, le serveur journalise seulement un
+> avertissement et reste joignable sans authentification. Exposer le MCP n'ouvre ni le dashboard ni
+> Keycloak. Un reverse proxy TLS reste recommandé.
+>
+> **OAuth fail-closed.** Avec `OAUTH_ENABLED=true`, si l'authentification ne peut pas être établie
+> (`JWTVerifier` absent, constructeur en erreur, ni `OAUTH_JWKS_URI` ni `OAUTH_PUBLIC_KEY`,
+> `OAUTH_ISSUER` ou `OAUTH_ALGORITHM` vides), le serveur **refuse de démarrer** et le conteneur sort
+> en code non nul (Compose le relance selon `restart: always` : lire ses logs). Le mode sans
+> authentification n'existe que via `OAUTH_ENABLED=false` (défaut), explicite et journalisé.
+> `OAUTH_ALGORITHM` et `OAUTH_REQUIRED_SCOPES` sont **effectivement appliqués** à chaque jeton : un
+> jeton sans les scopes configurés est refusé (vérifier vos jetons avant de mettre à jour).
+> Hors Docker, `HOST` vaut désormais `127.0.0.1` par défaut.
+
 ### Configurer votre IDE
 
 #### Claude Code (CLI)
@@ -147,7 +173,8 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `LLM_MODEL_*` / `LLM_PROVIDER_*` | Modèle/provider par **rôle** (CODER, QA, PLANNER, REVIEWER) | |
 | `LLM_RATE_LIMIT_*` | Limites d'appels LLM par client (minute / jour) | |
 | `CACHE_ENABLED` / `CACHE_TTL` | Cache des réponses d'outils | |
-| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | Authentification OAuth (**off** par défaut) | |
+| `OAUTH_ENABLED` (+ `OAUTH_*`, Keycloak) | Authentification OAuth (**off** par défaut ; **fail-closed** si activée : voir « Réseau » plus haut) | |
+| `COLLEGUE_PUBLISH_HOST` / `COLLEGUE_DASHBOARD_PUBLISH_HOST` / `COLLEGUE_KEYCLOAK_PUBLISH_HOST` | Adresse de publication des ports Docker (`127.0.0.1` par défaut) | |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` | Intégration GitHub (watchdog, PR) | |
 | `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | Observabilité Sentry | |
 | `STATE_DATABASE_URL` | État durable du moteur autonome (Postgres/SQLite) | |

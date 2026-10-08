@@ -36,6 +36,7 @@ from typing import Iterator, List, Optional, Protocol, Tuple, runtime_checkable
 
 from collegue.executor.agent import IssueSpec
 from collegue.sandbox.executor import DockerSandbox
+from collegue.sandbox.paths import is_confined_file, workspace_file
 from collegue.textnorm import inline
 
 # `python -m pytest` (et non le script `pytest`) ajoute le répertoire de travail
@@ -228,7 +229,7 @@ def _detect_asgi_app(workspace: str) -> Optional[str]:
     """Cible uvicorn (``module:app``) si le workspace expose une app FastAPI (#458)."""
     for rel, target in _ASGI_APP_CANDIDATES:
         path = os.path.join(workspace, rel)
-        if not os.path.isfile(path):
+        if not is_confined_file(workspace, path):  # jamais de lien sortant du workspace
             continue
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
@@ -455,7 +456,7 @@ def e2e_gate_command(
     for sub in candidates:
         base = workspace if sub == "." else os.path.join(workspace, sub)
         pkg = os.path.join(base, "package.json")
-        if not os.path.isfile(pkg):
+        if not is_confined_file(workspace, pkg):
             continue
         try:
             with open(pkg, encoding="utf-8") as handle:
@@ -647,8 +648,10 @@ def remediate_missing_requirements(workspace: str, output: str) -> Tuple[str, ..
 
     Retourne les paquets ajoutés (tuple vide si rien à faire).
     """
-    req_path = os.path.join(workspace, "requirements.txt")
-    if not os.path.isfile(req_path):
+    # Ce fichier est ÉCRIT sur l'hôte : jamais à travers un lien symbolique (l'agent
+    # peut faire de ``requirements.txt`` un lien vers un fichier hôte, réécrit sinon).
+    req_path = workspace_file(workspace, "requirements.txt", follow_internal_links=False)
+    if req_path is None:
         return ()
     modules = missing_modules(output)
     # #501 : les messages auto-diagnostiqués (Starlette « requires "X" ») ne sont
@@ -786,7 +789,7 @@ def frontend_gate_command(workspace: str, subdir: str = ".") -> Optional[str]:
     """
     base = workspace if subdir == "." else os.path.join(workspace, subdir)
     pkg_path = os.path.join(base, "package.json")
-    if not os.path.isfile(pkg_path):
+    if not is_confined_file(workspace, pkg_path):
         return None
     scripts: dict = {}
     declared: set = set()
@@ -1147,6 +1150,8 @@ def requirement_keys_present(workspace: str) -> frozenset:
     except OSError:
         pass
     for root in roots:
+        if not is_confined_file(workspace, os.path.join(root, "requirements.txt")):
+            continue
         try:
             with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as fh:
                 # Lecture BORNÉE (#482 suivi v8, revue) : requirements.txt est écrit par

@@ -37,42 +37,57 @@ class TestHealthServer:
 
     @pytest.fixture(scope="module")
     def health_server(self):
-        """Démarre le health server pour les tests."""
+        """Démarre le vrai health server et attend qu'il réponde ; échoue (jamais skip) sinon.
+
+        Interpréteur courant (dépendances installées) et attente active : un test qui saute quand
+        le serveur ne répond pas ne prouverait rien.
+        """
         import os
         import subprocess
+        import sys
 
         health_server_path = os.path.join(os.path.dirname(__file__), "..", "collegue", "health_server.py")
-        proc = subprocess.Popen(["python3", health_server_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        # Comme l'image (PYTHONPATH=/app) : lancé en script, le paquet `collegue` doit être importable.
+        env = {**os.environ, "PYTHONPATH": repo_root}
+        proc = subprocess.Popen(
+            [sys.executable, health_server_path], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
 
-        # Attendre que le serveur démarre
-        time.sleep(2)
-
-        yield proc
-
-        # Cleanup
-        proc.terminate()
+        deadline = time.monotonic() + 20
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            while True:
+                try:
+                    if requests.get("http://localhost:4122/_health", timeout=1).status_code == 200:
+                        break
+                except requests.exceptions.ConnectionError:
+                    pass
+                if proc.poll() is not None:
+                    error = proc.stderr.read().decode(errors="replace")[-800:]
+                    pytest.fail(f"health_server.py s'est arrêté (code {proc.returncode}) : {error}")
+                if time.monotonic() > deadline:
+                    pytest.fail("health_server.py ne répond pas sur :4122 après 20 s")
+                time.sleep(0.2)
+
+            yield proc
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     def test_health_endpoint_responds(self, health_server):
         """Test que le endpoint /_health répond."""
-        try:
-            response = requests.get("http://localhost:4122/_health", timeout=5)
-            assert response.status_code == 200
-            assert response.json()["status"] == "ok"
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Health server not running (expected in CI environment)")
+        response = requests.get("http://localhost:4122/_health", timeout=5)
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
 
     def test_oauth_endpoint_exists(self, health_server):
         """Test que le endpoint OAuth existe."""
-        try:
-            response = requests.get("http://localhost:4122/.well-known/oauth-protected-resource", timeout=5)
-            # Peut retourner 200 ou 500 selon la config, mais ne doit pas être 404
-            assert response.status_code in [200, 500]
-        except requests.exceptions.ConnectionError:
-            pytest.skip("Health server not running (expected in CI environment)")
+        response = requests.get("http://localhost:4122/.well-known/oauth-protected-resource", timeout=5)
+        # Peut retourner 200 ou 500 selon la config, mais ne doit pas être 404
+        assert response.status_code in [200, 500]
 
 
 class TestPortConfiguration:

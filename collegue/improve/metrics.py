@@ -19,6 +19,14 @@ diff-scopé est non déterministe et asymétrique avant/après (la cause racine 
 faux-rejet v9). Le « score du dashboard » du serveur (latence/coût de SES experts)
 ne convient pas non plus : on mesure la qualité du **projet généré**.
 
+**Frontière hôte (vague 1)** : le workspace mesuré est écrit par l'agent et par les
+tests. Toute opération HÔTE dessus part d'un nom de fichier non fiable et reste
+confinée (jamais de traversée, de lien symbolique suivi ni de réécriture hors
+workspace — :mod:`collegue.sandbox.paths`) ; l'audit de dépendances, qui
+résout/installe des dépendances choisies par l'agent, ne tourne JAMAIS sur l'hôte :
+il passe par le sandbox fourni à :func:`measure`, sinon la mesure est refusée
+(fail-closed) — jamais « 0 vulnérabilité ».
+
 Module **isolé** : non câblé au runtime (la boucle G4 l'orchestre).
 """
 
@@ -34,6 +42,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
+from collegue.sandbox.paths import workspace_file
 
 # Commande de couverture par défaut. ``python -m pytest`` (et non ``pytest`` nu) met le
 # CWD sur ``sys.path`` → un projet src-layout (imports ``from app…``) est collectable sans
@@ -172,6 +182,10 @@ class ProjectQualityMetrics:
     # Vulnérabilités de dépendances (pip-audit). Signal OPT-IN : 0 par défaut (flag
     # off) → terme composite nul + règle gate no-op. Gaté (tolérance 0) quand activé.
     dep_vulns: int = 0
+    # False si l'audit de dépendances était ACTIVÉ mais n'a pas pu être mené (outil absent,
+    # sandbox indisponible, échec/timeout, sortie invalide, dépendance non auditée) : le
+    # composite vaut alors -inf (mesure non fiable, rejet par le gate) — jamais 0 vuln.
+    dep_audit_measured: bool = True
 
 
 def parse_coverage(output: str) -> Optional[float]:
@@ -339,7 +353,16 @@ def autofix_lint(workspace: str, files, *, lint_select=DEFAULT_LINT_SELECT) -> i
     ruff = _find_ruff()
     if not ruff:
         return 0
-    py = [os.path.join(workspace, f) for f in files if f.endswith(".py") and os.path.isfile(os.path.join(workspace, f))]
+    # Les noms viennent du diff d'un agent (non fiable) et ruff RÉÉCRIT ces fichiers sur
+    # l'hôte : traversée, chemin absolu hors workspace et lien symbolique (même interne)
+    # sont refusés — on ne réécrit jamais à travers un lien ni hors du workspace.
+    py = []
+    for name in files:
+        if not isinstance(name, str) or not name.endswith(".py"):
+            continue
+        confined = workspace_file(workspace, name, follow_internal_links=False)
+        if confined is not None and confined not in py:
+            py.append(confined)
     if not py:
         return 0
     try:
@@ -393,8 +416,11 @@ def _default_doc_coverage(workspace: str) -> float:
         for fname in fnames:
             if not fname.endswith(".py") or _is_doc_test_file(fname):
                 continue
+            confined = workspace_file(workspace, os.path.join(root, fname), follow_internal_links=False)
+            if confined is None:  # lien symbolique / hors workspace : jamais lu
+                continue
             try:
-                with open(os.path.join(root, fname), encoding="utf-8") as handle:
+                with open(confined, encoding="utf-8") as handle:
                     tree = ast.parse(handle.read())
             except (OSError, SyntaxError, ValueError):
                 continue
@@ -411,40 +437,65 @@ def _default_doc_coverage(workspace: str) -> float:
     return 1.0 if total == 0 else documented / total
 
 
-def _find_pip_audit() -> Optional[str]:
-    """Localise pip-audit : PATH puis à côté de l'interpréteur (venv). ``None`` si absent."""
-    found = shutil.which("pip-audit")
-    if found:
-        return found
-    candidate = os.path.join(os.path.dirname(sys.executable), "pip-audit")
-    return candidate if os.path.exists(candidate) else None
+# Audit de dépendances, exécuté DANS le sandbox de ``measure`` (jamais sur l'hôte).
+# ``--no-deps --disable-pip`` : pip-audit lit ``requirements.txt`` lui-même — aucun pip,
+# aucun résolveur, aucune construction de sdist, aucun clone VCS ; une exigence VCS/URL/
+# locale/non épinglée fait échouer l'audit (donc refuse la mesure) au lieu d'être exécutée.
+DEP_AUDIT_COMMAND = "pip-audit -r requirements.txt --no-deps --disable-pip --progress-spinner off --timeout 60 -f json"
 
 
-def _default_dep_audit(workspace: str) -> int:
-    """Compte les vulnérabilités connues des dépendances via pip-audit (#551).
+class DepAuditUnavailable(RuntimeError):
+    """L'audit de dépendances n'a pas pu être mené : la mesure doit être refusée (fail-closed)."""
+
+
+def _count_audit_vulns(stdout: str) -> int:
+    """Nombre de vulnérabilités d'une sortie ``pip-audit -f json`` STRICTEMENT valide.
+
+    Toute forme inattendue (JSON invalide/tronqué, pas de liste ``dependencies``, entrée sans
+    liste ``vulns``, dépendance ignorée par pip-audit ``skip_reason`` donc NON auditée)
+    lève :class:`DepAuditUnavailable` : on ne convertit jamais un résultat douteux en « 0 ».
+    """
+    try:
+        data = json.loads(stdout or "")
+    except (TypeError, ValueError) as exc:
+        raise DepAuditUnavailable("sortie pip-audit non JSON (échec, outil absent ou sortie tronquée)") from exc
+    deps = data.get("dependencies") if isinstance(data, dict) else None
+    if not isinstance(deps, list):
+        raise DepAuditUnavailable("sortie pip-audit sans liste « dependencies »")
+    total = 0
+    for dep in deps:
+        if not isinstance(dep, dict) or not isinstance(dep.get("vulns"), list) or dep.get("skip_reason"):
+            raise DepAuditUnavailable("dépendance non auditée par pip-audit (résultat incomplet)")
+        total += len(dep["vulns"])
+    return total
+
+
+def _default_dep_audit(workspace: str, *, sandbox=None) -> int:
+    """Compte les vulnérabilités connues des dépendances via pip-audit, EN SANDBOX (#551).
 
     Opt-in (appelé seulement si ``dep_vulns_enabled``). Audite ``requirements.txt`` du
-    workspace (réseau, base OSV). pip-audit absent / pas de requirements / panne ⇒
-    **0** (no-op, comme ``_find_ruff``) — pip-audit n'est PAS imposé en dépendance.
+    workspace (réseau vers la base de vulnérabilités : celui du sandbox). Aucun outil de
+    résolution/installation ne tourne sur l'hôte. **Fail-closed** : sandbox absent, outil
+    absent du sandbox (exit 127), échec/timeout, sortie invalide ou incomplète lèvent
+    :class:`DepAuditUnavailable` — jamais un faux 0. Seul un ``requirements.txt`` absent
+    (rien de déclaré à auditer) vaut 0.
     """
-    audit = _find_pip_audit()
-    if not audit:
+    if not os.path.lexists(os.path.join(workspace, "requirements.txt")):
         return 0
-    req = os.path.join(workspace, "requirements.txt")
-    if not os.path.isfile(req):
-        return 0
+    run = getattr(sandbox, "run_tests", None)
+    if run is None:
+        raise DepAuditUnavailable("aucune isolation disponible pour l'audit de dépendances (sandbox absent)")
     try:
-        proc = subprocess.run(
-            [audit, "-r", req, "-f", "json", "--progress-spinner", "off"],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        data = json.loads(proc.stdout or "{}")
-        deps = data.get("dependencies", []) if isinstance(data, dict) else (data or [])
-        return sum(len(d.get("vulns", [])) for d in deps if isinstance(d, dict))
-    except Exception:  # noqa: BLE001 — audit best-effort, jamais bloquant
-        return 0
+        result = run(workspace, DEP_AUDIT_COMMAND)
+    except Exception as exc:  # noqa: BLE001 — sandbox indisponible ⇒ mesure refusée
+        raise DepAuditUnavailable(f"sandbox indisponible pour l'audit de dépendances: {exc}") from exc
+    if result is None or getattr(result, "timed_out", False):
+        raise DepAuditUnavailable("audit de dépendances sans résultat ou interrompu par le délai")
+    # pip-audit sort 0 (rien) ou 1 (vulnérabilités trouvées) avec un JSON valide ; tout
+    # autre code (127 outil absent, 2 usage, 124 délai…) est un échec, même si stdout parle.
+    if getattr(result, "exit_code", None) not in (0, 1):
+        raise DepAuditUnavailable(f"pip-audit indisponible ou en échec (code {getattr(result, 'exit_code', None)})")
+    return _count_audit_vulns(str(getattr(result, "stdout", "") or ""))
 
 
 async def measure(
@@ -471,7 +522,8 @@ async def measure(
     lint/complexité (``quality_scan_fn``) viennent de scans **statiques déterministes**
     du **workspace** (injectables en tests). La couverture de docstrings
     (``doc_coverage_fn``) est **informative** (hors composite). Les vulns de dépendances
-    (``dep_vulns_fn``) ne sont mesurées que si ``dep_vulns_enabled`` (opt-in, gaté).
+    (``dep_vulns_fn``) ne sont mesurées que si ``dep_vulns_enabled`` (opt-in, gaté) ; par défaut
+    l'audit tourne dans ``sandbox`` et une panne refuse la mesure (composite -inf), jamais 0.
     La revue LLM (``reviewer``/``diff``) est **optionnelle et informative**.
     """
     test_res = sandbox.run_tests(workspace, coverage_command)
@@ -491,12 +543,21 @@ async def measure(
 
     # Vulns de dépendances : OPT-IN (flag). Off ⇒ 0 (terme composite nul, gate no-op).
     # Symétrique à doc_coverage : une fn injectée qui lève ne fait pas planter la mesure.
+    # ACTIVÉ mais indisponible (échec, timeout, outil absent, fn injectée qui lève) ⇒ mesure
+    # REFUSÉE (fail-closed) : composite -inf, jamais « 0 vulnérabilité » qui améliorerait le score.
     dep_vulns = 0
+    dep_audit_measured = True
     if dep_vulns_enabled:
         try:
-            dep_vulns = int((dep_vulns_fn or _default_dep_audit)(workspace))
-        except Exception:  # noqa: BLE001 — audit best-effort, jamais bloquant
-            dep_vulns = 0
+            if dep_vulns_fn is not None:
+                dep_vulns = int(dep_vulns_fn(workspace))
+            else:
+                dep_vulns = _default_dep_audit(workspace, sandbox=sandbox)
+            if dep_vulns < 0:
+                raise DepAuditUnavailable("nombre de vulnérabilités négatif")
+        except Exception:  # noqa: BLE001 — toute panne d'audit ⇒ mesure non fiable (fail-closed)
+            dep_vulns = -1
+            dep_audit_measured = False
 
     # Revue LLM : INFORMATIVE uniquement (hors composite). Calculée seulement s'il y
     # a un reviewer ET un diff à examiner ; toute panne reste sans effet sur le gate.
@@ -513,13 +574,17 @@ async def measure(
         security_findings=security_findings,
         security_weighted=security_weighted,
         tests_passed=tests_passed,
-        composite=composite_score(
-            coverage_pct,
-            security_weighted,
-            lint_violations=lint_violations,
-            complexity_bad_blocks=complexity_bad_blocks,
-            dep_vulns=dep_vulns,
-            weights=weights,
+        composite=(
+            composite_score(
+                coverage_pct,
+                security_weighted,
+                lint_violations=lint_violations,
+                complexity_bad_blocks=complexity_bad_blocks,
+                dep_vulns=dep_vulns,
+                weights=weights,
+            )
+            if dep_audit_measured
+            else -math.inf
         ),
         coverage_measured=coverage_measured,
         review_score=review_score,
@@ -528,6 +593,7 @@ async def measure(
         quality_measured=quality_measured,
         doc_coverage=doc_coverage,
         dep_vulns=dep_vulns,
+        dep_audit_measured=dep_audit_measured,
     )
 
 
