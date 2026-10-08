@@ -19,6 +19,10 @@ Spécificités Claude Code :
   `trusted_base`) ; voir « Frontière Git et sources de confiance » dans `AGENTS.md`. Lancer les journaux de preuve sans
   pipe qui masque le code de retour (rediriger vers un fichier puis lire `$?`).
 - Commits : en français, terminés par la ligne d'attribution demandée par la session. A et B committent en
-  local ; seul C pousse, ouvre une PR et fusionne, après consigne du manager et acceptation sur le SHA exact.
+  local ; seul C pousse et ouvre une PR (sur consigne du manager), publie et observe checks et revues, **rapporte**
+  résultats et SHA, puis ne fusionne que sur l'instruction finale de Codex pour cette tête exacte.
+- Revues distantes : tout finding pertinent est transmis au manager **avant** fusion pour arbitrage ; ne jamais le
+  reporter seul à la vague suivante ni le noyer dans les limites de la PR. Une revue absente ou un check manquant
+  n'est pas un succès : le dire. Voir « Livraison et merge » dans `AGENTS.md`.
 - Écrire son rapport et ses preuves sous `~/.codex/collegue-consolidation/20260928/{reports,evidence}/`
   avec le préfixe `w<N>-<rôle>`, puis terminer la passe : le manager reprend la même session.
