@@ -84,10 +84,13 @@ def stop_reason_for(cycles: List[Any]) -> str:
 
 
 def verify_local_sync(
-    repo_source: str, merge_sha: str, tree_sha: str, *, runner: Any = None, git_bin: str = "git"
+    repo_source: str, merge_sha: str, tree_sha: Optional[str], *, runner: Any = None, git_bin: str = "git"
 ) -> None:
     """Le clone local est sur la fusion distante : ``HEAD == merge_sha`` (tree identique à la preuve) ou, si la base a
-    légitimement avancé depuis, ``merge_sha`` est un ancêtre de ``HEAD``. Lève :class:`LocalSyncError` sinon."""
+    légitimement avancé depuis, ``merge_sha`` est un ancêtre de ``HEAD``. Lève :class:`LocalSyncError` sinon.
+
+    ``tree_sha=None`` : fusion survenue HORS moteur (opérateur, autre outil) — aucune preuve de livraison, donc aucun
+    tree à comparer ; seule la présence de la fusion dans le clone est établie."""
     from collegue.executor.command import LocalCommandRunner
     from collegue.executor.git_boundary import WorkspaceError, require_trusted_checkout
 
@@ -107,7 +110,7 @@ def verify_local_sync(
     head_sha = str(head.stdout).strip()
     if head_sha == merge_sha:
         tree = git("rev-parse", "HEAD^{tree}")
-        if not getattr(tree, "ok", False) or str(tree.stdout).strip() != tree_sha:
+        if tree_sha is not None and (not getattr(tree, "ok", False) or str(tree.stdout).strip() != tree_sha):
             raise LocalSyncError("le tree local diffère de celui de la preuve de livraison")
         return
     ancestor = git("merge-base", "--is-ancestor", merge_sha, head_sha)

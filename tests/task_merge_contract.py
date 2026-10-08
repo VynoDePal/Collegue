@@ -229,5 +229,94 @@ def case_deleting_the_task_deletes_its_cycle_row(url, manager):
     assert manager.get_task_merge(task_id) is None
 
 
+def run_alembic_upgrade_0011_to_0012(url):
+    """VRAIE migration Alembic 0011 → 0012 → 0011 → head sur une base VIERGE (jamais ``create_all``).
+
+    Données préexistantes (projet, tâche ``in_review``, décision) créées à 0011 et conservées à chaque étape ;
+    version Alembic relue en base ; contraintes et cascade de ``task_merges`` éprouvées sur le schéma migré."""
+    from alembic import command
+    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy.exc import IntegrityError
+
+    from collegue.migrations import alembic_config, head_revisions
+
+    cfg = alembic_config(url)
+    engine = create_engine(url)
+
+    def version():
+        with engine.connect() as conn:
+            return conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+
+    def snapshot():
+        with engine.connect() as conn:
+            projects = conn.execute(text("SELECT id, name FROM projects ORDER BY id")).all()
+            tasks = conn.execute(text("SELECT id, project_id, title, status FROM tasks ORDER BY id")).all()
+        return [tuple(r) for r in projects], [tuple(r) for r in tasks]
+
+    try:
+        assert "projects" not in inspect(engine).get_table_names(), "base vierge exigée : aucune table pré-créée"
+        command.upgrade(cfg, "0011")
+        assert version() == "0011" and "task_merges" not in inspect(engine).get_table_names()
+
+        legacy = ProjectStateManager.from_url(url)  # create=False : le schéma vient d'Alembic seul
+        project_id = legacy.create_project(name="préexistant", spec="spec")
+        task_id = legacy.add_task(project_id, "T1", status="in_review")
+        legacy.record_decision(project_id, "décision antérieure à 0012")
+        before = snapshot()
+        assert before[1] == [(task_id, project_id, "T1", "in_review")]
+
+        command.upgrade(cfg, "0012")
+        assert version() == "0012" and head_revisions() == ["0012"]
+        schema = inspect(engine)
+        assert "task_merges" in schema.get_table_names()
+        assert {"task_id", "state", "revision", "head_sha", "base_sha", "tree_sha", "proof_id", "merge_sha"} <= {
+            c["name"] for c in schema.get_columns("task_merges")
+        }
+        assert "ix_task_merges_project_id" in {i["name"] for i in schema.get_indexes("task_merges")}
+        assert {
+            "ck_task_merges_state",
+            "ck_task_merges_merge_method",
+            "ck_task_merges_pr_positive",
+            "ck_task_merges_revision_nonnegative",
+            "ck_task_merges_sha_lengths",
+            "ck_task_merges_required_text",
+            "ck_task_merges_state_merge_sha",
+        } <= {c["name"] for c in schema.get_check_constraints("task_merges")}
+        checks = {c["name"]: c["sqltext"] for c in schema.get_check_constraints("task_merges")}
+        assert (
+            "'merged_unsynced'" in checks["ck_task_merges_state"]
+            and "IS NOT NULL OR" not in checks["ck_task_merges_state"]
+        )
+        assert snapshot() == before, "les données préexistantes sont conservées"
+
+        migrated = ProjectStateManager.from_url(url)
+        row = _begin(migrated, task_id)  # la tâche préexistante peut porter un cycle de fusion
+        assert (row.state, row.revision) == ("merge_pending", 0)
+        with pytest.raises(IntegrityError):
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE task_merges SET state = 'nope' WHERE task_id = :t"), {"t": task_id})
+        extra = migrated.add_task(project_id, "éphémère", status="in_review")  # cascade : tâche supprimée -> cycle
+        _begin(migrated, extra, pr_number=12)
+        with migrated.session() as session:  # le gestionnaire active les FK (PRAGMA) sur SQLite
+            from sqlalchemy import delete
+
+            from collegue.state.models import Task
+
+            session.execute(delete(Task).where(Task.id == extra))
+        assert migrated.get_task_merge(extra) is None
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM task_merges WHERE task_id = :t"), {"t": task_id})
+
+        command.downgrade(cfg, "0011")
+        assert version() == "0011" and "task_merges" not in inspect(engine).get_table_names()
+        assert snapshot() == before, "le downgrade ne touche que task_merges"
+
+        command.upgrade(cfg, "head")
+        assert version() == head_revisions()[0] == "0012" and "task_merges" in inspect(engine).get_table_names()
+        assert snapshot() == before
+    finally:
+        engine.dispose()
+
+
 CONTRACT = [value for name, value in sorted(globals().items()) if name.startswith("case_") and callable(value)]
 IDS = [fn.__name__.removeprefix("case_") for fn in CONTRACT]

@@ -40,6 +40,16 @@ def sha_of(label: str) -> str:
     return hashlib.sha1(label.encode()).hexdigest()
 
 
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def tree_sha_of(tree: str) -> str:
+    """SHA d'un arbre : un identifiant Git COMPLET (40 hex, ex. vrai arbre d'un dépôt de test) est conservé tel quel ;
+    seul un libellé symbolique (``"tree-task-1"``) est haché. Permet à un pont vers de vrais dépôts Git de fournir de
+    vrais SHA sans qu'ils soient re-hachés."""
+    return tree if _FULL_SHA.fullmatch(tree) else sha_of(tree)
+
+
 class HttpError(ToolExecutionError):
     pass
 
@@ -364,7 +374,7 @@ class FakeGitHubServer:
                 raise HttpError("Not Found", status_code=404)
             return {
                 "sha": c["sha"],
-                "tree": {"sha": sha_of(c["tree"])},
+                "tree": {"sha": tree_sha_of(c["tree"])},
                 "parents": [{"sha": p} for p in c["parents"]],
                 "message": c["message"],
             }
@@ -494,7 +504,7 @@ class ProofStore:
             pr_number=pr_number,
             head_sha=head,
             base_sha=base,
-            tree_sha=sha_of(tree_label),
+            tree_sha=tree_sha_of(tree_label),
         )
         fields.update(overrides)
         fields.setdefault(

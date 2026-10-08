@@ -849,3 +849,19 @@ async def test_merge_task_never_re_merges_a_task_that_already_has_an_unfinished_
     assert result.status == cycle.STATUS_PENDING
     assert world.server.merge_calls() == [] and world.sync.calls == 0
     assert world.cycle_row(1).state == state
+
+
+async def test_repo_sync_failed_from_an_external_merge_skips_the_final_drain_and_phase4(world, monkeypatch):
+    """Le driver a refusé de lancer quoi que ce soit (clone non resynchronisé) : ni drain ni handoff n'enchaînent."""
+    world.add_task(1)
+    improvement = []
+
+    async def fake_improvement(*a, **k):
+        improvement.append(1)
+
+    stopped = ProjectRunResult(stop_reason="repo_sync_failed", iterations=0, processed=[])
+    result = await _run(world, monkeypatch, passes=[stopped], improve=True, run_improvement_fn=fake_improvement)
+
+    assert result.stop_reason == "repo_sync_failed" and improvement == []
+    assert world.server.merge_calls() == [], "aucune fusion n'est émise par le drain"
+    assert world.status(1) == "in_review"

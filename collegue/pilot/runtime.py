@@ -648,10 +648,12 @@ async def run_project_from_settings(
         # #580 : vérification stricte juste avant Phase 4. Injectable pour les
         # tests ; le défaut vit dans le driver (fetch + reset origin/<base>).
         sync_base_fn=sync_base_fn,
+        # W3 : une PR fusionnée HORS moteur est réconciliée seulement après resynchronisation prouvée du clone.
+        merge_verify_fn=merge_sync_verify_fn,
     )
 
     try:
-        from collegue.pilot.driver import STOP_AWAITING_MERGE
+        from collegue.pilot.driver import STOP_AWAITING_MERGE, STOP_REPO_SYNC_FAILED
 
         # Barrière globale : un incident Phase 5 précède toute écriture BUILD ou
         # IMPROVE, même si ce run n'a pas demandé ``--improve`` ou si l'opt-in a
@@ -744,16 +746,18 @@ async def run_project_from_settings(
             # in_review résiduelles (travail validé) pour finir le MVP à 100%. Idempotent.
             tasks_before_final_drain = manager.get_tasks(project_id)
             had_pending_final_reviews = any(getattr(t, "status", None) == "in_review" for t in tasks_before_final_drain)
-            await _merge_in_review_prs(
-                manager,
-                clients,
-                project_id=project_id,
-                owner=owner,
-                repo=repo,
-                repo_source=repo_source,
-                base=base,
-                **merge_kwargs,
-            )
+            # Clone non resynchronisé après une fusion hors moteur : ni drain ni handoff, reprise au prochain run.
+            if result.stop_reason != STOP_REPO_SYNC_FAILED:
+                await _merge_in_review_prs(
+                    manager,
+                    clients,
+                    project_id=project_id,
+                    owner=owner,
+                    repo=repo,
+                    repo_source=repo_source,
+                    base=base,
+                    **merge_kwargs,
+                )
             merge_stop = _blocking_merge_cycles(manager, project_id)
             # #580 : le premier ``completed`` peut signifier « dernière PR BUILD
             # ouverte », pas encore « MVP intégré ». Après le drain final, si tout

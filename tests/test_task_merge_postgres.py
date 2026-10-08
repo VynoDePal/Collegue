@@ -9,7 +9,7 @@ Le compare-and-set concurrent (une seule transition gagnante) est prouvé ici co
 from __future__ import annotations
 
 import pytest
-from task_merge_contract import CONTRACT, IDS
+from task_merge_contract import CONTRACT, IDS, run_alembic_upgrade_0011_to_0012
 from test_budget_ledger_postgres import (  # noqa: F401 - fixtures réutilisées
     _close_every_engine_and_prove_no_connection_leaks,
     pg_manager,
@@ -24,19 +24,33 @@ def test_task_merge_contract_on_postgres(case, pg_manager, pg_url):
     case(pg_url, pg_manager)
 
 
-def test_migration_0012_creates_the_table_with_constraints_on_postgres(pg_url):
-    from sqlalchemy import create_engine, inspect, text
+def _empty_schema(pg_url):
+    from sqlalchemy import create_engine, text
 
     engine = create_engine(pg_url)
     try:
         with engine.begin() as conn:
             conn.execute(text("DROP SCHEMA public CASCADE"))
             conn.execute(text("CREATE SCHEMA public"))
+    finally:
+        engine.dispose()
+
+
+def test_alembic_upgrade_0011_to_0012_keeps_existing_data_on_real_postgres(pg_url):
+    """VRAIE migration Alembic sur PostgreSQL réel, base vierge, données préexistantes, version relue en base."""
+    _empty_schema(pg_url)
+    run_alembic_upgrade_0011_to_0012(pg_url)
+
+
+def test_orm_metadata_schema_enforces_the_task_merges_constraints_on_real_postgres(pg_url):
+    """Portée : schéma ORM (``create_all``), PAS la migration — voir le test Alembic ci-dessus pour 0011 -> 0012."""
+    from sqlalchemy import create_engine, inspect, text
+
+    _empty_schema(pg_url)
+    engine = create_engine(pg_url)
+    try:
         ProjectStateManager.from_url(pg_url, create=True)
-        inspector = inspect(engine)
-        assert "task_merges" in inspector.get_table_names()
-        columns = {c["name"] for c in inspector.get_columns("task_merges")}
-        assert {"task_id", "state", "revision", "head_sha", "base_sha", "tree_sha", "proof_id", "merge_sha"} <= columns
+        assert "task_merges" in inspect(engine).get_table_names()
         with engine.begin() as conn:
             with pytest.raises(Exception, match="(?i)check|violates"):
                 conn.execute(

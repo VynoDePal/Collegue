@@ -545,3 +545,13 @@ def test_rules_are_read_across_pages(world):
     w.server.rules[:0] = filler  # la règle de checks passe en page 2
     assert verify(w).server_policy.strict_sources == ("ruleset:1",)
     assert max(c[2]["page"] for c in w.server.calls if "/rules/branches/" in c[1]) == 2
+
+
+def test_real_git_tree_identifiers_are_not_rehashed_by_the_double(world):
+    """Contrat du double pour un pont vers de vrais dépôts Git : un arbre de 40 hex est conservé tel quel."""
+    w = world
+    real_tree = "ab" * 20
+    w.server.open_pr(12, head_ref="collegue/issue-2", tree=real_tree)
+    w.proofs.add(w.server, w.project_id, 12)
+    approval = verify(w, pr_number=12, expected_head_branch="collegue/issue-2")
+    assert approval.tree_sha == real_tree

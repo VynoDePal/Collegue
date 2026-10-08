@@ -89,6 +89,29 @@ la règle serveur).
   réconcilier / resynchroniser, jamais fusionner).
 - Les gardes budget / deadline de la vague 2 restent consultées à chaque tour d'attente (`continue_fn`), sans reset.
 
+## 4 bis. Fusion survenue HORS moteur (opérateur, autre outil)
+
+Avec `BUILD_AUTO_MERGE=false` (défaut), les PR sont fusionnées à la main : aucun cycle `task_merges` n'existe, mais le
+clone opérateur (`repo_source`) est périmé. `driver.reconcile_in_review_tasks` (appelé au démarrage de `run_project`)
+ne marque plus jamais une tâche `merged` sur la seule foi de GitHub :
+
+1. une seule resynchronisation du clone de **confiance** (`sync_base_fn`, défaut `resync_repository_base`, qui refuse un
+   workspace géré) couvre toutes les PR fusionnées hors moteur ;
+2. chaque `merge_commit_sha` est prouvé présent dans le clone (`verify_local_sync(..., None)` : `HEAD == sha` ou ancêtre) ;
+3. seulement alors la tâche passe `merged`.
+
+Échec (resync `False` / exception, fusion absente du clone, SHA de fusion inconnu, clone non fourni) : la tâche **reste
+`in_review`** (aucune écriture), l'événement d'audit `task_reconciled` porte `outcome=merged_unsynced` et la raison, et
+`run_project` rend `repo_sync_failed` (`pending_reviews` = ces tâches) **avant toute tâche, dépendante ou non**. Le runtime
+n'enchaîne alors ni drain final ni handoff Phase 4. Le prochain démarrage rejoue la réconciliation : reprise sans aucune
+nouvelle fusion (le moteur n'émet pas de `PUT` sur ce chemin). Une tâche portant un cycle `task_merges` inachevé
+(`merge_pending`, `merged_unsynced`, `attention`) est laissée à ce cycle. Les gardes budget/deadline ne sont pas touchées
+(la réconciliation ne dépense rien et précède la boucle).
+
+Procédure opérateur : un cycle `attention` n'est levé que par `acknowledge_task_merge` après inspection ; la ligne est alors
+supprimée, la tâche reste `in_review` et la passe suivante revalide la PR (preuve, base, checks) ou, si elle a été fusionnée
+hors moteur, la réconcilie comme ci-dessus, **après** resynchronisation prouvée du clone.
+
 ## 5. Classification sensible
 
 `pilot.automerge.is_sensitive` refuse, même si l'allowlist est élargie : manifestes et locks de dépendances
@@ -110,6 +133,10 @@ merge humain.
 
 `tests/test_pilot_merge_policy.py`, `test_pilot_merge_cycle.py` (faux serveur REST `tests/github_fake_server.py` branché
 sur les vrais clients ; courses simulées au niveau des appels émis), `test_task_merge_state.py` +
-`test_task_merge_postgres.py` (même contrat `task_merge_contract.py` sur SQLite et PostgreSQL réel, CAS concurrent),
-`test_github_merge_clients.py`, `test_pilot_local_sync.py` (vrai dépôt git), `test_pilot_automerge.py`,
+`test_task_merge_postgres.py` (même contrat `task_merge_contract.py` sur SQLite et PostgreSQL réel, CAS concurrent ;
+**vraie migration Alembic** 0011 → 0012 → 0011 → head sur base vierge avec données préexistantes et version relue,
+SQLite et PostgreSQL ; le test PostgreSQL « schéma ORM » porte explicitement sur `create_all`, pas sur la migration),
+`test_github_merge_clients.py`, `test_pilot_local_sync.py` (vrai dépôt git), `test_pilot_external_merge_resume.py`
+(runtime public, vrais dépôts Git, fusion hors moteur : témoins synchronisé / périmé, resync `False` / exception, fusion
+absente du clone, reprise, workspace géré refusé), `test_pilot_driver.py`, `test_pilot_automerge.py`,
 `test_pilot_phase5_resume.py`, `test_pilot_remote_revert.py`, `test_pilot_runtime.py`.
