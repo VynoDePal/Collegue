@@ -238,8 +238,14 @@ async def publish_and_merge_revert(
     runner=None,
     git_bin: str = "git",
     proof: Optional[RevertProof] = None,
+    merge_gate: Optional[Callable[..., object]] = None,
 ) -> RemoteRevertOutcome:
-    """Publie, merge et vérifie un revert distant ; tout doute arrête le flux."""
+    """Publie, merge et vérifie un revert distant ; tout doute arrête le flux.
+
+    ``merge_gate`` (par défaut ``merge_policy.verify_required_checks``) applique au revert les checks REQUIS
+    (protections classiques et rulesets) et la précondition serveur « à jour avant fusion » ; son refus retryable
+    attend dans la limite de ``ci_timeout_seconds``, tout autre refus est terminal. Le contenu, lui, est prouvé par
+    le tree restauré (contrôle final) : un revert n'a pas de preuve de livraison."""
 
     def outcome(status: str, message: str, *, restored: bool = False, attempted: bool = True, **kwargs):
         if audit is not None:
@@ -379,6 +385,36 @@ async def publish_and_merge_revert(
                 return outcome(STATUS_PUBLISH_FAILED, "liste CI du revert incomplète", pr_number=pr_number)
             states = tuple(str(state).strip().lower() for state in (getattr(checks, "states", ()) or ()))
             if states and all(state == "success" for state in states):
+                from collegue.pilot import merge_policy
+
+                try:
+                    (merge_gate or merge_policy.verify_required_checks)(
+                        clients, owner=owner, repo=repo, base=base, head_sha=branch_sha
+                    )
+                except merge_policy.MergeRefused as refused:
+                    if not refused.retryable:
+                        return outcome(
+                            STATUS_PUBLISH_FAILED,
+                            f"politique de fusion du revert: {refused.reason}",
+                            pr_number=pr_number,
+                            revert_branch_sha=branch_sha,
+                        )
+                    if clock() >= deadline:
+                        return outcome(
+                            STATUS_PENDING,
+                            f"checks requis du revert non réunis ({refused.reason}) ; PR laissée ouverte pour reprise",
+                            pr_number=pr_number,
+                            revert_branch_sha=branch_sha,
+                        )
+                    await _sleep(ci_poll_seconds, sleep_fn)
+                    continue
+                except Exception as exc:  # noqa: BLE001 - politique inaccessible => pas de fusion
+                    return outcome(
+                        STATUS_PUBLISH_FAILED,
+                        f"politique de fusion du revert inaccessible: {exc}",
+                        pr_number=pr_number,
+                        revert_branch_sha=branch_sha,
+                    )
                 current = observed
                 break
             terminal = [state for state in states if state != "success" and state not in _PENDING]

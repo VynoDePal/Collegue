@@ -4,6 +4,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from github_fakes import FakeRemote
 
 from collegue.executor import (
     ExecutionOutcome,
@@ -32,41 +33,27 @@ class _Sandbox:
         return SandboxResult(exit_code=0 if self._ok else 1, stdout="tests output", stderr="")
 
 
-class _Branches:
-    def __init__(self):
-        self.created = []
-
-    def ensure_branch(self, owner, repo, branch, from_branch=None):
-        self.created.append(branch)
-        return SimpleNamespace(name=branch)
+_REMOTE_STATE = {}
 
 
-class _Files:
-    def __init__(self):
-        self.updated = []
-
-    def update_file(self, owner, repo, path, message, content, branch=None):
-        self.updated.append(path)
-        return {}
-
-    def delete_file(self, owner, repo, path, message, branch=None):
-        return {}
-
-
-class _PRs:
-    def __init__(self):
-        self.created = []
-
-    def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
-        return None
-
-    def create_pr(self, owner, repo, title, head, base, body):
-        self.created.append({"head": head, "body": body})
-        return SimpleNamespace(number=101, html_url="https://gh/pull/101", head_branch=head)
+@pytest.fixture(autouse=True)
+def _reset_remote_state():
+    _REMOTE_STATE.clear()
+    yield
+    _REMOTE_STATE.clear()
 
 
 def _clients():
-    return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
+    """Clients GitHub FIDÈLES : un vrai dépôt Git distant cloné depuis la source du test (arbres calculés par git)."""
+    if "source" not in _REMOTE_STATE:  # test sans dépôt source : rien n'atteindra jamais GitHub
+        return PrClients(branches=None, files=None, prs=None)
+    _REMOTE_STATE["count"] = _REMOTE_STATE.get("count", 0) + 1
+    root = _REMOTE_STATE["root"] / f"remote-{_REMOTE_STATE['count']}"
+    root.mkdir()
+    remote = FakeRemote(root, _REMOTE_STATE["source"])
+    clients = remote.clients()
+    clients.remote = remote
+    return clients
 
 
 def _git(cwd, *args):
@@ -83,7 +70,13 @@ def repo(tmp_path):
     (src / "existing.txt").write_text("original\n")
     _git(src, "add", "-A")
     _git(src, "commit", "-q", "-m", "init")
+    _REMOTE_STATE.update(source=str(src), root=tmp_path, count=0)
     return str(src)
+
+
+def _manager(tmp_path):
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}", create=True)
+    return manager, manager.create_project(name="demo")
 
 
 def _kwargs(**overrides):
@@ -125,7 +118,7 @@ async def test_real_run_advances_state_to_in_review(repo, tmp_path):
     outcome = await execute_issue(
         ISSUE, repo, ctx=None, dry_run=False, manager=manager, task_id=tid, project_id=pid, **_kwargs(clients=clients)
     )
-    assert outcome.success is True
+    assert outcome.success is True, (outcome.error, outcome.stage)
     assert outcome.stage == "pr"
     assert outcome.pr.number == 101
     assert clients.prs.created and clients.branches.created  # écriture réelle
@@ -719,7 +712,10 @@ async def test_binary_diff_is_reseedable(repo):
             return AgentResult(success=True, logs="ok", files_changed=("assets/hero.png",))
 
     outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=True, **_kwargs(agent=_BinaryAgent()))
-    assert outcome.success is True
+    # Vague 3 : la publication ne sait pas pousser un binaire fidèlement → refus explicite (même en aperçu), jamais
+    # une PR annoncée complète sans lui. Le diff autoritatif reste néanmoins ré-appliquable pour le retry (#436).
+    assert outcome.success is False and outcome.reason == "gate_failed"
+    assert "LIVRAISON REFUSÉE" in outcome.error and "assets/hero.png" in outcome.error
     assert "GIT binary patch" in outcome.execution.diff  # payload embarqué
 
     fresh = prepare_workspace(repo, ISSUE)
@@ -759,17 +755,21 @@ async def test_workspace_error_caught_with_synthetic_execution(tmp_path):
     assert "[engine] exception avant l'agent" in outcome.execution.agent_result.logs
 
 
-async def test_pr_stage_exception_keeps_stage_and_real_feedback(repo):
+async def test_pr_stage_exception_keeps_stage_and_real_feedback(repo, tmp_path):
     # Panne réseau à l'OUVERTURE de PR : stage=pr, et le feedback est l'exception —
     # PAS les logs (verts) de l'agent, qui seraient un motif de retry trompeur.
     from collegue.executor.pipeline import failure_feedback
 
-    class _DownPRs(_PRs):
-        def create_pr(self, owner, repo, title, head, base, body):
-            raise ConnectionError("GitHub 502 simulé")
+    clients = _clients()
 
-    clients = PrClients(branches=_Branches(), files=_Files(), prs=_DownPRs())
-    outcome = await execute_issue(ISSUE, repo, ctx=None, dry_run=False, **_kwargs(clients=clients))
+    def _down(*args, **kwargs):
+        raise ConnectionError("GitHub 502 simulé")
+
+    clients.prs.create_pr = _down
+    manager, pid = _manager(tmp_path)
+    outcome = await execute_issue(
+        ISSUE, repo, ctx=None, dry_run=False, manager=manager, project_id=pid, **_kwargs(clients=clients)
+    )
     assert outcome.success is False and outcome.reason == "engine_error"
     assert outcome.stage == "pr"
     assert "GitHub 502" in failure_feedback(outcome)
@@ -1116,7 +1116,7 @@ class _SeqGateSandbox:
         return self._results.pop(0) if len(self._results) > 1 else self._results[0]
 
 
-async def test_requirements_remediation_recaptures_diff_for_pr(repo):
+async def test_requirements_remediation_recaptures_diff_for_pr(repo, tmp_path):
     """#481 : le gate a amendé requirements.txt — le diff autoritatif est
     RECAPTURÉ, sinon la PR et la mémoire de retry (#436) partiraient sans le
     correctif (récidive du bug livré)."""
@@ -1138,11 +1138,14 @@ async def test_requirements_remediation_recaptures_diff_for_pr(repo):
             return await super().review(diff, ctx, issue=issue)
 
     reviewer = _CountingReviewer()
+    manager, pid = _manager(tmp_path)
     outcome = await execute_issue(
         ISSUE,
         repo,
         ctx=None,
         dry_run=False,
+        manager=manager,
+        project_id=pid,
         **_kwargs(
             agent=FakeCodeAgent(files={"requirements.txt": "fastapi\n", "app.py": "import httpx\n"}),
             sandbox=_SeqGateSandbox([red, green]),
@@ -1150,7 +1153,7 @@ async def test_requirements_remediation_recaptures_diff_for_pr(repo):
             reviewer=reviewer,
         ),
     )
-    assert outcome.success is True
+    assert outcome.success is True, outcome.error
     assert outcome.quality_report.requirements_added == ("httpx",)
     assert "+httpx" in outcome.execution.diff
     assert "requirements.txt" in outcome.execution.files_changed
@@ -1160,6 +1163,12 @@ async def test_requirements_remediation_recaptures_diff_for_pr(repo):
     assert "artefact.js" not in outcome.execution.diff
     assert reviewer.calls == 2  # ancien diff, puis diff final réellement livrable
     assert "collegue-diff-sha256:" in outcome.pr.body
+    # Vague 3 : l'arbre publié est EXACTEMENT l'arbre testé (requirements amendé inclus, artefacts du gate exclus).
+    remote = clients.remote
+    published = remote.files_at(outcome.pr.head)
+    assert "httpx" in published["requirements.txt"] and not any("node_modules" in p for p in published)
+    assert remote.tree_of(remote.branch_sha(outcome.pr.head)) == outcome.tested_content.tree_sha
+    assert outcome.proof is not None and outcome.proof.tree_sha == outcome.tested_content.tree_sha
 
 
 async def test_requirements_remediation_final_recheck_can_veto_pr(repo):

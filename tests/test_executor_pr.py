@@ -23,6 +23,7 @@ from collegue.executor.pr import (
     DELIVERY_UPDATE,
     DeliveryDriftError,
     DeliveryFile,
+    DeliveryRefusedError,
     DeliverySnapshot,
     capture_delivery_snapshot,
     diff_sha256_marker,
@@ -81,6 +82,58 @@ class _FakePRs:
     def create_pr(self, owner, repo, title, head, base, body):
         self.created.append({"title": title, "head": head, "base": base, "body": body})
         return SimpleNamespace(number=self._number, html_url=f"https://gh/pull/{self._number}", head_branch=head)
+
+
+BENCH_ISSUE = IssueSpec(number=5, title="Ajouter le endpoint")
+
+
+@pytest.fixture
+def bench(tmp_path):
+    """Banc de publication RÉEL : dépôt source Git, workspace géré, distant Git fidèle, état SQLite."""
+    from github_fakes import FakeRemote, make_source_repo
+
+    from collegue.executor.workspace import prepare_workspace
+
+    source = make_source_repo(
+        tmp_path / "source", {"keep.py": "kept\n", "gone.py": "to delete\n", "README.md": "# base\n"}
+    )
+    workspace = prepare_workspace(source, BENCH_ISSUE, dest_root=str(tmp_path / "ws"))
+    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}", create=True)
+    return SimpleNamespace(
+        workspace=workspace,
+        remote=FakeRemote(tmp_path, source),
+        manager=manager,
+        project_id=manager.create_project(name="demo"),
+        root=Path(workspace.path),
+    )
+
+
+def sealed_draft(bench):
+    """Fige le contenu testé tel qu'il est maintenant (comme le pipeline avant ses contrôles) + verdicts verts."""
+    from collegue.executor.delivery_proof import MANDATORY_VERDICTS, PHASE_BUILD, ProofDraft, seal_tested_content
+
+    content = seal_tested_content(bench.workspace.path)
+    draft = ProofDraft(phase=PHASE_BUILD, content=content)
+    for name in MANDATORY_VERDICTS[PHASE_BUILD]:
+        draft.add(name, True, "ok")
+    return draft
+
+
+def publish(bench, snapshot=None, *, files_changed=(), clients=None, draft=None):
+    return open_pr(
+        bench.workspace,
+        REPORT,
+        BENCH_ISSUE,
+        "o",
+        "r",
+        files_changed=files_changed,
+        snapshot=snapshot,
+        clients=clients or bench.remote.clients(),
+        dry_run=False,
+        manager=bench.manager,
+        project_id=bench.project_id,
+        draft=draft or sealed_draft(bench),
+    )
 
 
 def _clients(existing=None):
@@ -175,44 +228,51 @@ def test_verify_delivery_snapshot_fingerprints_skipped_binary_and_symlink(tmp_pa
         verify_delivery_snapshot(ws, snapshot)
 
 
-def test_open_pr_with_snapshot_pushes_frozen_payload_without_reading_live_file(tmp_path):
-    ws = _workspace(tmp_path, {"a.py": "validated bytes\n"})
-    snapshot = capture_delivery_snapshot(ws, ("a.py",), diff="the reviewed diff")
-    Path(ws.path, "a.py").write_text("unvalidated mutation\n", encoding="utf-8")
-    clients = _clients()
+def test_open_pr_with_snapshot_pushes_frozen_payload_without_reading_live_file(bench):
+    (bench.root / "a.py").write_text("validated bytes\n")
+    snapshot = capture_delivery_snapshot(bench.workspace, ("a.py",), diff="the reviewed diff")
+    draft = sealed_draft(bench)  # contenu testé figé AVANT la mutation
+    (bench.root / "a.py").write_text("unvalidated mutation\n")
 
-    result = open_pr(ws, REPORT, ISSUE, "o", "r", snapshot=snapshot, clients=clients, dry_run=False)
+    result = publish(bench, snapshot, draft=draft)
 
-    assert result.number == 101
-    assert clients.files.updated == [("a.py", "validated bytes\n", "collegue/issue-5")]
-    body = clients.prs.created[0]["body"]
+    assert result.number == 101 and result.proof.passed is True
+    assert (
+        bench.remote.files_at("collegue/issue-5")["a.py"] == "validated bytes\n"
+    )  # octets figés, pas le fichier vivant
+    assert bench.remote.tree_of(result.head_sha) == draft.content.tree_sha == result.proof.tree_sha
+    body = bench.remote.prs[101].body
     assert diff_sha256_marker(snapshot.diff_sha256) in body
 
 
-def test_open_pr_snapshot_preserves_frozen_deletion_when_file_reappears(tmp_path):
-    ws = _workspace(tmp_path, {"keep.py": "kept\n"})
-    snapshot = capture_delivery_snapshot(ws, ("gone.py",), diff="delete gone.py")
-    Path(ws.path, "gone.py").write_text("late content\n", encoding="utf-8")
-    clients = _clients()
+def test_open_pr_snapshot_preserves_frozen_deletion_when_file_reappears(bench):
+    (bench.root / "gone.py").unlink()
+    snapshot = capture_delivery_snapshot(bench.workspace, ("gone.py",), diff="delete gone.py")
+    draft = sealed_draft(bench)
+    (bench.root / "gone.py").write_text("late content\n")
 
-    open_pr(ws, REPORT, ISSUE, "o", "r", snapshot=snapshot, clients=clients, dry_run=False)
+    result = publish(bench, snapshot, draft=draft)
 
-    assert clients.files.updated == []
-    assert clients.files.deleted == [("gone.py", "collegue/issue-5")]
+    published = bench.remote.files_at(result.head)
+    assert "gone.py" not in published and published["keep.py"] == "kept\n"
+    assert bench.remote.tree_of(result.head_sha) == draft.content.tree_sha
 
 
-def test_historical_open_pr_captures_before_network_side_effects(tmp_path):
-    ws = _workspace(tmp_path, {"a.py": "captured first\n"})
+def test_historical_open_pr_captures_before_network_side_effects(bench):
+    (bench.root / "a.py").write_text("captured first\n")
+    draft = sealed_draft(bench)
+    clients = bench.remote.clients()
+    ensure = clients.branches.ensure_branch
 
-    class _MutatingBranches(_FakeBranches):
-        def ensure_branch(self, owner, repo, branch, from_branch=None):
-            Path(ws.path, "a.py").write_text("changed during network call\n", encoding="utf-8")
-            return super().ensure_branch(owner, repo, branch, from_branch=from_branch)
+    def mutating_ensure(owner, repo, branch, from_branch=None):
+        (bench.root / "a.py").write_text("changed during network call\n")
+        return ensure(owner, repo, branch, from_branch=from_branch)
 
-    clients = PrClients(branches=_MutatingBranches(), files=_FakeFiles(), prs=_FakePRs())
-    open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("a.py",), clients=clients, dry_run=False)
+    clients.branches.ensure_branch = mutating_ensure
+    result = publish(bench, files_changed=("a.py",), clients=clients, draft=draft)
 
-    assert clients.files.updated == [("a.py", "captured first\n", "collegue/issue-5")]
+    assert bench.remote.files_at(result.head)["a.py"] == "captured first\n"
+    assert bench.remote.tree_of(result.head_sha) == draft.content.tree_sha
 
 
 def test_open_pr_rejects_files_changed_that_disagree_with_snapshot(tmp_path):
@@ -252,84 +312,117 @@ def test_dry_run_writes_nothing(tmp_path):
 # --- écriture réelle ------------------------------------------------------------
 
 
-def test_real_creates_branch_files_and_pr(tmp_path):
-    ws = _workspace(tmp_path, {"a.py": "print('a')\n", "sub/b.py": "x = 1\n"})
-    clients = _clients()
+def test_real_creates_branch_files_and_pr(bench):
+    (bench.root / "a.py").write_text("print('a')\n")
+    (bench.root / "sub").mkdir()
+    (bench.root / "sub" / "b.py").write_text("x = 1\n")
+    clients = bench.remote.clients()
     result = open_pr(
-        ws, REPORT, ISSUE, "o", "r", files_changed=("a.py", "sub/b.py"), base="main", clients=clients, dry_run=False
+        bench.workspace,
+        REPORT,
+        BENCH_ISSUE,
+        "o",
+        "r",
+        files_changed=("a.py", "sub/b.py"),
+        base="main",
+        clients=clients,
+        dry_run=False,
+        manager=bench.manager,
+        project_id=bench.project_id,
+        draft=sealed_draft(bench),
     )
-    assert result.dry_run is False
-    assert result.skipped is False
-    assert result.number == 101
-    assert result.html_url == "https://gh/pull/101"
-    # branche dédiée créée depuis base
-    assert clients.branches.created == [("collegue/issue-5", "main")]
-    # fichiers committés avec leur contenu
-    assert {p for p, _c, _b in clients.files.updated} == {"a.py", "sub/b.py"}
-    assert all(b == "collegue/issue-5" for _p, _c, b in clients.files.updated)
-    # une seule PR, corps complet
+    assert result.dry_run is False and result.skipped is False and result.number == 101
+    assert result.html_url == "https://example.invalid/pull/101"
+    assert clients.branches.created == ["collegue/issue-5"]  # branche dédiée créée depuis la base
+    assert set(clients.files.updated) == {"a.py", "sub/b.py"}
     assert len(clients.prs.created) == 1
     body = clients.prs.created[0]["body"]
     assert "Closes #5" in body and "## Gate qualité" in body and exec_marker(5) in body
+    assert bench.remote.files_at(result.head)["sub/b.py"] == "x = 1\n"
 
 
-def test_binary_file_is_skipped_not_crashed(tmp_path):
-    """#410 : un fichier binaire (PNG/PDF/…) est SAUTÉ au lieu de faire planter
-    l'ouverture de PR (la Contents API n'est câblée qu'en texte UTF-8) ; le reste
-    du diff (texte) est bien poussé, et le binaire sauté est tracé."""
+def test_binary_file_is_refused_not_silently_omitted(tmp_path):
+    """Vague 3 (était #410 : binaire SAUTÉ) : la Contents API ne pousse que du texte UTF-8. Omettre le binaire faisait
+    annoncer un candidat COMPLET alors que la livraison ne le contient pas → refus explicite AVANT toute écriture."""
     ws_dir = tmp_path / "ws"
     ws_dir.mkdir()
     (ws_dir / "code.py").write_text("print('ok')\n", encoding="utf-8")
     (ws_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\xcbbinaire")  # octets non-UTF-8
     ws = Workspace(path=str(ws_dir), branch="collegue/issue-5", base_commit="basesha123")
     clients = _clients()
-    result = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("code.py", "logo.png"), clients=clients, dry_run=False)
-    # le code texte est poussé, le binaire est sauté (aucune exception)
-    assert {p for p, _c, _b in clients.files.updated} == {"code.py"}
-    assert result.skipped_binaries == ("logo.png",)
-    # trace visible pour le relecteur dans le corps de PR
-    assert "logo.png" in clients.prs.created[0]["body"]
+    with pytest.raises(DeliveryRefusedError, match="logo.png"):
+        open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("code.py", "logo.png"), clients=clients, dry_run=False)
+    assert clients.branches.created == [] and clients.files.updated == [] and clients.prs.created == []
+    # l'aperçu (dry-run) reste informatif : il nomme ce que la livraison refuserait
+    preview = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("code.py", "logo.png"), clients=clients, dry_run=True)
+    assert preview.skipped_binaries == ("logo.png",) and "logo.png" in preview.body
 
 
-def test_idempotent_when_pr_already_open(tmp_path):
-    ws = _workspace(tmp_path)
-    existing = SimpleNamespace(number=77, html_url="https://gh/pull/77", head_branch="collegue/issue-5")
-    clients = _clients(existing=existing)
-    result = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("a.py",), clients=clients, dry_run=False)
-    assert result.skipped is True
-    assert result.number == 77
-    # rien recréé
-    assert clients.branches.created == []
-    assert clients.files.updated == []
-    assert clients.prs.created == []
+def test_idempotent_when_pr_already_open_with_the_same_content(bench):
+    (bench.root / "a.py").write_text("print('a')\n")
+    draft = sealed_draft(bench)
+    first = publish(bench, files_changed=("a.py",), draft=draft)
+    clients = bench.remote.clients()
+    again = publish(bench, files_changed=("a.py",), clients=clients, draft=draft)
+    assert again.skipped is True and again.number == first.number
+    assert clients.files.updated == [] and clients.prs.created == []  # rien recréé
+    assert again.proof.proof_id == first.proof.proof_id  # la preuve immuable de la première publication fait foi
 
 
-def test_deleted_file_is_removed_on_branch(tmp_path):
-    ws = _workspace(tmp_path, {"keep.py": "k\n"})  # "gone.py" n'existe pas sur disque
-    clients = _clients()
-    open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("keep.py", "gone.py"), clients=clients, dry_run=False)
-    assert {p for p, _c, _b in clients.files.updated} == {"keep.py"}
-    assert [p for p, _b in clients.files.deleted] == ["gone.py"]
+def test_an_open_pr_of_another_revision_is_never_reported_as_the_delivery(bench):
+    clients = bench.remote.clients()
+    clients.branches.ensure_branch("o", "r", "collegue/issue-5", from_branch="main")
+    clients.files.update_file("o", "r", "other.py", "m", "pas la livraison\n", branch="collegue/issue-5")
+    clients.prs.create_pr("o", "r", "ancienne", "collegue/issue-5", "main", "ancienne")
+    (bench.root / "a.py").write_text("print('a')\n")
+    with pytest.raises(DeliveryDriftError, match="arbre publié"):
+        publish(bench, files_changed=("a.py",))
+    assert bench.manager.get_decision_journal(bench.project_id, "delivery-proof") == []
 
 
-def test_persists_pr_number_to_decision_journal(tmp_path):
-    manager = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}", create=True)
-    pid = manager.create_project(name="demo")
-    ws = _workspace(tmp_path)
-    open_pr(
-        ws,
-        REPORT,
-        ISSUE,
-        "o",
-        "r",
-        files_changed=("a.py",),
-        clients=_clients(),
-        dry_run=False,
-        manager=manager,
-        project_id=pid,
-    )
-    decisions = manager.get_decisions(pid)
+def test_deleted_file_is_removed_on_branch(bench):
+    (bench.root / "gone.py").unlink()
+    (bench.root / "new.py").write_text("n\n")
+    clients = bench.remote.clients()
+    result = publish(bench, files_changed=("new.py", "gone.py"), clients=clients)
+    assert clients.files.updated == ["new.py"] and clients.files.deleted == ["gone.py"]
+    assert "gone.py" not in bench.remote.files_at(result.head)
+
+
+def test_persists_pr_number_and_the_proof_to_the_decision_journal(bench):
+    (bench.root / "a.py").write_text("print('a')\n")
+    result = publish(bench, files_changed=("a.py",))
+    decisions = bench.manager.get_decisions(bench.project_id)
     assert any("PR #101" in d.summary for d in decisions)
+    assert any(d.summary.startswith("delivery-proof:v1:") for d in decisions)
+    assert result.proof.pr_number == 101
+
+
+def test_real_publication_without_a_proof_draft_a_manager_or_a_passing_draft_is_refused(bench):
+    (bench.root / "a.py").write_text("print('a')\n")
+    clients = bench.remote.clients()
+    draft = sealed_draft(bench)
+    common = dict(files_changed=("a.py",), clients=clients, dry_run=False)
+    with pytest.raises(DeliveryRefusedError, match="aucun contenu testé"):
+        open_pr(
+            bench.workspace, REPORT, BENCH_ISSUE, "o", "r", manager=bench.manager, project_id=bench.project_id, **common
+        )
+    with pytest.raises(DeliveryRefusedError, match="manager et project_id requis"):
+        open_pr(bench.workspace, REPORT, BENCH_ISSUE, "o", "r", draft=draft, **common)
+    draft.add("tests", False, "rouge")
+    with pytest.raises(DeliveryRefusedError, match="tests"):
+        open_pr(
+            bench.workspace,
+            REPORT,
+            BENCH_ISSUE,
+            "o",
+            "r",
+            manager=bench.manager,
+            project_id=bench.project_id,
+            draft=draft,
+            **common,
+        )
+    assert bench.remote.calls == []
 
 
 def test_path_traversal_rejected(tmp_path):
@@ -345,44 +438,36 @@ def test_dot_and_empty_segments_rejected(tmp_path):
             open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=(bad,), clients=_clients(), dry_run=False)
 
 
-def test_symlink_is_skipped_not_crashed(tmp_path):
-    """#423 : un symlink légitime du diff (ex. `node_modules/.bin/*` après un
-    `npm install`) est SAUTÉ au lieu de faire planter toute la tâche ; le reste
-    du diff est poussé et le lien sauté est tracé (résultat + corps de PR)."""
+def test_symlink_is_refused_not_silently_omitted(tmp_path):
+    """Vague 3 (était #423 : lien SAUTÉ) : un lien symbolique du diff n'est pas représentable par la Contents API ;
+    l'omettre ferait livrer un contenu différent de celui testé → refus explicite avant toute écriture."""
     ws = _workspace(tmp_path, {"code.py": "x = 1\n", "node_modules/acorn/bin/acorn": "#!/usr/bin/env node\n"})
     bin_dir = Path(ws.path) / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True)
     os.symlink(Path(ws.path) / "node_modules" / "acorn" / "bin" / "acorn", bin_dir / "acorn")
     clients = _clients()
-    result = open_pr(
-        ws,
-        REPORT,
-        ISSUE,
-        "o",
-        "r",
-        files_changed=("code.py", "node_modules/.bin/acorn"),
-        clients=clients,
-        dry_run=False,
-    )
-    assert {p for p, _c, _b in clients.files.updated} == {"code.py"}
-    assert result.skipped_symlinks == ("node_modules/.bin/acorn",)
-    assert "node_modules/.bin/acorn" in clients.prs.created[0]["body"]
+    files = ("code.py", "node_modules/.bin/acorn")
+    with pytest.raises(DeliveryRefusedError, match="node_modules/.bin/acorn"):
+        open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=files, clients=clients, dry_run=False)
+    assert clients.branches.created == [] and clients.files.updated == [] and clients.prs.created == []
+    preview = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=files, clients=clients, dry_run=True)
+    assert preview.skipped_symlinks == ("node_modules/.bin/acorn",)
+    assert "node_modules/.bin/acorn" in preview.body
 
 
-def test_symlink_escape_is_skipped_never_read(tmp_path):
-    # Un agent non fiable crée un symlink pointant un secret hôte hors workspace.
-    # open_pr ne doit JAMAIS lire/pousser le secret : le lien est sauté (et la
-    # tâche n'échoue plus pour autant, cf. #423 — même politique que les binaires).
+def test_symlink_escape_is_refused_and_never_read(tmp_path):
+    # Un agent non fiable crée un symlink pointant un secret hôte hors workspace : la livraison est REFUSÉE (lien non
+    # représentable) et le contenu du secret n'est JAMAIS lu ni poussé (seule la cible du lien est empreintée).
     secret = tmp_path / "host_secret.txt"
     secret.write_text("HOST PRIVATE KEY", encoding="utf-8")
     ws = _workspace(tmp_path, {"real.py": "x = 1\n"})
     os.symlink(secret, Path(ws.path) / "evil.py")
     clients = _clients()
-    result = open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("real.py", "evil.py"), clients=clients, dry_run=False)
-    # le contenu du secret n'a JAMAIS été poussé ; le vrai code l'est.
-    assert all("HOST PRIVATE KEY" not in content for _p, content, _b in clients.files.updated)
-    assert {p for p, _c, _b in clients.files.updated} == {"real.py"}
-    assert result.skipped_symlinks == ("evil.py",)
+    with pytest.raises(DeliveryRefusedError, match="evil.py"):
+        open_pr(ws, REPORT, ISSUE, "o", "r", files_changed=("real.py", "evil.py"), clients=clients, dry_run=False)
+    assert clients.files.updated == [] and clients.prs.created == []
+    snapshot = capture_delivery_snapshot(ws, ("real.py", "evil.py"))
+    assert all("HOST PRIVATE KEY" not in (item.content or "") for item in snapshot.files)
 
 
 def test_symlinked_dir_escape_still_rejected(tmp_path):

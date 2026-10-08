@@ -49,6 +49,13 @@ def _clients():
     return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
 
 
+def _published_clients(repo):
+    """Clients COMPLETS pour un run réel (vrai dépôt Git distant) : voir ``tests/w3_publication.py``."""
+    from w3_publication import published_clients
+
+    return published_clients(repo)
+
+
 class _Budget:
     """Budget toujours OK (déterministe, sans collecteur global)."""
 
@@ -102,7 +109,7 @@ async def _run(manager, git_repo, pid, *, dry_run):
         sandbox=_Sandbox(),
         agent=FakeCodeAgent(),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=_clients() if dry_run else _published_clients(git_repo),
         budget=_Budget(),
     )
 
@@ -247,7 +254,7 @@ async def test_real_run_wires_cost_governance_by_default(git_repo, manager):
         sandbox=_Sandbox(),
         agent=_UsageAgent(),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=_published_clients(git_repo),
         budget=_Budget(),
     )
     assert result.stop_reason == "awaiting_merge"  # usage compté, mais PR non mergée
@@ -526,48 +533,6 @@ async def _noop_sleep(_s):
     return None
 
 
-async def test_merge_in_review_prs_merges_sets_status_and_resyncs(manager, git_repo):
-    """Le merge-bot du build merge la PR d'une tâche in_review, la passe `merged`, resync le clone."""
-    import collegue.pilot.runtime as runtime
-
-    pid = manager.create_project(name="demo")
-    tid = manager.add_task(pid, title="T1")
-    manager.update_task_status(tid, "in_review")
-
-    calls = {"merge": [], "git": []}
-
-    class _PRs2:
-        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
-            return SimpleNamespace(number=77)
-
-        def merge_pr(self, owner, repo, number, method="squash", expected_head_sha=None):
-            calls["merge"].append((number, method))
-            return SimpleNamespace(merged=True, already_merged=False)
-
-    class _Runner:
-        def run_command(self, cmd, ws):
-            calls["git"].append(" ".join(cmd) if isinstance(cmd, list) else cmd)
-            return SandboxResult(exit_code=0, stdout="", stderr="")
-
-    clients = PrClients(branches=_Branches(), files=_Files(), prs=_PRs2())
-    merged = await runtime._merge_in_review_prs(
-        manager,
-        clients,
-        project_id=pid,
-        owner="o",
-        repo="r",
-        repo_source=git_repo,
-        base="main",
-        git_runner=_Runner(),
-        sleep_fn=_noop_sleep,
-    )
-    assert merged == 1
-    assert calls["merge"] == [(77, "squash")]  # squash
-    assert manager.get_task(tid).status == "merged"  # statut avancé
-    assert any("fetch origin main" in g for g in calls["git"])  # resync
-    assert any("reset --hard origin/main" in g for g in calls["git"])
-
-
 async def test_build_auto_merge_loops_until_complete(monkeypatch, manager, git_repo):
     """auto-merge ON : driver ↔ merge-bot bouclent jusqu'à `completed` (1 PR mergée par passe)."""
     import collegue.pilot.runtime as runtime
@@ -662,135 +627,8 @@ async def test_build_auto_merge_drains_last_pr_on_complete(monkeypatch, manager,
     assert calls["merge"] == 1  # drain final exécuté quand même (dernière PR)
 
 
-async def test_build_improve_handoff_orders_merge_resync_then_phase4(monkeypatch, manager, git_repo):
-    """#580 : preuve combinée du vrai runtime, sans LLM/réseau.
-
-    La dernière PR BUILD doit être ouverte, mergée, le clone resynchronisé, puis
-    seulement Phase 4 peut démarrer dans une seconde passe sans tâche.
-    """
-    import collegue.pilot.runtime as runtime
-
-    pid = _linear(manager, 1)
-    approve_plan(manager, pid)
-    events = []
-    pr = SimpleNamespace(number=77, html_url="https://gh/pull/77", head_branch="collegue/issue-1")
-
-    class _TrackingPRs:
-        def __init__(self):
-            self.created = False
-
-        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
-            return pr if self.created else None
-
-        def create_pr(self, owner, repo, title, head, base, body):
-            self.created = True
-            events.append("pr_opened")
-            return pr
-
-        def merge_pr(self, owner, repo, number, method="squash", expected_head_sha=None):
-            events.append("merged")
-            return SimpleNamespace(merged=True, already_merged=False)
-
-    async def fake_improvement(project_id, repo_source, ctx, **kwargs):
-        events.append("improved")
-        return SimpleNamespace(stop_reason="plateau")
-
-    def strict_handoff_sync(_src, _base):
-        events.append("handoff_resynced")
-        return True
-
-    # Le merge-bot fait déjà un resync après merge ; on le rend déterministe et
-    # visible, puis le driver effectue sa seconde vérification stricte.
-    monkeypatch.setattr(
-        runtime,
-        "_resync_repo_source",
-        lambda _src, _base, **_kw: events.append("merge_resynced") or True,
-    )
-    monkeypatch.setattr("collegue.executor.openhands_agent.coder_pricing_resolvable", lambda s=None: True)
-
-    clients = PrClients(branches=_Branches(), files=_Files(), prs=_TrackingPRs())
-    result = await run_project_from_settings(
-        pid,
-        git_repo,
-        owner="o",
-        repo="r",
-        dry_run=False,
-        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=True),
-        manager=manager,
-        sandbox=_Sandbox(),
-        agent=FakeCodeAgent(),
-        reviewer=FakeReviewer(),
-        clients=clients,
-        budget=_Budget(),
-        ctx=SimpleNamespace(),
-        improve=True,
-        run_improvement_fn=fake_improvement,
-        sync_base_fn=strict_handoff_sync,
-        audit=SimpleNamespace(
-            record=lambda *a, **k: None,
-            record_cost=lambda *a, **k: None,
-            record_once=lambda *a, **k: None,
-            cost_summary=lambda: {"usd": 0.0, "tokens": 0},
-        ),
-        cost_source=lambda: (0.0, 0),
-    )
-
-    assert result.stop_reason == "completed"
-    assert result.improvement.stop_reason == "plateau"
-    assert manager.get_task(1).status == "merged"
-    assert events == ["pr_opened", "merged", "merge_resynced", "handoff_resynced", "improved"]
-
-
-async def test_failed_final_merge_never_reports_completed_or_runs_phase4(monkeypatch, manager, git_repo):
-    """#580 : un drain final KO reste awaiting_merge, sans faux succès ni Phase 4."""
-    import collegue.pilot.runtime as runtime
-
-    pid = _linear(manager, 1)
-    approve_plan(manager, pid)
-    improved = {"called": False}
-
-    async def never_merge(*args, **kwargs):
-        return False, "CI/merge indisponible"
-
-    async def fake_improvement(*args, **kwargs):
-        improved["called"] = True
-        raise AssertionError("Phase 4 interdite après un merge BUILD échoué")
-
-    class _KnownPRs(_PRs):
-        def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
-            return SimpleNamespace(number=88)
-
-    monkeypatch.setattr(runtime, "_try_merge_pr", never_merge)
-    clients = PrClients(branches=_Branches(), files=_Files(), prs=_KnownPRs())
-    result = await run_project_from_settings(
-        pid,
-        git_repo,
-        owner="o",
-        repo="r",
-        dry_run=False,
-        settings_obj=SimpleNamespace(BUILD_AUTO_MERGE=True),
-        manager=manager,
-        sandbox=_Sandbox(),
-        agent=FakeCodeAgent(),
-        reviewer=FakeReviewer(),
-        clients=clients,
-        budget=_Budget(),
-        ctx=SimpleNamespace(),
-        improve=True,
-        run_improvement_fn=fake_improvement,
-        sync_base_fn=lambda _src, _base: True,
-        audit=SimpleNamespace(
-            record=lambda *a, **k: None,
-            record_cost=lambda *a, **k: None,
-            record_once=lambda *a, **k: None,
-            cost_summary=lambda: {"usd": 0.0, "tokens": 0},
-        ),
-        cost_source=lambda: (0.0, 0),
-    )
-
-    assert result.stop_reason == "awaiting_merge"
-    assert result.pending_reviews == [1]
-    assert result.improvement is None and improved["called"] is False
+# Les preuves bout en bout du merge-bot (ordre fusion → resync → Phase 4, drain refusé, échec de resync) vivent
+# dans tests/test_pilot_merge_cycle.py, contre un faux serveur GitHub REST.
 
 
 async def test_build_auto_merge_off_single_pass(monkeypatch, manager, git_repo):
@@ -1296,3 +1134,85 @@ def test_sandbox_subscription_auth_parsed_from_settings(tmp_path):
     assert not target.exists()
     assert _sandbox_subscription_auth(SimpleNamespace(SANDBOX_SUBSCRIPTION_AUTH_DIR="")) is None
     assert _sandbox_subscription_auth(SimpleNamespace()) is None
+
+
+# --- BUILD_AUTO_MERGE : opt-out exact, y compris les replis getattr (W3-B) -----------------
+
+
+def test_build_auto_merge_is_disabled_by_default_in_the_settings_model():
+    from collegue.config import Settings
+
+    assert Settings.model_fields["BUILD_AUTO_MERGE"].default is False
+    assert Settings(_env_file=None).BUILD_AUTO_MERGE is False
+
+
+@pytest.mark.parametrize("raw, expected", [("true", True), ("1", True), ("false", False), ("0", False), ("", False)])
+def test_build_auto_merge_only_turns_on_by_explicit_operator_choice(monkeypatch, raw, expected):
+    from collegue.config import Settings
+
+    monkeypatch.setenv("BUILD_AUTO_MERGE", raw)
+    try:
+        value = Settings(_env_file=None).BUILD_AUTO_MERGE
+    except Exception:  # valeur vide invalide pour un bool : jamais interprétée comme « activé »
+        value = False
+    assert value is expected
+
+
+def test_env_example_never_enables_build_auto_merge_by_default():
+    text = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    active = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("BUILD_AUTO_MERGE")]
+    assert active == [], "BUILD_AUTO_MERGE ne doit pas être activé (même explicitement) dans le gabarit"
+    assert "# BUILD_AUTO_MERGE=false" in text
+    assert "OFF par défaut" in text
+
+
+@pytest.mark.parametrize(
+    "settings", [SimpleNamespace(), SimpleNamespace(BUILD_AUTO_MERGE=None), SimpleNamespace(BUILD_AUTO_MERGE=False)]
+)
+async def test_runtime_missing_or_false_setting_never_merges(monkeypatch, manager, git_repo, settings):
+    """Repli getattr : un réglage ABSENT vaut « désactivé » (aucun appel de merge, une seule passe)."""
+    import collegue.pilot.runtime as runtime
+
+    pid = _linear(manager, 1)
+    approve_plan(manager, pid)
+    calls = {"run": 0, "merge": 0}
+
+    async def _fake_run_project(p, src, ctx, **kw):
+        calls["run"] += 1
+        assert kw.get("require_merged_deps") is False, (
+            "sans auto-merge, les dépendances ne sont pas forcées « mergées »"
+        )
+        return ProjectRunResult(stop_reason="awaiting_merge", iterations=1, processed=[])
+
+    async def _fake_merge(*a, **k):
+        calls["merge"] += 1
+        return 1
+
+    class _Ctx:
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(runtime, "run_project", _fake_run_project)
+    monkeypatch.setattr(runtime, "_merge_in_review_prs", _fake_merge)
+    monkeypatch.setattr("collegue.executor.openhands_agent.coder_pricing_resolvable", lambda s: True)
+
+    result = await run_project_from_settings(
+        pid,
+        git_repo,
+        owner="o",
+        repo="r",
+        dry_run=False,
+        settings_obj=settings,
+        manager=manager,
+        sandbox=_Sandbox(),
+        agent=FakeCodeAgent(),
+        reviewer=FakeReviewer(),
+        clients=_clients(),
+        budget=_Budget(),
+        ctx=_Ctx(),
+        audit=SimpleNamespace(cost_summary=lambda: {"usd": 0.0, "tokens": 0}),
+        cost_source=lambda: (0.0, 0),
+    )
+
+    assert calls == {"run": 1, "merge": 0}
+    assert result.stop_reason == "awaiting_merge"

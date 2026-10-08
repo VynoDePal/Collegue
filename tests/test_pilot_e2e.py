@@ -65,6 +65,13 @@ def _clients():
     return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
 
 
+def _published_clients(repo):
+    """Clients COMPLETS pour un run réel (vrai dépôt Git distant) : voir ``tests/w3_publication.py``."""
+    from w3_publication import published_clients
+
+    return published_clients(repo)
+
+
 class _Budget:
     def should_continue(self):
         return SimpleNamespace(action="continue", ok=True)
@@ -92,8 +99,7 @@ class _QACtx(_Ctx):
             text=(
                 "from pathlib import Path\n\n"
                 "def test_contract():\n"
-                "    workspace = Path('/workspace')\n"
-                "    assert workspace.is_dir()\n"
+                "    assert (Path.cwd() / 'COLLEGUE_FAKE.txt').is_file()\n"
             )
         )
 
@@ -178,7 +184,7 @@ async def test_plan_then_run_handoff_via_product(monkeypatch, manager, git_repo)
         sandbox=_Sandbox(),
         agent=FakeCodeAgent(),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=_published_clients(git_repo),
         budget=_Budget(),
         ctx=_Ctx(),
     )
@@ -279,7 +285,9 @@ async def test_draft_approve_sync_survives_manager_restart(monkeypatch, tmp_path
     assert all(task.issue_number for task in sync_manager.get_tasks(draft.project_id))
 
 
-async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(monkeypatch, manager, git_repo):
+async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(
+    monkeypatch, manager, git_repo, tmp_path
+):
     """Tranche §4.7 complète : QA au plan → hash → gate stocké au run."""
     _patch_planner_llm(monkeypatch)
     qa_ctx = _QACtx()
@@ -313,21 +321,30 @@ async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(m
     assert all(task.acceptance_test_provenance["role"] == "qa" for task in tasks)
     assert "oracle QA" in plan.preview_markdown
 
+    from oracle_sandbox import LocalOracleSandbox
+
     from collegue.executor.quality_gate import StoredAcceptanceChecker
     from collegue.pilot.driver import _issue_from_task
 
+    # Le sandbox EXÉCUTE réellement l'oracle (lanceur de production, rapport complet jugé par l'hôte) ; les commandes qui
+    # ne sont pas des oracles (pytest du gate) retombent sur le double habituel.
+    # Préflight : le contrat scellé est ROUGE par assertion sur la base (le livrable n'existe pas encore), pas « vert par défaut ».
     preflight = await StoredAcceptanceChecker(manager=manager, project_id=plan.project_id).check(
         git_repo,
         "diff ignoré",
         _issue_from_task(tasks[0], {task.id: task for task in tasks}),
         _Ctx(),
-        sandbox=_Sandbox(),
+        sandbox=LocalOracleSandbox(fallback=_Sandbox()),
     )
-    assert preflight.passed is True, preflight.error
+    assert preflight.passed is False
+    assert [e.candidate.status for e in preflight.evidence] == ["red-assertion"]
 
     # Le flag env est volontairement OFF au run : la politique persistée du plan
     # doit tout de même imposer le checker stocké, sans aucun nouveau sampling.
-    sandbox = _Sandbox()
+    from w3_publication import published_remote
+
+    remote = published_remote(git_repo)
+    sandbox = LocalOracleSandbox(fallback=_Sandbox())
     result = await run_project_from_settings(
         plan.project_id,
         git_repo,
@@ -344,7 +361,7 @@ async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(m
         sandbox=sandbox,
         agent=FakeCodeAgent(),
         reviewer=FakeReviewer(),
-        clients=_clients(),
+        clients=remote.clients(),
         budget=_Budget(),
         ctx=_Ctx(),
     )
@@ -353,4 +370,19 @@ async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(m
     # ouvertes : #580 interdit donc de déclarer le MVP intégré.
     assert result.stop_reason == "awaiting_merge", [task.last_error for task in manager.get_tasks(plan.project_id)]
     acceptance_commands = [command for command in sandbox.commands if "python -I -c" in command]
-    assert len(acceptance_commands) == 2
+    # Par tâche livrée : le contrat sur le candidat PUIS la preuve négative (même oracle sur la préimage) ; aucun LLM.
+    assert len(acceptance_commands) == 2 * len(manager.get_tasks(plan.project_id))
+    assert len(qa_ctx.calls) == 2  # aucun nouvel échantillonnage QA pendant le run
+
+    # La preuve de chaque livraison est relisible depuis une NOUVELLE instance du manager et porte l'oracle scellé.
+    from collegue.executor.delivery_proof import load_delivery_proof
+
+    reloaded = ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'state.db'}")
+    for task in reloaded.get_tasks(plan.project_id):
+        assert task.status == "in_review"
+    proofs = [
+        load_delivery_proof(reloaded, plan.project_id, owner="o", repo="r", pr_number=number, head_sha=sha)
+        for number, sha in [(n, remote.branch_sha(pr.head)) for n, pr in remote.prs.items()]
+    ]
+    assert proofs and all(p.passed and p.contracts_required for p in proofs)
+    assert all(p.oracles and p.oracles[0].preimage.status == "red-assertion" for p in proofs)

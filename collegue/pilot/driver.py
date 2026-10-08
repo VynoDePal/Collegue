@@ -30,6 +30,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Callable, List, Optional, Tuple
 
 from collegue.executor.agent import IssueSpec
@@ -293,7 +294,48 @@ def _issue_from_task(task, by_id=None) -> IssueSpec:
     )
 
 
-def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str, audit=None) -> int:
+def _external_merge_sync(repo_source, base, merge_shas, *, sync_base_fn, verify_fn) -> Tuple[dict, Optional[str]]:
+    """Resynchronise le clone OPÉRATEUR puis prouve que chaque fusion distante y figure.
+
+    Retourne ``({task_id: raison_d_échec | None}, raison_globale)``. Une seule resynchronisation couvre toutes les
+    fusions ; ``None`` pour une tâche = fusion présente dans ``HEAD`` (ou ancêtre). Aucune exception ne sort."""
+    sync = sync_base_fn or resync_repository_base
+    try:
+        synced = bool(sync(repo_source, base))
+        failure = None if synced else "resynchronisation du clone local échouée"
+    except Exception as exc:  # noqa: BLE001 - plomberie git : fail-closed
+        failure = f"resynchronisation du clone local impossible: {exc}"
+    if failure is not None:
+        return {task_id: failure for task_id in merge_shas}, failure
+    if verify_fn is None:
+        from collegue.pilot.merge_cycle import verify_local_sync as verify_fn  # noqa: PLW0127
+    verdicts: dict = {}
+    for task_id, merge_sha in merge_shas.items():
+        if not merge_sha:
+            verdicts[task_id] = "SHA du commit de fusion inconnu — présence dans le clone invérifiable"
+            continue
+        try:
+            verify_fn(repo_source, merge_sha, None)
+            verdicts[task_id] = None
+        except Exception as exc:  # noqa: BLE001
+            verdicts[task_id] = f"fusion non prouvée dans le clone local: {exc}"
+    return verdicts, None
+
+
+def reconcile_in_review_tasks(
+    tasks,
+    manager,
+    clients,
+    *,
+    owner: str,
+    repo: str,
+    audit=None,
+    repo_source: Optional[str] = None,
+    base: str = "main",
+    sync_base_fn: Optional[Callable[[str, str], bool]] = None,
+    verify_fn: Optional[Callable[..., None]] = None,
+    unsynced: Optional[list] = None,
+) -> int:
     """Réaligne les tâches ``in_review`` sur l'état RÉEL de leur PR GitHub (#442).
 
     Entre deux runs, des PRs sont mergées ou fermées **hors moteur** (opérateur,
@@ -302,20 +344,33 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
     dépendants stricts bloqués ``awaiting_merge`` à tort). Pour chaque tâche
     ``in_review`` (PR retrouvée par sa branche déterministe) :
 
-    - PR **mergée** → statut ``merged`` (terminal) ;
+    - PR **mergée** → statut ``merged`` (terminal) **uniquement après** une resynchronisation
+      du clone opérateur ``repo_source`` PROUVÉE (la fusion figure dans ``HEAD``). Sans cela
+      le dépendant démarrerait sur un clone sans le code livré (W3). Échec ou ``repo_source``
+      absent : la tâche RESTE ``in_review`` (aucune écriture), l'échec est ajouté à
+      ``unsynced`` (liste de ``(task_id, pr_number, raison)``) et la réconciliation sera
+      rejouée au prochain démarrage — jamais de nouvelle fusion ;
     - PR **fermée sans merge** → redo (``todo`` + feedback #424, même canal que
       le conflit #434) ;
     - PR encore ouverte / introuvable / GitHub injoignable → état conservé
       (**best-effort** : la réconciliation n'invente rien et ne tue pas le run).
+
+    Une tâche portant un cycle de fusion durable inachevé (``task_merges``) est laissée à ce cycle.
 
     Mute les objets ``tasks`` (overlay) ET persiste via ``manager``. Retourne le
     nombre de tâches réalignées.
     """
     audit = audit or NullAuditLog()
     reconciled = 0
+    merged_prs: dict = {}  # task -> PR fusionnée hors moteur, en attente de resynchronisation prouvée
     for task in tasks:
         if task.status != TASK_STATUS_IN_REVIEW:
             continue
+        cycle_of = getattr(manager, "get_task_merge", None)
+        if callable(cycle_of):
+            cycle = cycle_of(task.id)
+            if cycle is not None and getattr(cycle, "state", None) in {"merge_pending", "merged_unsynced", "attention"}:
+                continue  # le cycle durable (merge-bot) possède cette fusion et sa resynchronisation
         branch = branch_for_issue(task.issue_number or task.id)
         try:
             pr = clients.prs.find_pr_by_head(owner, repo, branch, state="all")
@@ -325,11 +380,7 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
         if pr is None:
             continue
         if getattr(pr, "merged", False):
-            task.status = TASK_STATUS_MERGED
-            manager.update_task_status(task.id, TASK_STATUS_MERGED)
-            audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="merged")
-            logger.info("tâche %s : PR #%s mergée hors-run → statut merged (#442)", task.id, pr.number)
-            reconciled += 1
+            merged_prs[task] = pr
         elif getattr(pr, "state", "") == "closed":
             message = (
                 f"[reconcile] ta PR #{pr.number} a été FERMÉE sans merge en dehors du run — "
@@ -341,7 +392,162 @@ def reconcile_in_review_tasks(tasks, manager, clients, *, owner: str, repo: str,
             audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="closed_requeued")
             logger.info("tâche %s : PR #%s fermée sans merge → redo (#442)", task.id, pr.number)
             reconciled += 1
+
+    if not merged_prs:
+        return reconciled
+
+    # 1) Le fait « fusion distante connue, synchronisation NON prouvée » est rendu durable AVANT toute tentative de
+    #    synchronisation : un crash, un échec de sync ou une panne ultérieure de la découverte GitHub ne l'effacent plus.
+    persisted: dict = {}  # task -> (pr, enregistrement)
+    for task, pr in merged_prs.items():
+        merge_sha = getattr(pr, "merge_commit_sha", None)
+        try:
+            if not merge_sha:
+                raise ValueError("SHA du commit de fusion inconnu — barrière impossible à consigner")
+            record = manager.begin_external_task_merge(
+                task.id,
+                owner=owner,
+                repo=repo,
+                base_branch=base,
+                pr_number=int(pr.number),
+                merge_sha=str(merge_sha).lower(),
+            )
+            persisted[task] = (pr, record)
+        except Exception as exc:  # noqa: BLE001 - barrière non persistée : la tâche (et le run) restent bloqués
+            _report_unsynced(
+                task, pr, f"barrière de synchronisation non persistée: {exc}", audit=audit, unsynced=unsynced
+            )
+
+    # 2) Une seule resynchronisation (clone opérateur de confiance) puis preuve de présence de CHAQUE fusion.
+    if persisted:
+        if repo_source is None:
+            failures = {t.id: "clone local non fourni — resynchronisation invérifiable" for t in persisted}
+            verdicts = dict(failures)
+        else:
+            verdicts, _ = _external_merge_sync(
+                repo_source,
+                base,
+                {t.id: record.merge_sha for t, (_pr, record) in persisted.items()},
+                sync_base_fn=sync_base_fn,
+                verify_fn=verify_fn,
+            )
+        for task, (pr, record) in persisted.items():
+            failure = verdicts.get(task.id)
+            if failure is None:
+                failure = _settle_external_merge(manager, record)
+            else:
+                _annotate_external_merge(manager, record, failure)
+            if failure is not None:
+                _report_unsynced(task, pr, failure, audit=audit, unsynced=unsynced)
+                continue
+            task.status = TASK_STATUS_MERGED
+            audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="merged")
+            logger.info(
+                "tâche %s : PR #%s mergée hors-run, clone resynchronisé → statut merged (#442)", task.id, pr.number
+            )
+            reconciled += 1
     return reconciled
+
+
+def _report_unsynced(task, pr, reason: str, *, audit, unsynced: Optional[list]) -> None:
+    logger.error(
+        "tâche %s : PR #%s mergée hors-run mais %s — tâche laissée in_review, aucune tâche lancée tant que le clone "
+        "n'est pas resynchronisé (reprise au prochain démarrage, sans nouvelle fusion).",
+        task.id,
+        pr.number,
+        reason,
+    )
+    audit.record(TASK_RECONCILED, task_id=task.id, pr_number=pr.number, outcome="merged_unsynced", reason=reason)
+    if unsynced is not None:
+        unsynced.append((task.id, pr.number, reason))
+
+
+def _annotate_external_merge(manager, record, reason: str) -> None:
+    """Mémorise la dernière raison d'échec sur le cycle (best-effort : le cycle RESTE ``merged_unsynced``)."""
+    try:
+        manager.transition_task_merge(
+            record.task_id,
+            expected_state="merged_unsynced",
+            expected_revision=record.revision,
+            new_state="merged_unsynced",
+            last_error=reason,
+        )
+    except Exception:  # noqa: BLE001 - l'annotation ne débloque jamais rien
+        logger.exception("annotation du cycle de fusion externe de la tâche %s impossible", record.task_id)
+
+
+def _settle_external_merge(manager, record) -> Optional[str]:
+    """``synced`` + tâche ``merged`` dans UNE transaction ; retourne une raison si l'état durable n'a pas suivi."""
+    try:
+        manager.transition_task_merge(
+            record.task_id,
+            expected_state="merged_unsynced",
+            expected_revision=record.revision,
+            new_state="synced",
+            last_error=None,
+            complete_task=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - état durable incohérent : la barrière reste, le run est bloqué
+        return f"clôture durable du cycle de fusion impossible: {exc}"
+    return None
+
+
+def resume_external_merges(
+    tasks,
+    manager,
+    project_id: int,
+    *,
+    repo_source: str,
+    base: str,
+    sync_base_fn=None,
+    verify_fn=None,
+    audit=None,
+    unsynced: Optional[list] = None,
+) -> int:
+    """Reprend, SANS GitHub, les fusions hors moteur dont la synchronisation n'a pas été prouvée (état durable).
+
+    Lit les cycles ``origin='external'`` en ``merged_unsynced`` (une erreur de lecture se propage : le run reste bloqué),
+    resynchronise le clone de confiance une fois, prouve la présence de chaque SHA de fusion enregistré et clôt
+    (``synced`` + tâche ``merged``). Échec : le cycle reste ``merged_unsynced`` et est ajouté à ``unsynced``. Aucune
+    fusion n'est jamais émise. Retourne le nombre de tâches clôturées (overlay ``tasks`` aligné)."""
+    audit = audit or NullAuditLog()
+    records = [
+        r
+        for r in manager.list_task_merges(project_id, states={"merged_unsynced"})
+        if getattr(r, "origin", "engine") == "external"
+    ]
+    if not records:
+        return 0
+    verdicts, _ = _external_merge_sync(
+        repo_source,
+        base,
+        {r.task_id: r.merge_sha for r in records},
+        sync_base_fn=sync_base_fn,
+        verify_fn=verify_fn,
+    )
+    by_id = {t.id: t for t in tasks}
+    done = 0
+    for record in records:
+        failure = verdicts.get(record.task_id)
+        if failure is None:
+            failure = _settle_external_merge(manager, record)
+        else:
+            _annotate_external_merge(manager, record, failure)
+        pr = SimpleNamespace(number=record.pr_number)
+        task = by_id.get(record.task_id) or SimpleNamespace(id=record.task_id)
+        if failure is not None:
+            _report_unsynced(task, pr, failure, audit=audit, unsynced=unsynced)
+            continue
+        if record.task_id in by_id:
+            by_id[record.task_id].status = TASK_STATUS_MERGED
+        audit.record(TASK_RECONCILED, task_id=record.task_id, pr_number=record.pr_number, outcome="merged_resumed")
+        logger.info(
+            "tâche %s : fusion externe de la PR #%s reprise, clone resynchronisé → merged",
+            record.task_id,
+            record.pr_number,
+        )
+        done += 1
+    return done
 
 
 # #461 : aléas d'infrastructure pendant le GATE (timeout PyPI dans la passe
@@ -543,6 +749,7 @@ async def _run_project_impl(
     cleanup_workspaces: bool = True,
     require_cost_pricing: bool = False,
     sync_base_fn: Optional[Callable[[str, str], bool]] = None,
+    merge_verify_fn: Optional[Callable[..., None]] = None,
 ) -> ProjectRunResult:
     """Pilote un projet : chaîne ``execute_issue`` sur les tâches prêtes sous budget.
 
@@ -607,6 +814,10 @@ async def _run_project_impl(
     ``sync_base_fn`` (#580) : barrière injectable ``(repo_source, base) -> bool``
     exécutée avant la Phase 4. Le défaut fait ``git fetch`` + ``reset --hard`` sur
     ``origin/<base>``. Un échec interdit l'amélioration (``repo_sync_failed``).
+    La MÊME barrière sert à la réconciliation d'une PR fusionnée hors moteur (W3) : tant que le clone
+    opérateur n'est pas resynchronisé ET ne contient pas la fusion (``merge_verify_fn``, défaut
+    ``merge_cycle.verify_local_sync``), la tâche reste ``in_review`` et le run s'arrête
+    ``repo_sync_failed`` AVANT toute tâche.
     """
     budget = budget or BudgetTimeController()
     audit = audit or NullAuditLog()
@@ -674,8 +885,47 @@ async def _run_project_impl(
     # #442 : réconciliation GitHub→état (réel uniquement, clients requis). Des PRs
     # ont pu être mergées/fermées HORS moteur depuis le dernier run : sans
     # réalignement, le redémarrage n'est pas idempotent.
-    if reconcile_reviews and not dry_run and clients is not None:
-        reconcile_in_review_tasks(tasks, manager, clients, owner=owner, repo=repo, audit=audit)
+    # W3 : le blocage « fusion externe connue, synchronisation non prouvée » est DURABLE (``task_merges``,
+    # ``origin='external'``). Il est relu et repris ici, sans GitHub, AVANT toute tâche — même si la découverte
+    # des PR est indisponible ou ne retrouve plus la PR. Une erreur de lecture/persistance de cet état interrompt le run.
+    unsynced_merges: list = []
+    if not dry_run:
+        resume_external_merges(
+            tasks,
+            manager,
+            project_id,
+            repo_source=repo_source,
+            base=base,
+            sync_base_fn=sync_base_fn,
+            verify_fn=merge_verify_fn,
+            audit=audit,
+            unsynced=unsynced_merges,
+        )
+    if not unsynced_merges and reconcile_reviews and not dry_run and clients is not None:
+        reconcile_in_review_tasks(
+            tasks,
+            manager,
+            clients,
+            owner=owner,
+            repo=repo,
+            audit=audit,
+            repo_source=repo_source,
+            base=base,
+            sync_base_fn=sync_base_fn,
+            verify_fn=merge_verify_fn,
+            unsynced=unsynced_merges,
+        )
+    if unsynced_merges:
+        # Fusion distante confirmée hors moteur mais clone non resynchronisé/prouvé : aucune tâche (ni dépendante ni
+        # indépendante) ne part d'un checkout sans le code livré. Rien n'est marqué ``merged`` ; le cycle durable
+        # reste ``merged_unsynced`` et le prochain démarrage le reprend, sans aucune nouvelle fusion.
+        return ProjectRunResult(
+            stop_reason=STOP_REPO_SYNC_FAILED,
+            iterations=0,
+            processed=[],
+            project_status=None,
+            pending_reviews=[task_id for task_id, _pr, _reason in unsynced_merges],
+        )
 
     # Avec retries, chaque tâche peut consommer jusqu'à max_task_attempts itérations.
     cap = (
@@ -1070,8 +1320,8 @@ async def _run_project_impl(
             # GATE fait foi, pas la forme du texte : elle aussi préserve.
             infra_diag = infra_gate_failure or is_infra_noise(diagnostic)
             if diagnostic and infra_diag and previous_error and not is_infra_noise(previous_diag):
-                base = _INFRA_NOISE_SUFFIX_RE.sub("", previous_error)
-                last_error = f"{base} (+ aléa infra à la tentative {attempts} : [{outcome.stage}/{outcome.reason}])"
+                previous_functional = _INFRA_NOISE_SUFFIX_RE.sub("", previous_error)
+                last_error = f"{previous_functional} (+ aléa infra à la tentative {attempts} : [{outcome.stage}/{outcome.reason}])"
             task.last_error = last_error
 
             # #436 : mémoriser la MEILLEURE tentative (diff + score + échecs). Le

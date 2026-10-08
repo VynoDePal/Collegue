@@ -104,13 +104,21 @@ def repo(tmp_path):
     return str(src)
 
 
+@pytest.fixture
+def clients(tmp_path, repo):
+    """Distant GitHub FIDÈLE (vrai dépôt Git cloné de `repo`) : la publication réelle est vérifiée de bout en bout."""
+    from github_fakes import FakeRemote
+
+    return FakeRemote(tmp_path, repo).clients()
+
+
 def _merge_all(manager, pid):
     for task in manager.get_tasks(pid):
         if task.status == "in_review":
             manager.update_task_status(task.id, "merged")
 
 
-async def test_defect_1_two_build_passes_cannot_exceed_the_cap_across_a_merge(url, repo):
+async def test_defect_1_two_build_passes_cannot_exceed_the_cap_across_a_merge(url, repo, clients):
     manager = ProjectStateManager.from_url(url, create=True)
     pid = _linear_project(manager, 4)
     agent = _Priced(0.6)
@@ -123,6 +131,7 @@ async def test_defect_1_two_build_passes_cannot_exceed_the_cap_across_a_merge(ur
             budget=_controller(),
             agent=agent,
             dry_run=False,
+            clients=clients,
             max_iterations=1,
             audit=audit,
             reconcile_reviews=False,
@@ -156,12 +165,20 @@ async def test_defect_2_failed_improve_attempts_are_debited_and_stop_the_loop(ur
     assert run_cost_summary(manager, pid)["usd"] == pytest.approx(1.4)
 
 
-async def test_defect_3_a_restart_does_not_reset_the_spend(url, repo):
+async def test_defect_3_a_restart_does_not_reset_the_spend(url, repo, clients):
     first = ProjectStateManager.from_url(url, create=True)
     pid = _linear_project(first, 3)
     agent = _Priced(0.7)
     await _run(
-        first, repo, pid, budget=_controller(), agent=agent, dry_run=False, max_iterations=1, reconcile_reviews=False
+        first,
+        repo,
+        pid,
+        budget=_controller(),
+        agent=agent,
+        dry_run=False,
+        clients=clients,
+        max_iterations=1,
+        reconcile_reviews=False,
     )
     restarted = ProjectStateManager.from_url(url)  # nouvelle instance, aucune donnée héritée
     _merge_all(restarted, pid)
@@ -172,6 +189,7 @@ async def test_defect_3_a_restart_does_not_reset_the_spend(url, repo):
         budget=_controller(),
         agent=agent,
         dry_run=False,
+        clients=clients,
         max_iterations=1,
         reconcile_reviews=False,
     )
@@ -183,6 +201,7 @@ async def test_defect_3_a_restart_does_not_reset_the_spend(url, repo):
         budget=_controller(),
         agent=agent,
         dry_run=False,
+        clients=clients,
         max_iterations=1,
         reconcile_reviews=False,
     )

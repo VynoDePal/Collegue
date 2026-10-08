@@ -1,9 +1,11 @@
-"""Câblage CI de la preuve PostgreSQL réelle du registre de budget (vague 2).
+"""Câblage CI des preuves PostgreSQL réelles (vagues 2 et 3).
 
-La garantie d'atomicité des réservations ne se prouve pas sur SQLite ni sur un double : le job ``Pytest`` requis
-doit lancer ``tests/test_budget_ledger_postgres.py`` contre un VRAI service et devenir rouge si un test échoue,
-est sauté, est désélectionné ou si la collecte est tronquée. Ces tests vérifient (1) la structure du workflow,
-(2) le script de garde JUnit, (3) le texte RÉEL de l'étape exécuté avec un faux ``pytest``.
+Une garantie de concurrence ou de contrainte ne se prouve pas sur SQLite ni sur un double : le job ``Pytest`` requis
+doit lancer, contre un VRAI service, ``tests/test_budget_ledger_postgres.py`` (registre de budget, vague 2),
+``tests/test_task_merge_postgres.py`` (état durable de fusion, vague 3) et ``tests/test_delivery_proof_postgres.py``
+(persistance des preuves de livraison, vague 3), et devenir rouge si un test échoue, est sauté, est désélectionné ou si
+la collecte est tronquée. Ces tests vérifient (1) la structure du workflow, (2) le script de garde JUnit, (3) le texte
+RÉEL de chaque étape exécuté avec un faux ``pytest``.
 """
 
 from __future__ import annotations
@@ -25,6 +27,24 @@ PG_TEST_FILE = "tests/test_budget_ledger_postgres.py"
 STEP_NAME = "PostgreSQL budget ledger - real concurrency proof"
 REQUIRED_NAMES = {"Ruff", "Pytest (Python 3.11)", "Pytest (Python 3.12)", "Dependency audit", "Docker build"}
 FLOOR = 21  # plancher du workflow : à relever si des cas sont ajoutés, jamais à abaisser
+
+# (nom de l'étape, fichier de tests, plancher exact, rapport JUnit)
+PROOF_STEPS = [
+    (STEP_NAME, PG_TEST_FILE, FLOOR, "pg-budget.xml"),
+    (
+        "PostgreSQL task merges - real durable-state proof",
+        "tests/test_task_merge_postgres.py",
+        23,
+        "pg-task-merges.xml",
+    ),
+    (
+        "PostgreSQL delivery proofs - real persistence proof",
+        "tests/test_delivery_proof_postgres.py",
+        5,
+        "pg-delivery-proofs.xml",
+    ),
+]
+PROOF_IDS = ["budget", "task_merges", "delivery_proofs"]
 
 
 def _workflow() -> dict:
@@ -70,33 +90,26 @@ def test_postgres_service_is_explicit_ephemeral_and_secret_free() -> None:
     assert "continue-on-error" not in segment, "un échec doit rendre le job requis rouge"
 
 
-def test_the_proof_runs_in_both_required_python_jobs_before_the_general_run() -> None:
+@pytest.mark.parametrize("name, test_file, floor, report", PROOF_STEPS, ids=PROOF_IDS)
+def test_each_proof_runs_in_both_required_python_jobs_before_the_general_run(name, test_file, floor, report) -> None:
     steps = [step.get("name") for step in _pytest_job()["steps"]]
-    assert STEP_NAME in steps
-    assert steps.index(STEP_NAME) < steps.index("Run pytest with coverage")
-    step = _step()
+    assert name in steps
+    assert steps.index(name) < steps.index("Run pytest with coverage")
+    step = _step(name)
     assert step.get("shell") == "bash", "pipefail explicite : le compte de collecte passe par un pipe"
     assert "if" not in step, "l'étape n'est jamais conditionnelle"
     assert not step.get("continue-on-error")
+    script = str(step["run"])
+    assert test_file in script and report in script and "scripts/ci_require_junit.py" in script
+    assert "-o addopts=" in script, "mêmes options pour la collecte et l'exécution"
 
 
-def test_the_floor_cannot_exceed_what_the_file_really_collects() -> None:
-    script = str(_step()["run"])
-    floor = int(re.search(r"--min-tests\s+(\d+)", script).group(1))
-    assert floor == FLOOR
+@pytest.mark.parametrize("name, test_file, floor, report", PROOF_STEPS, ids=PROOF_IDS)
+def test_the_floor_is_the_exact_count_the_file_really_collects(name, test_file, floor, report) -> None:
+    script = str(_step(name)["run"])
+    assert int(re.search(r"--min-tests\s+(\d+)", script).group(1)) == floor
     collected = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            PG_TEST_FILE,
-            "-o",
-            "addopts=",
-            "--collect-only",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-        ],
+        [sys.executable, "-m", "pytest", test_file, "-o", "addopts=", "--collect-only", "-q", "-p", "no:cacheprovider"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -104,13 +117,15 @@ def test_the_floor_cannot_exceed_what_the_file_really_collects() -> None:
         env={**os.environ, "PYTHONPATH": str(ROOT)},
     ).stdout
     count = sum(1 for line in collected.splitlines() if "::" in line)
-    assert count >= floor, f"le workflow exige {floor} tests PostgreSQL mais le fichier n'en collecte que {count}"
+    # plancher == compte exact : un test supprimé ne se perd pas en silence, un test ajouté impose de relever le plancher
+    assert count == floor, f"{test_file} collecte {count} tests mais le plancher du workflow est {floor}"
 
 
-def test_the_upload_of_the_report_never_hides_a_failure() -> None:
+def test_the_upload_of_the_reports_never_hides_a_failure() -> None:
     upload = _step("Upload PostgreSQL proof report")
     assert upload["if"] == "always()"
-    assert "pg-budget.xml" in upload["with"]["path"]
+    for _name, _file, _floor, report in PROOF_STEPS:
+        assert report in upload["with"]["path"]
 
 
 # --- (2) script de garde JUnit ------------------------------------------------------------------------------------
@@ -187,7 +202,7 @@ scenario = os.environ["FAKE_SCENARIO"]
 total = int(os.environ.get("FAKE_TOTAL", "21"))
 if "--collect-only" in args:
     for i in range(total):
-        print(f"tests/test_budget_ledger_postgres.py::test_{i}")
+        print(f"{os.environ['FAKE_FILE']}::test_{i}")
     print(f"\n{total} tests collected in 0.1s")
     sys.exit(0)
 report = next(a.split("=", 1)[1] for a in args if a.startswith("--junitxml="))
@@ -209,7 +224,13 @@ sys.exit(exit_code)
 
 
 def _run_step(
-    tmp_path: Path, scenario: str, *, url: str | None = "postgresql+psycopg2://x@localhost:5432/p", total: int = 21
+    tmp_path: Path,
+    scenario: str,
+    *,
+    url: str | None = "postgresql+psycopg2://x@localhost:5432/p",
+    total: int = 21,
+    step: str = STEP_NAME,
+    test_file: str = PG_TEST_FILE,
 ):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -225,11 +246,12 @@ def _run_step(
         "HOME": str(tmp_path),
         "FAKE_SCENARIO": scenario,
         "FAKE_TOTAL": str(total),
+        "FAKE_FILE": test_file,
         "PYTHONPATH": ".",
     }
     if url is not None:
         env["COLLEGUE_TEST_POSTGRES_URL"] = url
-    script = str(_step()["run"])
+    script = str(_step(step)["run"])
     # GitHub lance « shell: bash » comme : bash --noprofile --norc -eo pipefail {0}
     return subprocess.run(
         ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
@@ -242,24 +264,32 @@ def _run_step(
     )
 
 
-def test_real_step_passes_only_when_every_collected_test_ran_without_skip(tmp_path: Path) -> None:
-    result = _run_step(tmp_path, "ok")
+@pytest.mark.parametrize("name, test_file, floor, report", PROOF_STEPS, ids=PROOF_IDS)
+def test_real_step_passes_only_when_every_collected_test_ran_without_skip(
+    tmp_path: Path, name, test_file, floor, report
+) -> None:
+    result = _run_step(tmp_path, "ok", total=floor, step=name, test_file=test_file)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "tests PostgreSQL collectés: 21" in result.stdout
+    assert f"tests PostgreSQL collectés: {floor}" in result.stdout
 
 
+@pytest.mark.parametrize("name, test_file, floor, report", PROOF_STEPS, ids=PROOF_IDS)
 @pytest.mark.parametrize("scenario", ["skip", "fail", "short", "exit1", "nofile"])
-def test_real_step_is_red_on_any_missing_proof(tmp_path: Path, scenario: str) -> None:
-    result = _run_step(tmp_path, scenario)
+def test_real_step_is_red_on_any_missing_proof(tmp_path: Path, scenario: str, name, test_file, floor, report) -> None:
+    result = _run_step(tmp_path, scenario, total=floor, step=name, test_file=test_file)
     assert result.returncode != 0, f"{scenario}: l'étape ne doit pas passer\n{result.stdout}{result.stderr}"
 
 
-def test_real_step_is_red_without_the_service_url(tmp_path: Path) -> None:
-    result = _run_step(tmp_path, "ok", url=None)
+@pytest.mark.parametrize("name, test_file, floor, report", PROOF_STEPS, ids=PROOF_IDS)
+def test_real_step_is_red_without_the_service_url(tmp_path: Path, name, test_file, floor, report) -> None:
+    result = _run_step(tmp_path, "ok", url=None, total=floor, step=name, test_file=test_file)
     assert result.returncode != 0
 
 
-def test_real_step_is_red_when_collection_loses_tests_below_the_floor(tmp_path: Path) -> None:
-    result = _run_step(tmp_path, "ok", total=20)
+@pytest.mark.parametrize("name, test_file, floor, report", PROOF_STEPS, ids=PROOF_IDS)
+def test_real_step_is_red_when_collection_loses_tests_below_the_floor(
+    tmp_path: Path, name, test_file, floor, report
+) -> None:
+    result = _run_step(tmp_path, "ok", total=floor - 1, step=name, test_file=test_file)
     assert result.returncode != 0
     assert "minimum" in result.stdout

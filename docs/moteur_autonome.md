@@ -63,7 +63,7 @@ ou on refuse) :
 
 | Garde-fou | Comportement |
 |-----------|--------------|
-| **Merge-bot (phase BUILD)** | Pendant la **construction du MVP**, une tâche réussie est **auto-mergée** (squash) puis le clone local est resynchronisé sur `origin/<base>` avant la tâche suivante (`BUILD_AUTO_MERGE=true` par défaut). Sans lui, avec 1 PR en vol + dépendances strictes, le build se figerait `awaiting_merge` (et des bases périmées créeraient des conflits). C'est le merge humain **simulé** pendant la construction autonome. Mettre `BUILD_AUTO_MERGE=false` ramène tout au merge humain. |
+| **Merge-bot (phase BUILD)** | Pendant la **construction du MVP**, une tâche réussie est **auto-mergée** (squash) puis le clone local est resynchronisé sur `origin/<base>` avant la tâche suivante (**opt-in** : `BUILD_AUTO_MERGE=true` ; `false` par défaut, y compris si le réglage est absent). Sans lui, avec 1 PR en vol + dépendances strictes, le build s'arrête `awaiting_merge` : c'est le merge humain. Activé, il ne fusionne qu'une PR dont la **preuve de livraison durable** est valide pour sa tête exacte, dont les **checks requis** (protections classiques et rulesets) sont tous réussis et dont la base n'a pas bougé, sous une règle serveur « à jour avant fusion » effectivement applicable à l'acteur ; le SHA de tête est transmis à l'API de fusion (qui n'offre **pas** de précondition atomique sur la base : la garantie repose sur cette règle serveur, sinon la fusion est refusée). Une fusion distante confirmée dont la resynchronisation échoue est un état durable à reprendre : ni seconde fusion, ni tâche suivante (même indépendante) sur un clone périmé. Détail : [w3-merge](consolidation/w3-merge.md). |
 | **Barrière BUILD → IMPROVE** | Une PR `in_review` ne compte **jamais** comme un MVP intégré. Phase 4 exige toutes les tâches en `merged`/`done`, puis un `git fetch` + `reset --hard origin/<base>` réussi juste avant sa première mesure. Merge final ou resync en échec ⇒ `awaiting_merge` / `repo_sync_failed`, aucune amélioration. |
 | **Merge humain (phase AMÉLIORATION, §6)** | Par défaut, les PR d'**amélioration** (Phase 4) restent **ouvertes** pour relecture/merge humain. Seul l'opt-in explicite `AUTO_MERGE_ENABLED=true` active la politique Phase 5 ci-dessous. |
 | **`dry_run` par défaut** | Un **run** sans `--execute` va jusqu'aux aperçus de PR sans écriture GitHub/état et sans auto-merge. `plan draft` persiste volontairement son brouillon (SPEC/DAG/oracles/cible) pour permettre validation et reprise ; seul `plan sync --execute` touche GitHub. |
@@ -270,8 +270,8 @@ passer par un **abonnement** ChatGPT/Codex : mettre `CODER_SUBSCRIPTION=true` +
 `SANDBOX_SUBSCRIPTION_AUTH_DIR=~/.openhands` (creds OpenHands montées dans le
 sandbox). Le reviewer/juge suit le même chemin quand son modèle n'est pas un
 modèle Gemini (`LLM_MODEL_REVIEWER=gpt-5.4` → échantillonné dans le sandbox).
-Avec `BUILD_AUTO_MERGE=true` (défaut), un seul `--execute` construit **tout le
-MVP** (merge-bot enchaîne les tâches) ; `--improve` ajoute ensuite des PR
+Avec `BUILD_AUTO_MERGE=true` (opt-in, **désactivé par défaut**) et les préconditions de fusion réunies, un seul `--execute` construit **tout le
+MVP** (merge-bot enchaîne les tâches) ; sans lui, le run s'arrête `awaiting_merge` entre deux tâches dépendantes ; `--improve` ajoute ensuite des PR
 d'amélioration **laissées ouvertes** pour merge humain par défaut. Avec
 `AUTO_MERGE_ENABLED=true`, seules les promotions Phase 4 faibles risques passent
 le cycle CI → merge SHA-gaté → resync → santé ; tout doute arrête la boucle. Le handoff est fail-closed :
@@ -301,7 +301,7 @@ lit :
 | `TASK_MAX_ATTEMPTS` | Tentatives max par tâche — retry avec backoff sur échec transitoire (`1` = pas de retry). | `3` |
 | `TASK_RETRY_BACKOFF_SECONDS` | Base du backoff linéaire entre tentatives (plafonné à 90 s). | `15` |
 | `DEPS_REQUIRE_MERGED` | Exige le **merge** d'une dépendance avant de débloquer ses dépendants (sinon le démarrage sur PR non mergée est signalé) ; arrêt `awaiting_merge` quand seuls des merges manquent. **Forcé à vrai** quand `BUILD_AUTO_MERGE` est actif. | `false` |
-| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** : auto-merge (squash) de chaque PR de tâche + resync du clone avant la suivante (+ drain de la dernière PR). `false` → BUILD au merge humain. Distinct de la politique Phase 5. | `true` |
+| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (opt-in) : auto-merge (squash) de chaque PR de tâche sur preuve de livraison valide, checks requis réussis et base inchangée + resync vérifiée du clone avant la suivante (+ drain de la dernière PR). `false` (défaut) → BUILD au merge humain. Distinct de la politique Phase 5. | `false` |
 | `LLM_CALL_TIMEOUT` | Timeout par appel LLM, secondes (`0` = off). | `0` |
 | `CODER_SUBSCRIPTION` | Code via un **abonnement** ChatGPT/Codex (OpenHands `subscription_login`, coût API `$0`) au lieu d'une clé API. Le **reviewer/juge** suit aussi l'abonnement si son modèle n'est pas un modèle Gemini (échantillonné dans le sandbox). | `false` |
 | `CODER_SUBSCRIPTION_MODEL` | Modèle codeur via l'abonnement. | `gpt-5.5` |

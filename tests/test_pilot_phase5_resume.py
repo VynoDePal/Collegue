@@ -155,8 +155,18 @@ def _green_guard(*args, **kwargs):
     return SimpleNamespace(checked=True, healthy=True, reverted=False, reason="main verte")
 
 
+GATE_CALLS: list = []
+
+
+def _gate_ok(clients, manager, **kwargs):
+    """Chemin commun de fusion (preuve, base, checks requis, précondition serveur) : testé pour de vrai dans
+    test_pilot_merge_policy.py / test_pilot_merge_cycle.py."""
+    GATE_CALLS.append(kwargs)
+
+
 async def _resume(manager, *, clients=None, **kwargs):
     guard_fn = kwargs.pop("guard_fn", _green_guard)
+    kwargs.setdefault("merge_gate", _gate_ok)
     kwargs.setdefault("auto_merge_enabled", True)
     return await resume_phase5_incident(
         7,
@@ -403,3 +413,50 @@ async def test_run_improvement_recovery_hook_blocks_before_first_round():
     assert calls == ["recovery"]
     assert result.rounds == 0 and result.stop_reason == "phase5_incident_pending"
     assert result.rejected == [("phase5_recovery", "incident durable non résolu")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,expected_state",
+    [
+        ("missing_check", "merge_pending"),
+        ("pending", "merge_pending"),
+        ("api_error", "merge_pending"),
+        ("moved", "attention"),
+        ("no_proof", "attention"),
+        ("failed_check", "attention"),
+        ("policy", "attention"),
+    ],
+)
+async def test_resumed_merge_goes_through_the_common_policy_and_never_merges_when_refused(code, expected_state):
+    from collegue.pilot.merge_policy import MergeRefused
+
+    def refuse(clients, manager, **kwargs):
+        raise MergeRefused("refus de test", code=code)
+
+    manager = _Manager(_incident())
+    prs = _PRs(_pr(), states=("success",))
+
+    outcome = await _resume(manager, clients=_clients(prs=prs), merge_gate=refuse)
+
+    assert outcome.stop_reason == "phase5_incident_pending" and outcome.continue_loop is False
+    assert prs.merge_calls == [], "aucun PUT de fusion si la politique commune refuse"
+    states = [item["new_state"] for item in manager.transitions]
+    assert ("attention" in states) == (expected_state == "attention")
+    assert manager.incident is not None
+
+
+@pytest.mark.asyncio
+async def test_resumed_merge_asks_the_common_policy_for_the_persisted_anchors():
+    GATE_CALLS.clear()
+    manager = _Manager(_incident())
+    prs = _PRs(_pr(), states=("success",))
+
+    await _resume(manager, clients=_clients(prs=prs))
+
+    (call,) = GATE_CALLS
+    assert call["expected_phase"] == "improve" and call["require_all_green"] is True
+    persisted = _incident()
+    assert call["expected_head_sha"] == persisted.source_head_sha
+    assert call["expected_pr_base_sha"] == persisted.base_sha_before_merge and call["pr_number"] == 42
+    assert len(prs.merge_calls) == 1

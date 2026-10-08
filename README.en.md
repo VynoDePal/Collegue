@@ -181,7 +181,7 @@ Overview **by theme** (full list and default values in
 | `BUDGET_MODE` | `strict` (default: reservation **before** every call the framework emits, unknown usage = durable block) or `advisory` (records without blocking, **no guarantee**). The guarantee covers calls the framework emits, not a workspace program that holds a key: see [w2-budget](docs/consolidation/w2-budget.md) (FR; accepted and refused transports) | |
 | `COLLEGUE_HOME` | Persistence root (metrics, checkpoints, **editable prompts**; the prompt state of a previous installation is imported on first start, see [w2-installation](docs/consolidation/w2-installation.md), FR) | |
 | `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Code via a ChatGPT/Codex **subscription** (`$0` API cost) instead of an API key | |
-| `BUILD_AUTO_MERGE` | **Build-phase merge-bot** (auto-merges task PRs; **on** by default). Improvement stays human-merge | |
+| `BUILD_AUTO_MERGE` | **Build-phase merge-bot** (auto-merges task PRs; **off** by default, explicit opt-in). Merges only with a durable delivery proof, required checks passing, an unchanged base and a server-side strict protection that really applies ([w3-merge](docs/consolidation/w3-merge.md)). Improvement stays human-merge | `false` |
 | `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Coder container network and resources | |
 | `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Risk-gated autonomous capabilities (opt-in, **off** by default) | |
 
@@ -201,7 +201,7 @@ Stages: `planner` → `pilote` → `executor` → `improve`, on a durable-state
 `plan draft` only persists its durable draft; the operator then approves the
 displayed hash, and only `plan sync --execute` writes to GitHub. The durable budget (`strict` mode)
 pauses the engine at a cap or on unknown usage; unboundable transports are refused rather than claimed. In a real BUILD, a **merge-bot** auto-merges each task to
-construct the MVP (`BUILD_AUTO_MERGE`, on by default); the **improvement** phase
+construct the MVP (opt-in: `BUILD_AUTO_MERGE`, **off** by default; it requires a validated delivery proof); the **improvement** phase
 leaves its PRs **open for human merge** (§6) by default. Phase 5 risk-gated
 auto-merge is wired but remains opt-in: complete CI, a stable SHA, base resync and
 post-merge health are mandatory. Auto-revert and the pilot MCP tool stay **off by

@@ -76,6 +76,13 @@ def _clients():
     return PrClients(branches=_Branches(), files=_Files(), prs=_PRs())
 
 
+def _published_clients(repo, base="main"):
+    """Clients COMPLETS pour un run réel (vrai dépôt Git distant) : voir ``tests/w3_publication.py``."""
+    from w3_publication import published_clients
+
+    return published_clients(repo, base)
+
+
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
@@ -126,7 +133,7 @@ async def _run(manager, repo, pid, *, budget=None, dry_run=True, sandbox=None, a
         budget=budget or _always(),
         sandbox=sandbox or _Sandbox(ok=True),
         reviewer=FakeReviewer(),
-        clients=clients or _clients(),
+        clients=clients or (_clients() if dry_run else _published_clients(repo)),
         dry_run=dry_run,
         **kw,
     )
@@ -216,7 +223,7 @@ async def test_real_run_advances_states_but_does_not_promote_unmerged_mvp(repo, 
     assert result.project_status is None  # #580 : PRs ouvertes != MVP intégré
     assert all(t.status == "in_review" for t in manager.get_tasks(pid))
     assert manager.get_project(pid).status != "improving"
-    assert result.opened_prs == [101, 101]
+    assert result.opened_prs == [101, 102]  # numérotation du vrai dépôt distant factice (une PR par tâche)
 
 
 # --- arrêts ---------------------------------------------------------------------
@@ -571,8 +578,36 @@ class _ReconcilePRs(_PRs):
         return value
 
 
-def _reconcile_clients(mapping):
-    return PrClients(branches=_Branches(), files=_Files(), prs=_ReconcilePRs(mapping))
+class _ScriptedThenPublishingPRs:
+    """Réconciliation scriptée (``state="all"``, par branche) ET publication RÉELLE (``state="open"``, vrai dépôt distant).
+
+    Le démarrage du run relit l'état des PR existantes via ``find_pr_by_head(..., state="all")`` (réponses scriptées du
+    test) ; la livraison d'une tâche relancée passe, elle, par le vrai dépôt Git distant (``FakeRemote``) afin que sa preuve
+    soit vérifiée contre de vrais objets Git.
+    """
+
+    def __init__(self, mapping, published):
+        self._scripted = _ReconcilePRs(mapping)
+        self._published = published
+        self.queries = self._scripted.queries
+
+    def find_pr_by_head(self, owner, repo, head, base=None, state="open"):
+        if state == "all":
+            return self._scripted.find_pr_by_head(owner, repo, head, base=base, state=state)
+        return self._published.find_pr_by_head(owner, repo, head, base=base, state=state)
+
+    def __getattr__(self, name):
+        return getattr(self._published, name)
+
+
+def _reconcile_clients(mapping, repo=None):
+    """Sans ``repo`` : aucune livraison attendue (doubles minimaux). Avec ``repo`` : la livraison est réelle."""
+    if repo is None:
+        return PrClients(branches=_Branches(), files=_Files(), prs=_ReconcilePRs(mapping))
+    published = _published_clients(repo)
+    return PrClients(
+        branches=published.branches, files=published.files, prs=_ScriptedThenPublishingPRs(mapping, published.prs)
+    )
 
 
 async def test_reconcile_merged_pr_updates_state_and_unblocks_strict(repo, manager):
@@ -583,8 +618,19 @@ async def test_reconcile_merged_pr_updates_state_and_unblocks_strict(repo, manag
     s0 = manager.get_tasks(pid)[0]
     manager.update_task_status(s0.id, "in_review")
     branch = f"collegue/issue-{s0.id}"
-    clients = _reconcile_clients({branch: SimpleNamespace(number=72, state="closed", merged=True)})
-    result = await _run(manager, repo, pid, dry_run=False, clients=clients, require_merged_deps=True)
+    clients = _reconcile_clients(
+        {branch: SimpleNamespace(number=72, state="closed", merged=True, merge_commit_sha="a" * 40)}, repo
+    )
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=clients,
+        require_merged_deps=True,
+        sync_base_fn=lambda _src, _base: True,
+        merge_verify_fn=lambda *_a: None,
+    )
     statuses = {t.title: t.status for t in manager.get_tasks(pid)}
     assert statuses["S0"] == "merged"  # vérité GitHub réalignée
     assert statuses["S1"] == "in_review"  # la sœur a pu se construire
@@ -599,7 +645,7 @@ async def test_reconcile_closed_pr_requeues_with_feedback(repo, manager):
     t0 = manager.get_tasks(pid)[0]
     manager.update_task_status(t0.id, "in_review")
     branch = f"collegue/issue-{t0.id}"
-    clients = _reconcile_clients({branch: SimpleNamespace(number=64, state="closed", merged=False)})
+    clients = _reconcile_clients({branch: SimpleNamespace(number=64, state="closed", merged=False)}, repo)
     agent = _RecordingAgent()
     result = await _run(manager, repo, pid, dry_run=False, clients=clients, agent=agent)
     assert result.iterations == 1  # relivrée dans ce run
@@ -648,11 +694,20 @@ async def test_reconcile_audits_outcomes(repo, manager):
     manager.update_task_status(s0.id, "in_review")
     manager.update_task_status(s1.id, "in_review")
     mapping = {
-        f"collegue/issue-{s0.id}": SimpleNamespace(number=72, state="closed", merged=True),
+        f"collegue/issue-{s0.id}": SimpleNamespace(number=72, state="closed", merged=True, merge_commit_sha="a" * 40),
         f"collegue/issue-{s1.id}": SimpleNamespace(number=64, state="closed", merged=False),
     }
     audit = RunAuditLog(pid)
-    await _run(manager, repo, pid, dry_run=False, clients=_reconcile_clients(mapping), audit=audit)
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=_reconcile_clients(mapping),
+        audit=audit,
+        sync_base_fn=lambda _src, _base: True,
+        merge_verify_fn=lambda *_a: None,
+    )
     outcomes = {e.detail["pr_number"]: e.detail["outcome"] for e in audit.events if e.kind == "task_reconciled"}
     assert outcomes == {72: "merged", 64: "closed_requeued"}
 
@@ -1462,6 +1517,44 @@ async def test_infra_noise_does_not_clobber_actionable_feedback(repo, manager):
     ctx = agent.contexts[2]
     assert "email_validator" in ctx
     assert "ReadTimeoutError" not in ctx  # le bruit réseau n'est PAS ré-injecté
+
+
+async def test_infra_noise_after_a_functional_failure_never_changes_the_branch_given_to_the_next_attempts(
+    repo, manager, monkeypatch
+):
+    """Régression (variable locale ``base`` qui masquait le paramètre branche) : après une erreur fonctionnelle puis un
+    aléa infra, la tentative suivante recevait le TEXTE du feedback comme branche de base."""
+    from collegue.pilot import driver
+
+    bases = []
+    real_execute = driver.execute_issue
+
+    async def spy(*args, **kwargs):
+        bases.append(kwargs.get("base"))
+        return await real_execute(*args, **kwargs)
+
+    monkeypatch.setattr(driver, "execute_issue", spy)
+
+    async def _sleep(d):
+        pass
+
+    pid = _linear_project(manager, 1)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_RecordingAgent(),
+        sandbox=_InfraThenGreenSandbox(),
+        max_task_attempts=3,
+        sleep_fn=_sleep,
+        base="release/9",
+        clients=_published_clients(repo, base="release/9"),
+    )
+
+    assert result.stop_reason == "completed"
+    assert bases == ["release/9"] * 3, "la branche de base reste celle du paramètre à CHAQUE tentative"
+    assert manager.get_tasks(pid)[0].status == "in_review"
 
 
 async def test_infra_noise_suffix_is_replaced_not_stacked(repo, manager):
@@ -2351,3 +2444,273 @@ async def test_cost_unknown_deduped_across_serial_segments(repo, manager, monkey
     # Au plus UN cost_unknown persisté pour tout le run, malgré 2 segments.
     cu = [d for d in manager.get_decisions(pid) if d.summary == "[run] cost_unknown"]
     assert len(cu) == 1
+
+
+# --- PR fusionnée HORS moteur : aucune tâche avant une resynchronisation PROUVÉE (W3) ---------------
+
+
+class _OrderedAgent(_RecordingAgent):
+    """Journalise l'ordre des appels (resynchronisation puis agent) dans ``events``."""
+
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def implement_issue(self, workspace, issue):
+        self.events.append(("agent", issue.source_task_id))
+        return super().implement_issue(workspace, issue)
+
+
+def _external_merge_project(manager):
+    """T0 (in_review, PR fusionnée hors moteur) ; S1 sœur indépendante ; D2 dépendante de T0."""
+    pid = manager.create_project(name="external-merge")
+    first = manager.add_task(pid, title="T0")
+    manager.update_task_status(first, "in_review")
+    sibling = manager.add_task(pid, title="S1")
+    dependent = manager.add_task(pid, title="D2", depends_on=[first])
+    return pid, first, sibling, dependent
+
+
+def _merged_outside(manager, first, sha="c" * 40):
+    return _reconcile_clients(
+        {
+            f"collegue/issue-{first}": SimpleNamespace(
+                number=11, state="closed", merged=True, merge_commit_sha=sha, head_branch=f"collegue/issue-{first}"
+            )
+        }
+    )
+
+
+async def test_external_merge_is_synced_and_proved_before_any_task_starts(repo, manager):
+    pid, first, sibling, dependent = _external_merge_project(manager)
+    events = []
+    verified = []
+
+    def sync(src, base):
+        events.append(("sync", src, base))
+        return True
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=_merged_outside(manager, first),
+        agent=_OrderedAgent(events),
+        require_merged_deps=True,
+        max_inflight_reviews=5,
+        sync_base_fn=sync,
+        merge_verify_fn=lambda src, sha, tree: verified.append((src, sha, tree)),
+        base="trunk",
+    )
+
+    assert events[0] == ("sync", repo, "trunk"), "la resynchronisation précède tout agent"
+    assert verified == [(repo, "c" * 40, None)], (
+        "la fusion distante est prouvée dans le clone (pas de tree : hors moteur)"
+    )
+    assert {e for e in events if e[0] == "agent"} == {("agent", dependent), ("agent", sibling)}
+    assert manager.get_task(first).status == "merged" and result.stop_reason != "repo_sync_failed"
+
+
+@pytest.mark.parametrize("failure", ["false", "raises", "not_in_clone", "unknown_merge_sha"])
+async def test_external_merge_with_failed_or_unproved_sync_blocks_every_task(repo, manager, failure):
+    from collegue.pilot.audit import RunAuditLog
+
+    pid, first, sibling, dependent = _external_merge_project(manager)
+    events = []
+
+    def sync(src, base):
+        events.append("sync")
+        if failure == "raises":
+            raise RuntimeError("git indisponible")
+        return failure != "false"
+
+    def verify(src, sha, tree):
+        events.append("verify")
+        if failure == "not_in_clone":
+            raise RuntimeError("le clone local ne contient pas la fusion")
+
+    sha = None if failure == "unknown_merge_sha" else "c" * 40
+    audit = RunAuditLog(pid)
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=_merged_outside(manager, first, sha),
+        agent=_OrderedAgent(events),
+        require_merged_deps=True,
+        sync_base_fn=sync,
+        merge_verify_fn=verify,
+        audit=audit,
+    )
+
+    assert result.stop_reason == "repo_sync_failed" and result.iterations == 0 and result.processed == []
+    assert result.pending_reviews == [first] and result.project_status is None
+    assert not [e for e in events if isinstance(e, tuple)], "aucun agent (dépendant OU indépendant) n'a été lancé"
+    assert [t.status for t in manager.get_tasks(pid)] == ["in_review", "todo", "todo"], "rien n'est marqué merged"
+    outcomes = [(e.detail["outcome"], e.detail.get("reason")) for e in audit.events if e.kind == "task_reconciled"]
+    assert [o for o, _ in outcomes] == ["merged_unsynced"] and outcomes[0][1]
+
+
+async def test_failed_external_sync_is_resumed_on_restart_without_any_new_merge(repo, manager):
+    pid, first, sibling, dependent = _external_merge_project(manager)
+    clients = _merged_outside(manager, first)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("aucune fusion ne doit être émise par la reprise")
+
+    clients.prs.merge_pr = forbidden
+
+    first_run = await _run(
+        manager, repo, pid, dry_run=False, clients=clients, sync_base_fn=lambda *_: False, require_merged_deps=True
+    )
+    assert first_run.stop_reason == "repo_sync_failed"
+
+    events = []
+    resumed = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=clients,
+        agent=_OrderedAgent(events),
+        sync_base_fn=lambda *_: True,
+        merge_verify_fn=lambda *_: None,
+        require_merged_deps=True,
+        max_inflight_reviews=5,
+    )
+    assert manager.get_task(first).status == "merged" and resumed.stop_reason != "repo_sync_failed"
+    assert ("agent", dependent) in events
+
+
+async def test_reconcile_without_a_local_clone_never_marks_merged(manager):
+    from collegue.pilot import reconcile_in_review_tasks
+
+    pid, first, _sibling, _dependent = _external_merge_project(manager)
+    unsynced = []
+    count = reconcile_in_review_tasks(
+        manager.get_tasks(pid), manager, _merged_outside(manager, first), owner="o", repo="r", unsynced=unsynced
+    )
+    assert count == 0 and manager.get_task(first).status == "in_review"
+    assert [u[0] for u in unsynced] == [first]
+
+
+async def test_a_task_owned_by_an_unfinished_merge_cycle_is_left_to_that_cycle(repo, manager):
+    pid, first, _sibling, _dependent = _external_merge_project(manager)
+    row = manager.begin_task_merge(
+        first,
+        owner="o",
+        repo="r",
+        base_branch="main",
+        pr_number=11,
+        head_sha="1" * 40,
+        base_sha="2" * 40,
+        tree_sha="3" * 40,
+        proof_id="a" * 64,
+        merge_method="squash",
+    )
+    manager.transition_task_merge(
+        first, expected_state=row.state, expected_revision=0, new_state="merged_unsynced", merge_sha="c" * 40
+    )
+    calls = []
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=_merged_outside(manager, first),
+        sync_base_fn=lambda *a: calls.append(a) or True,
+        merge_verify_fn=lambda *_: None,
+    )
+
+    assert manager.get_task(first).status == "in_review", "le cycle durable, pas le driver, clôt cette tâche"
+    assert calls == [] and result.stop_reason != "repo_sync_failed"
+
+
+# --- barrière durable relue par le driver SEUL (sans runtime ni découverte GitHub) -------------------
+
+
+def _external_row(manager, first, sha="c" * 40):
+    return manager.begin_external_task_merge(
+        first, owner="o", repo="r", base_branch="main", pr_number=11, merge_sha=sha
+    )
+
+
+async def test_driver_resumes_a_persisted_external_barrier_without_any_github_discovery(repo, manager):
+    pid, first, sibling, dependent = _external_merge_project(manager)
+    _external_row(manager, first)
+    events, verified = [], []
+
+    class _NoDiscovery(_PRs):
+        def find_pr_by_head(self, *a, **k):
+            raise AssertionError("la reprise d'une barrière persistée ne consulte pas GitHub")
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        clients=PrClients(branches=_Branches(), files=_Files(), prs=_NoDiscovery()),
+        agent=_OrderedAgent(events),
+        require_merged_deps=True,
+        max_inflight_reviews=5,
+        sync_base_fn=lambda src, base: events.append(("sync", src, base)) or True,
+        merge_verify_fn=lambda src, sha, tree: verified.append((sha, tree)),
+    )
+
+    assert verified == [("c" * 40, None)] and events[0][0] == "sync"
+    assert manager.get_task(first).status == "merged" and manager.get_task_merge(first).state == "synced"
+    assert ("agent", dependent) in events and result.stop_reason != "repo_sync_failed"
+
+
+async def test_driver_keeps_a_persisted_barrier_when_the_sync_is_still_failing(repo, manager):
+    pid, first, _sibling, _dependent = _external_merge_project(manager)
+    _external_row(manager, first)
+    events = []
+
+    result = await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        agent=_OrderedAgent(events),
+        sync_base_fn=lambda *_: False,
+        merge_verify_fn=lambda *_: None,
+    )
+
+    assert result.stop_reason == "repo_sync_failed" and result.pending_reviews == [first]
+    assert not [e for e in events if isinstance(e, tuple)], "aucune tâche lancée"
+    row = manager.get_task_merge(first)
+    assert row.state == "merged_unsynced" and "resynchronisation" in row.last_error
+    assert manager.get_task(first).status == "in_review"
+
+
+async def test_driver_ignores_engine_cycles_which_belong_to_the_runtime_barrier(repo, manager):
+    pid, first, _sibling, _dependent = _external_merge_project(manager)
+    row = manager.begin_task_merge(
+        first,
+        owner="o",
+        repo="r",
+        base_branch="main",
+        pr_number=11,
+        head_sha="1" * 40,
+        base_sha="2" * 40,
+        tree_sha="3" * 40,
+        proof_id="a" * 64,
+        merge_method="squash",
+    )
+    manager.transition_task_merge(
+        first, expected_state=row.state, expected_revision=0, new_state="merged_unsynced", merge_sha="c" * 40
+    )
+    calls = []
+    await _run(
+        manager,
+        repo,
+        pid,
+        dry_run=False,
+        sync_base_fn=lambda *a: calls.append(a) or True,
+        merge_verify_fn=lambda *_: None,
+    )
+    assert manager.get_task_merge(first).state == "merged_unsynced" and manager.get_task(first).status == "in_review"

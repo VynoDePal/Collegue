@@ -7,6 +7,8 @@ de glob au-delà du segment, plafond LOC à 0 = illimité, liste/CI incomplètes
 
 from types import SimpleNamespace
 
+import pytest
+
 from collegue.pilot.automerge import (
     DEFAULT_PATH_ALLOWLIST,
     AutoMergeDecision,
@@ -455,6 +457,26 @@ class _Phase5State:
         return True
 
 
+def _approving_gate(clients, manager, **kw):
+    """Chemin commun de fusion (politique serveur, preuve, base) : doublé ici ; testé pour de vrai dans
+    test_pilot_merge_policy.py / test_pilot_merge_cycle.py (faux serveur GitHub REST)."""
+    GATE_CALLS.append(kw)
+    return SimpleNamespace(
+        head_sha=kw["expected_head_sha"],
+        pr_base_sha=kw["expected_pr_base_sha"],
+        base_sha="base",
+        tree_sha="t" * 40,
+    )
+
+
+def _conforming_result(clients, **kw):
+    RESULT_CHECKS.append(kw)
+
+
+GATE_CALLS: list = []
+RESULT_CHECKS: list = []
+
+
 async def test_phase5_success_merges_resyncs_then_guards():
     prs = _Phase5PRs()
     state = _Phase5State()
@@ -469,6 +491,8 @@ async def test_phase5_success_merges_resyncs_then_guards():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
         manager=state,
         project_id=1,
         ci_timeout_seconds=0,
@@ -530,6 +554,8 @@ async def test_phase5_guard_red_stops_after_merge():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
         manager=state,
         project_id=1,
         sync_base_fn=lambda src, base: True,
@@ -554,6 +580,8 @@ async def test_phase5_main_move_during_health_guard_never_clears_incident():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
         manager=state,
         project_id=1,
         sync_base_fn=lambda src, base: True,
@@ -587,6 +615,8 @@ async def test_phase5_guard_red_publishes_remote_revert_and_stops_recovered():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
         manager=state,
         project_id=1,
         sync_base_fn=lambda src, base: True,
@@ -629,6 +659,8 @@ async def test_phase5_remote_revert_failure_status_is_propagated():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
         manager=state,
         project_id=1,
         sync_base_fn=lambda src, base: True,
@@ -658,6 +690,8 @@ async def test_phase5_refuses_merge_when_durable_write_ahead_is_unavailable():
         repo_source="/repo",
         base="main",
         sandbox=object(),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
     )
     assert out.stop_reason == "phase5_incident_pending"
     assert prs.merged_calls == []
@@ -683,3 +717,169 @@ async def test_phase5_off_and_dry_run_perform_no_github_reads():
             dry_run=dry_run,
         )
         assert out.continue_loop is True and out.merged is False
+
+
+# --- classification « sensible » après packaging/locks W2 (W3-B) ---------------------------------
+# Chemins concrets de l'arbre W2 (evidence/w3-manager-sensitive-paths-before.json) : la garde dure doit valoir
+# même si l'allowlist est élargie. Les restrictions de faible risque s'appliquent à TOUS les fichiers de
+# dépendances, locks et Dockerfiles.
+
+SENSITIVE_DEPENDENCY_PATHS = [
+    "requirements.txt",
+    "requirements-dev.txt",
+    "requirements-lock.txt",
+    "requirements/base.txt",
+    "constraints.txt",
+    "Pipfile",
+    "Pipfile.lock",
+    "poetry.lock",
+    "uv.lock",
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "go.mod",
+    "go.sum",
+    "Gemfile",
+    "Cargo.lock",
+    "locks/runtime.txt",
+    "locks/dev.txt",
+    "locks/audit.txt",
+    "locks/lint.txt",
+    "locks/sandbox.txt",
+    "locks/sandbox-openhands.txt",
+    "locks/README.md",
+    "sub/locks/anything.md",
+    "Dockerfile",
+    "Dockerfile.openhands",
+    "docker/sandbox/Dockerfile",
+    "docker/sandbox/Dockerfile.openhands",
+    "docker/app.Dockerfile",
+    "docker-compose.yml",
+    ".dockerignore",
+    "pyproject.toml",
+    "collegue/migrations/versions/0012_task_merges.py",
+    "collegue/migrations/env.py",
+    "collegue/migrations/script.py.mako",
+    "alembic.ini",
+    "entrypoint.sh",
+    "scripts/locks.py",
+    "MANIFEST.in",
+]
+ORDINARY_DOCUMENTATION = [
+    "README.md",
+    "docs/guide.md",
+    "docs/consolidation/w3-merge.md",
+    "CHANGELOG.rst",
+    "notes/todo.md",
+]
+
+
+@pytest.mark.parametrize("path", SENSITIVE_DEPENDENCY_PATHS)
+def test_dependency_locks_and_dockerfiles_are_sensitive(path):
+    assert is_sensitive(path) is True, path
+
+
+@pytest.mark.parametrize("path", ORDINARY_DOCUMENTATION)
+def test_ordinary_documentation_stays_non_sensitive(path):
+    assert is_sensitive(path) is False, path
+
+
+@pytest.mark.parametrize("path", SENSITIVE_DEPENDENCY_PATHS)
+def test_sensitive_paths_are_refused_even_when_the_allowlist_is_widened(path):
+    widened = _policy(path_allowlist=("**", "**/*", "*", "locks/**", "docker/**", "requirements*.txt", path))
+
+    decision = evaluate_automerge([path], additions=1, checks=["success"], policy=widened)
+
+    assert decision.allowed is False
+    assert "sensible" in decision.reason, decision.reason
+
+
+def test_widened_allowlist_still_admits_ordinary_documentation():
+    widened = _policy(path_allowlist=("**", "**/*"))
+
+    assert evaluate_automerge(["docs/guide.md"], additions=1, checks=["success"], policy=widened).allowed is True
+
+
+async def test_phase5_gate_receives_improve_phase_exact_anchors_and_full_green():
+    GATE_CALLS.clear()
+    RESULT_CHECKS.clear()
+    prs = _Phase5PRs()
+    await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        manager=_Phase5State(),
+        project_id=1,
+        sync_base_fn=lambda src, base: True,
+        guard_fn=lambda *a, **kw: SimpleNamespace(checked=True, healthy=True, reason="vert"),
+        merge_gate=_approving_gate,
+        merge_result_check=_conforming_result,
+    )
+    (gate,) = GATE_CALLS
+    assert gate["expected_phase"] == "improve" and gate["require_all_green"] is True
+    assert (gate["expected_head_sha"], gate["expected_pr_base_sha"], gate["method"]) == ("head", "base", "squash")
+    assert RESULT_CHECKS and RESULT_CHECKS[-1]["merge_sha"] == "merged-sha"
+
+
+@pytest.mark.parametrize("failure", ["refused", "boom", "other_head"])
+async def test_phase5_gate_refusal_or_failure_blocks_before_any_write(failure):
+    from collegue.pilot.merge_policy import MergeRefused
+
+    def gate(clients, manager, **kw):
+        if failure == "refused":
+            raise MergeRefused("check requis absent", code="missing_check")
+        if failure == "boom":
+            raise RuntimeError("API protections indisponible")
+        return SimpleNamespace(head_sha="autre", pr_base_sha="base", base_sha="base", tree_sha="t" * 40)
+
+    prs = _Phase5PRs()
+    state = _Phase5State()
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        manager=state,
+        project_id=1,
+        merge_gate=gate,
+        merge_result_check=_conforming_result,
+    )
+    assert out.merged is False and out.continue_loop is False
+    assert prs.merged_calls == [] and state.incident is None
+
+
+async def test_phase5_merge_commit_not_matching_the_proof_is_attention():
+    def nonconforming(clients, **kw):
+        raise RuntimeError("tree inattendu")
+
+    prs = _Phase5PRs()
+    state = _Phase5State()
+    out = await auto_merge_promotion(
+        SimpleNamespace(number=42),
+        policy=_policy(),
+        revert_policy=SimpleNamespace(enabled=True),
+        clients=_clients(prs),
+        owner="o",
+        repo="r",
+        repo_source="/repo",
+        base="main",
+        sandbox=object(),
+        manager=state,
+        project_id=1,
+        sync_base_fn=lambda src, base: pytest.fail("pas de resync d'un contenu non prouvé"),
+        merge_gate=_approving_gate,
+        merge_result_check=nonconforming,
+    )
+    assert out.merged is True and out.continue_loop is False and out.stop_reason == "post_merge_guard_failed"
+    assert state.incident.state == "attention"

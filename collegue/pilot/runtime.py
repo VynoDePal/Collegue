@@ -316,26 +316,6 @@ def _build_acceptance_checker(manager, project_id: int):  # pragma: no cover - i
 _MERGE_BOT_OUTER_CAP = 500
 
 
-async def _try_merge_pr(prs, owner, repo, number, *, attempts: int = 5, sleep_fn=None):
-    """Merge (squash) avec relances courtes — GitHub calcule la mergeabilité en différé.
-
-    Retourne ``(True, result)`` au premier succès (ou PR déjà mergée), sinon
-    ``(False, dernière_raison)``. Une non-mergeabilité / erreur HTTP est journalisée
-    par l'appelant (le moteur réconciliera au prochain démarrage, #442)."""
-    sleep_fn = sleep_fn or asyncio.sleep
-    last = None
-    for i in range(attempts):
-        try:
-            res = prs.merge_pr(owner, repo, number, method="squash")
-            if getattr(res, "merged", False) or getattr(res, "already_merged", False):
-                return True, res
-            last = getattr(res, "message", None) or getattr(res, "reason", None) or "non mergée"
-        except Exception as exc:  # noqa: BLE001 - non-mergeable/HTTP : journalisé, réconcilié plus tard
-            last = str(exc)
-        await sleep_fn(min(5 * (i + 1), 20))
-    return False, last
-
-
 def _resync_repo_source(repo_source: str, base: str, *, git_runner=None) -> bool:
     """Resynchronise le clone LOCAL sur ``origin/<base>`` (plomberie git locale).
 
@@ -345,6 +325,14 @@ def _resync_repo_source(repo_source: str, base: str, *, git_runner=None) -> bool
     from collegue.executor.workspace import resync_repository_base
 
     return resync_repository_base(repo_source, base, runner=git_runner)
+
+
+def _blocking_merge_cycles(manager, project_id: int) -> Optional[str]:
+    """Raison d'arrêt si un cycle de fusion durable interdit la suite (sinon ``None``)."""
+    from collegue.pilot import merge_cycle as cycle
+
+    stuck = cycle.blocking_cycles(manager, project_id)
+    return cycle.stop_reason_for(stuck) if stuck else None
 
 
 async def _merge_in_review_prs(
@@ -358,19 +346,53 @@ async def _merge_in_review_prs(
     base: str,
     git_runner=None,
     sleep_fn=None,
+    proof_loader=None,
+    ci_timeout_seconds: float = 900.0,
+    ci_poll_seconds: float = 10.0,
+    continue_fn=None,
+    verify_fn=None,
+    method: str = "squash",
 ) -> int:
-    """Merge-bot du BUILD : merge les PR des tâches ``in_review`` puis resync le clone.
+    """Merge-bot du BUILD (OPT-IN ``BUILD_AUTO_MERGE``) : fusionne les PR des tâches ``in_review``.
 
-    Simule le merge HUMAIN pendant la construction autonome du MVP — sans lui, avec
-    1 PR en vol (#434) + deps strictes (#411), le driver s'arrête ``awaiting_merge``
-    et le build n'avance pas. **N'est appelé que par la phase build** : la phase
-    d'amélioration laisse ses PR ouvertes pour merge humain (§6). Retourne le nombre
-    de PR mergées sur cette passe."""
+    Chaque fusion passe par la politique COMMUNE (``merge_policy`` : preuve de livraison durable, SHA de tête et de
+    base, checks requis des protections classiques et rulesets, précondition serveur contre la course sur la base)
+    puis par le cycle durable ``merge_cycle`` (write-ahead, contrôle du commit fusionné, resynchronisation vérifiée
+    du clone). Ce chemin sert la boucle normale, le drain de fin ET la reprise : il commence toujours par
+    reprendre les cycles inachevés (jamais de deuxième fusion). **N'est appelé que par la phase build** : la phase
+    d'amélioration laisse ses PR ouvertes (§6). Retourne le nombre de tâches fusionnées ET resynchronisées."""
     from collegue.executor.workspace import branch_for_issue
-    from collegue.pilot.driver import TASK_STATUS_IN_REVIEW, TASK_STATUS_MERGED
+    from collegue.pilot import merge_cycle as cycle
+    from collegue.pilot.driver import TASK_STATUS_IN_REVIEW
+
+    sleep_fn = sleep_fn or asyncio.sleep
+    resync = lambda src, br, **kw: _resync_repo_source(src, br, **kw)  # noqa: E731 - résolu à l'appel (doubles de tests)
+    unsynced_before = [
+        c.task_id for c in manager.list_task_merges(project_id, states={"merge_pending", "merged_unsynced"})
+    ]
+    blocking = cycle.resume_cycles(
+        manager,
+        clients,
+        project_id=project_id,
+        repo_source=repo_source,
+        base=base,
+        resync_fn=resync,
+        git_runner=git_runner,
+        verify_fn=verify_fn,
+    )
+    resumed = sum(
+        1 for task_id in unsynced_before if getattr(manager.get_task_merge(task_id), "state", None) == "synced"
+    )
+    if blocking:
+        logger.warning(
+            "merge-bot: %d cycle(s) de fusion inachevé(s) (%s) — aucune nouvelle fusion, tâche suivante non lancée.",
+            len(blocking),
+            ", ".join(f"tâche {c.task_id}:{c.state}" for c in blocking),
+        )
+        return resumed
 
     prs = clients.prs
-    merged = 0
+    merged = resumed
     for task in manager.get_tasks(project_id):
         if getattr(task, "status", None) != TASK_STATUS_IN_REVIEW:
             continue
@@ -382,20 +404,36 @@ async def _merge_in_review_prs(
         if not number:
             logger.warning("merge-bot: aucune PR trouvée pour la tâche %s (%s)", task.id, branch)
             continue
-        ok, info = await _try_merge_pr(prs, owner, repo, number, sleep_fn=sleep_fn)
-        if ok:
-            manager.update_task_status(task.id, TASK_STATUS_MERGED)
+        result = await cycle.merge_task(
+            manager,
+            clients,
+            task,
+            project_id=project_id,
+            owner=owner,
+            repo=repo,
+            base=base,
+            pr_number=int(number),
+            head_branch=branch,
+            repo_source=repo_source,
+            resync_fn=resync,
+            method=method,
+            proof_loader=proof_loader,
+            ci_timeout_seconds=ci_timeout_seconds,
+            ci_poll_seconds=ci_poll_seconds,
+            continue_fn=continue_fn,
+            sleep_fn=sleep_fn,
+            git_runner=git_runner,
+            verify_fn=verify_fn,
+        )
+        if result.status == cycle.STATUS_MERGED:
             merged += 1
-            if not _resync_repo_source(repo_source, base, git_runner=git_runner):
-                logger.warning(
-                    "merge-bot: resync git du clone (%s) sur origin/%s a ÉCHOUÉ — la tâche "
-                    "suivante pourrait partir d'une base périmée (conflit possible).",
-                    repo_source,
-                    base,
-                )
             logger.info("merge-bot: PR #%s mergée (tâche %s) → clone resync sur %s", number, task.id, base)
-        else:
-            logger.warning("merge-bot: merge PR #%s (tâche %s) échoué: %s", number, task.id, str(info)[:200])
+            continue
+        logger.warning(
+            "merge-bot: PR #%s (tâche %s) NON fusionnée [%s]: %s", number, task.id, result.status, result.reason[:300]
+        )
+        if result.status != cycle.STATUS_REFUSED:
+            break  # fusion distante confirmée mais non resynchronisée / incertaine : on s'arrête ici
     return merged
 
 
@@ -423,6 +461,8 @@ async def run_project_from_settings(
     audit=None,
     cost_source=None,
     sync_base_fn=None,
+    merge_proof_loader=None,
+    merge_sync_verify_fn=None,
 ) -> ProjectRunResult:
     """Assemble les dépendances (depuis la config) et lance ``run_project``.
 
@@ -510,7 +550,8 @@ async def run_project_from_settings(
     # Merge-bot de la phase BUILD (§6 : auto-merge build, merge humain en amélioration).
     # En dry_run, jamais d'auto-merge (aucune écriture). Off → 1 seule passe (comportement
     # historique : arrêt `awaiting_merge`, le merge humain reprend au prochain run).
-    auto_merge = bool(getattr(settings_obj, "BUILD_AUTO_MERGE", True)) and not dry_run
+    # OPT-IN : un réglage absent ou nul vaut « désactivé » (jamais « activé » par repli).
+    auto_merge = bool(getattr(settings_obj, "BUILD_AUTO_MERGE", False)) and not dry_run
     # En auto-merge, on EXIGE le merge des deps (le merge-bot le fournit) — un dépendant
     # ne doit pas partir d'une base sans le code mergé de sa dépendance (#411).
     require_merged = True if auto_merge else bool(getattr(settings_obj, "DEPS_REQUIRE_MERGED", False))
@@ -542,6 +583,7 @@ async def run_project_from_settings(
                 continue_fn=budget.should_continue,
                 sync_base_fn=sync_base_fn,
                 auto_merge_enabled=phase5_policy.enabled,
+                proof_loader=merge_proof_loader,
             )
 
         improvement_options["recovery_hook"] = _phase5_recovery_hook
@@ -565,6 +607,7 @@ async def run_project_from_settings(
                     ci_poll_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_POLL_SECONDS", 10) or 0),
                     sync_base_fn=sync_base_fn,
                     continue_fn=budget.should_continue,
+                    proof_loader=merge_proof_loader,
                 )
 
             improvement_options["promotion_hook"] = _phase5_promotion_hook
@@ -605,10 +648,12 @@ async def run_project_from_settings(
         # #580 : vérification stricte juste avant Phase 4. Injectable pour les
         # tests ; le défaut vit dans le driver (fetch + reset origin/<base>).
         sync_base_fn=sync_base_fn,
+        # W3 : une PR fusionnée HORS moteur est réconciliée seulement après resynchronisation prouvée du clone.
+        merge_verify_fn=merge_sync_verify_fn,
     )
 
     try:
-        from collegue.pilot.driver import STOP_AWAITING_MERGE
+        from collegue.pilot.driver import STOP_AWAITING_MERGE, STOP_REPO_SYNC_FAILED
 
         # Barrière globale : un incident Phase 5 précède toute écriture BUILD ou
         # IMPROVE, même si ce run n'a pas demandé ``--improve`` ou si l'opt-in a
@@ -624,9 +669,49 @@ async def run_project_from_settings(
                     project_status=getattr(project, "status", None),
                 )
 
+        merge_kwargs = dict(
+            proof_loader=merge_proof_loader,
+            ci_timeout_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_TIMEOUT_SECONDS", 900) or 0),
+            ci_poll_seconds=float(getattr(settings_obj, "AUTO_MERGE_CI_POLL_SECONDS", 10) or 0),
+            continue_fn=budget.should_continue,
+            verify_fn=merge_sync_verify_fn,
+        )
+
+        # Barrière de reprise des fusions : un cycle `merge_pending` / `merged_unsynced` / `attention` (crash, resync
+        # échoué) interdit de lancer la moindre tâche — le checkout local est périmé ou l'issue distante incertaine.
+        # Valable même si BUILD_AUTO_MERGE a été retiré depuis : on ne fait que réconcilier/resynchroniser, jamais fusionner.
+        if not dry_run:
+            from collegue.pilot import merge_cycle as _cycle
+
+            stuck = _cycle.resume_cycles(
+                manager,
+                clients,
+                project_id=project_id,
+                repo_source=repo_source,
+                base=base,
+                # La barrière injectée (``sync_base_fn``) vaut aussi pour la reprise d'un cycle inachevé : même résync que
+                # le handoff, et un test/opérateur qui la remplace ne la voit jamais contournée par le défaut.
+                resync_fn=(
+                    (lambda src, br, **kw: sync_base_fn(src, br))
+                    if sync_base_fn is not None
+                    else (lambda src, br, **kw: _resync_repo_source(src, br, **kw))
+                ),
+                verify_fn=merge_sync_verify_fn,
+            )
+            if stuck:
+                project = manager.get_project(project_id)
+                return ProjectRunResult(
+                    stop_reason=_cycle.stop_reason_for(stuck),
+                    iterations=0,
+                    processed=[],
+                    project_status=getattr(project, "status", None),
+                    pending_reviews=[c.task_id for c in stuck],
+                )
+
         all_processed: List[Any] = []
         no_merge_streak = 0
         outer = 0
+        merge_stop: Optional[str] = None
         while True:
             outer += 1
             result = await run_project(project_id, repo_source, ctx, **run_kwargs)
@@ -642,7 +727,12 @@ async def run_project_from_settings(
                 repo=repo,
                 repo_source=repo_source,
                 base=base,
+                **merge_kwargs,
             )
+            stuck = _blocking_merge_cycles(manager, project_id)
+            if stuck:
+                merge_stop = stuck
+                break
             if merged == 0:
                 # Aucune PR mergeable sur 2 passes consécutives → on n'insiste pas
                 # (PR réellement non mergeable : laissée au merge humain / réconciliation).
@@ -655,22 +745,26 @@ async def run_project_from_settings(
             if outer >= _MERGE_BOT_OUTER_CAP:
                 logger.warning("merge-bot: plafond d'itérations (%d) atteint — arrêt.", _MERGE_BOT_OUTER_CAP)
                 break
-        if auto_merge:
+        if auto_merge and merge_stop is None:
             # Drain final : à la COMPLÉTION, la DERNIÈRE tâche reste `in_review` — le build
             # complète dès que sa PR est ouverte (plus aucune tâche prête), SANS repasser par
             # `awaiting_merge` → la boucle ci-dessus ne l'aurait pas mergée. On draine les PR
             # in_review résiduelles (travail validé) pour finir le MVP à 100%. Idempotent.
             tasks_before_final_drain = manager.get_tasks(project_id)
             had_pending_final_reviews = any(getattr(t, "status", None) == "in_review" for t in tasks_before_final_drain)
-            await _merge_in_review_prs(
-                manager,
-                clients,
-                project_id=project_id,
-                owner=owner,
-                repo=repo,
-                repo_source=repo_source,
-                base=base,
-            )
+            # Clone non resynchronisé après une fusion hors moteur : ni drain ni handoff, reprise au prochain run.
+            if result.stop_reason != STOP_REPO_SYNC_FAILED:
+                await _merge_in_review_prs(
+                    manager,
+                    clients,
+                    project_id=project_id,
+                    owner=owner,
+                    repo=repo,
+                    repo_source=repo_source,
+                    base=base,
+                    **merge_kwargs,
+                )
+            merge_stop = _blocking_merge_cycles(manager, project_id)
             # #580 : le premier ``completed`` peut signifier « dernière PR BUILD
             # ouverte », pas encore « MVP intégré ». Après le drain final, si tout
             # est réellement merged/done, une ultime passe sans tâche réalise le
@@ -682,7 +776,8 @@ async def run_project_from_settings(
                 getattr(t, "status", None) in {"merged", "done"} for t in integrated
             )
             if (
-                improve
+                merge_stop is None
+                and improve
                 and had_pending_final_reviews
                 and result.stop_reason == "completed"
                 and result.improvement is None
@@ -695,6 +790,12 @@ async def run_project_from_settings(
             # (sinon `processed`/`iterations` ne refléteraient que la dernière passe).
             result.processed = all_processed
             result.iterations = len(all_processed)
+        if merge_stop is not None:
+            # Fusion distante confirmée mais clone non resynchronisé (ou issue incertaine) : ni « completed » ni
+            # Phase 4, ni tâche suivante. L'état durable reprend à la prochaine invocation.
+            result.stop_reason = merge_stop
+            result.project_status = None
+            result.improvement = None
 
         # #580, défense en profondeur : un adaptateur/fake qui rapporterait
         # ``completed`` alors que l'état durable porte encore des PR BUILD

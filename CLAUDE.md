@@ -26,5 +26,10 @@ Spécificités Claude Code :
   n'est pas un succès : le dire. Voir « Livraison et merge » dans `AGENTS.md`.
 - Vague 2 : lire `docs/consolidation/w2-integration.md` (propriété des fichiers, raccordements, checklist). Caches et
   artefacts sous `/tmp/<rôle>-…`, jamais dans `~/.cache`.
+- Vague 3 : lire `docs/consolidation/w3-integration.md` (propriété des fichiers, contrat de preuve, checklist), puis
+  `w3-quality.md` et `w3-merge.md` (documents de lot). Raccords de C : `tests/w3_remote_bridge.py` (Git distant réel derrière les
+  vrais clients GitHub), `tests/w3_publication.py`, `tests/test_w3_integration_{build,improve}.py` ; jamais de `verify_fn`,
+  `proof_loader` ni preuve injectés dans ces tests. `--basetemp` court (socket Unix). Ne pas présenter la comparaison de base
+  d'un `merge_pr` comme atomique (l'API REST n'a pas d'`expected_base_sha`).
 - Écrire son rapport et ses preuves sous `~/.codex/collegue-consolidation/20260928/{reports,evidence}/`
   avec le préfixe `w<N>-<rôle>`, puis terminer la passe : le manager reprend la même session.

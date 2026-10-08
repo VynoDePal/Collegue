@@ -8,16 +8,19 @@ disque** (et non sur le diff d'une itération) pour rester **symétrique** avant
 
 * **couverture de tests ↑** (parsée de la sortie : pytest-cov/coverage.py, go, JS-TS
   istanbul/jest/vitest, lcov, cobertura XML — cf. ``parse_coverage``, #577) ;
-* **sécurité ↓** : compte de secrets **pondéré par sévérité**, issu d'un scan
-  **statique** (``secret_scan``, moteur regex, zéro LLM) sur le répertoire du
-  projet — déterministe par construction ;
+* **scan de secrets ↓** (champs historiques ``security_*``) : compte de secrets
+  **pondéré par sévérité**, issu d'un scan **statique par expressions régulières**
+  (``secret_scan``, zéro LLM) du répertoire du projet, hors tests/fixtures/lockfiles
+  (:data:`SECRET_SCAN_SCOPE`). C'est un détecteur de secrets, PAS un audit de sécurité :
+  une régression de ce scan est bloquante, son absence de findings ne certifie rien d'autre ;
 * ``tests_passed`` comme **garde dure** (utilisée par le gate G2).
 
-La **revue LLM** (``review_score``) est conservée à titre **informatif** (corps de
-PR, relecteur humain) mais **n'entre pas** dans le composite gaté : un signal LLM
+La **revue LLM** (``review_score``) n'entre **pas** dans le composite gaté : un signal LLM
 diff-scopé est non déterministe et asymétrique avant/après (la cause racine du
-faux-rejet v9). Le « score du dashboard » du serveur (latence/coût de SES experts)
-ne convient pas non plus : on mesure la qualité du **projet généré**.
+faux-rejet v9). Mais son **verdict bloquant** (``review_blocking``) est un VETO : un score
+composite élevé ne compense jamais un finding bloquant (vague 3). Le « score du dashboard »
+du serveur (latence/coût de SES experts) ne convient pas non plus : on mesure la qualité
+du **projet généré**.
 
 **Frontière hôte (vague 1)** : le workspace mesuré est écrit par l'agent et par les
 tests. Toute opération HÔTE dessus part d'un nom de fichier non fiable et reste
@@ -50,11 +53,14 @@ from collegue.sandbox.paths import workspace_file
 # install editable (#577) ; cohérent avec le gate de build qui utilise déjà ``python -m``.
 DEFAULT_COVERAGE_COMMAND = "python -m pytest -q --cov --cov-report=term-missing"
 
-# Pondération par sévérité des findings de sécurité (secret_scan). Le critique pèse
+# Nom EXACT de ce que mesurent les champs ``security_*`` : un scan statique de secrets, pas un audit de sécurité.
+SECRET_SCAN_SCOPE = "scan statique de secrets (regex, hors tests/fixtures/lockfiles)"
+
+# Pondération par sévérité des findings du scan de secrets (secret_scan). Le critique pèse
 # le plus ; le composite et le gate (tolérance 0) raisonnent sur ce total pondéré.
 SECURITY_SEVERITY_WEIGHTS = {"critical": 10.0, "high": 5.0, "medium": 2.0, "low": 1.0}
 
-# Fichiers/dossiers EXCLUS du scan sécu de la BOUCLE (#547). Les lockfiles générés et
+# Fichiers/dossiers EXCLUS du scan de secrets de la BOUCLE (#547). Les lockfiles générés et
 # les emplacements de test/fixtures/exemples contiennent légitimement des chaînes qui
 # ressemblent à des secrets (URLs de registre npm, faux tokens, sqlite:/// de fixtures)
 # qu'on ne « corrige » jamais — sans exclusion ils noient le signal (sur un MVP réel,
@@ -158,15 +164,15 @@ class ProjectQualityMetrics:
     """Instantané des métriques de qualité d'un projet (à un instant/itération)."""
 
     coverage_pct: float  # 0–100 (0.0 si non mesurée — voir coverage_measured)
-    security_findings: int  # compte BRUT de secrets (proposeur + corps de PR)
-    security_weighted: float  # score sécu pondéré par sévérité (composite + gate)
+    security_findings: int  # compte BRUT de secrets du scan statique (SECRET_SCAN_SCOPE ; proposeur + corps de PR)
+    security_weighted: float  # score du scan de secrets pondéré par sévérité (composite + gate)
     tests_passed: bool
     composite: float
     # False si la couverture n'a PAS pu être mesurée (pas de ligne TOTAL). Le gate
     # (G2) doit alors traiter le delta de couverture comme inconnu (fail-closed),
     # plutôt que de confondre « non mesuré » avec « 0 % réel ».
     coverage_measured: bool = True
-    # INFORMATIF (hors-gate) : score de revue LLM pour le corps de PR. N'entre PAS
+    # INFORMATIF (hors composite) : score de revue LLM pour le corps de PR. N'entre PAS
     # dans ``composite`` (un signal LLM diff-scopé est non déterministe — #541).
     review_score: float = 0.0
     # Signaux qualité déterministes (ruff/mccabe, #543). 0 = neutre (projet non-Python
@@ -186,6 +192,12 @@ class ProjectQualityMetrics:
     # sandbox indisponible, échec/timeout, sortie invalide, dépendance non auditée) : le
     # composite vaut alors -inf (mesure non fiable, rejet par le gate) — jamais 0 vuln.
     dep_audit_measured: bool = True
+    # Vague 3 — VETO de la revue (hors composite). ``review_measured`` : un reviewer a réellement rendu un verdict sur le
+    # diff ; ``review_blocking`` : ce verdict est bloquant ; ``review_error`` : le reviewer a échoué (indisponible =
+    # non vérifié ⇒ jamais « pas de finding bloquant »).
+    review_measured: bool = False
+    review_blocking: bool = False
+    review_error: str = ""
 
 
 def parse_coverage(output: str) -> Optional[float]:
@@ -524,7 +536,8 @@ async def measure(
     (``doc_coverage_fn``) est **informative** (hors composite). Les vulns de dépendances
     (``dep_vulns_fn``) ne sont mesurées que si ``dep_vulns_enabled`` (opt-in, gaté) ; par défaut
     l'audit tourne dans ``sandbox`` et une panne refuse la mesure (composite -inf), jamais 0.
-    La revue LLM (``reviewer``/``diff``) est **optionnelle et informative**.
+    La revue LLM (``reviewer``/``diff``) hors composite : son verdict bloquant (ou son échec) est tracé
+    (``review_blocking``/``review_error``) et gate la promotion.
     """
     test_res = sandbox.run_tests(workspace, coverage_command)
     tests_passed = bool(test_res.ok)
@@ -559,15 +572,22 @@ async def measure(
             dep_vulns = -1
             dep_audit_measured = False
 
-    # Revue LLM : INFORMATIVE uniquement (hors composite). Calculée seulement s'il y
-    # a un reviewer ET un diff à examiner ; toute panne reste sans effet sur le gate.
+    # Revue LLM : hors composite, mais son verdict BLOQUANT est un veto (vague 3). Calculée seulement s'il y a un
+    # reviewer ET un diff à examiner. Une panne du reviewer n'est PAS « pas de finding » : elle est tracée
+    # (``review_error``) et le gate refuse. Les ``BaseException`` (budget, annulation) remontent.
     review_score = 0.0
+    review_measured = False
+    review_blocking = False
+    review_error = ""
     if reviewer is not None and diff:
         try:
             outcome = await reviewer.review(diff, ctx, issue=issue)
             review_score = float(getattr(outcome, "quality_score", 0.0))
-        except Exception:  # noqa: BLE001 — la revue est informative, jamais bloquante
+            review_blocking = bool(getattr(outcome, "blocking", False))
+            review_measured = True
+        except Exception as exc:  # noqa: BLE001 — fail-closed : revue indisponible = non vérifiée
             review_score = 0.0
+            review_error = str(exc) or repr(exc)
 
     return ProjectQualityMetrics(
         coverage_pct=coverage_pct,
@@ -594,6 +614,9 @@ async def measure(
         doc_coverage=doc_coverage,
         dep_vulns=dep_vulns,
         dep_audit_measured=dep_audit_measured,
+        review_measured=review_measured,
+        review_blocking=review_blocking,
+        review_error=review_error,
     )
 
 
