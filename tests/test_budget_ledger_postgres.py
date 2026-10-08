@@ -294,9 +294,8 @@ def test_check_constraints_reject_a_negative_balance_at_the_database_level(pg_ma
 
 
 def test_migration_0011_upgrades_postgres_imports_history_once_and_downgrades(pg_url, monkeypatch):
-    from alembic.config import Config
-
     from alembic import command
+    from alembic.config import Config
 
     engine = create_engine(pg_url)
     with engine.begin() as conn:
@@ -431,10 +430,9 @@ def _scenario_names():
 
 @pytest.mark.parametrize("scenario", _scenario_names())
 def test_legacy_import_migration_matches_lazy_import_on_real_postgres(pg_url, monkeypatch, scenario):
+    from alembic import command
     from alembic.config import Config
     from test_budget_ledger import LEGACY_SCENARIOS, _legacy_view, _seed_legacy
-
-    from alembic import command
 
     cost, tokens, expected, anomalies = LEGACY_SCENARIOS[scenario]
     engine = _reset(pg_url)

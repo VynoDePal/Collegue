@@ -881,9 +881,8 @@ def _migrate_sqlite_between(tmp_path, monkeypatch, seed):
     """Alembic jusqu'à 0010, ``seed(url)`` insère l'historique, puis 0011 : la voie MIGRATION."""
     from pathlib import Path
 
-    from alembic.config import Config
-
     from alembic import command
+    from alembic.config import Config
 
     root = Path(__file__).resolve().parents[1]
     url = f"sqlite:///{tmp_path / 'migrated.db'}"
