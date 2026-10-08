@@ -31,5 +31,10 @@ Spécificités Claude Code :
   vrais clients GitHub), `tests/w3_publication.py`, `tests/test_w3_integration_{build,improve}.py` ; jamais de `verify_fn`,
   `proof_loader` ni preuve injectés dans ces tests. `--basetemp` court (socket Unix). Ne pas présenter la comparaison de base
   d'un `merge_pr` comme atomique (l'API REST n'a pas d'`expected_base_sha`).
+- Vague 4 (en cours ; W1, W2 et W3 livrées, aucune campagne réelle démarrée) : lire `docs/consolidation/w4-integration.md`
+  (répartition, interfaces proposées, preuves attendues, checklist, livraison en deux étapes). A = routage par rôle, B = scénario
+  métier et campagne, C = documents, `tests.yml`, dépendances/verrous sur besoin établi et raccords. Ne jamais intégrer A ou B avant
+  leur SHA figé et l'instruction du manager ; ne jamais lancer le workflow de campagne ni le nightly sans ordre explicite ; un
+  préflight bloqué avant émission est une *validation incomplète*, pas une validation réelle.
 - Écrire son rapport et ses preuves sous `~/.codex/collegue-consolidation/20260928/{reports,evidence}/`
   avec le préfixe `w<N>-<rôle>`, puis terminer la passe : le manager reprend la même session.

@@ -301,9 +301,9 @@ La vague 1 est close (PR #608 et #609, `main` = `9862b39`). La vague 2 (A : regi
 - **Prompts** : l'ancien état d'une installation précédente est importé sans être modifié ; le nouvel état gagne toujours.
 - **Preuves restant à la CI** : Python 3.11, image Docker et smoke, wheel complet avec verrous, PostgreSQL sur le runner. Toute suppression d'une de ces preuves est une régression.
 
-## 11. Vague 3 (intégrée localement)
+## 11. Vague 3 (livrée)
 
-La vague 2 est close (PR #610, `main` = `58355a4`). La vague 3 (A : preuve de livraison commune BUILD/IMPROVE, oracles conservés, veto qualité, intégrité du contenu publié ; B : opt-in de fusion, politique SHA/checks/base commune, rulesets, reprise durable après fusion et synchronisation, classification des chemins sensibles) est **intégrée sur la branche de C** (lot A `ee15e0b`, lot B `c4e63c6`) ; sa publication, ses cinq checks distants et ses revues restent à faire. Protocole, répartition, contrat et checklist : `docs/consolidation/w3-integration.md`.
+La vague 2 est close (PR #610, `main` = `58355a4`). La vague 3 (A : preuve de livraison commune BUILD/IMPROVE, oracles conservés, veto qualité, intégrité du contenu publié ; B : opt-in de fusion, politique SHA/checks/base commune, rulesets, reprise durable après fusion et synchronisation, classification des chemins sensibles) est **livrée** : PR #611 fusionnée en squash, `main` = `5c1cbf51cec854b2fa73e3951273951e7a7212be` (arbre `206d53ac…`, parent unique `58355a4`), cinq checks du push verts (run `37860048078`, 3852 tests passés / 36 ignorés, PostgreSQL réel 21/23/5 sans skip). Les revues externes ont été indisponibles par quota (aucun avis favorable). Protocole, répartition, contrat et checklist : `docs/consolidation/w3-integration.md`.
 
 Points d'attaque propres à cette vague (à rejouer sur le SHA figé, entrées publiques, témoin bénin et motif du refus vérifiés) :
 - **Preuve** : rechargement par une nouvelle instance du manager, identités exactes, refus des preuves absentes, d'une autre PR, d'un ancien SHA, d'un contenu altéré ; jamais reconstruite depuis le corps de PR ; ré-exécution identique idempotente (une seule preuve par tête), vrai conflit conservé.
@@ -314,3 +314,15 @@ Points d'attaque propres à cette vague (à rejouer sur le SHA figé, entrées p
 - **Reprise** : fusion distante confirmée puis synchronisation en échec ⇒ pas de seconde fusion, aucune tâche (indépendante comprise) sur un checkout périmé ; reprise depuis un nouveau manager, y compris pour une fusion hors moteur sans cycle initial et quand la découverte des PR est indisponible ; crash entre l'appel distant et l'écriture locale réconcilié sans refusion.
 
 Limites à citer sans les arrondir : Contents API texte seul ; journal de preuves non signé ; oracle non résistant à du code arbitraire dans le même interpréteur ; jeton d'application GitHub refusé ; deux PR simultanées sur la même base (la seconde reste ouverte, base périmée) ; PR empilées d'IMPROVE non auto-fusionnables vers `main` avant leur parente ; aucune campagne réelle. Les limites de la vague 2 (strict borné aux transports bornables, abonnement USD seul, droit de planification 2 h) restent valables.
+
+## 12. Vague 4 (en cours)
+
+La vague 3 est livrée (`main` = `5c1cbf5`). **État exact : W1, W2 et W3 livrées ; W4 en cours ; aucune campagne réelle démarrée.** La vague 4 (A : résolution cohérente fournisseur/modèle/endpoint/authentification par rôle, jusqu'aux appels effectivement émis ; B : référence métier FastAPI + SQLite + Alembic à trois tâches dépendantes **sérialisées**, PDF, reprise, amélioration, incident et rollback Phase 5, puis invocation unique de la campagne réelle préparée sans être lancée) a sa répartition, ses interfaces proposées, ses preuves et sa checklist dans `docs/consolidation/w4-integration.md`.
+
+Points d'attaque propres à cette vague (à rejouer sur le SHA figé, entrées publiques, témoin bénin et motif du refus vérifié) :
+- **Routage** : destination, modèle et provenance du credential *réellement émis* pour chaque rôle (CODER, PLANNER, QA, REVIEWER, DEFAULT), appels concurrents de deux rôles de même modèle ; aucune clé globale vers un autre fournisseur ; erreur avant émission sans credential adapté ; contradictions fournisseur/préfixe/modèle refusées ; secrets absents des `repr`, journaux, exceptions et `argv` ; point de construction du SDK OpenHands (préfixe, endpoint, provenance de la clé).
+- **Budget** : réservation sur la destination effective, retries et replis compris ; refus des transports non bornables inchangé ; l'abonnement ne garantit pas un plafond de tokens strict.
+- **Scénario métier** : base vierge, oracles rouges par assertion puis verts (même empreinte), contenu intégré vérifié avant la tâche suivante, PDF lu par un vrai lecteur avec témoin négatif, reprise avec le même registre, rollback Phase 5 restaurant comportement ET état durable, politiques W3 actives.
+- **Campagne** : commande unique, 2 USD / 250 000 tokens / 900 s depuis le registre de W2, préflight sans dépense, transport incompatible ⇒ refus avant émission (*validation incomplète*), aucun nightly ni test payant déclenché.
+
+Limites à citer sans les arrondir : W2 (plafond strict seulement pour les transports bornables ; abonnement sans plafond de tokens strict) et W3 (Contents API texte seul ; journal non signé ; oracle dans le même interpréteur ; base distante exigeant une protection stricte applicable ; pas de re-livraison automatique d'une PR périmée ; GitHub App refusé).
