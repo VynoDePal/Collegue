@@ -182,7 +182,7 @@ Aperçu **par thème** (liste exhaustive et valeurs par défaut dans
 | `BUDGET_MODE` | `strict` (défaut : réservation **avant** chaque appel émis par le framework, usage inconnu = blocage durable) ou `advisory` (enregistre sans bloquer, **aucune garantie**). La garantie porte sur les appels que le framework émet, pas sur un programme du workspace qui disposerait d'une clé : voir [w2-budget](docs/consolidation/w2-budget.md) (transports acceptés et refusés) | |
 | `COLLEGUE_HOME` | Racine de persistance (métriques, checkpoints, **prompts modifiables** ; l'ancien état de prompts d'une installation précédente est repris au premier démarrage, voir [w2-installation](docs/consolidation/w2-installation.md)) | |
 | `CODER_SUBSCRIPTION` (+ `CODER_SUBSCRIPTION_MODEL`, `SANDBOX_SUBSCRIPTION_AUTH_DIR`) | Codage par **abonnement** ChatGPT/Codex (coût API `$0`) au lieu d'une clé | |
-| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **on** par défaut). Distinct de Phase 5 | |
+| `BUILD_AUTO_MERGE` | **Merge-bot de la phase build** (auto-merge des PR de tâches ; **off** par défaut, activation explicite). Ne fusionne que sur preuve de livraison durable, checks requis réussis, base inchangée et protection stricte réellement applicable ([w3-merge](docs/consolidation/w3-merge.md)). Distinct de Phase 5 | `false` |
 | `GATE_ACCEPTANCE_TESTS` | Oracles pytest générés au plan-time par le rôle QA, scellés avec le plan puis rejoués sans LLM (**off** par défaut) | |
 | `SANDBOX_NETWORK` / `SANDBOX_MEMORY` / `SANDBOX_CPUS` / `SANDBOX_TIMEOUT` | Réseau et ressources du conteneur coder | |
 | `AUTO_MERGE_ENABLED` / `AUTO_REVERT_ENABLED` / `PILOT_TOOL_ENABLED` | Capacités autonomes risk-gated (opt-in, **off** par défaut) | |
@@ -202,8 +202,8 @@ durable (Postgres/SQLite) et de sandbox Docker.
 **Sûr par défaut** : un run reste en `dry_run` (aucune écriture) tant qu'on ne passe pas `--execute` ;
 `plan draft` persiste seulement son brouillon durable ; l'opérateur approuve ensuite
 le hash affiché, et seul `plan sync --execute` touche GitHub ;
-budget durable en mode `strict` (pause à l'atteinte d'un plafond ou d'un usage inconnu ; les transports non bornables sont refusés plutôt que prétendus). En BUILD réel, un **merge-bot** auto-merge chaque tâche pour
-construire le MVP (`BUILD_AUTO_MERGE`, on par défaut) ; la phase **amélioration**
+budget durable en mode `strict` (pause à l'atteinte d'un plafond ou d'un usage inconnu ; les transports non bornables sont refusés plutôt que prétendus). En BUILD réel, un **merge-bot** (opt-in : `BUILD_AUTO_MERGE`, **off** par défaut) peut auto-merger chaque tâche pour
+construire le MVP, sur preuve de livraison validée ; la phase **amélioration**
 laisse ses PR **ouvertes pour merge humain** (§6) par défaut. L'auto-merge
 risk-gated Phase 5 est réellement câblé mais reste opt-in : CI complète, SHA stable,
 resync et santé de `main` sont obligatoires. Si cette santé régresse et que

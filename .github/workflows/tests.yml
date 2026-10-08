@@ -91,12 +91,42 @@ jobs:
           pytest tests/test_budget_ledger_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-budget.xml
           python scripts/ci_require_junit.py pg-budget.xml --min-tests 21 --expect-tests "${expected}"
 
+      # Vague 3 : mêmes garanties pour l'état durable de fusion (task_merges : CAS, contraintes, courses d'insertion,
+      # réouverture) et pour la persistance des preuves de livraison (journal de décisions, relecture, concurrence).
+      # Planchers = nombre exact de tests de chaque fichier ; à relever si des cas sont ajoutés, jamais à abaisser.
+      - name: PostgreSQL task merges - real durable-state proof
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          test -n "${COLLEGUE_TEST_POSTGRES_URL:-}"
+          expected="$(pytest tests/test_task_merge_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests PostgreSQL collectés: ${expected}"
+          pytest tests/test_task_merge_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-task-merges.xml
+          python scripts/ci_require_junit.py pg-task-merges.xml --min-tests 23 --expect-tests "${expected}"
+
+      - name: PostgreSQL delivery proofs - real persistence proof
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          test -n "${COLLEGUE_TEST_POSTGRES_URL:-}"
+          expected="$(pytest tests/test_delivery_proof_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests PostgreSQL collectés: ${expected}"
+          pytest tests/test_delivery_proof_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-delivery-proofs.xml
+          python scripts/ci_require_junit.py pg-delivery-proofs.xml --min-tests 5 --expect-tests "${expected}"
+
       - name: Upload PostgreSQL proof report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: postgres-budget-junit-${{ matrix.python-version }}
-          path: pg-budget.xml
+          path: |
+            pg-budget.xml
+            pg-task-merges.xml
+            pg-delivery-proofs.xml
           if-no-files-found: warn
 
       - name: Run pytest with coverage

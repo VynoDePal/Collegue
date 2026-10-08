@@ -16,7 +16,7 @@ from collegue.state.budget_ledger import (
     Settlement,
 )
 from collegue.state.checkpoints import ProjectSnapshot, load_snapshot
-from collegue.state.manager import Phase5IncidentConflictError, ProjectStateManager
+from collegue.state.manager import Phase5IncidentConflictError, ProjectStateManager, TaskMergeConflictError
 from collegue.state.models import (
     PHASE5_ATTENTION,
     PHASE5_HEALTH_PENDING,
@@ -37,6 +37,7 @@ from collegue.state.models import (
     Phase5Incident,
     Project,
     Task,
+    TaskMerge,
 )
 
 __all__ = [
@@ -55,6 +56,8 @@ __all__ = [
     "Settlement",
     "Project",
     "Task",
+    "TaskMerge",
+    "TaskMergeConflictError",
     "Decision",
     "Metric",
     "Checkpoint",
