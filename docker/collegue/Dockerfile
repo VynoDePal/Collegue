@@ -9,8 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+# Dépendances VERROUILLÉES (pyproject.toml -> locks/runtime.txt, hachées, universelles 3.11/3.12) :
+# --require-hashes refuse tout paquet absent du verrou ou à l'empreinte différente ; --no-deps car la
+# fermeture transitive est déjà entièrement épinglée. Le serveur MCP et le dashboard partagent cette image.
+COPY locks/runtime.txt locks/runtime.txt
+RUN pip install --user --no-cache-dir --require-hashes --no-deps -r locks/runtime.txt
 
 # Stage 2: Runtime minimal
 FROM python:3.12-slim
@@ -37,12 +40,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /root/.local /home/collegue/.local
 
 # Copie des fichiers de configuration
-COPY --chown=collegue:collegue requirements.txt entrypoint.sh ./
+COPY --chown=collegue:collegue entrypoint.sh ./
 RUN chmod +x ./entrypoint.sh
 
-# Copie du code source
+# Copie du code source : le paquet embarque ses ressources (skills, graines de prompts, règles IaC,
+# migrations Alembic) résolues par importlib.resources, sans /app/skills ni répertoire courant.
 COPY --chown=collegue:collegue ./collegue ./collegue
-COPY --chown=collegue:collegue ./skills ./skills
 
 EXPOSE ${PORT} ${HEALTH_PORT}
 
