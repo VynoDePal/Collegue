@@ -224,6 +224,13 @@ def test_actor_and_role():
         _client(BranchCommands, lambda e, p: {}).get_collaborator_role("o", "r", "bot")
 
 
+def test_custom_role_with_admin_permission_keeps_its_custom_name():
+    """``permission=admin`` + ``role_name`` personnalisé : le nom personnalisé n'est pas écrasé par « admin »
+    (le rôle effectif reste identifiable ; la politique le présume contournant, voir test_pilot_merge_policy)."""
+    payload = {"permission": "admin", "role_name": "Release-Manager"}
+    assert _client(BranchCommands, lambda e, p: payload).get_collaborator_role("o", "r", "bot") == "release-manager"
+
+
 def test_compare_commits_reports_ancestry_and_validates_shas():
     payload = {"status": "Ahead", "ahead_by": 2, "behind_by": 0, "merge_base_commit": {"sha": SHA_A}}
     client = _client(BranchCommands, lambda e, p: payload)
