@@ -149,6 +149,9 @@ Section ajoutée à l'intégration ; les résultats chiffrés, les SHA et les pr
 (hors dépôt). Les §1 à §6 ci-dessus décrivent la préparation et restent le protocole.
 
 - **Contributions** : lot B `23de03d`, lot A `d0b0aab`, fusionnés `--no-ff` par SHA (B d'abord) sur la base `9862b39`.
+  Le correctif d'usage Python 3.11 de A (`5b8a438`, `sample_with_timeout` : `asyncio.timeout` à la place de `asyncio.wait_for`)
+  est intégré par un second merge `--no-ff` : sous 3.11, `wait_for` exécute la coroutine dans une tâche enfant et l'usage
+  écrit dans la `ContextVar` y restait enfermé. Les suites complètes sont exécutées sous **3.11 et 3.12** avec les verrous.
 - **Raccords mécaniques réalisés** (commits séparés) :
   1. `0011_budget_ledger.py` : `alembic/versions/` → `collegue/migrations/versions/`, mêmes identifiants (`0011`/`0010`), blob
      identique à celui de A au moment du déplacement (le fichier contient la table `budget_blocks` et les champs de claim) ;
