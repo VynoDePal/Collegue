@@ -277,6 +277,146 @@ def case_database_constraints_forbid_an_invented_or_missing_proof(url, manager):
     assert (row.origin, row.state, row.proof_id, row.merge_sha) == ("external", "merged_unsynced", None, MERGE)
 
 
+def _race(manager, *calls):
+    """Exécute les appels dans de VRAIS threads, synchronisés juste après leur premier SELECT sur ``task_merges`` :
+    chacun a donc observé le même état avant que l'un d'eux n'écrive. Aucune méthode produit n'est doublée."""
+    import threading
+
+    from sqlalchemy import event
+
+    barrier = threading.Barrier(len(calls), timeout=20)
+    seen = threading.local()
+
+    def synchronize(conn, cursor, statement, parameters, context, executemany):
+        if "from task_merges" in statement.lower() and not getattr(seen, "observed", False):
+            seen.observed = True
+            barrier.wait()
+
+    with manager.session() as session:
+        engine = session.get_bind()
+    event.listen(engine, "after_cursor_execute", synchronize)
+    outcomes = [None] * len(calls)
+
+    def worker(index, call):
+        try:
+            outcomes[index] = ("ok", call())
+        except TaskMergeConflictError as exc:
+            outcomes[index] = ("conflict", exc)
+        except Exception as exc:  # noqa: BLE001 - toute autre erreur est un échec du test
+            outcomes[index] = ("error", exc)
+
+    threads = [threading.Thread(target=worker, args=(i, c)) for i, c in enumerate(calls)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+    finally:
+        event.remove(engine, "after_cursor_execute", synchronize)
+    assert all(o is not None and o[0] != "error" for o in outcomes), outcomes
+    return outcomes
+
+
+def _identity(row):
+    return (row.origin, row.pr_number, row.merge_sha, row.head_sha)
+
+
+def case_race_same_external_identity_is_idempotent_for_both_callers(url, manager):
+    _, task_id = _task(manager)
+    out = _race(
+        manager,
+        lambda: _begin_external(manager, task_id),
+        lambda: _begin_external(manager, task_id),
+    )
+    assert [kind for kind, _ in out] == ["ok", "ok"]
+    assert all(_identity(row) == ("external", 11, MERGE, None) for _, row in out)
+    assert manager.get_task_merge(task_id).revision == 0
+
+
+def case_race_two_external_identities_give_one_winner_and_one_conflict(url, manager):
+    _, task_id = _task(manager)
+    out = _race(
+        manager,
+        lambda: _begin_external(manager, task_id, pr_number=11, merge_sha=H1),
+        lambda: _begin_external(manager, task_id, pr_number=12, merge_sha=H2),
+    )
+    kinds = sorted(kind for kind, _ in out)
+    assert kinds == ["conflict", "ok"], out
+    (winner,) = [row for kind, row in out if kind == "ok"]
+    stored = manager.get_task_merge(task_id)
+    assert (stored.pr_number, stored.merge_sha) == (winner.pr_number, winner.merge_sha), "jamais l'identité d'un autre"
+    assert (winner.pr_number, winner.merge_sha) in {(11, H1), (12, H2)}
+
+
+def case_race_two_engine_intentions_give_one_winner_and_one_conflict(url, manager):
+    _, task_id = _task(manager)
+    out = _race(
+        manager,
+        lambda: _begin(manager, task_id, head_sha=H1),
+        lambda: _begin(manager, task_id, head_sha=H2),
+    )
+    assert sorted(kind for kind, _ in out) == ["conflict", "ok"], out
+    (winner,) = [row for kind, row in out if kind == "ok"]
+    assert manager.get_task_merge(task_id).head_sha == winner.head_sha
+
+
+def case_race_engine_and_external_origins_never_share_a_row(url, manager):
+    _, task_id = _task(manager)
+    out = _race(
+        manager,
+        lambda: _begin(manager, task_id),
+        lambda: _begin_external(manager, task_id),
+    )
+    assert sorted(kind for kind, _ in out) == ["conflict", "ok"], out
+    (winner,) = [row for kind, row in out if kind == "ok"]
+    stored = manager.get_task_merge(task_id)
+    assert stored.origin == winner.origin and stored.state == winner.state
+    if stored.origin == "external":
+        assert stored.proof_id is None
+    else:
+        assert stored.proof_id == PROOF
+
+
+def case_race_reopening_an_abandoned_cycle_never_replaces_the_winner_silently(url, manager):
+    _, task_id = _task(manager)
+    row = _begin(manager, task_id)
+    manager.transition_task_merge(
+        task_id, expected_state=row.state, expected_revision=row.revision, new_state="abandoned"
+    )
+    base_revision = manager.get_task_merge(task_id).revision
+    out = _race(
+        manager,
+        lambda: _begin_external(manager, task_id, pr_number=21, merge_sha=H1),
+        lambda: _begin_external(manager, task_id, pr_number=22, merge_sha=H2),
+    )
+    assert sorted(kind for kind, _ in out) == ["conflict", "ok"], out
+    (winner,) = [row for kind, row in out if kind == "ok"]
+    stored = manager.get_task_merge(task_id)
+    assert (stored.pr_number, stored.merge_sha) == (winner.pr_number, winner.merge_sha)
+    assert stored.revision == base_revision + 1, "une seule réouverture a eu lieu"
+
+
+def case_race_reopening_a_synced_cycle_between_engine_and_external_has_one_winner(url, manager):
+    _, task_id = _task(manager)
+    first = _begin_external(manager, task_id)
+    manager.transition_task_merge(
+        task_id,
+        expected_state="merged_unsynced",
+        expected_revision=first.revision,
+        new_state="synced",
+        complete_task=True,
+    )
+    out = _race(
+        manager,
+        lambda: _begin(manager, task_id, pr_number=31, head_sha=H1),
+        lambda: _begin_external(manager, task_id, pr_number=32, merge_sha=H2),
+    )
+    assert sorted(kind for kind, _ in out) == ["conflict", "ok"], out
+    (winner,) = [row for kind, row in out if kind == "ok"]
+    stored = manager.get_task_merge(task_id)
+    assert _identity(stored) == _identity(winner) and stored.revision == first.revision + 2
+
+
 def case_exactly_one_of_many_concurrent_processes_wins_the_compare_and_set(url, manager):
     _, task_id = _task(manager)
     _begin(manager, task_id)

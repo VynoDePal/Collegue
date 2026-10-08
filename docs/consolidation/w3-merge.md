@@ -116,6 +116,13 @@ blocage survit au redémarrage :
 
 Les gardes budget/deadline ne sont pas touchées (la reprise ne dépense rien et précède la boucle).
 
+Concurrence sur `task_merges` : deux appelants qui voient la même ligne absente puis insèrent ne partagent jamais une identité.
+Le repli sur `IntegrityError` de `begin_task_merge` / `begin_external_task_merge` ne réutilise la ligne gagnante que si son
+`origin` ET son identité exacte (PR + SHA de fusion, ou intention moteur complète) sont ceux demandés ; sinon
+`TaskMergeConflictError`. La réouverture d'une ligne `synced`/`abandoned` est un UPDATE conditionnel sur (état, révision) lus :
+un perdant échoue en conflit au lieu d'écraser silencieusement le gagnant. Prouvé par de vrais threads (barrière après le
+premier SELECT) sur SQLite et PostgreSQL réel (`task_merge_contract.py`, cas `race_*`).
+
 Procédure opérateur : un cycle `attention` n'est levé que par `acknowledge_task_merge` après inspection ; la ligne est alors
 supprimée, la tâche reste `in_review` et la passe suivante revalide la PR (preuve, base, checks) ou, si elle a été fusionnée
 hors moteur, la réconcilie comme ci-dessus, **après** resynchronisation prouvée du clone.

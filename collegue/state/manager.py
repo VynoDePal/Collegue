@@ -541,15 +541,17 @@ class ProjectStateManager:
                 if existing.state == TASK_MERGE_ABANDONED or (
                     existing.state == TASK_MERGE_SYNCED and not same_identity
                 ):
-                    for key, value in payload.items():
-                        setattr(existing, key, value)
-                    existing.origin = TASK_MERGE_ORIGIN_ENGINE
-                    existing.state = TASK_MERGE_PENDING
-                    existing.revision = existing.revision + 1
-                    existing.merge_sha = None
-                    existing.last_error = None
-                    s.flush()
-                    return existing
+                    return self._reopen_task_merge(
+                        s,
+                        existing,
+                        {
+                            **payload,
+                            "origin": TASK_MERGE_ORIGIN_ENGINE,
+                            "state": TASK_MERGE_PENDING,
+                            "merge_sha": None,
+                            "last_error": None,
+                        },
+                    )
                 if existing.state == TASK_MERGE_PENDING and all(getattr(existing, k) == v for k, v in payload.items()):
                     return existing
                 raise TaskMergeConflictError(
@@ -559,9 +561,13 @@ class ProjectStateManager:
                 )
         except IntegrityError as exc:
             existing = self.get_task_merge(task_id)
-            if existing is not None and existing.state == TASK_MERGE_PENDING:
-                if all(getattr(existing, k) == v for k, v in payload.items()):
-                    return existing
+            if (
+                existing is not None
+                and existing.origin == TASK_MERGE_ORIGIN_ENGINE
+                and existing.state == TASK_MERGE_PENDING
+                and all(getattr(existing, k) == v for k, v in payload.items())
+            ):
+                return existing  # même identité exacte : l'autre appelant a déjà écrit la même intention
             raise TaskMergeConflictError(f"création concurrente d'un cycle de fusion pour la tâche {task_id}") from exc
 
     def begin_external_task_merge(
@@ -625,12 +631,9 @@ class ProjectStateManager:
                 if existing.state in (TASK_MERGE_ABANDONED, TASK_MERGE_SYNCED) and not (
                     existing.state == TASK_MERGE_SYNCED and same
                 ):
-                    for key, value in {**anchors_cleared, **payload}.items():
-                        setattr(existing, key, value)
-                    existing.state = TASK_MERGE_UNSYNCED
-                    existing.revision = existing.revision + 1
-                    s.flush()
-                    return existing
+                    return self._reopen_task_merge(
+                        s, existing, {**anchors_cleared, **payload, "state": TASK_MERGE_UNSYNCED}
+                    )
                 if existing.state == TASK_MERGE_UNSYNCED and same:
                     return existing
                 raise TaskMergeConflictError(
@@ -639,11 +642,39 @@ class ProjectStateManager:
                 )
         except IntegrityError as exc:
             existing = self.get_task_merge(task_id)
-            if existing is not None and existing.state == TASK_MERGE_UNSYNCED:
-                return existing
+            if (
+                existing is not None
+                and existing.origin == TASK_MERGE_ORIGIN_EXTERNAL
+                and existing.state == TASK_MERGE_UNSYNCED
+                and all(getattr(existing, k) == v for k, v in payload.items())
+            ):
+                return existing  # même origine ET identité exacte (PR + SHA) : idempotence
             raise TaskMergeConflictError(
                 f"enregistrement concurrent de la fusion externe de la tâche {task_id}"
             ) from exc
+
+    @staticmethod
+    def _reopen_task_merge(s: Session, existing: TaskMerge, values: dict) -> TaskMerge:
+        """Réouvre une ligne ``synced``/``abandoned`` par UPDATE conditionnel (état + révision LUS).
+
+        Un autre appelant qui a modifié la ligne entre notre lecture et cette écriture fait échouer le CAS
+        (:class:`TaskMergeConflictError`) : aucune identité n'en remplace silencieusement une autre."""
+        expected_state, expected_revision = existing.state, existing.revision
+        result = s.execute(
+            update(TaskMerge)
+            .where(
+                TaskMerge.task_id == existing.task_id,
+                TaskMerge.state == expected_state,
+                TaskMerge.revision == expected_revision,
+            )
+            .values(**values, revision=expected_revision + 1, updated_at=datetime.now(timezone.utc))
+        )
+        if result.rowcount != 1:
+            raise TaskMergeConflictError(
+                f"réouverture concurrente du cycle de fusion de la tâche {existing.task_id} (état/révision périmés)"
+            )
+        s.refresh(existing)
+        return existing
 
     def get_task_merge(self, task_id: int) -> Optional[TaskMerge]:
         with self.session() as s:
