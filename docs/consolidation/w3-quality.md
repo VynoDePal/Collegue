@@ -79,6 +79,11 @@ verdict obligatoire déclaré `required=False` ne la satisfait pas, `ProofDraft.
 oracle est **déduit de ses faits** (`derive_oracle_passed` : candidat vert avec ≥ 1 test exécuté, tous réussis, rien d'ignoré ni en
 erreur ; contrat courant : préimage rouge par assertion avec `échecs == assertions`, sans erreur de collecte) et jamais de son
 booléen `passed` ; `persist_delivery_proof` et `load_delivery_proof` refusent toute preuve dont l'un de ces invariants est faux.
+Les faits eux-mêmes doivent être POSSIBLES et à leur place (`run_facts_error`) : la préimage porte la phase `preimage` et le
+candidat la phase `candidate` ; compteurs entiers positifs ou nuls (relus en JSON strict : ni chaîne, ni flottant, ni booléen) ;
+`passed`, `failed`, `xpassed` ≤ `executed` et `passed + failed` ≤ `executed` ; `assertion_failures` ≤ `failed` ; pas plus de noms de
+tests que de tests exécutés ; statut connu et compatible (`green` sans échec ni assertion, `red-assertion` n'a que des échecs
+d'assertion). Cela vaut aussi pour une exécution facultative (préimage d'un contrat livré) et pour un rôle inconnu.
 
 `passed` est **dérivé** (`derive_passed`) : tous les verdicts requis passent ET toutes les obligations de phase sont
 présentes (BUILD : `content_integrity`, `tests`, `review` ; IMPROVE : + `coverage`, `secret_scan`) ET, si des contrats sont

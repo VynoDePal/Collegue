@@ -466,6 +466,128 @@ def test_the_oracle_verdict_is_deduced_from_its_facts_not_from_its_boolean():
     assert derive_oracle_passed(delivered) is True  # un contrat livré n'est pas exigé rouge
 
 
+IMPOSSIBLE_FACTS = {
+    # contradictions de la sonde manager
+    "rouge : failed=2 pour executed=1": dict(
+        preimage=_facts(phase="preimage", status="red-assertion", executed=1, failed=2, assertion_failures=2)
+    ),
+    "rouge : préimage portant la phase candidate": dict(
+        preimage=_facts(phase="candidate", status="red-assertion", executed=1, failed=1, assertion_failures=1)
+    ),
+    "vert : candidat portant la phase preimage": dict(
+        candidate=_facts(phase="preimage", status="green", executed=1, passed=1)
+    ),
+    "vert : assertion_failures=1 sans échec": dict(
+        candidate=_facts(status="green", executed=1, passed=1, failed=0, assertion_failures=1)
+    ),
+    # invariants voisins : comptes, sommes, statut/compteurs
+    "compte négatif": dict(candidate=_facts(status="green", executed=1, passed=1, errors=-1)),
+    "compte négatif d'exécution": dict(candidate=_facts(status="green", executed=-1, passed=-1)),
+    "compte booléen": dict(candidate=_facts(status="green", executed=True, passed=True)),
+    "compte flottant": dict(candidate=_facts(status="green", executed=1.0, passed=1)),
+    "passed supérieur à executed": dict(candidate=_facts(status="green", executed=1, passed=2)),
+    "passed + failed supérieur à executed": dict(
+        preimage=_facts(phase="preimage", status="red-assertion", executed=2, passed=1, failed=2, assertion_failures=2)
+    ),
+    "assertion_failures supérieur à failed": dict(
+        preimage=_facts(phase="preimage", status="red-assertion", executed=2, failed=1, assertion_failures=2)
+    ),
+    "xpassed supérieur à executed": dict(candidate=_facts(status="green", executed=1, passed=1, xpassed=2)),
+    "plus de noms de tests que de tests exécutés": dict(
+        candidate=_facts(status="green", executed=1, passed=1, tests=("a", "b"))
+    ),
+    "statut inconnu": dict(candidate=_facts(status="presque-vert", executed=1, passed=1)),
+    "préimage rouge avec un test passé en trop": dict(
+        preimage=_facts(phase="preimage", status="red-assertion", executed=1, passed=1, failed=1, assertion_failures=1)
+    ),
+}
+
+
+@pytest.mark.parametrize("label", sorted(IMPOSSIBLE_FACTS))
+def test_impossible_or_misplaced_oracle_facts_are_never_promotable(bench, state_url, label):
+    """Faits impossibles (comptes contradictoires, mauvaise phase, statut incompatible) : ni verdict, ni persistance, ni relecture."""
+    from collegue.executor.delivery_proof import derive_oracle_passed
+
+    oracle = _evidence(**IMPOSSIBLE_FACTS[label])
+    assert derive_oracle_passed(oracle) is False, label
+    manager = ProjectStateManager.from_url(state_url, create=True)
+    project_id = manager.create_project(name="faits-impossibles")
+    draft = ProofDraft(phase=PHASE_BUILD, content=seal_tested_content(bench.ws.path), contracts_required=True)
+    for name in MANDATORY_VERDICTS[PHASE_BUILD]:
+        draft.add(name, True)
+    draft.add("contracts", True, "l'appelant affirme que les contrats passent")
+    draft.oracles.append(oracle)  # passed=True fourni par l'appelant
+    assert draft.passed is False
+    proof = seal_proof(
+        draft, owner=OWNER, repo=REPO, project_id=project_id, pr_number=7, head_sha="1" * 40, base_sha="2" * 40
+    )
+    assert proof.passed is False
+    with pytest.raises(DeliveryProofError):
+        persist_delivery_proof(manager, proof)
+    assert manager.get_decision_journal(project_id, "delivery-proof") == []
+
+
+def test_possible_facts_with_the_right_phases_stay_promotable():
+    from collegue.executor.delivery_proof import derive_oracle_passed
+
+    assert derive_oracle_passed(_evidence()) is True  # rouge par assertion (préimage) puis vert (candidat)
+    mixed = _evidence(
+        preimage=_facts(
+            phase="preimage",
+            status="red-assertion",
+            executed=3,
+            passed=2,
+            failed=1,
+            assertion_failures=1,
+            tests=("a", "b", "c"),
+        ),
+        candidate=_facts(status="green", executed=3, passed=3, tests=("a", "b", "c")),
+    )
+    assert derive_oracle_passed(mixed) is True  # un rouge peut compter des tests réussis à côté de l'assertion en échec
+    delivered = _evidence(role="delivered", expected_preimage="not-required", preimage=None)
+    assert derive_oracle_passed(delivered) is True
+    wrong_phase_delivered = _evidence(
+        role="delivered",
+        expected_preimage="not-required",
+        preimage=_facts(
+            phase="candidate", status="green", executed=1, passed=1
+        ),  # même facultative, une préimage porte sa phase
+    )
+    assert derive_oracle_passed(wrong_phase_delivered) is False
+    assert derive_oracle_passed(_evidence(role="reviewer")) is False  # rôle inconnu
+
+
+def test_a_reloaded_record_with_untyped_counters_is_refused(bench, state_url):
+    """Compteurs relus : entiers stricts, positifs ou nuls (pas de chaîne, de flottant, de booléen ni de négatif)."""
+    from collegue.executor.delivery_proof import _canonical, _record_without_id
+
+    manager = ProjectStateManager.from_url(state_url, create=True)
+    project_id = manager.create_project(name="comptes-relus")
+    content = seal_tested_content(bench.ws.path)
+    draft = ProofDraft(phase=PHASE_BUILD, content=content, contracts_required=True)
+    for name in MANDATORY_VERDICTS[PHASE_BUILD]:
+        draft.add(name, True)
+    draft.add("contracts", True, "ok")
+    draft.oracles.append(_evidence())
+    proof = seal_proof(
+        draft, owner=OWNER, repo=REPO, project_id=project_id, pr_number=7, head_sha="1" * 40, base_sha="2" * 40
+    )
+    assert proof.passed is True
+    persist_delivery_proof(manager, proof)  # témoin : l'enregistrement honnête est accepté
+    assert load_delivery_proof(manager, project_id, owner=OWNER, repo=REPO, pr_number=7, head_sha="1" * 40) == proof
+    for index, bad in enumerate(("1", 1.0, True, -1, None)):
+        record = _record_without_id(proof)
+        record["proof_id"] = proof.proof_id
+        record["oracles"][0]["candidate"]["executed"] = bad
+        head = f"{index + 3:040x}"
+        record["head_sha"] = head
+        manager.record_decision(
+            project_id, f"delivery-proof:v1:{OWNER}/{REPO}#7@{head}:{proof.proof_id}", _canonical(record)
+        )
+        with pytest.raises(DeliveryProofError):
+            load_delivery_proof(manager, project_id, owner=OWNER, repo=REPO, pr_number=7, head_sha=head)
+
+
 def test_an_inconsistent_oracle_cannot_make_a_proof_pass_be_persisted_or_be_loaded(bench, state_url):
     manager = ProjectStateManager.from_url(state_url, create=True)
     project_id = manager.create_project(name="invariants")

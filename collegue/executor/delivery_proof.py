@@ -190,6 +190,50 @@ class ProofDraft:
         return derive_passed(tuple(self.verdicts), tuple(self.oracles), self.phase, self.contracts_required)
 
 
+_COUNTERS = (
+    "executed",
+    "passed",
+    "failed",
+    "assertion_failures",
+    "skipped",
+    "xfailed",
+    "xpassed",
+    "collection_errors",
+    "errors",
+)
+_RUN_STATUSES = ("green", "red-assertion", "invalid")
+
+
+def run_facts_error(run: OracleRun, expected_phase: str) -> str:
+    """Motif pour lequel les faits d'une exécution sont IMPOSSIBLES ou à la mauvaise place ; ``""`` si cohérents.
+
+    Une exécution porte la phase qu'on lui prête (``preimage`` / ``candidate``), un statut connu, des compteurs entiers
+    positifs ou nuls (ni booléen, ni flottant) et des sommes plausibles : ``passed``, ``failed`` et ``xpassed`` ne dépassent
+    pas ``executed`` (les tests exécutés en phase call), leur somme non plus, ``assertion_failures`` ≤ ``failed``, et pas plus
+    de noms de tests que de tests exécutés. Un statut ne peut pas contredire ses compteurs : ``green`` n'a ni échec, ni
+    assertion, ni erreur ; ``red-assertion`` n'a que des échecs d'assertion.
+    """
+    if run.phase != expected_phase:
+        return f"exécution portant la phase {run.phase!r} à la place de {expected_phase!r}"
+    if run.status not in _RUN_STATUSES:
+        return f"statut d'exécution inconnu {run.status!r}"
+    for name in _COUNTERS:
+        value = getattr(run, name)
+        if type(value) is not int or value < 0:
+            return f"compteur {name} invalide ({value!r})"
+    if run.passed > run.executed or run.failed > run.executed or run.xpassed > run.executed:
+        return "compteur supérieur au nombre de tests exécutés"
+    if run.passed + run.failed > run.executed:
+        return "tests réussis + échoués supérieurs au nombre de tests exécutés"
+    if run.assertion_failures > run.failed:
+        return "plus d'échecs d'assertion que d'échecs"
+    if len(run.tests) > run.executed:
+        return "plus de noms de tests que de tests exécutés"
+    if run.status == "green" and (run.failed or run.assertion_failures):
+        return "statut green avec des échecs"
+    return ""
+
+
 def _run_is_green(run: Optional[OracleRun]) -> bool:
     """Un candidat est vert si des tests ont RÉELLEMENT tourné, tous réussis, sans rien d'ignoré ni d'en erreur."""
     return (
@@ -198,6 +242,7 @@ def _run_is_green(run: Optional[OracleRun]) -> bool:
         and run.executed >= 1
         and run.passed == run.executed
         and run.failed == 0
+        and run.assertion_failures == 0
         and run.skipped == 0
         and run.xfailed == 0
         and run.xpassed == 0
@@ -228,10 +273,17 @@ def derive_oracle_passed(oracle: OracleEvidence) -> bool:
     Candidat vert ; si la preuve négative est exigée (contrat courant) : préimage rouge par assertion. Le rôle ``current``
     exige toujours la preuve négative ; un contrat déjà livré n'est pas exigé rouge.
     """
+    if oracle.role not in ("current", "delivered"):
+        return False
     if oracle.role == "current" and oracle.expected_preimage != "red-assertion":
         return False
     if oracle.expected_preimage not in ("red-assertion", "not-required"):
         return False
+    # Faits impossibles ou à la mauvaise place (phase, compteurs, sommes, statut) : jamais promouvable, y compris pour une
+    # exécution facultative (préimage d'un contrat livré).
+    for run, phase in ((oracle.preimage, "preimage"), (oracle.candidate, "candidate")):
+        if run is not None and run_facts_error(run, phase):
+            return False
     if not _run_is_green(oracle.candidate):
         return False
     if oracle.expected_preimage == "red-assertion":
@@ -699,6 +751,13 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _strict_count(value: Any, name: str) -> int:
+    """Compteur relu : entier JSON strict, positif ou nul (ni chaîne, ni flottant, ni booléen, ni négatif)."""
+    if type(value) is not int or value < 0:
+        raise ValueError(f"compteur {name} invalide ({value!r})")
+    return value
+
+
 def _run_from(record: Any) -> Optional[OracleRun]:
     if record is None:
         return None
@@ -709,15 +768,7 @@ def _run_from(record: Any) -> Optional[OracleRun]:
             phase=str(record["phase"]),
             status=str(record["status"]),
             reason=str(record.get("reason", "")),
-            executed=int(record["executed"]),
-            passed=int(record["passed"]),
-            failed=int(record["failed"]),
-            assertion_failures=int(record["assertion_failures"]),
-            skipped=int(record["skipped"]),
-            xfailed=int(record["xfailed"]),
-            xpassed=int(record["xpassed"]),
-            collection_errors=int(record["collection_errors"]),
-            errors=int(record["errors"]),
+            **{name: _strict_count(record[name], name) for name in _COUNTERS},
             tests=tuple(str(t) for t in record.get("tests", ())),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -798,6 +849,12 @@ def _validate(proof: DeliveryProof) -> None:
         for label in ("source_sha256", "contract_sha256", "provenance_sha256"):
             if not _SHA256_RE.fullmatch(getattr(oracle, label)):
                 raise _bad(f"empreinte d'oracle invalide ({label})")
+        if type(oracle.task_id) is not int or oracle.task_id <= 0 or type(oracle.passed) is not bool:
+            raise _bad("identifiant ou verdict d'oracle mal typé")
+        for run, phase in ((oracle.preimage, "preimage"), (oracle.candidate, "candidate")):
+            problem = run_facts_error(run, phase) if run is not None else ""
+            if problem:
+                raise _bad(f"faits impossibles pour l'oracle de la tâche {oracle.task_id} : {problem}")
         if bool(oracle.passed) != derive_oracle_passed(oracle):
             raise _bad(
                 f"verdict de l'oracle de la tâche {oracle.task_id} incohérent avec ses faits "
