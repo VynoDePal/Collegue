@@ -23,8 +23,9 @@ RUN apt-get update \
         tmux \
     && rm -rf /var/lib/apt/lists/*
 
-# uv : resolver/install rapide et capable du closure otel d'OpenHands.
-COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /usr/local/bin/uv
+# uv : resolver/install rapide et capable du closure otel d'OpenHands. Version EXACTE = scripts/locks.py
+# (UV_VERSION) ; ≥ 0.11.15 : 0.9.28 était affecté par GHSA-pjjw-68hj-v9mw et GHSA-4gg8-gxpx-9rph.
+COPY --from=ghcr.io/astral-sh/uv:0.11.33 /uv /usr/local/bin/uv
 
 # Closure COMPLÈTE verrouillée et hachée (locks/sandbox-openhands.txt, groupe « sandbox-openhands » de
 # pyproject.toml) : OpenHands 1.7.0 + SDK/tools 1.19.1 + lmnr 0.7.52 (la 0.7.53 a retiré

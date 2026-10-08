@@ -42,7 +42,34 @@ l'en-tête) rend la résolution rejouable.
 pip install --require-hashes --no-deps -r locks/<cible>.txt
 ```
 
-Chaque verrou commence par un en-tête (`target`, `source-sha256`, `exclude-newer`, version d'`uv`).
+Chaque verrou commence par un en-tête (`target`, `source-sha256`, `exclude-newer`, version d'`uv` qui l'a généré — informatif,
+ignoré par la comparaison).
+
+### uv de résolution : version exacte et corrigée
+
+Le job `Dependency audit` installe `uv` dans l'environnement qu'il audite (`pip-audit --strict --desc`), et la même version est
+copiée dans `docker/sandbox/Dockerfile.openhands`. La version **0.9.28** initialement épinglée était affectée par
+**GHSA-pjjw-68hj-v9mw** (suppression hors du préfixe lors d'une désinstallation, corrigé en 0.11.6) et
+**GHSA-4gg8-gxpx-9rph** (entry points écrits hors du répertoire de scripts, corrigé en 0.11.15) : le job était rouge (PR #610,
+run 37822037891). La version exacte est désormais **`0.11.33`**, source unique `UV_VERSION` dans `scripts/locks.py` :
+
+| Où | Forme |
+|---|---|
+| `scripts/locks.py` | `UV_VERSION = "0.11.33"` ; `UV_MIN_SAFE_VERSION = "0.11.15"` (plancher interdisant de revenir à une version affectée) ; `python scripts/locks.py uv-version` l'affiche |
+| `.github/workflows/tests.yml` (job `Dependency audit`) | `pip install uv==0.11.33` |
+| `docker/sandbox/Dockerfile.openhands` | `COPY --from=ghcr.io/astral-sh/uv:0.11.33 /uv …` |
+
+`generate` et `check --recompile` **refusent** tout autre `uv` (message explicite, avant toute résolution). `uv` reste installé
+dans l'environnement audité : l'audit n'a pas été contourné (ni avis ignoré, ni `--strict` relâché, ni paquet exclu). Des tests
+font échouer la suite si le workflow, le Dockerfile et `UV_VERSION` divergent ou si la version passe sous le plancher.
+
+**Résolution inchangée** : les six verrous sont reproduits à l'identique (à la ligne `# uv:` près) par `uv 0.11.33` ; aucun
+verrou n'a été modifié. Pour cela la résolution ignore désormais le cache d'`uv` (`--no-cache`) : avec un cache chaud issu d'une
+autre version, `uv` écrivait autrement les marqueurs des paquets `pyobjc-*` (macOS) du verrou OpenHands (mêmes noms, versions et
+empreintes, marqueurs réécrits) — la résolution ne doit dépendre ni de la machine ni de l'historique du cache.
+
+Pour changer de version d'`uv` : mettre à jour `UV_VERSION`, le workflow et le Dockerfile ensemble, relancer
+`python scripts/locks.py check --recompile` avec cette version et, en cas de différence, `generate` puis examiner chaque changement.
 
 ### Commandes
 
@@ -72,7 +99,7 @@ copies dérivées : `tests/test_dependency_locks.py`).
 `observe(rollout_entrypoint=…)`), `opentelemetry-semantic-conventions==0.60b1`, `pytest<9` et `pytest-asyncio==0.23.6`
 (pytest 9.0 a retiré `FixtureDef`). Closure séparée (résolution en 3.12, `docker/sandbox/Dockerfile.openhands` est
 `python:3.12-slim`) : la closure OpenHands est incompatible avec 3.11 et ne contamine pas le runtime. Le Dockerfile installe
-d'abord le verrou (un seul `uv pip install --require-hashes`, `uv` épinglé à 0.9.28), **puis** exécute le patch, qui
+d'abord le verrou (un seul `uv pip install --require-hashes`, `uv` épinglé à `0.11.33`, voir « uv de résolution »), **puis** exécute le patch, qui
 vérifie toujours versions et SHA-256 de la source : le patch n'est pas désactivé, une dérive casse le build. Le test
 `test_openhands_lock_keeps_the_versions_required_by_the_gemma4_patch` fait échouer la suite si le verrou s'en écarte.
 La CI reste la preuve de construction de l'image (pas d'installation OpenHands locale).
