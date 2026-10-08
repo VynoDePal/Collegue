@@ -23,6 +23,16 @@ GIT_CONTROL_MARKER = ex.GIT_CONTROL_MARKER
 HOME = {"HOME": "/home/worker"}  # hors /tmp : requis par subscription_auth_dir
 
 
+_ORDINARY_ROOT: list = [None]
+
+
+@pytest.fixture(autouse=True)
+def _ordinary_root(tmp_path_factory):
+    _ORDINARY_ROOT[0] = tmp_path_factory.mktemp("ordinary-workspaces")
+    yield
+    _ORDINARY_ROOT[0] = None
+
+
 def _make_control(parent: Path, name: str = "workspace") -> tuple[Path, Path]:
     """Layout d'un workspace géré sous ``parent`` : (workspace, contrôle frère marqué)."""
     workspace = parent / name
@@ -48,7 +58,7 @@ def _sandbox(kind: str, mounted: Path):
     """Sandbox dont le montage ``kind`` pointe ``mounted`` ; les deux autres restent ordinaires."""
     if kind == "workspace":
         return DockerSandbox(env=HOME), mounted
-    ordinary = mounted.parent / f"ordinary-{kind}"
+    ordinary = _ORDINARY_ROOT[0] / f"ordinary-{kind}"  # indépendant du chemin monté (parent fermé, fichier…)
     ordinary.mkdir(parents=True, exist_ok=True)
     if kind == "pip_cache":
         return DockerSandbox(pip_cache_dir=str(mounted), env=HOME), ordinary
@@ -273,8 +283,12 @@ def test_symlink_loops_and_links_to_the_control_are_not_followed_and_do_not_hang
     argv = _argv(kind, tree)
 
     assert f"{os.path.realpath(tree)}:" in " ".join(argv)
-    # seul l'arbre monté est listé : jamais la cible d'un lien
-    assert all(os.path.realpath(p).startswith(os.path.realpath(tree)) for p in visited), visited
+    # seul l'arbre monté (et le workspace ordinaire des autres types) est listé : jamais la cible d'un lien
+    allowed = (os.path.realpath(tree), os.path.realpath(_ORDINARY_ROOT[0]))
+    assert all(
+        any(os.path.realpath(p) == a or os.path.realpath(p).startswith(a + os.sep) for a in allowed) for p in visited
+    ), visited
+    assert not any(os.path.realpath(p) in (os.path.realpath(parent), "/") for p in visited), visited
 
 
 def _git_source(tmp_path: Path) -> str:
@@ -518,3 +532,209 @@ def test_sampling_absent_auth_dir_stays_compatible(tmp_path, sampler_script):
     calls = []
     assert _sample(_sampling_ctx(tmp_path / "not" / "yet", sampler_script, calls)) == "ok"
     assert len(calls) == 1
+
+
+# --- erreurs de stat/résolution : jamais lues comme une absence ---------------------------------------
+#
+# ``os.path.lexists`` / ``isdir`` avalent ``PermissionError`` : un contrôle sous un parent non
+# traversable paraissait absent, et le démon Docker (qui résout le bind avec SES privilèges) pouvait le
+# monter. Seule une absence ÉTABLIE (ENOENT / ENOTDIR) autorise le chemin « à créer ».
+#
+# Preuve : en non-root, vraies permissions (``chmod 000``, uid courant) ; en root (CI) ``chmod`` est
+# sans effet, donc la même situation est reproduite par injection d'EACCES sur ``lstat/stat/scandir``.
+# Aucun cas n'est ignoré (pas de skip) ; ``record_property('proof', …)`` rend la nature de la preuve visible.
+
+PROOF_REAL = "real-permissions-uid-nonroot"
+PROOF_INJECTED = "injected-eacces-root"
+# Root (CI) : ``chmod`` est sans effet → injection. ``COLLEGUE_FORCE_INJECTED_EACCES=1`` force aussi la
+# branche injection en non-root, pour l'exercer sans être root (la preuve réelle reste le défaut).
+_INJECT_ACCESS = os.getuid() == 0 or os.environ.get("COLLEGUE_FORCE_INJECTED_EACCES") == "1"
+
+
+@pytest.fixture
+def closed_tree(tmp_path, monkeypatch, record_property):
+    """``root/closed`` est NON traversable ; ``closed/workspace.control`` (marqué) est dedans."""
+    root = tmp_path / "root"
+    closed = root / "closed"
+    control = closed / "workspace.control"
+    control.mkdir(parents=True)
+    (control / GIT_CONTROL_MARKER).write_text("managed\n")
+    (control / "objects").mkdir()
+    prefix = str(closed) + os.sep
+    if _INJECT_ACCESS:
+        record_property("proof", PROOF_INJECTED)
+        real_lstat, real_stat, real_scandir = os.lstat, os.stat, os.scandir
+
+        def denied(path) -> bool:
+            text = os.fspath(path) if not isinstance(path, int) else ""
+            text = os.path.abspath(text)
+            return text.startswith(prefix) or text == str(closed) + "/."
+
+        def lstat(path, *a, **k):
+            if denied(path):
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return real_lstat(path, *a, **k)
+
+        def stat(path, *a, **k):
+            if denied(path):
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return real_stat(path, *a, **k)
+
+        def scandir(path="."):
+            if os.path.abspath(os.fspath(path)) == str(closed) or denied(path):
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "lstat", lstat)
+        monkeypatch.setattr(os, "stat", stat)
+        monkeypatch.setattr(os, "scandir", scandir)
+        yield closed, control
+        return
+    record_property("proof", PROOF_REAL)
+    closed.chmod(0)
+    try:
+        yield closed, control
+    finally:
+        closed.chmod(0o700)  # pour que tmp_path puisse être nettoyé
+
+
+def test_the_proof_kind_is_identifiable(closed_tree, record_property):
+    """Le journal dit explicitement si la preuve est réelle (uid non-root) ou injectée (root)."""
+    expected = PROOF_INJECTED if _INJECT_ACCESS else PROOF_REAL
+    record_property("proof_expected", expected)
+    if not _INJECT_ACCESS:
+        with pytest.raises(PermissionError):
+            os.lstat(closed_tree[1])  # la permission est RÉELLEMENT refusée par le noyau
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_control_behind_an_inaccessible_parent_is_never_mounted(closed_tree, kind):
+    closed, control = closed_tree
+    _assert_refused(kind, control, match="vérification")
+    _assert_refused(kind, control / "objects", match="vérification")  # sous-chemin du contrôle
+    _assert_refused(kind, closed / "workspace.control" / "absent", match="vérification")
+    _assert_refused(kind, closed / "other-project", match="vérification")  # « à créer » sous un parent fermé
+    _assert_refused(kind, closed, match="vérification")  # le parent fermé lui-même (scan impossible)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_alias_through_an_inaccessible_parent_is_refused(closed_tree, tmp_path, kind):
+    _closed, control = closed_tree
+    alias = tmp_path / "alias-to-control"
+    os.symlink(control, alias)  # le lien est lisible, sa cible ne l'est pas
+    _assert_refused(kind, alias, match="vérification")
+
+
+def test_run_command_never_emits_docker_for_a_control_behind_an_inaccessible_parent(closed_tree, monkeypatch):
+    _closed, control = closed_tree
+    launched = []
+    monkeypatch.setattr(ex.subprocess, "run", lambda *a, **k: launched.append(a) or pytest.fail("docker lancé"))
+    monkeypatch.setattr(ex.os, "getuid", lambda: 1000)
+    with pytest.raises(ValueError, match="vérification"):
+        DockerSandbox().run_command("echo hi", str(control))
+    assert launched == []
+
+
+def test_sampling_refuses_a_control_behind_an_inaccessible_parent(closed_tree, sampler_script):
+    closed, control = closed_tree
+    calls = []
+    for auth in (control, control / "objects", closed / "auth-to-create"):
+        with pytest.raises(RuntimeError, match="vérification"):
+            _sample(_sampling_ctx(auth, sampler_script, calls))
+    assert calls == []
+
+
+def test_sampling_refuses_a_script_behind_an_inaccessible_parent(closed_tree, tmp_path):
+    closed, _control = closed_tree
+    auth = tmp_path / "auth"
+    auth.mkdir()
+    calls = []
+    with pytest.raises(RuntimeError, match="vérification"):
+        _sample(_sampling_ctx(auth, closed / "oh_sampler.py", calls))
+    assert calls == []
+
+
+# --- injection indépendante du uid : TOUJOURS exécutée, y compris en non-root -------------------------
+
+
+@pytest.fixture
+def stat_errors(monkeypatch):
+    """Injecte une erreur ``errno`` sur ``lstat``/``stat`` pour les chemins sous ``<marker>``."""
+
+    def install(trigger: str, err: int):
+        import errno as errno_mod
+
+        real_lstat, real_stat = os.lstat, os.stat
+
+        def fail(real):
+            def wrapper(path, *a, **k):
+                if trigger in os.fspath(path):
+                    raise OSError(err, errno_mod.errorcode.get(err, "ERR"), os.fspath(path))
+                return real(path, *a, **k)
+
+            return wrapper
+
+        monkeypatch.setattr(os, "lstat", fail(real_lstat))
+        monkeypatch.setattr(os, "stat", fail(real_stat))
+
+    return install
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("err_name", ["EACCES", "EPERM", "EIO", "ELOOP", "ETIMEDOUT"])
+def test_any_stat_error_other_than_absence_refuses_the_mount(tmp_path, stat_errors, kind, err_name):
+    import errno
+
+    target = tmp_path / "sentinel-dir" / "project"
+    target.mkdir(parents=True)
+    stat_errors("sentinel-dir", getattr(errno, err_name))
+    _assert_refused(kind, target, match="vérification")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("err_name", ["ENOENT", "ENOTDIR"])
+def test_an_established_absence_keeps_the_path_to_create_compatible(tmp_path, kind, err_name):
+    import errno
+
+    if err_name == "ENOENT":
+        missing = tmp_path / "a" / "b" / "to-create"
+    else:  # un composant est un fichier : absence établie par ENOTDIR
+        (tmp_path / "plainfile").write_text("x")
+        missing = tmp_path / "plainfile" / "to-create"
+    assert not os.path.exists(missing)
+    assert getattr(errno, err_name)
+    argv = _argv(kind, missing)
+    assert any("to-create" in a for a in argv)
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_dangling_symlink_cannot_establish_absence(tmp_path, kind):
+    target = tmp_path / "later-created-control"
+    link = tmp_path / "dangling"
+    os.symlink(target, link)
+    _assert_refused(kind, link, match="vérification")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_symlink_loop_is_a_refusal(tmp_path, kind):
+    os.symlink("loop-b", tmp_path / "loop-a")
+    os.symlink("loop-a", tmp_path / "loop-b")
+    _assert_refused(kind, tmp_path / "loop-a", match="vérification")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_traversable_but_unlistable_parent_still_finds_a_control_by_direct_stat(tmp_path, kind):
+    """Un parent ``--x`` (traversable, non listable) laisse ``lstat`` fonctionner : le contrôle est vu."""
+    if os.getuid() == 0:
+        pytest.fail(
+            "cas réel uid non-root uniquement : en root les permissions sont sans effet (couvert par l'injection)"
+        )
+    parent = tmp_path / "execonly"
+    control = parent / "workspace.control"
+    control.mkdir(parents=True)
+    (control / GIT_CONTROL_MARKER).write_text("managed\n")
+    parent.chmod(0o111)
+    try:
+        _assert_refused(kind, control)
+    finally:
+        parent.chmod(0o700)

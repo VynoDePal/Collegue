@@ -311,7 +311,7 @@ class LocalSamplingContext:
             real = os.path.realpath(os.path.abspath(os.fspath(raw)))
             if ":" in real:
                 raise RuntimeError(f"sampler abonnement : chemin {label} invalide (contient ':'): {real}")
-            reason = git_control_exposure(real)
+            reason = git_control_exposure(raw)  # chemin BRUT : lien pendant, erreur de stat… ⇒ refus
             if reason is not None:
                 raise RuntimeError(f"sampler abonnement : montage {label} refusé, contrôle Git exposé ({reason})")
             mounts.append(real)

@@ -172,6 +172,13 @@ Propriétés :
   (`GIT_CONTROL_SCAN_MAX_DIRS`), entrées itérées — fichiers compris, comptées à mesure — ≤ 1 000 000
   (`GIT_CONTROL_SCAN_MAX_ENTRIES`), profondeur ≤ 64 (`GIT_CONTROL_SCAN_MAX_DEPTH`). Un répertoire géant est donc
   coupé pendant son itération, pas après l'avoir entièrement empilé.
+- **Une erreur n'est jamais une absence.** `os.path.lexists`/`isdir` avalent `PermissionError` et ne sont pas
+  utilisés pour conclure à l'absence : un contrôle sous un parent non traversable paraîtrait inexistant alors que le
+  démon Docker, plus privilégié, le monterait. La résolution est stricte (`realpath(strict=True)` du plus long préfixe
+  existant, `lstat` pour chaque marqueur) ; **seules ENOENT/ENOTDIR** établissent qu'un chemin est « à créer » (accepté).
+  Toute autre erreur (EACCES, EPERM, EIO, ELOOP, ETIMEDOUT…), un lien symbolique pendant (cible absente, donc
+  susceptible de devenir un contrôle) ou une boucle de liens ⇒ refus. Le chemin BRUT fourni est vérifié (pas son
+  `realpath` non strict, qui masquerait un lien pendant).
 - **Fail-closed** : erreur de lecture (permission, disparition), dépassement de borne, `OSError` ⇒ refus
   (« vérification impossible »). Un arbre énorme est refusé plutôt que parcouru sans limite : l'opérateur doit
   alors monter un répertoire plus petit.
