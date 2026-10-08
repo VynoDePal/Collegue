@@ -25,6 +25,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -36,6 +37,7 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     func,
+    true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -321,3 +323,135 @@ class Phase5Incident(Base):
     )
 
     project: Mapped["Project"] = relationship(back_populates="phase5_incident")
+
+
+# ── Registre budgétaire durable (vague 2) ────────────────────────────────────────────
+#
+# AUTORITÉ de la dépense LLM d'un projet/cycle. Montants en entiers : micro-USD
+# (1e-6 $, arrondis TOUJOURS vers le haut = conservateur) et tokens. Les compteurs du
+# scope sont des agrégats mis à jour par UPDATE relatif conditionnel (CAS) dans la même
+# transaction que la ligne de réservation/événement : jamais lus-modifiés-écrits en Python.
+BUDGET_RESERVED = "reserved"
+BUDGET_COMMITTED = "committed"
+BUDGET_RELEASED = "released"
+BUDGET_UNKNOWN = "unknown"
+BUDGET_RESERVATION_STATES = frozenset({BUDGET_RESERVED, BUDGET_COMMITTED, BUDGET_RELEASED, BUDGET_UNKNOWN})
+BUDGET_KINDS = frozenset({"call", "worker", "import"})
+BUDGET_EVENT_KINDS = frozenset({"reserve", "commit", "release", "unknown", "resolve", "import", "note"})
+
+
+class BudgetScope(Base):
+    """Un compte budgétaire : un projet (cycle BUILD+IMPROVE) ou un contexte de planification.
+
+    ``scope_key`` est l'identifiant durable créé AVANT la première dépense (``planning:<uuid>``
+    avant que le projet existe, puis lié à ``project_id`` ; ``project:<id>`` sinon).
+    """
+
+    __tablename__ = "budget_scopes"
+    __table_args__ = (
+        CheckConstraint(
+            "consumed_micro_usd >= 0 AND consumed_tokens >= 0 AND reserved_micro_usd >= 0 "
+            "AND reserved_tokens >= 0 AND unknown_micro_usd >= 0 AND unknown_tokens >= 0",
+            name="ck_budget_scopes_nonnegative",
+        ),
+        CheckConstraint(
+            "(cap_micro_usd IS NULL OR cap_micro_usd >= 0) AND (cap_tokens IS NULL OR cap_tokens >= 0)",
+            name="ck_budget_scopes_caps_nonnegative",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    project_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, unique=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="project", server_default="project")
+    # Plafonds (NULL = pas de plafond sur cette dimension).
+    cap_micro_usd: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    cap_tokens: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Mode strict : une dépense d'usage inconnu BLOQUE toute nouvelle réservation.
+    strict: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
+    consumed_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    consumed_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    reserved_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    reserved_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # Réservations d'usage INCONNU : conservées (borne haute) tant qu'un humain ne les a pas résolues.
+    unknown_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    unknown_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Dernier échec de planification conservé (la SPEC échouée a quand même pu coûter).
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow, server_default=func.now()
+    )
+
+
+class BudgetReservation(Base):
+    """Réservation AVANT dépense, identifiée durablement (``reservation_id`` unique)."""
+
+    __tablename__ = "budget_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('reserved', 'committed', 'released', 'unknown')",
+            name="ck_budget_reservations_state",
+        ),
+        CheckConstraint("kind IN ('call', 'worker', 'import')", name="ck_budget_reservations_kind"),
+        CheckConstraint(
+            "reserved_micro_usd >= 0 AND reserved_tokens >= 0 AND consumed_micro_usd >= 0 AND consumed_tokens >= 0",
+            name="ck_budget_reservations_nonnegative",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reservation_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    scope_id: Mapped[int] = mapped_column(
+        ForeignKey("budget_scopes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    role: Mapped[str] = mapped_column(String(48), nullable=False, default="", server_default="")
+    model: Mapped[str] = mapped_column(String(160), nullable=False, default="", server_default="")
+    transport: Mapped[str] = mapped_column(String(48), nullable=False, default="", server_default="")
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="reserved", server_default="reserved")
+    reserved_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reserved_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    consumed_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    consumed_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    # Échéance : une réservation encore ``reserved`` après elle est un crash/abandon → ``unknown``.
+    expires_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, onupdate=_utcnow, server_default=func.now()
+    )
+
+
+class BudgetEvent(Base):
+    """Journal append-only des règlements ; ``event_key`` unique = idempotence au rejeu."""
+
+    __tablename__ = "budget_events"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('reserve', 'commit', 'release', 'unknown', 'resolve', 'import', 'note')",
+            name="ck_budget_events_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_key: Mapped[str] = mapped_column(String(192), nullable=False, unique=True)
+    scope_id: Mapped[int] = mapped_column(
+        ForeignKey("budget_scopes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    reservation_id: Mapped[Optional[str]] = mapped_column(String(96), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )

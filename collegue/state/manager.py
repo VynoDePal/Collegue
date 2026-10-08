@@ -140,6 +140,20 @@ class ProjectStateManager:
 
     def __init__(self, session_factory: sessionmaker):
         self._session_factory = session_factory
+        self._budget_ledger = None
+
+    @property
+    def budget_ledger(self):
+        """Registre budgétaire durable (AUTORITÉ de la dépense) adossé à CETTE base.
+
+        Sans état en mémoire : deux managers sur la même base — y compris après redémarrage —
+        voient exactement le même registre.
+        """
+        if self._budget_ledger is None:
+            from collegue.state.budget_ledger import BudgetLedger
+
+            self._budget_ledger = BudgetLedger(self._session_factory)
+        return self._budget_ledger
 
     @classmethod
     def from_url(cls, url: str, *, create: bool = False, echo: bool = False) -> "ProjectStateManager":

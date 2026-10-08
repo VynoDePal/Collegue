@@ -35,6 +35,7 @@ from collegue.improve.metrics import (
     persist,
 )
 from collegue.improve.proposer import AttemptRecord, build_improvement_task, next_dimension
+from collegue.state.budget_ledger import BudgetRefused
 
 # Raisons d'arrêt.
 STOP_PLATEAU = "plateau"  # rendements décroissants : les gains plafonnent
@@ -153,7 +154,7 @@ def _seed_promoted_diffs(workspace, diffs, *, git_bin: str = "git") -> int:
     return applied
 
 
-async def run_improvement(
+async def _run_improvement_impl(
     project_id: int,
     repo_source: str,
     ctx,
@@ -258,172 +259,210 @@ async def run_improvement(
             result.rejected.append(("phase5_recovery", str(getattr(recovered, "reason", "incident non résolu"))))
             return result
 
-    while True:
-        if round_num >= max_iterations:
-            result.stop_reason = STOP_SAFETY_CAP
-            break
-        decision = budget.should_continue()
-        if not decision.ok:
-            result.stop_reason = STOP_PAUSED_BUDGET if decision.action == ACTION_PAUSED_BUDGET else STOP_DEADLINE
-            break
-
-        round_num += 1
-        task = IssueSpec(number=round_num, title=f"Amélioration continue (round {round_num})")
-        workspace = prepare_workspace(repo_source, task)
-
-        # Compounding (#545) : réapplique les diffs promus sur le clone neuf AVANT la
-        # mesure baseline → l'objectif porte sur l'état cumulé (le score monte ; une
-        # dimension réglée n'est plus proposée car sa métrique redevient bonne).
-        if promoted_diffs:
-            _seed_promoted_diffs(workspace, promoted_diffs)
-
-        # Levier 1 (#541) : la mesure baseline porte sur le WORKSPACE sur disque, pas
-        # sur un diff (il n'y en a pas encore) — objectif symétrique avant/après.
-        before = await measure_fn(
-            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights, **measure_extra
-        )
-
-        # Baseline non fiable (composite non fini, ex. scan sécu en échec → inf) :
-        # round à vide. On NE lance PAS l'agent (coûteux) pour rien et on n'enregistre
-        # pas de score fantôme (inf) ; fail-closed — rien ne sera promu (#541).
-        if not math.isfinite(before.composite):
-            result.rejected.append(("baseline", "mesure baseline non fiable (composite non fini)"))
-            plateau += 1
-            if plateau >= plateau_rounds:
-                result.stop_reason = STOP_PLATEAU
+    try:
+        while True:
+            if round_num >= max_iterations:
+                result.stop_reason = STOP_SAFETY_CAP
                 break
-            continue
-
-        if result.initial_score is None:
-            result.initial_score = before.composite
-        result.final_score = before.composite
-
-        dimension = next_dimension(before, history=history)
-        improvement = build_improvement_task(dimension, before, number=round_num)
-        execution = run_issue(agent, workspace, improvement, runner=runner)
-
-        if not execution.changed:
-            # L'agent n'a rien produit : pas une amélioration → round « à vide ».
-            history.append(AttemptRecord(dimension, improved=False))
-            result.rejected.append((dimension.value, "aucun diff produit"))
-            plateau += 1
-            if plateau >= plateau_rounds:
-                result.stop_reason = STOP_PLATEAU
+            decision = budget.should_continue()
+            if not decision.ok:
+                result.stop_reason = STOP_PAUSED_BUDGET if decision.action == ACTION_PAUSED_BUDGET else STOP_DEADLINE
                 break
-            continue
 
-        # Auto-fix lint déterministe (#549) : nettoie le lint auto-corrigible des
-        # fichiers touchés AVANT la mesure (le gate est tolérance-0 sur le lint, donc
-        # le code de test/refactor du coder ne doit pas être recalé pour un import
-        # inutilisé ou un espacement). On re-capture le diff : mesure, PR et compounding
-        # utilisent la version corrigée. Un fix cassant un test ⇒ rejeté par le gate.
-        autofix_lint(workspace.path, execution.files_changed)
-        final_diff, final_files = capture_diff(workspace)
-        delivery_snapshot = capture_delivery_snapshot(
-            workspace,
-            final_files,
-            diff=final_diff,
-        )
+            round_num += 1
+            task = IssueSpec(number=round_num, title=f"Amélioration continue (round {round_num})")
+            workspace = prepare_workspace(repo_source, task)
 
-        after = await measure_fn(
-            workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, diff=final_diff, weights=weights, **measure_extra
-        )
-        try:
-            verify_delivery_snapshot(workspace, delivery_snapshot)
-        except DeliveryDriftError as exc:
-            # #582 : measure_fn exécute du code projet en RW. Une mesure verte
-            # portant sur des octets différents du snapshot livrable est invalide.
-            history.append(AttemptRecord(dimension, improved=False))
-            result.rejected.append((dimension.value, f"intégrité du livrable refusée : {exc}"))
-            plateau += 1
-            if plateau >= plateau_rounds:
-                result.stop_reason = STOP_PLATEAU
-                break
-            continue
-        result.final_score = after.composite
-        gate = evaluate(before, after, min_gain=min_gain)
-        history.append(AttemptRecord(dimension, improved=gate.accepted))
+            # Compounding (#545) : réapplique les diffs promus sur le clone neuf AVANT la
+            # mesure baseline → l'objectif porte sur l'état cumulé (le score monte ; une
+            # dimension réglée n'est plus proposée car sa métrique redevient bonne).
+            if promoted_diffs:
+                _seed_promoted_diffs(workspace, promoted_diffs)
 
-        if gate.accepted:
-            report = _improvement_quality_report(dimension.value, before, after, gate.delta)
-            from collegue.executor.pr import open_pr
+            # Levier 1 (#541) : la mesure baseline porte sur le WORKSPACE sur disque, pas
+            # sur un diff (il n'y en a pas encore) — objectif symétrique avant/après.
+            before = await measure_fn(
+                workspace.path, ctx, sandbox=sandbox, reviewer=reviewer, weights=weights, **measure_extra
+            )
 
-            pr = open_pr(
+            # Baseline non fiable (composite non fini, ex. scan sécu en échec → inf) :
+            # round à vide. On NE lance PAS l'agent (coûteux) pour rien et on n'enregistre
+            # pas de score fantôme (inf) ; fail-closed — rien ne sera promu (#541).
+            if not math.isfinite(before.composite):
+                result.rejected.append(("baseline", "mesure baseline non fiable (composite non fini)"))
+                plateau += 1
+                if plateau >= plateau_rounds:
+                    result.stop_reason = STOP_PLATEAU
+                    break
+                continue
+
+            if result.initial_score is None:
+                result.initial_score = before.composite
+            result.final_score = before.composite
+
+            dimension = next_dimension(before, history=history)
+            improvement = build_improvement_task(dimension, before, number=round_num)
+            execution = run_issue(agent, workspace, improvement, runner=runner)
+
+            if not execution.changed:
+                # L'agent n'a rien produit : pas une amélioration → round « à vide ».
+                history.append(AttemptRecord(dimension, improved=False))
+                result.rejected.append((dimension.value, "aucun diff produit"))
+                plateau += 1
+                if plateau >= plateau_rounds:
+                    result.stop_reason = STOP_PLATEAU
+                    break
+                continue
+
+            # Auto-fix lint déterministe (#549) : nettoie le lint auto-corrigible des
+            # fichiers touchés AVANT la mesure (le gate est tolérance-0 sur le lint, donc
+            # le code de test/refactor du coder ne doit pas être recalé pour un import
+            # inutilisé ou un espacement). On re-capture le diff : mesure, PR et compounding
+            # utilisent la version corrigée. Un fix cassant un test ⇒ rejeté par le gate.
+            autofix_lint(workspace.path, execution.files_changed)
+            final_diff, final_files = capture_diff(workspace)
+            delivery_snapshot = capture_delivery_snapshot(
                 workspace,
-                report,
-                improvement,
-                owner,
-                repo,
-                files_changed=final_files,
-                snapshot=delivery_snapshot,
-                # Stacking (#554) : base = branche de la promotion précédente si elle
-                # existe (mode --execute), sinon la base d'origine. → diff de PR propre.
-                base=(last_promoted_branch or base),
-                clients=clients,
-                dry_run=dry_run,
-                manager=manager,
-                project_id=project_id,
-                # Le numéro est un compteur de round, pas une vraie issue → pas de Closes.
-                closes_issue=False,
+                final_files,
+                diff=final_diff,
             )
-            hook_outcome = None
-            hook_error = None
-            if not dry_run and promotion_hook is not None:
-                if pr.skipped:
-                    # Une PR retrouvée peut avoir été modifiée hors du snapshot de
-                    # ce round : pas d'auto-merge sans preuve d'identité complète.
-                    hook_error = "PR préexistante : auto-merge refusé sans nouvelle preuve de livraison"
-                else:
-                    try:
-                        hook_outcome = promotion_hook(pr)
-                        if inspect.isawaitable(hook_outcome):
-                            hook_outcome = await hook_outcome
-                    except Exception as exc:  # noqa: BLE001 - hook externe fail-closed
-                        hook_error = f"hook Phase 5 en erreur: {exc}"
-            auto_merged = bool(getattr(hook_outcome, "merged", False))
-            auto_reverted = bool(
-                getattr(getattr(hook_outcome, "remote_revert", None), "restored", False)
-                or getattr(hook_outcome, "stop_reason", None) == "auto_revert_recovered"
-            )
-            if not dry_run and not auto_reverted:
-                persist(manager, project_id, after)
-            if auto_reverted:
-                # Le diff a été retiré de main : ne pas présenter son score comme
-                # l'état courant ni le réinjecter au prochain round/run.
-                result.final_score = before.composite
-                history[-1] = AttemptRecord(dimension, improved=False)
-                auto_merged = False
-                last_promoted_branch = None
-                promoted_diffs.clear()
-            elif auto_merged:
-                # Le hook a resynchronisé repo_source sur main : le diff promu y est
-                # déjà présent. Le réappliquer via compounding le dupliquerait.
-                last_promoted_branch = None
-                promoted_diffs.clear()
-            else:
-                if not dry_run:
-                    # Stacking humain historique (#554).
-                    last_promoted_branch = pr.head
-                promoted_diffs.append(final_diff)
-            result.promoted.append(
-                PromotedImprovement(dimension.value, gate.delta, pr.number, auto_merged, reverted=auto_reverted)
-            )
-            plateau = 0
-            if hook_error is not None:
-                result.rejected.append((dimension.value, hook_error))
-                result.stop_reason = STOP_AUTOMERGE_BLOCKED
-                break
-            if hook_outcome is not None and not bool(getattr(hook_outcome, "continue_loop", False)):
-                reason = str(getattr(hook_outcome, "reason", "auto-merge non abouti"))
-                result.rejected.append((dimension.value, reason))
-                result.stop_reason = str(getattr(hook_outcome, "stop_reason", None) or STOP_AUTOMERGE_BLOCKED)
-                break
-        else:
-            result.rejected.append((dimension.value, gate.reason))
-            plateau += 1
-            if plateau >= plateau_rounds:
-                result.stop_reason = STOP_PLATEAU
-                break
 
+            after = await measure_fn(
+                workspace.path,
+                ctx,
+                sandbox=sandbox,
+                reviewer=reviewer,
+                diff=final_diff,
+                weights=weights,
+                **measure_extra,
+            )
+            try:
+                verify_delivery_snapshot(workspace, delivery_snapshot)
+            except DeliveryDriftError as exc:
+                # #582 : measure_fn exécute du code projet en RW. Une mesure verte
+                # portant sur des octets différents du snapshot livrable est invalide.
+                history.append(AttemptRecord(dimension, improved=False))
+                result.rejected.append((dimension.value, f"intégrité du livrable refusée : {exc}"))
+                plateau += 1
+                if plateau >= plateau_rounds:
+                    result.stop_reason = STOP_PLATEAU
+                    break
+                continue
+            result.final_score = after.composite
+            gate = evaluate(before, after, min_gain=min_gain)
+            history.append(AttemptRecord(dimension, improved=gate.accepted))
+
+            if gate.accepted:
+                report = _improvement_quality_report(dimension.value, before, after, gate.delta)
+                from collegue.executor.pr import open_pr
+
+                pr = open_pr(
+                    workspace,
+                    report,
+                    improvement,
+                    owner,
+                    repo,
+                    files_changed=final_files,
+                    snapshot=delivery_snapshot,
+                    # Stacking (#554) : base = branche de la promotion précédente si elle
+                    # existe (mode --execute), sinon la base d'origine. → diff de PR propre.
+                    base=(last_promoted_branch or base),
+                    clients=clients,
+                    dry_run=dry_run,
+                    manager=manager,
+                    project_id=project_id,
+                    # Le numéro est un compteur de round, pas une vraie issue → pas de Closes.
+                    closes_issue=False,
+                )
+                hook_outcome = None
+                hook_error = None
+                if not dry_run and promotion_hook is not None:
+                    if pr.skipped:
+                        # Une PR retrouvée peut avoir été modifiée hors du snapshot de
+                        # ce round : pas d'auto-merge sans preuve d'identité complète.
+                        hook_error = "PR préexistante : auto-merge refusé sans nouvelle preuve de livraison"
+                    else:
+                        try:
+                            hook_outcome = promotion_hook(pr)
+                            if inspect.isawaitable(hook_outcome):
+                                hook_outcome = await hook_outcome
+                        except Exception as exc:  # noqa: BLE001 - hook externe fail-closed
+                            hook_error = f"hook Phase 5 en erreur: {exc}"
+                auto_merged = bool(getattr(hook_outcome, "merged", False))
+                auto_reverted = bool(
+                    getattr(getattr(hook_outcome, "remote_revert", None), "restored", False)
+                    or getattr(hook_outcome, "stop_reason", None) == "auto_revert_recovered"
+                )
+                if not dry_run and not auto_reverted:
+                    persist(manager, project_id, after)
+                if auto_reverted:
+                    # Le diff a été retiré de main : ne pas présenter son score comme
+                    # l'état courant ni le réinjecter au prochain round/run.
+                    result.final_score = before.composite
+                    history[-1] = AttemptRecord(dimension, improved=False)
+                    auto_merged = False
+                    last_promoted_branch = None
+                    promoted_diffs.clear()
+                elif auto_merged:
+                    # Le hook a resynchronisé repo_source sur main : le diff promu y est
+                    # déjà présent. Le réappliquer via compounding le dupliquerait.
+                    last_promoted_branch = None
+                    promoted_diffs.clear()
+                else:
+                    if not dry_run:
+                        # Stacking humain historique (#554).
+                        last_promoted_branch = pr.head
+                    promoted_diffs.append(final_diff)
+                result.promoted.append(
+                    PromotedImprovement(dimension.value, gate.delta, pr.number, auto_merged, reverted=auto_reverted)
+                )
+                plateau = 0
+                if hook_error is not None:
+                    result.rejected.append((dimension.value, hook_error))
+                    result.stop_reason = STOP_AUTOMERGE_BLOCKED
+                    break
+                if hook_outcome is not None and not bool(getattr(hook_outcome, "continue_loop", False)):
+                    reason = str(getattr(hook_outcome, "reason", "auto-merge non abouti"))
+                    result.rejected.append((dimension.value, reason))
+                    result.stop_reason = str(getattr(hook_outcome, "stop_reason", None) or STOP_AUTOMERGE_BLOCKED)
+                    break
+            else:
+                result.rejected.append((dimension.value, gate.reason))
+                plateau += 1
+                if plateau >= plateau_rounds:
+                    result.stop_reason = STOP_PLATEAU
+                    break
+
+    except BudgetRefused as refusal:
+        # Refus AVANT émission (plafond, blocage strict, échéance, tarif inconnu…) : on s'arrête en pause
+        # budget en CONSERVANT le bilan partiel (promotions déjà acquises, rejets).
+        result.rejected.append(("budget", f"refus budgétaire ({refusal.code}) : {refusal}"))
+        result.stop_reason = STOP_PAUSED_BUDGET
     result.rounds = round_num
     return result
+
+
+async def run_improvement(project_id: int, repo_source: str, ctx, **kwargs) -> ImprovementResult:
+    """Fait tourner la boucle d'amélioration (voir :func:`_run_improvement_impl`) sous le registre durable.
+
+    Pour un run RÉEL, ouvre/retrouve le scope du projet (le MÊME que le BUILD : cumul commun BUILD →
+    IMPROVE, y compris après redémarrage), le rend autoritaire pour ``budget`` et lie registre et scope
+    au contexte : chaque round réserve l'allocation du worker et chaque appel de sampling AVANT émission.
+    """
+    import contextlib
+
+    from collegue.core.llm.budget_guard import bind_budget, current_binding
+    from collegue.pilot.budget import BudgetTimeController, attach_project_budget
+
+    budget = kwargs.get("budget") or BudgetTimeController()
+    kwargs["budget"] = budget
+    manager = kwargs.get("manager")
+    binding = contextlib.nullcontext()
+    if not kwargs.get("dry_run", True) and current_binding() is None:
+        scope = attach_project_budget(budget, manager, project_id)
+        if scope is not None:
+            binding = bind_budget(
+                manager.budget_ledger, scope.scope_key, settings=budget.settings, deadline=budget.deadline
+            )
+    with binding:
+        return await _run_improvement_impl(project_id, repo_source, ctx, **kwargs)

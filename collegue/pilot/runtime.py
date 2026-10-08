@@ -23,6 +23,7 @@ le serveur tourne ``OAUTH_ENABLED=false`` par défaut.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -839,6 +840,25 @@ async def plan_project_from_settings(
     if ctx is None:
         ctx = _build_ctx(settings_obj)
 
+    # Registre budgétaire (vague 2) : le projet n'existe pas encore — son ID n'est connu qu'après
+    # ``persist_spec`` — mais ``generate_spec`` dépense DÉJÀ. Un scope durable est donc créé AVANT
+    # la première dépense, lié au projet dès qu'il existe : les frais de SPEC, de décomposition et de QA
+    # (échecs compris) restent au même registre que BUILD et IMPROVE.
+    from collegue.pilot.budget import budget_strict_from_settings
+
+    ledger = getattr(manager, "budget_ledger", None)
+    planning_scope = None
+    budget_stack = contextlib.ExitStack()
+    if ledger is not None:
+        from collegue.core.llm.budget_guard import bind_budget
+
+        planning_scope = ledger.create_planning_scope(
+            max_cost_usd=getattr(settings_obj, "MAX_COST_USD", None),
+            max_tokens=getattr(settings_obj, "MAX_TOKENS_BUDGET", None),
+            strict=budget_strict_from_settings(settings_obj),
+        )
+        budget_stack.enter_context(bind_budget(ledger, planning_scope.scope_key, settings=settings_obj))
+
     try:
         from collegue.planner.acceptance_tests import generate_acceptance_tests
         from collegue.planner.decomposer import DecompositionCardinalityError, decompose
@@ -853,6 +873,8 @@ async def plan_project_from_settings(
             deadline=deadline,
             plan_sync_config=plan_sync_config,
         )
+        if planning_scope is not None:
+            ledger.bind_project(planning_scope.scope_key, project_id)
 
         last_err: Optional[Exception] = None
         tasks: list = []
@@ -915,7 +937,17 @@ async def plan_project_from_settings(
             # jamais recalculer dans une seconde session après l'aperçu.
             plan_hash=preview.plan_hash,
         )
+    except BaseException as exc:
+        # L'échec de planification est CONSERVÉ durablement avec sa dépense (les appels déjà émis
+        # restent débités sur le scope) : jamais une planification ratée « gratuite ».
+        if planning_scope is not None:
+            try:
+                ledger.note_failure(planning_scope.scope_key, f"{type(exc).__name__}: {exc}")
+            except Exception as note_exc:  # noqa: BLE001 - ne masque jamais l'exception d'origine
+                logger.warning("échec de planification non journalisé au registre: %s", note_exc)
+        raise
     finally:
+        budget_stack.close()
         if owns_ctx:
             aclose = getattr(ctx, "aclose", None)
             if aclose is not None:

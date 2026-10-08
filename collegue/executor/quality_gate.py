@@ -1890,7 +1890,10 @@ class LLMAcceptanceChecker:
         preferences = model_preferences_for_role(LLMRole.REVIEWER, settings_obj)
         if preferences:
             sample_kwargs["model_preferences"] = preferences
-        result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
+        from collegue.core.llm.budget_guard import budget_role
+
+        with budget_role(LLMRole.REVIEWER):
+            result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
         return str(getattr(result, "text", "") or "")
 
     async def check(self, workspace: str, diff: str, issue: IssueSpec, ctx, *, sandbox) -> AcceptanceOutcome:

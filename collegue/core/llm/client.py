@@ -109,18 +109,25 @@ async def accounted_sample(
     if settings_obj is None:
         from collegue.config import settings as settings_obj
 
+    from collegue.core.llm.budget_guard import budget_role, current_binding
     from collegue.monitoring.metrics import enforce_budget, get_metrics_collector
     from collegue.monitoring.pricing import cost_per_token, has_explicit_pricing
     from collegue.monitoring.sampling_usage import capture_usage
 
     collector = collector or get_metrics_collector()
-    enforce_budget(collector=collector, settings_obj=settings_obj)
+    # Registre durable lié : c'est LUI qui borne (réservation avant chaque appel, au transport). Le
+    # MetricsCollector ne sert plus qu'aux statistiques — jamais à une décision de budget (pas de
+    # double comptage ni de garde en mémoire qui repart de zéro).
+    ledger_bound = current_binding() is not None
+    if not ledger_bound:
+        enforce_budget(collector=collector, settings_obj=settings_obj)
     provider, requested_model = resolve_role(role, settings_obj)
     subscription_requested = bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False)) and not str(
         requested_model
     ).lower().startswith(("gemma", "gemini"))
     if (
-        float(getattr(settings_obj, "MAX_COST_USD", 0) or 0) > 0
+        not ledger_bound
+        and float(getattr(settings_obj, "MAX_COST_USD", 0) or 0) > 0
         and not subscription_requested
         and not has_explicit_pricing(requested_model, provider=provider)
     ):
@@ -132,7 +139,7 @@ async def accounted_sample(
     result = None
     error: Optional[BaseException] = None
     error_traceback = None
-    with capture_usage() as captured:
+    with capture_usage() as captured, budget_role(role):
         try:
             result = await sample_with_timeout(ctx, settings_obj=settings_obj, **sample_kwargs)
             succeeded = True
@@ -170,5 +177,6 @@ async def accounted_sample(
         raise UsageAccountingError(
             f"Usage LLM absent pour {operation} : impossible de garantir le plafond dur configuré."
         )
-    enforce_budget(collector=collector, settings_obj=settings_obj)
+    if not ledger_bound:
+        enforce_budget(collector=collector, settings_obj=settings_obj)
     return result

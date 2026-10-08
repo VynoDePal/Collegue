@@ -96,6 +96,11 @@ class AgentResult:
     # ``billable: false`` → coût réel 0) ; le pilote ne re-tarife alors PAS au prix
     # de secours #484. Défaut False : un coût 0 = INCONNU (modèle non mappé) → #484.
     cost_authoritative: bool = False
+    # Vague 2 : le rapport d'usage est-il COMPLET ? ``reported`` (défaut : agents qui ne dépensent pas
+    # hors process, doubles de test) → la consommation déclarée est établie ; ``unknown`` → conteneur
+    # interrompu / rapport absent après armement : le budget CONSERVE la réservation et bloque la suite stricte.
+    usage_status: str = "reported"
+    usage_reason: str = ""
 
     @property
     def total_tokens(self) -> int:
