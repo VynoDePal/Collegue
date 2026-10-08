@@ -292,6 +292,33 @@ class LocalSamplingContext:
         m = (model or "").strip().lower()
         return bool(m) and not (m.startswith("gemma") or m.startswith("gemini"))
 
+    def _validated_subscription_mounts(self) -> tuple:
+        """Chemins CANONIQUES (auth RW, script RO) à monter, ou ``RuntimeError`` (fail-closed).
+
+        Garantie commune des bind mounts (``collegue.sandbox.executor.git_control_exposure``) : ni le
+        répertoire d'auth ni le script ne peuvent être, contenir ou se trouver dans un répertoire de
+        contrôle Git, quelle que soit la profondeur ; une vérification impossible vaut refus. Le script
+        monté en lecture seule doit en outre être un FICHIER régulier (un répertoire exposerait son
+        arbre), et aucun chemin ne peut contenir ``:`` (injection d'options de ``-v``).
+        """
+        from collegue.sandbox.executor import git_control_exposure
+
+        mounts = []
+        for label, raw in (
+            ("auth d'abonnement", self._subscription_auth_dir),
+            ("script sampler", self._sampler_script),
+        ):
+            real = os.path.realpath(os.path.abspath(os.fspath(raw)))
+            if ":" in real:
+                raise RuntimeError(f"sampler abonnement : chemin {label} invalide (contient ':'): {real}")
+            reason = git_control_exposure(real)
+            if reason is not None:
+                raise RuntimeError(f"sampler abonnement : montage {label} refusé, contrôle Git exposé ({reason})")
+            mounts.append(real)
+        if os.path.lexists(mounts[1]) and not os.path.isfile(mounts[1]):
+            raise RuntimeError(f"sampler abonnement : le script monté doit être un fichier régulier: {mounts[1]}")
+        return mounts[0], mounts[1]
+
     async def _sample_subscription(self, model: str, oai_messages: List[Dict[str, str]]) -> str:
         """Échantillonne ``model`` via l'abonnement (Codex/ChatGPT) en lançant ``oh_sampler.py``
         dans le sandbox (le ``subscription_login`` du SDK n'est pas dans le process principal).
@@ -305,6 +332,9 @@ class LocalSamplingContext:
         requis (le bridge Docker stalle les transferts LLM — chemin réseau prouvé du harnais) ;
         le montage des creds est RW (rafraîchissement éventuel du jeton d'abonnement).
         """
+        # Frontière Git : ce constructeur de ``docker run -v`` est hors ``DockerSandbox`` ; il
+        # applique le même vérificateur de montages AVANT toute émission du runner.
+        auth_mount, script_mount = self._validated_subscription_mounts()
         system_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] == "system")
         user_text = "\n\n".join(m["content"] for m in oai_messages if m["role"] != "system")
         payload = json.dumps({"system": system_text, "prompt": user_text})
@@ -328,9 +358,9 @@ class LocalSamplingContext:
             "-e",
             "OPENHANDS_SUPPRESS_BANNER=1",
             "-v",
-            f"{self._subscription_auth_dir}:/home/sandbox/.openhands",
+            f"{auth_mount}:/home/sandbox/.openhands",
             "-v",
-            f"{self._sampler_script}:/oh_sampler.py:ro",
+            f"{script_mount}:/oh_sampler.py:ro",
             self._sampler_image,
             "python",
             "/oh_sampler.py",

@@ -1,8 +1,10 @@
 """Exécuteur de code en sandbox Docker isolé (C8, brief §6).
 
 Garde-fou critique : le code généré n'est **jamais** exécuté sur l'hôte. Toute
-commande tourne dans un conteneur Docker éphémère, durci, qui ne monte **que** le
-workspace du projet — pas le reste du système de fichiers hôte.
+commande tourne dans un conteneur Docker éphémère, durci, qui ne monte que le
+workspace du projet — plus, OPT-IN et validés, un cache pip et les creds d'abonnement —
+pas le reste du système de fichiers hôte. Aucun de ces montages n'expose jamais un
+répertoire de contrôle Git (``git_control_exposure``).
 
 Durcissement appliqué :
 - réseau coupé (``--network none``), capabilities droppées (``--cap-drop ALL``),
@@ -59,7 +61,10 @@ GIT_CONTROL_SUFFIX = ".control"
 
 # Bornes du parcours qui vérifie qu'un montage n'expose aucun répertoire de contrôle (voir
 # ``git_control_exposure``). Au-delà, le montage est REFUSÉ (fail-closed), jamais autorisé.
+# DIRS borne à la fois les répertoires parcourus ET la file en attente (une file qui grossit
+# sans borne serait un parcours sans limite) ; ENTRIES borne chaque entrée itérée, fichiers compris.
 GIT_CONTROL_SCAN_MAX_DIRS = 250_000
+GIT_CONTROL_SCAN_MAX_ENTRIES = 1_000_000
 GIT_CONTROL_SCAN_MAX_DEPTH = 64
 
 # Code de sortie conventionnel pour un dépassement de délai (cf. coreutils timeout).
@@ -91,44 +96,32 @@ def git_control_reason(path: str) -> Optional[str]:
     return None
 
 
-def _is_paired_managed_workspace(real: str) -> bool:
-    """Vrai si ``real`` est un workspace GÉRÉ authentique : son contrôle frère existe (répertoire
-    réel, marqueur réel) et le marqueur désigne exactement ce chemin. Le marqueur vit dans le
-    contrôle, hors de tout montage : l'agent ne peut ni le forger ni le déplacer."""
-    control = real + GIT_CONTROL_SUFFIX
-    marker = os.path.join(control, GIT_CONTROL_MARKER)
-    try:
-        if os.path.islink(control) or not os.path.isdir(control) or os.path.islink(marker):
-            return False
-        with open(marker, encoding="utf-8") as handle:
-            return handle.read().strip() == real
-    except OSError:
-        return False
-
-
 def git_control_exposure(path: str) -> Optional[str]:
     """Raison pour laquelle monter ``path`` exposerait un répertoire de contrôle Git, ou ``None``.
 
-    Garantie (valable pour TOUT bind mount : workspace, cache pip, creds d'abonnement) — un
-    chemin est accepté seulement si, après canonicalisation (``realpath`` : alias, liens,
-    ``..``, chemin relatif), AUCUN répertoire portant le marqueur de contrôle n'est :
+    Garantie (valable pour TOUT bind mount : workspace, cache pip, creds d'abonnement, et le
+    montage d'abonnement de ``sampling_ctx``) — un chemin est accepté seulement si, après
+    canonicalisation (``realpath`` : alias, liens, ``..``, chemin relatif), AUCUN répertoire
+    portant le marqueur de contrôle n'est :
 
     * ``path`` lui-même, ni l'un de ses ancêtres (monter l'intérieur d'un contrôle en exposerait
       une partie) ;
     * contenu dans ``path`` à une profondeur quelconque ≤ ``GIT_CONTROL_SCAN_MAX_DEPTH``.
 
     Le parcours est itératif, ne suit AUCUN lien symbolique (ni boucle, ni lien vers l'hôte), et
-    borné (``GIT_CONTROL_SCAN_MAX_DIRS`` répertoires, profondeur maximale). Toute erreur de
-    lecture, tout dépassement de borne, ⇒ REFUS (« vérification impossible »), jamais une
-    autorisation. L'état vit sur le disque (marqueur) : le contrôle reste valable après reprise
-    du processus. Un chemin absent est accepté (rien à exposer ; sa création reste légitime),
-    seuls ses ancêtres existants sont examinés. Un marqueur planté par l'agent dans un arbre non
-    géré provoque un refus (faux positif assumé) et ne peut jamais autoriser quoi que ce soit.
+    borné de trois façons : répertoires parcourus ET file en attente ≤ ``GIT_CONTROL_SCAN_MAX_DIRS``,
+    entrées itérées (fichiers compris, comptées à mesure) ≤ ``GIT_CONTROL_SCAN_MAX_ENTRIES``,
+    profondeur ≤ ``GIT_CONTROL_SCAN_MAX_DEPTH``. Toute erreur de lecture, tout dépassement de
+    borne ⇒ REFUS (« vérification impossible »), jamais une autorisation. L'état vit sur le disque
+    (marqueur) : le contrôle reste valable après reprise du processus. Un chemin absent est
+    accepté (rien à exposer ; sa création reste légitime), seuls ses ancêtres existants sont
+    examinés. Un marqueur planté par l'agent dans un arbre refuse ce montage (faux positif
+    assumé) et ne peut jamais autoriser quoi que ce soit.
 
-    Dispense de parcours : un workspace géré authentique (contrôle frère apparié, voir
-    ``_is_paired_managed_workspace``) est le répertoire de travail lui-même ; son contrôle est
-    un frère, hors de l'arbre — inutile de parcourir ce que l'agent a écrit (et l'agent ne peut
-    pas bloquer le montage en piégeant l'arbre).
+    AUCUNE dispense pour un workspace « géré » : être apparié à SON contrôle frère ne prouve pas
+    l'absence d'AUTRES contrôles dans l'arbre (``prepare_workspace(dest_root=<ws>/nested)`` en
+    place un sous le montage). Le coût (≈ 0,06 s pour 30 000 répertoires) ne justifie pas une
+    exception ; en contrepartie un arbre piégé par l'agent est refusé, fail-closed.
     """
     try:
         real = os.path.realpath(os.path.abspath(os.fspath(path)))
@@ -140,10 +133,11 @@ def git_control_exposure(path: str) -> Optional[str]:
             if parent == current:
                 break
             current = parent
-        if not os.path.isdir(real) or _is_paired_managed_workspace(real):
-            return None
+        if not os.path.isdir(real):
+            return None  # absent (à créer) ou fichier : rien à parcourir
         stack = [(real, 0)]
         visited = 0
+        entries_seen = 0
         while stack:
             directory, depth = stack.pop()
             visited += 1
@@ -153,10 +147,18 @@ def git_control_exposure(path: str) -> Optional[str]:
                 return f"vérification impossible : profondeur > {GIT_CONTROL_SCAN_MAX_DEPTH} sous {real}"
             with os.scandir(directory) as entries:
                 for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > GIT_CONTROL_SCAN_MAX_ENTRIES:
+                        return f"vérification impossible : plus de {GIT_CONTROL_SCAN_MAX_ENTRIES} entrées sous {real}"
                     if entry.name == GIT_CONTROL_MARKER:
                         return f"{directory} est un répertoire de contrôle Git contenu dans le montage"
                     if entry.is_dir(follow_symlinks=False):
                         stack.append((entry.path, depth + 1))
+                        if len(stack) > GIT_CONTROL_SCAN_MAX_DIRS:
+                            return (
+                                f"vérification impossible : plus de {GIT_CONTROL_SCAN_MAX_DIRS} "
+                                f"répertoires en attente sous {real}"
+                            )
         return None
     except (OSError, ValueError) as exc:
         return f"vérification impossible ({type(exc).__name__}: {exc})"
@@ -189,9 +191,11 @@ class SandboxResult:
 class DockerSandbox:
     """Exécute des commandes dans un conteneur Docker isolé et durci.
 
-    Isolation (AC#1 « ne peut pas lire le FS hôte ») : seul ``workspace`` est monté
-    (sur ``/workspace``) ; aucun autre chemin hôte n'est exposé — sauf un cache pip
-    OPT-IN sur ``/tmp/.pip_cache`` si ``pip_cache_dir`` est fourni (#496).
+    Isolation (AC#1 « ne peut pas lire le FS hôte ») : ``workspace`` est monté (sur
+    ``/workspace``) ; aucun autre chemin hôte n'est exposé — sauf, OPT-IN, un cache pip
+    sur ``/tmp/.pip_cache`` si ``pip_cache_dir`` est fourni (#496) et les creds
+    d'abonnement si ``subscription_auth_dir`` l'est. Les TROIS sources de montage passent
+    par ``git_control_exposure`` : aucune n'expose le contrôle Git, à aucune profondeur.
     Persistance (AC#2) : ``workspace`` est un répertoire réel réutilisé d'une
     exécution à l'autre.
     """
@@ -363,7 +367,7 @@ class DockerSandbox:
             argv += ["--user", f"{os.getuid()}:{os.getgid()}"]
         argv += [
             "-v",
-            f"{ws}:/workspace",  # SEUL chemin hôte monté
+            f"{ws}:/workspace",  # le workspace ; les montages OPT-IN (cache pip, creds) sont ajoutés plus haut
             "-w",
             "/workspace",
             self.image,

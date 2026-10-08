@@ -145,10 +145,15 @@ embarquer `pip-audit` ; sinon l'audit activé refuse la mesure (voir limites).
 
 ## Garantie des montages (suivi W1)
 
-`git_control_exposure(path)` (`collegue/sandbox/executor.py`) est appliqué aux **trois** sources de `-v` :
-le workspace (`_validate_workspace`), `pip_cache_dir` et `subscription_auth_dir` (`_build_run_argv`). Ces deux
-derniers sont des réglages d'opérateur, donc des chemins d'entrée. Le refus est levé (`ValueError`) avant toute
-construction d'argv : aucune commande Docker n'est émise.
+`git_control_exposure(path)` (`collegue/sandbox/executor.py`) est appliqué à **toutes** les sources de `-v` :
+1. le workspace (`DockerSandbox._validate_workspace`) ;
+2. `pip_cache_dir` et 3. `subscription_auth_dir` (`DockerSandbox._build_run_argv`) — réglages d'opérateur, donc
+   chemins d'entrée ;
+4. le montage d'auth RW **et** le script sampler RO de `LocalSamplingContext._sample_subscription`
+   (`collegue/core/llm/sampling_ctx.py`), qui construit son propre `docker run` hors `DockerSandbox`.
+
+Le refus est levé avant toute construction d'argv / avant tout appel du runner : aucune commande Docker n'est émise
+(`ValueError` côté sandbox, `RuntimeError` côté sampler).
 
 Un chemin est accepté seulement si, après `realpath` (alias, symlinks, `..`, chemin relatif), aucun répertoire
 portant le marqueur `.collegue-git-control` n'est :
@@ -158,22 +163,27 @@ portant le marqueur `.collegue-git-control` n'est :
 
 Propriétés :
 
+- **Aucune dispense, y compris pour un workspace géré.** Être apparié à SON contrôle frère ne prouve pas l'absence
+  d'AUTRES contrôles dans l'arbre : `prepare_workspace(dest_root=<ws>/nested)` place `inner.control` sous le montage
+  de `outer`. Tout arbre monté est donc parcouru. Conséquence assumée : un arbre piégé par l'agent (marqueur forgé,
+  sous-répertoire illisible, énorme) fait REFUSER son propre montage — jamais l'autoriser.
 - **Parcours borné et sans lien** : itératif, `scandir(follow_symlinks=False)` — ni boucle, ni lien vers l'hôte
-  suivi ; ≤ 250 000 répertoires et profondeur ≤ 64 (`GIT_CONTROL_SCAN_MAX_DIRS/_DEPTH`).
+  suivi. Trois bornes (constantes de module) : répertoires parcourus **et file en attente** ≤ 250 000
+  (`GIT_CONTROL_SCAN_MAX_DIRS`), entrées itérées — fichiers compris, comptées à mesure — ≤ 1 000 000
+  (`GIT_CONTROL_SCAN_MAX_ENTRIES`), profondeur ≤ 64 (`GIT_CONTROL_SCAN_MAX_DEPTH`). Un répertoire géant est donc
+  coupé pendant son itération, pas après l'avoir entièrement empilé.
 - **Fail-closed** : erreur de lecture (permission, disparition), dépassement de borne, `OSError` ⇒ refus
-  (« vérification impossible »). Jamais d'autorisation par défaut. Un arbre énorme est refusé plutôt que parcouru
-  sans limite : l'opérateur doit alors monter un répertoire plus petit.
+  (« vérification impossible »). Un arbre énorme est refusé plutôt que parcouru sans limite : l'opérateur doit
+  alors monter un répertoire plus petit.
 - **Sans état en mémoire** : la décision ne dépend que du marqueur sur disque ; elle vaut donc après reprise du
-  processus et pour chaque appel de `run_command`.
+  processus, pour un contrôle restauré, et pour chaque appel.
 - **Compatibilité** : un chemin absent (workspace ou cache à créer) est accepté — seuls ses ancêtres existants
-  sont examinés. Les répertoires ordinaires (frères d'un contrôle compris) sont acceptés.
-- **Dispense de parcours pour le workspace géré authentique** : si `<ws>.control` existe (répertoire réel, marqueur
-  réel) et que le marqueur désigne exactement `realpath(ws)`, le montage est le répertoire de travail lui-même ; son
-  contrôle est un frère, hors de l'arbre. L'arbre écrit par l'agent n'est pas parcouru (coût nul sur `node_modules`),
-  et l'agent ne peut pas empêcher le montage en piégeant l'arbre. Le marqueur vit dans le contrôle, que l'agent
-  ne peut pas atteindre.
-- **Faux positif assumé** : un marqueur planté par l'agent dans un arbre non géré fait refuser ce montage ; il ne
-  peut jamais autoriser quoi que ce soit.
+  sont examinés. Les répertoires ordinaires (frères d'un contrôle compris) sont acceptés. Coût mesuré : ≈ 0,06 s
+  pour 30 000 répertoires.
+- **Sampler d'abonnement** : en plus, le script monté `:ro` doit être un fichier régulier (un répertoire exposerait
+  son arbre) et aucun des deux chemins ne peut contenir `:` (injection d'options de `-v`) ; les chemins canoniques
+  sont ceux qui sont montés. Le routage fournisseur/modèle n'est pas modifié.
+- **Faux positif assumé** : un marqueur planté dans un arbre fait refuser ce montage.
 
 Limite : le test porte sur le disque au moment de la construction de l'argv ; un contrôle créé *après* par un autre
 processus entre la vérification et `docker run` n'est pas couvert (course locale, hors modèle de menace : seul l'hôte
