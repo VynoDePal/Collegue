@@ -12,6 +12,12 @@ Langue : français (échanges, commits, PR, documentation).
 - La CI exécute `ruff check collegue tests` **et** `ruff format --check collegue tests`. Lancer les deux sur
   l'arbre complet, pas sur les seuls fichiers modifiés (un import ajouté dans un `__init__.py` casse l'ordre isort ailleurs).
 - Tests `integration` (LLM, GitHub, Sentry, Postgres, K8s réels) : exclus par défaut, jamais lancés sans consigne écrite du manager.
+- Environnement de test durable (depuis le 2026-10-08) : les dépendances communes vivent sous
+  `~/.codex/collegue-consolidation/20260928/envs/dependencies-20261008` (versions figées dans
+  `evidence/w1-env-freeze-20261008.txt`) ; chaque venv de rôle (`envs/<rôle>`) y accède par un `.pth` et possède ses
+  propres scripts console. `/tmp` n'héberge plus aucune dépendance. **Aucun paquet `collegue` n'est installé** dans ces
+  venv : le code importé est celui du worktree, d'où l'obligation de lancer depuis sa racine. Ne jamais
+  `pip install` dans un venv partagé ni dans `dependencies-20261008`.
 - Ne jamais afficher ni copier une clé, un token ou le contenu d'un fichier d'authentification.
 - Pas de force-push. Mettre une branche à jour par `git merge`, jamais par rebase suivi d'un push forcé.
 - Pas de `git stash` nu : la pile est partagée entre worktrees. Utiliser un commit WIP.
@@ -33,6 +39,30 @@ Le chantier de consolidation corrige des garanties incomplètes identifiées par
 - A, B et C sont trois sessions Claude Code distinctes et simultanées. Aucun sous-agent, session annexe ou modèle de remplacement, ni pour Claude ni pour Codex.
 - Une session ne change pas de modèle et reste reprise par le manager pour les corrections ou la vague suivante.
 - Le manager ne modifie pas le code produit ; C ne modifie le code de A/B que pour un raccordement mécanique (import, signature, renommage) et le signale.
+
+### Frontière Git et sources de confiance (depuis la vague 1)
+
+Un workspace est écrit par du code non fiable (agent, tests du gate) : son `.git` (config, hooks, `core.fsmonitor`,
+filtres, `diff.external`, `HEAD`, index, gitfile ou lien symbolique) ne doit jamais être exécuté ni lu par l'hôte.
+Détail et inventaire : `docs/consolidation/w1-isolation.md`.
+
+- Toute opération Git **hôte** sur un workspace passe par `collegue.executor.git_boundary` : `TrustedGit` (workspace géré :
+  `GIT_DIR` = répertoire de contrôle frère `<workspace>.control`, hors de tout montage, `GIT_WORK_TREE` = workspace,
+  environnement reconstruit, options neutralisées en `-c`) ou `HardenedGitRunner` (clone plat créé par l'hôte et jamais
+  monté : revert, santé de `main`). Ne jamais relire `<workspace>/.git` : c'est une copie jetable pour l'agent.
+- **Source de confiance** : la base de livraison est `trusted_base(workspace)` (HEAD du contrôle) ; `Workspace.base_commit`
+  n'est que le SHA du clone initial. `advance_base` la fait avancer (compounding). `repo_source` (checkout de l'opérateur)
+  et un clone neuf jamais monté sont de confiance ; un workspace géré ou un répertoire de contrôle ne l'est jamais
+  (`require_trusted_checkout`).
+- `LocalCommandRunner` est réservé aux fixtures de confiance et aux lectures sur `repo_source` ; il refuse (126) un workspace
+  géré. Jamais un défaut de production sur un workspace : `runner=None` passe par la frontière, un workspace non géré lève
+  `WorkspaceError` (fail-closed, aucun repli silencieux). Un runner injecté est refusé sur un workspace géré.
+- Le sandbox ne monte que le répertoire de travail, jamais le contrôle ni son parent (`GIT_CONTROL_MARKER`).
+- Noms de fichiers venant de l'agent : lus ou écrits sur l'hôte seulement via `collegue.sandbox.paths.workspace_file`
+  (ni `..`, ni lien symbolique suivi, ni sortie du workspace). L'audit de dépendances ne s'exécute jamais sur l'hôte ; une
+  mesure indisponible est refusée (composite non fini), jamais comptée comme zéro.
+- Tout nouveau sous-processus hôte doit être inventorié (le test `test_host_subprocess_usage_is_inventoried` échoue sinon) ;
+  un changement qui y touche est revu par C avec la checklist du protocole (§5.1).
 
 ### Worktrees et branches
 

@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     APP_DESCRIPTION: str = "Assistant de développement intelligent"
 
     # Loopback par défaut : `python collegue/app.py` n'est joignable que depuis la machine.
-    # Une exposition distante est un choix explicite (HOST=0.0.0.0) et impose OAUTH_ENABLED=true.
+    # Une exposition distante est un choix explicite (HOST=0.0.0.0) et doit s'accompagner de
+    # OAUTH_ENABLED=true : sans OAuth, build_auth_provider() se contente d'un AVERTISSEMENT (pas de refus).
     # Dans Docker, le conteneur écoute sur 0.0.0.0 via entrypoint.sh (--host) ; c'est la
     # PUBLICATION hôte (docker-compose.yml, COLLEGUE_PUBLISH_HOST) qui reste sur loopback.
     HOST: str = "127.0.0.1"

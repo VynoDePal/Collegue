@@ -114,7 +114,7 @@ Le défaut de l'audit : `run_issue` lance `git add`/`git diff` sur l'hôte via `
 - [ ] Seed/retry (`apply_seed_diff`) et compounding IMPROVE (diff cumulatif).
 - [ ] Revert (`executor/revert.py`, `prepare_revert`) et cleanup/resync (`resync_repository_base`).
 
-**Recherche des usages oubliés** (à relancer sur le SHA intégré) :
+**Recherche des usages oubliés** (à relancer sur le SHA intégré ; l'inventaire de A est dans `docs/consolidation/w1-isolation.md` et épinglé par `test_host_subprocess_usage_is_inventoried`) :
 
 ```bash
 git grep -nE 'LocalCommandRunner|runner or |run_command\(\[' -- collegue
@@ -133,7 +133,7 @@ Le défaut de l'audit : `app.py` journalise puis garde `auth_provider = None` ; 
 - [ ] **Trois** chemins permissifs à la base, tous à rendre bloquants quand `OAUTH_ENABLED=true` : (1) `ImportError` de `JWTVerifier` (simple `warning`), (2) exception du constructeur (`auth_provider = None`), (3) ni `OAUTH_JWKS_URI` ni `OAUTH_PUBLIC_KEY` (simple `warning`). Le brief B n'en cite que deux : vérifier le troisième.
 - [ ] Le test échoue sur la base pour la bonne raison (`app.auth is None` après import), et le démarrage échoue **réellement** : import qui lève, pas seulement un log d'erreur.
 - [ ] Le mode local sans OAuth reste possible, **explicite** et testé (`OAUTH_ENABLED=false`), avec un message clair ; un OAuth valide (JWKS, clé publique) démarre avec `app.auth` non nul.
-- [ ] Niveau conteneur : `entrypoint.sh` (mode http) lance `fastmcp run` en arrière-plan, puis `wait $MCP_PID` et `cleanup` qui se termine par `exit 0`, et affiche « All services started successfully! » sans condition. Un échec de démarrage OAuth peut donc **sortir en code 0** malgré le correctif Python. Ce fichier n'est attribué à aucun lot de la vague 1 (voir le rapport de C) : décision du manager requise ; sans elle, le smoke Docker doit détecter ce cas.
+- [ ] Niveau conteneur : `entrypoint.sh` (mode http) sortait en code 0 après `wait $MCP_PID` + `cleanup` et affichait « All services started successfully! » sans condition. Ruling manager : le fichier appartient à B en vague 1. Vérifier que le code exact de `fastmcp run` est restitué (jamais converti en 0 par `cleanup`), qu'un MCP sorti avant d'être prêt vaut un échec, que « prêt » exige le health server **et** le MCP (`mcp-ready` : 2xx, 401 ou 403 seulement), et que le healthcheck Compose utilise cette sonde.
 - [ ] `PILOT_TOOL_ENABLED` : `pilot/mcp_tool.py` se fie au drapeau `OAUTH_ENABLED`. Cohérent seulement si le drapeau implique désormais une authentification effective.
 - [ ] Loopback : **tous** les ports publiés de `docker-compose.yml` à la base (4121, 4122, 4123, 4125, 8088), pas seulement le port MCP, sont limités à `127.0.0.1` par défaut. L'exposition distante est une action explicite (variable ou override) documentée avec OAuth. `MCP_HOST: 0.0.0.0` à l'intérieur du conteneur est conservé. `tests/test_docker_compose_config.py` couvre le résultat.
 - [ ] Docs alignées : `README.md`, `README.en.md`, `.env.example`, `docs/moteur_autonome.md`, `content.md` ne décrivent plus une exposition ou un défaut devenu faux.
@@ -177,3 +177,55 @@ Les défauts de l'audit : `pytest | tee` sans `pipefail` ; « Bilan » qui accep
 ## 7. Campagne réelle finale
 
 Une seule campagne, plafonnée à **2 USD au total, 250 000 tokens et 900 secondes**, sans relance payante automatique, sur un dépôt fixture dédié. Ce budget est distinct des quotas Claude Code. Rien ne démarre avant la fin de la vague 4 et la validation du manager. Une preuve manquante rend la validation incomplète, jamais réussie par un skip.
+
+## 8. Bilan d'intégration de la vague 1
+
+Base `51ab3fc` ; lot A `f146915` ; lot B `329a11a` ; intégration par merges locaux `--no-ff` par SHA (aucun commit
+de A ou de B réécrit). Intersection des fichiers modifiés par A et B : **vide**. Aucun conflit textuel. Les preuves
+(journaux intégraux avec code retour) sont sous `evidence/w1-c-*` et le rapport `reports/w1-c.md`.
+
+### Interfaces à connaître
+
+- Git : `collegue.executor.git_boundary` (`TrustedGit`, `HardenedGitRunner`, `require_trusted_checkout`),
+  `workspace.trusted_base` / `advance_base`, `sandbox.paths.workspace_file`. `Workspace(path, branch, base_commit)` inchangé.
+  Un workspace géré a un répertoire de contrôle frère `<workspace>.control` (jamais monté). `runner=None` = production.
+- OAuth : `collegue.core.server_auth.build_auth_provider` / `OAuthConfigurationError` ; `OAUTH_ALGORITHM` non vide
+  obligatoire ; `OAUTH_ALGORITHM` et `OAUTH_REQUIRED_SCOPES` transmis à `JWTVerifier`.
+- Réseau : `COLLEGUE_PUBLISH_HOST` (4121, 4122, 8088), `COLLEGUE_DASHBOARD_PUBLISH_HOST` (4125),
+  `COLLEGUE_KEYCLOAK_PUBLISH_HOST` (4123), tous `127.0.0.1` par défaut. `Settings.HOST` vaut `127.0.0.1`.
+- CI : `scripts/ci_docker_smoke.sh`, `scripts/ci_integration_bilan.py`, job `e2e-status`, artifact `docker-smoke-logs`.
+  Les 5 noms de checks requis sont inchangés.
+
+### Changements de comportement à annoncer dans la PR
+
+1. Les scopes de `OAUTH_REQUIRED_SCOPES` et l'algorithme sont désormais **imposés** : des jetons sans ces scopes sont refusés.
+2. `docker compose up` ne publie plus rien hors loopback ; l'exposition distante est un choix explicite.
+   Elle n'est **pas** bloquée sans OAuth : avertissement seulement.
+3. Un OAuth demandé mais inutilisable interdit le démarrage ; en Docker le conteneur sort en code non nul
+   (`restart: always` le relance : lire les logs).
+4. Un workspace non géré fait lever `WorkspaceError` (plus de repli silencieux sur `LocalCommandRunner`) ; les
+   workspaces antérieurs à la frontière (sans `.control`) sont refusés.
+5. Le diff capturé utilise `--no-renames` : un renommage supprime l'ancien fichier dans la PR.
+6. Le nightly est fidèle à pytest : il devient rouge sur un échec réel ; l'E2E produit non exécuté est annoncé
+   « NON EXÉCUTÉ » (code 0, pas une preuve).
+
+### Limites connues (à ne pas arrondir)
+
+- **`pip-audit` est absent de l'image `docker/sandbox/Dockerfile`** : activer `dep_vulns_enabled` **refuse** donc la
+  mesure (composite non fini, rejet par le gate), jamais « 0 vulnérabilité ». Aucun câblage produit n'active ce
+  drapeau aujourd'hui. Ajouter l'outil à l'image est à planifier (build lourd, donc hors vague 1).
+- **Python 3.11 n'est pas exécuté localement** (compilation seulement) : la preuve est le check `Pytest (Python 3.11)`.
+- **Le smoke Docker n'a jamais tourné sur une image réelle** (pas de build local : 421 Mo de disque libre). La preuve
+  est le check `Docker build` de la PR ; en cas d'échec, lire d'abord l'artifact `docker-smoke-logs`. Les sondes
+  semi-réelles (vrai `entrypoint.sh`, vrai serveur, shim `docker`) ont passé.
+- `ruff` (lint, format, `autofix_lint`) tourne toujours sur l'hôte, sur des chemins confinés ; `repo_source` et le clone
+  nightly sont tenus pour fiables par construction (inventaire de A) ; le sandbox reste en `--user` hôte avec
+  workspace en lecture-écriture : la vague ferme les effets **hôte** via Git, pas ceux du code non fiable dans le conteneur.
+- La vue Git de l'agent est une copie complète du contrôle par tentative et par round (coût disque) ; Git LFS et la
+  config utilisateur ne sont pas chargés dans les workspaces gérés ; un `repo_source` d'un autre propriétaire peut
+  échouer au clone (`safe.directory` ignoré) ; les workspaces `improve` ne sont toujours pas nettoyés (fuite préexistante).
+- Le test d'inventaire des sous-processus est textuel : il ne voit pas `asyncio.create_subprocess_*`.
+- Les collisions de port 4122 sont possibles si plusieurs sessions lancent la suite complète en parallèle
+  (`TestHealthServer` ne saute plus : il échoue).
+- La campagne `integration` n'a pas été lancée (payante). Seul `test_real_delegation_engine_evaluation`, déterministe, a
+  été exécuté seul, hors ligne (namespace réseau vide) ; sa clé factice ne sert qu'à lever le `skipif`.

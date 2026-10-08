@@ -15,6 +15,9 @@ Spécificités Claude Code :
 - Ne lancer ni sous-agent, ni autre session, ni modèle annexe ; garder le modèle courant.
 - Utiliser le python du venv de son rôle (`~/.codex/collegue-consolidation/20260928/envs/<rôle>/bin/python`),
   `python -m pytest -p no:cacheprovider` depuis la racine du worktree, `python -m ruff --no-cache`.
+- Git sur un workspace d'agent : uniquement via `collegue.executor.git_boundary` (`TrustedGit`, `HardenedGitRunner`,
+  `trusted_base`) ; voir « Frontière Git et sources de confiance » dans `AGENTS.md`. Lancer les journaux de preuve sans
+  pipe qui masque le code de retour (rediriger vers un fichier puis lire `$?`).
 - Commits : en français, terminés par la ligne d'attribution demandée par la session. A et B committent en
   local ; seul C pousse, ouvre une PR et fusionne, après consigne du manager et acceptation sur le SHA exact.
 - Écrire son rapport et ses preuves sous `~/.codex/collegue-consolidation/20260928/{reports,evidence}/`
