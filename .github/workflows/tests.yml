@@ -247,6 +247,36 @@ jobs:
             collegue-sandbox-openhands:pr-check \
             python - < scripts/ci_w4_worker_routing.py
 
+      # Preuve du VRAI vérificateur métier public (collegue.pilot.w4_business.verify_business_checkout, runner omis) dans
+      # l'image CONSTRUITE ci-dessus, sans modèle, sans clé et sans réseau applicatif (les conteneurs sont lancés par B en
+      # --network none). L'orchestrateur tourne sur l'hôte avec les dépendances de test VERROUILLÉES et hachées (locks/dev.txt) ;
+      # il ne construit aucun montage et n'exécute aucun livrable sur l'hôte. Trois cas obligatoires : la fixture de référence
+      # (observation passed, toutes les assertions métier vraies), puis deux témoins hostiles qui neutralisent SIGALRM (et SIGTERM)
+      # et que le superviseur EXTERNE du conteneur doit arrêter (codes 124 puis 137) en un temps borné. Un cas non exécuté,
+      # une image absente ou un import manquant font échouer le job. La relève hôte est allongée pendant les témoins pour isoler
+      # le superviseur ; ni la marge de production de 2 s ni un crash réel de l'hôte ne sont éprouvés ici.
+      - name: Set up Python 3.12 for the verifier proof
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: locks/dev.txt
+
+      - name: Install locked test dependencies for the verifier proof
+        run: pip install --require-hashes --no-deps -r locks/dev.txt
+
+      - name: Prove the business verifier in the built image (public path, no model)
+        timeout-minutes: 10
+        run: python scripts/ci_w4_business_verifier.py --image collegue-sandbox-openhands:pr-check --report-dir w4-verifier-report
+
+      - name: Upload business verifier proof report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w4-business-verifier-proof
+          path: w4-verifier-report/
+          if-no-files-found: warn
+
       # Prouve que le service est PRÊT (santé + MCP initialize), pas seulement lancé :
       # attente bornée, échec si le conteneur sort ou reste indisponible, journaux
       # conservés, aucun réseau ni appel LLM (cf. scripts/ci_docker_smoke.sh).
