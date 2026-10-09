@@ -1,0 +1,172 @@
+# Campagne métier W4 PONCTUELLE (FastAPI + SQLite + Alembic, trois tâches dépendantes) sur le dépôt fixture dédié.
+#
+# Ce workflow est le SEUL mécanisme autorisé pour le lancement réel : déclenchement manuel (workflow_dispatch) uniquement, jamais
+# de planification, jamais d'événement de dépôt, jamais de relance automatique (le préflight refuse une tentative > 1).
+# Il n'active PAS INTEGRATION_E2E_ENABLED et ne lance AUCUN test LLM du nightly : une seule enveloppe, 2 USD / 250000 tokens / 900 s,
+# portée par le registre durable W2 (COLLEGUE_HOME / STATE_DATABASE_URL propres à ce run).
+#
+# Ordre (une étape qui échoue arrête tout, aucune étape suivante ne s'exécute) :
+#   1. préflight STATIQUE — contexte de lancement, enveloppe, secrets, identité du dépôt fixture, capacité du transport de worker,
+#      protections W3 de la base éphémère. Jeton de LECTURE du dépôt fixture seulement : AUCUNE clé de modèle dans cette étape.
+#   2. image du sandbox (construite seulement si 1. a réussi), puis préflight COMPLET (pile des oracles + lecteur PDF réel).
+#   3. campagne : c'est la SEULE étape qui reçoit la clé du fournisseur de modèle.
+#   4. nettoyage idempotent des ressources éphémères et dépôt du rapport (machine JSON + humain), sans secret.
+# Un préflight qui ne peut pas ÉTABLIR un plafond ou une protection termine « validation incomplète » (code 3) AVANT toute
+# émission : ce n'est ni un succès ni une preuve du parcours avec modèles réels.
+
+name: Consolidation E2E (campagne ponctuelle)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Confirmation du lancement UNIQUE (saisir exactement LANCER-UNE-FOIS-2USD-250000TOKENS-900S)"
+        required: true
+        type: string
+      campaign_id:
+        description: "Identifiant de la campagne (registre durable propre)"
+        required: true
+        default: "w4-business-final"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consolidation-e2e
+  cancel-in-progress: false
+
+jobs:
+  campaign:
+    name: Campagne métier W4 (préflight → campagne → rapport)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm == 'LANCER-UNE-FOIS-2USD-250000TOKENS-900S' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      W4_BUSINESS_CONFIRM: ${{ inputs.confirm }}
+      W4_BUSINESS_CAMPAIGN_ID: ${{ inputs.campaign_id }}
+      # La récurrence du nightly reste désactivée : le préflight refuse si elle est active.
+      INTEGRATION_E2E_ENABLED: ${{ vars.INTEGRATION_E2E_ENABLED }}
+      # Enveloppe GLOBALE (aucun compteur remis à zéro entre commandes : un seul registre, un seul run).
+      MAX_COST_USD: "2"
+      MAX_TOKENS_BUDGET: "250000"
+      COLLEGUE_RUN_DEADLINE_SECONDS: "900"
+      BUDGET_MODE: strict
+      BUDGET_EXHAUSTED_ACTION: pause
+      REQUIRE_COST_PRICING: "true"
+      # Fusion BUILD sur la base éphémère, sous les contrôles W3 (preuve, tête exacte, checks requis, base protégée, sync prouvée).
+      BUILD_AUTO_MERGE: "true"
+      AUTO_MERGE_ENABLED: "false"
+      DEPS_REQUIRE_MERGED: "true"
+      STRICT_MAX_INFLIGHT_PRS: "1"
+      TASK_MAX_ATTEMPTS: "1"
+      TASK_RETRY_BACKOFF_SECONDS: "0"
+      GATE_ACCEPTANCE_TESTS: "true"
+      GATE_TEST_COMMAND: python -m pytest -q
+      GATE_FRONTEND: "false"
+      SANDBOX_IMAGE: collegue-sandbox-openhands:ci
+      SANDBOX_NETWORK: bridge
+      SANDBOX_MEMORY: 6g
+      SANDBOX_CPUS: "2.0"
+      SANDBOX_TIMEOUT: "720"
+      LLM_CALL_TIMEOUT: "180"
+      CODER_LLM_NUM_RETRIES: "3"
+      CODER_LLM_RETRY_MIN_WAIT: "5"
+      CODER_LLM_RETRY_MAX_WAIT: "30"
+      LLM_PROVIDER: ${{ vars.INTEGRATION_LLM_PROVIDER }}
+      LLM_MODEL: ${{ vars.INTEGRATION_LLM_MODEL }}
+      LLM_PRICE_PROMPT_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_PROMPT_PER_1M }}
+      LLM_PRICE_COMPLETION_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_COMPLETION_PER_1M }}
+    steps:
+      - name: Initialiser les chemins éphémères du runner
+        shell: bash
+        run: |
+          if [[ ! "$W4_BUSINESS_CAMPAIGN_ID" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
+            echo "::error::campaign_id invalide (minuscules, chiffres et tirets, 3 à 40 caractères)."
+            exit 1
+          fi
+          root="$RUNNER_TEMP/w4-business"
+          mkdir -p "$root/home" "$root/report" "$root/pip-cache"
+          {
+            printf 'COLLEGUE_NIGHTLY_MANIFEST=%s/manifest.json\n' "$root"
+            printf 'COLLEGUE_HOME=%s/home\n' "$root"
+            printf 'STATE_DATABASE_URL=sqlite:///%s/home/%s.sqlite3\n' "$root" "$W4_BUSINESS_CAMPAIGN_ID"
+            printf 'SANDBOX_PIP_CACHE_DIR=%s/pip-cache\n' "$root"
+            printf 'W4_REPORT_DIR=%s/report\n' "$root"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: locks/dev.txt
+
+      - name: Installer les dépendances verrouillées
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes --no-deps -r locks/dev.txt
+
+      - name: Initialiser le registre durable local (migrations, base vierge de la campagne)
+        shell: bash
+        run: python -m collegue.migrations upgrade
+
+      - name: Préflight statique (sans clé de modèle, lectures seules)
+        id: preflight_static
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: |
+          python -m collegue.pilot.w4_business preflight --stage static \
+            --campaign-id "$W4_BUSINESS_CAMPAIGN_ID" \
+            --output "$W4_REPORT_DIR/preflight-static.json" --human "$W4_REPORT_DIR/preflight-static.txt"
+
+      - name: Construire l'image du sandbox
+        if: steps.preflight_static.outcome == 'success'
+        shell: bash
+        run: docker build -f docker/sandbox/Dockerfile.openhands -t "$SANDBOX_IMAGE" .
+
+      - name: Préflight complet (pile des oracles et lecteur PDF réel)
+        id: preflight_full
+        if: steps.preflight_static.outcome == 'success'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: |
+          python -m collegue.pilot.w4_business preflight --stage full \
+            --campaign-id "$W4_BUSINESS_CAMPAIGN_ID" \
+            --output "$W4_REPORT_DIR/preflight-full.json" --human "$W4_REPORT_DIR/preflight-full.txt"
+
+      - name: Campagne réelle (SEULE étape qui reçoit la clé du fournisseur de modèle)
+        id: campaign
+        if: steps.preflight_full.outcome == 'success'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+        run: |
+          python -m collegue.pilot.w4_business run \
+            --campaign-id "$W4_BUSINESS_CAMPAIGN_ID" \
+            --output "$W4_REPORT_DIR/campaign.json" --human "$W4_REPORT_DIR/campaign.txt"
+
+      - name: Nettoyage idempotent des ressources éphémères
+        if: always() && steps.preflight_static.outcome == 'success'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: python -m collegue.pilot.w4_business cleanup
+
+      - name: Déposer le rapport (machine + humain, sans secret)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w4-business-report
+          path: ${{ env.W4_REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
