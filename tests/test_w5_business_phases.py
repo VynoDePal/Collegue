@@ -146,6 +146,9 @@ def story(tmp_path_factory):
     # 7. R05 : REPRISE — l'incident durable est réconcilié, rollback prouvé, acquittement CAS, reprise libre
     out["r05_resumed"] = run(world, world_support.services_for(world), r05, step5, context)
     out["incident_after_ack"] = world.manager().get_phase5_incident(world.project_id)
+    from collegue.pilot import w5_business_ownership as ownership
+
+    out["owned_events"] = ownership.read_events(str(world.root / "owned-manifest.json"), repo="fixture/fixture")
     out["tip_final"] = world_support.git_tip(world)
     out["heads_final"] = {n: world.bridge.branches.get(n) for n in out["build_heads"]}
     # 8. contrat altéré : une source d'oracle scellée est modifiée → plus d'approbation du contenu → R04 ne démarre pas
@@ -273,6 +276,23 @@ def test_each_phase_asks_the_public_entry_for_its_own_narrowed_target(story):
         "cibles disjointes : R04 ne peut pas consommer l'incident"
     )
     assert story["r05_resumed"]["evidence"]["injection"]["files"] == list(w5.INCIDENT_DOCS)
+
+
+def test_the_phases_record_their_pull_requests_and_merges_in_the_durable_ownership_registry_before_the_acknowledgement(
+    story,
+):
+    """R04 consigne l'amélioration, R05 l'incident ET le revert (avant l'acquittement qui supprime l'incident de la base d'état) :
+    ces fusions sont ce qui EXPLIQUE ensuite l'avancée de la base au nettoyage."""
+    kinds = [event["event"] for event in story["owned_events"]]
+    assert kinds.count("improve_pr") >= 1 and kinds.count("incident_pr") == 1 and kinds.count("revert_pr") == 1, kinds
+    evidence = story["r05_resumed"]["evidence"]
+    incident = next(e for e in story["owned_events"] if e["event"] == "incident_pr")
+    revert = next(e for e in story["owned_events"] if e["event"] == "revert_pr")
+    assert incident["pr_number"] == evidence["incident_pr"] and incident["merge_sha"] == evidence["merge_sha"]
+    assert revert["pr_number"] == evidence["revert_pr"] and revert["merge_sha"] == evidence["revert_pr_merge_sha"]
+    assert revert["head_branch"].startswith("collegue/revert-")
+    improvement = next(e for e in story["owned_events"] if e["event"] == "improve_pr")
+    assert improvement["merge_sha"] == story["context_after_r04"]["r04"]["merge_sha"]
 
 
 def test_the_independent_health_probe_really_saw_the_pdf_regression_and_then_the_restoration(story):

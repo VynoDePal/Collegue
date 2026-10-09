@@ -52,7 +52,12 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(
         w5,
         "materialize_spec_for_launch",
-        lambda **kwargs: events.append(("spec", kwargs["project_id"], kwargs["deadline"])),
+        lambda **kwargs: (
+            events.append(("spec", kwargs["project_id"], kwargs["deadline"])),
+            SimpleNamespace(
+                to_fact=lambda: {"state": "merged", "base_after": "a" * 40}
+            ),  # sommet post-fusion exact (celui du faux dépôt)
+        )[1],
     )
     monkeypatch.setattr(
         w5, "cleanup_campaign_resources", lambda report, **kwargs: events.append(("resources", sorted(kwargs))) or {}

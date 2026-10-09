@@ -26,14 +26,14 @@ PR) sont consignées dans un fichier d'intention écrit AVANT la création, que 
 from __future__ import annotations
 
 import hashlib
-import json
-import os
+import re
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from collegue.pilot import w5_business_ownership as ownership
 from collegue.pilot import w5_business_policy as fixture_policy
+from collegue.tools.base import ToolExecutionError
 
 SPEC_HEAD_PREFIX = "collegue-spec/"
 SPEC_MARKER = "<!-- collegue-spec:{digest} -->"
@@ -56,27 +56,6 @@ def head_branch_for(base: str) -> str:
     prefix = fixture_policy.CAMPAIGN_BASE_PREFIX
     tag = base[len(prefix) :] if base.startswith(prefix) else base.replace("/", "-")
     return f"{SPEC_HEAD_PREFIX}{tag}"
-
-
-def record_path(manifest_path: str) -> str:
-    return str(manifest_path) + ".spec.json"
-
-
-def _write_record(path: str, payload: Mapping[str, Any]) -> None:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".tmp")
-    temporary.write_text(json.dumps(dict(payload), sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(temporary, destination)
-
-
-def load_record(manifest_path: str) -> Optional[Dict[str, Any]]:
-    try:
-        return json.loads(Path(record_path(manifest_path)).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        raise SpecMaterializationError(f"fichier d'intention de la SPEC illisible ({type(exc).__name__})") from exc
 
 
 @dataclass
@@ -161,8 +140,18 @@ def materialize_approved_spec(
     blob = git_blob_sha(spec_bytes)
     branches, files, prs = clients.branches, clients.files, clients.prs
     head = head_branch_for(base)
-    record = {"head_branch": head, "base": base, "spec_file": path, "spec_sha256": digest, "pr_number": None, "head_sha": None,
-              "merge_sha": None, "state": "intent"}  # fmt: skip
+    identity = ownership.identity_of(
+        owner, repo, base, project_id=project_id, plan_hash=getattr(snapshot, "plan_hash", None)
+    )
+
+    def note(event: str, **fields: Any) -> None:
+        ownership.append_event(manifest_path, identity, event, **fields)
+
+    try:
+        events = ownership.read_events(manifest_path, repo=f"{owner}/{repo}", base=base, project_id=project_id)
+    except ownership.OwnershipError as exc:
+        raise SpecMaterializationError(f"registre d'appartenance inutilisable : {exc}") from exc
+    merged_before = [e for e in events if e["event"] == "spec_merged" and e.get("spec_sha256") == digest]
 
     # 1. SPEC distante : identique ⇒ fin ; divergente ⇒ refus ; 404 établi ⇒ matérialisation ; autre erreur ⇒ arrêt.
     try:
@@ -174,8 +163,27 @@ def materialize_approved_spec(
             ) from exc
         current = None
     if isinstance(current, dict) and current.get("content") == spec:
-        outcome = SpecOutcome("already_identical", digest, base_before=str(branches.get_branch_sha(owner, repo, base)))
-        outcome.base_after = outcome.base_before
+        tip_now = str(branches.get_branch_sha(owner, repo, base)).lower()
+        if merged_before and tip_now != str(merged_before[-1].get("merge_sha", "")).lower():
+            # Reprise « idempotente » : une SPEC identique ne masque pas un état distant incohérent avec ce que la campagne a fusionné.
+            raise SpecMaterializationError(
+                f"la SPEC est identique mais la base '{base}' ({tip_now[:12]}) n'est plus le commit de fusion consigné "
+                f"({str(merged_before[-1].get('merge_sha'))[:12]}) : état distant incohérent, aucune poursuite"
+            )
+        recorded_prs = [e for e in events if e["event"] == "spec_pr" and e.get("spec_sha256") == digest]
+        if recorded_prs and not merged_before:
+            # Arrêt entre la fusion et sa ligne au registre : relire la PR de CETTE campagne et exiger que la base soit SON commit de fusion.
+            number_seen = int(recorded_prs[-1]["pr_number"])
+            reread = prs.get_pr(owner, repo, number_seen)
+            if getattr(reread, "merged", False):
+                merge_seen = str(getattr(reread, "merge_commit_sha", "") or "").lower()
+                if merge_seen != tip_now:
+                    raise SpecMaterializationError(
+                        f"la SPEC est identique mais la base '{base}' ({tip_now[:12]}) n'est pas le commit de fusion de la PR "
+                        f"#{number_seen} ({merge_seen[:12] or '?'}) : état distant incohérent, aucune poursuite ni seconde fusion"
+                    )
+                note("spec_merged", pr_number=number_seen, merge_sha=merge_seen, spec_sha256=digest)
+        outcome = SpecOutcome("already_identical", digest, base_before=tip_now, base_after=tip_now)
         return outcome
     if isinstance(current, dict) and current.get("content") is not None:
         raise SpecMaterializationError(f"{path} existe sur {base} avec un contenu divergent : refus de l'écraser")
@@ -210,29 +218,69 @@ def materialize_approved_spec(
             return "other"
         return "spec" if _rows(branches, owner, repo, commit.tree_sha) == expected_rows else "other"
 
-    # 3. branche de tête : écriture-d'abord de l'intention, puis création/reprise, jamais de réécriture aveugle.
-    _write_record(record_path(manifest_path), record)
+    # 3. branche de tête. Une intention n'est écrite QUE si l'ABSENCE est établie (404 confirmé) ; une branche déjà présente et non
+    #    consignée par cette campagne est étrangère : refusée, signalée, jamais reprise ni supprimée.
     try:
         tip: Optional[str] = str(branches.get_branch_sha(owner, repo, head)).lower()
     except Exception as exc:  # noqa: BLE001
         if _status(exc) != 404:
             raise SpecMaterializationError(f"sommet de '{head}' illisible ({exc}) : aucune écriture") from exc
         tip = None
-    if tip is not None and tip != base_tip:
-        if head_state(tip) != "spec":
-            raise SpecMaterializationError(
-                f"la branche '{head}' existe déjà ({tip[:12]}) sans être la base ni exactement base + SPEC approuvée : "
-                "ni réutilisée ni réécrite"
-            )
-    elif tip is None or tip == base_tip:
+    intents = [
+        e for e in events if e["event"] == "spec_branch_intent" and e.get("head") == head and e.get("absent_verified") is True
+        and e.get("spec_sha256") == digest
+    ]  # fmt: skip
+    if tip is None:
         checkpoint("avant création de la branche")
-        created = branches.ensure_branch(owner, repo, head, from_branch=base)
+        note("spec_branch_intent", head=head, base_tip=base_tip, absent_verified=True, spec_sha256=digest,
+             spec_file=path, spec_blob=blob)  # fmt: skip
+        try:
+            created = branches.create_branch(owner, repo, head, from_branch=base)
+        except ToolExecutionError as exc:  # la branche est-elle apparue entre l'absence et la création ?
+            try:
+                appeared: Optional[str] = str(branches.get_branch_sha(owner, repo, head)).lower()
+            except Exception as reread:  # noqa: BLE001
+                if _status(reread) != 404:
+                    raise SpecMaterializationError(
+                        f"création de '{head}' non confirmée ({exc}) et relecture impossible : aucune écriture"
+                    ) from exc
+                appeared = None
+            if appeared is None:
+                raise SpecMaterializationError(
+                    f"création de la branche '{head}' refusée ({exc}) : aucune écriture"
+                ) from exc
+            note("foreign_branch_seen", head=head, tip=appeared)
+            raise SpecMaterializationError(
+                f"la branche '{head}' ({appeared[:12]}) est apparue pendant la création : non possédée ; ni écrite ni supprimée"
+            ) from exc
         landed = str(getattr(created, "commit_sha", "") or "").lower()
         if landed != base_tip:
+            note("foreign_branch_seen", head=head, tip=landed)
             raise SpecMaterializationError(
-                f"la branche '{head}' n'est pas sur la base lue ({landed[:12] or '?'} ≠ {base_tip[:12]})"
+                f"la branche '{head}' n'est pas sur la base lue ({landed[:12] or '?'} ≠ {base_tip[:12]}) : apparue pendant "
+                "la création, non possédée ; ni écrite ni supprimée"
             )
+        note("spec_branch_created", head=head, sha=landed)
         files.update_file(owner, repo, path, f"docs: SPEC approuvée (campagne {digest[:12]})", spec, branch=head)
+    else:
+        creations = [
+            e for e in events if e["event"] == "spec_branch_created" and e.get("head") == head
+            and str(e.get("sha", "")).lower() == base_tip
+        ]  # fmt: skip
+        if not intents or str(intents[-1].get("base_tip", "")).lower() != base_tip or not creations:
+            note("foreign_branch_seen", head=head, tip=tip)
+            raise SpecMaterializationError(
+                f"la branche '{head}' existe déjà ({tip[:12]}) sans que cette campagne l'ait créée (aucune création consignée sur "
+                "cette base : une intention seule ne prouve rien) : conservée, ni reprise, ni réécrite, ni supprimée"
+            )
+        # Création interrompue de CETTE campagne, sous preuves exactes : base lue = base de l'intention, sommet = base ou base + SPEC.
+        if tip == base_tip:
+            files.update_file(owner, repo, path, f"docs: SPEC approuvée (campagne {digest[:12]})", spec, branch=head)
+        elif head_state(tip) != "spec":
+            raise SpecMaterializationError(
+                f"la branche '{head}' ({tip[:12]}) consignée par cette campagne n'est plus ni la base ni base + SPEC approuvée : "
+                "conservée, ni reprise ni réécrite"
+            )
     head_sha = str(branches.get_branch_sha(owner, repo, head)).lower()
     if head_state(head_sha) != "spec":
         raise SpecMaterializationError(f"la tête '{head}' ({head_sha[:12]}) n'est pas exactement base + SPEC approuvée")
@@ -241,16 +289,18 @@ def materialize_approved_spec(
         fixture_policy.assert_remote_head_clean(branches, owner, repo, head_tree_sha=head_tree, anchor=anchor.rows)
     except fixture_policy.PolicyRefusal as refused:
         raise SpecMaterializationError(f"contrôles de la tête altérés : {refused.reason}") from refused
-    record.update(head_sha=head_sha, state="head_ready")
-    _write_record(record_path(manifest_path), record)
+    note("spec_written", head=head, head_sha=head_sha)
 
     # 4. PR documentaire (reprise d'une PR ouverte de même tête).
     existing = prs.find_pr_by_head(owner, repo, head, base=base)
     marker = SPEC_MARKER.format(digest=digest)
     if existing is not None:
         number = int(existing.number)
-        if str(getattr(existing, "head_sha", head_sha)).lower() != head_sha:
-            raise SpecMaterializationError(f"la PR #{number} observe une autre tête que la branche vérifiée")
+        live = prs.get_pr(owner, repo, number)
+        if str(getattr(live, "head_sha", "")).lower() != head_sha or marker not in str(getattr(live, "body", "") or ""):
+            raise SpecMaterializationError(
+                f"la PR #{number} de la branche '{head}' n'est ni sur la tête vérifiée ni marquée pour cette SPEC : ni adoptée ni fermée"
+            )
     else:
         checkpoint("avant création de la PR")
         created_pr = prs.create_pr(
@@ -259,8 +309,7 @@ def materialize_approved_spec(
             f"Ce n'est pas une tâche BUILD : aucun code, aucune preuve de livraison.\n\n{marker}",
         )  # fmt: skip
         number = int(created_pr.number)
-    record.update(pr_number=number, state="pr_open")
-    _write_record(record_path(manifest_path), record)
+    note("spec_pr", pr_number=number, head=head, head_sha=head_sha, spec_sha256=digest)
 
     # 5. checks requis réels + provenance, dans l'échéance globale.
     started = clock.now()
@@ -314,52 +363,116 @@ def materialize_approved_spec(
         raise SpecMaterializationError(
             f"le commit de fusion {merge_sha[:12]} n'est pas exactement base + SPEC approuvée"
         )
-    record.update(merge_sha=merge_sha, state="merged")
-    _write_record(record_path(manifest_path), record)
+    note("spec_merged", pr_number=number, merge_sha=merge_sha, spec_sha256=digest)
     after = files.get_file_content(owner, repo, path, branch=base)
     if after.get("content") != spec:
         raise SpecMaterializationError(f"{path} relu sur {base} après fusion n'est pas identique à la SPEC approuvée")
-    return SpecOutcome("merged", digest, number, head, head_sha, merge_sha, base_tip,
-                       str(branches.get_branch_sha(owner, repo, base)).lower(), clock.now() - started)  # fmt: skip
+    tip_after = str(branches.get_branch_sha(owner, repo, base)).lower()
+    if tip_after != merge_sha:
+        # Le blob SPEC identique ne suffit pas : la suite exige le sommet post-fusion EXACT vérifié (aucune seconde fusion pour « réparer »).
+        raise SpecMaterializationError(
+            f"la base '{base}' ({tip_after[:12]}) n'est pas le commit de fusion vérifié ({merge_sha[:12]}) : écriture extérieure "
+            "juste après la fusion, aucune poursuite"
+        )
+    return SpecOutcome("merged", digest, number, head, head_sha, merge_sha, base_tip, tip_after, clock.now() - started)
+
+
+# ── nettoyage : UNIQUEMENT ce qu'un état durable de CETTE campagne désigne, recoupé avec GitHub ─────────────────────────────────
+
+
+def _owned_view(
+    manager: Any, project_id: Optional[int], owner: str, repo: str, base: Optional[str], manifest_path: str
+):
+    try:
+        events = ownership.read_events(manifest_path, repo=f"{owner}/{repo}", base=base, project_id=project_id)
+        owned = ownership.owned_pull_requests(manager, project_id, owner, repo, events)
+    except ownership.OwnershipError as exc:
+        raise SpecMaterializationError(f"appartenance des ressources non établie : {exc}") from exc
+    return events, owned
 
 
 def cleanup_spec_resources(clients: Any, owner: str, repo: str, manifest_path: str) -> Dict[str, Any]:
-    """Ressources de la PR documentaire connues du fichier d'intention : PR encore ouverte fermée (gardes d'identité), branche de tête
-    supprimée seulement si son sommet est celui consigné. Idempotent ; jamais la base, jamais une PR fusionnée."""
-    record = load_record(manifest_path)
-    if record is None:
-        return {"spec": "aucune ressource consignée"}
-    out: Dict[str, Any] = {"head_branch": record.get("head_branch"), "pr_number": record.get("pr_number")}
-    head, number, head_sha = record.get("head_branch"), record.get("pr_number"), record.get("head_sha")
-    if not head or not str(head).startswith(SPEC_HEAD_PREFIX):
-        raise SpecMaterializationError(
-            "fichier d'intention de la SPEC incohérent : branche hors motif, aucune suppression"
-        )
-    marker = SPEC_MARKER.format(digest=record.get("spec_sha256"))
-    if number:
-        info = clients.prs.get_pr(owner, repo, int(number))
-        if info.state == "open" and not getattr(info, "merged", False):
-            clients.prs.close_pr(owner, repo, int(number), expected_head_sha=str(info.head_sha),
-                                 expected_head_branch=str(head), expected_base_branch=str(record.get("base")),
-                                 body_marker=marker)  # fmt: skip
-            out["closed_pr"] = int(number)
+    """Branche et PR de la SPEC que CETTE campagne a créées : branche dont l'ABSENCE a été établie avant sa création (intention consignée
+    seulement alors), dont la CRÉATION a été consignée (une intention seule ne prouve rien) et dont le sommet est exactement l'une
+    des étapes attendues (sommet créé, base + SPEC consignée, ou base + blob SPEC exact d'une écriture interrompue). Une branche déjà présente, empruntée ou ambiguë est CONSERVÉE et signalée
+    (``SpecMaterializationError`` en fin de passe : nettoyage incomplet) ; une PR de cette branche n'est fermée que si sa tête et son
+    marqueur sont ceux de la SPEC. Jamais la base, jamais une PR fusionnée."""
     try:
-        tip = str(clients.branches.get_branch_sha(owner, repo, str(head))).lower()
-    except Exception as exc:  # noqa: BLE001
-        if _status(exc) == 404:
-            out["branch"] = "déjà absente"
-            return out
-        raise
-    if head_sha and tip != str(head_sha).lower():
+        events = ownership.read_events(manifest_path, repo=f"{owner}/{repo}")
+    except ownership.OwnershipError as exc:
+        raise SpecMaterializationError(f"registre d'appartenance inutilisable : {exc}") from exc
+    intents: Dict[tuple, Dict[str, Any]] = {}
+    for entry in events:
+        if entry["event"] == "spec_branch_intent" and entry.get("absent_verified") is True:
+            intents[(entry["base"], entry["head"])] = entry
+    created_heads = {e["head"] for e in events if e["event"] == "spec_branch_created"}
+    seen_foreign = {e["head"] for e in events if e["event"] == "foreign_branch_seen"}
+    # Une branche constatée ÉTRANGÈRE (apparue après notre intention, refusée par le matérialiseur) n'est jamais possédée.
+    intents = {key: value for key, value in intents.items() if key[1] not in seen_foreign}
+    foreign = sorted(seen_foreign)
+    out: Dict[str, Any] = {"branches_etrangeres_conservees": foreign}
+    if not intents:
+        out["spec"] = "aucune ressource possédée"
+        return out
+    kept: List[str] = []
+    for (base, head), intent in sorted(intents.items()):
+        digest = str(intent.get("spec_sha256"))
+        expected = {
+            str(e.get("sha", "")).lower()
+            for e in events
+            if e["event"] == "spec_branch_created" and e.get("head") == head
+        }
+        expected |= {
+            str(e.get("head_sha", "")).lower()
+            for e in events
+            if e["event"] in {"spec_written", "spec_pr"} and e.get("head") == head
+        }
+        try:
+            tip = str(clients.branches.get_branch_sha(owner, repo, head)).lower()
+        except Exception as exc:  # noqa: BLE001
+            if _status(exc) == 404:
+                out.setdefault("deja_absentes", []).append(head)
+                continue
+            raise
+        # Une INTENTION seule ne prouve aucune création : sans création consignée, la branche présente est ambiguë ⇒ conservée.
+        proven = head in created_heads and tip in expected
+        if (
+            head in created_heads and not proven
+        ):  # écriture faite, jamais consignée (arrêt entre l'écriture et la ligne du registre) : preuve par le contenu exact
+            commit = clients.branches.get_git_commit(owner, repo, tip)
+            base_commit = clients.branches.get_git_commit(owner, repo, str(intent["base_tip"]))
+            wanted = _rows(clients.branches, owner, repo, base_commit.tree_sha)
+            wanted[str(intent["spec_file"])] = ("100644", str(intent["spec_blob"]))
+            proven = (
+                list(commit.parents) == [str(intent["base_tip"])]
+                and _rows(clients.branches, owner, repo, commit.tree_sha) == wanted
+            )
+        if not proven:
+            kept.append(f"{head}@{tip[:12]}")
+            continue
+        marker = SPEC_MARKER.format(digest=digest)
+        pr = clients.prs.find_pr_by_head(owner, repo, head, base=base, state="all")
+        if pr is not None:
+            live = clients.prs.get_pr(owner, repo, int(pr.number))
+            if (
+                marker in str(live.body or "")
+                and str(live.head_sha).lower() == tip
+                and live.state == "open"
+                and not live.merged
+            ):
+                clients.prs.close_pr(owner, repo, int(pr.number), expected_head_sha=tip, expected_head_branch=head,
+                                     expected_base_branch=base, body_marker=marker)  # fmt: skip
+                out.setdefault("pr_fermees", []).append(int(pr.number))
+        clients.branches.delete_branch(owner, repo, head, expected_sha=tip)
+        out.setdefault("branches_supprimees", []).append(head)
+    if kept:
+        out["conservees"] = kept
         raise SpecMaterializationError(
-            f"la branche '{head}' a bougé depuis la preuve ({tip[:12]}) : aucune suppression"
+            "branche(s) de SPEC consignée(s) mais dans un état non reconnu — conservée(s), nettoyage incomplet : "
+            + ", ".join(kept)
         )
-    clients.branches.delete_branch(owner, repo, str(head), expected_sha=tip)
-    out["branch"] = "supprimée"
     return out
 
-
-# ── nettoyage de ce que le nettoyage nightly ne connaît pas ───────────────────────────────────────────────────────────────────
 
 RESIDUAL_HEADS = {
     "collegue/improve-": r"<!-- collegue-exec:(-?\d+) -->",
@@ -368,36 +481,94 @@ RESIDUAL_HEADS = {
 MAX_BASE_WALK = 300
 
 
-def close_residual_pull_requests(clients: Any, owner: str, repo: str, base: str) -> List[Dict[str, Any]]:
-    """PR OUVERTES de la campagne que le nettoyage nightly refuserait (« PR non corrélée ») : amélioration non fusionnée, revert non
-    fusionné. Chacune est fermée avec les gardes d'identité (tête, branche, base, marqueur du corps) puis sa branche supprimée si son
-    sommet est celui de la PR. Une PR ouverte étrangère n'est jamais touchée (le nettoyage nightly la signalera)."""
-    import re
-
+def close_residual_pull_requests(
+    clients: Any, owner: str, repo: str, base: str, owned: Optional[Mapping[int, Mapping[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """PR OUVERTES d'amélioration/revert que le nettoyage nightly refuserait (« PR non corrélée ») : fermées avec leurs gardes
+    d'identité puis leur branche supprimée — SEULEMENT si la PR est dans ``owned`` (preuves de livraison de CE projet, registre de la
+    campagne) et si sa tête vivante est celle consignée. Un préfixe de branche et un marqueur de corps sont publics : ils ne prouvent rien.
+    Sans ``owned`` (état durable non fourni), rien n'est fermé."""
     closed: List[Dict[str, Any]] = []
-    for pr in clients.prs.list_prs(owner, repo, state="open", limit=100, base=base):
-        head = str(pr.head_branch or "")
+    for number, info in sorted((owned or {}).items()):
+        live = clients.prs.get_pr(owner, repo, int(number))
+        head = str(live.head_branch or "")
         pattern = next((rx for prefix, rx in RESIDUAL_HEADS.items() if head.startswith(prefix)), None)
-        if pattern is None:
+        if pattern is None or live.state != "open" or live.merged or live.base_branch != base:
             continue
-        full = clients.prs.get_pr(owner, repo, int(pr.number))
-        found = re.search(pattern, str(full.body or ""))
-        if found is None or full.merged or full.state != "open" or not full.head_sha:
+        if str(live.head_sha).lower() not in info["heads"]:
+            continue  # tête déplacée depuis l'ouverture : plus la ressource consignée
+        found = re.search(pattern, str(live.body or ""))
+        if found is None:
             continue
-        clients.prs.close_pr(owner, repo, int(pr.number), expected_head_sha=str(full.head_sha), expected_head_branch=head,
+        clients.prs.close_pr(owner, repo, int(number), expected_head_sha=str(live.head_sha), expected_head_branch=head,
                              expected_base_branch=base, body_marker=found.group(0))  # fmt: skip
-        clients.branches.delete_branch(owner, repo, head, expected_sha=str(full.head_sha))
-        closed.append({"pr": int(pr.number), "head": head})
+        clients.branches.delete_branch(owner, repo, head, expected_sha=str(live.head_sha))
+        closed.append({"pr": int(number), "head": head})
     return closed
 
 
-def advance_recorded_base(
-    clients: Any, config: Any, *, anchor_rows: Optional[Mapping[str, Any]] = None
+def reconcile_merged_heads(
+    clients: Any, config: Any, *, manager: Any = None, project_id: Optional[int] = None
 ) -> Dict[str, Any]:
-    """Les fusions de la campagne (SPEC, BUILD, amélioration, incident, revert) font avancer la base ; le nettoyage nightly ne
-    tolère qu'une base déplacée par le seul commit de SPEC. Le sommet courant est adopté comme base enregistrée SEULEMENT s'il
-    descend de l'ancienne base par la chaîne du premier parent (aucun commit étranger intercalé hors de cette chaîne) et, si une ancre
-    est fournie, si ses contrôles ``.github/``/``ci/`` sont ceux du socle. Sinon : aucune adoption, le nettoyage refusera (ancres conservées)."""
+    """Têtes de PR FUSIONNÉES de CETTE campagne (le dépôt fixture conserve les têtes : ``delete_branch_on_merge=false``).
+
+    Une PR n'est considérée que si elle est possédée (preuve de livraison persistée du projet ou registre de la campagne) et si sa
+    tête vivante est celle consignée : ``collegue/issue-<N>`` d'une issue du manifeste ⇒ SHA CONSIGNÉ au manifeste (sans quoi le nettoyage
+    nightly refuse « SHA non prouvé ») ; ``collegue/improve-…`` / ``collegue/revert-…`` ⇒ branche supprimée avec garde de sommet. Une PR
+    étrangère fusionnée (marqueur et préfixe publics) n'est ni consignée ni supprimée ; sans état durable fourni, rien n'est fait."""
+    from collegue.pilot.nightly_e2e import _load_manifest, _write_manifest
+
+    manifest = _load_manifest(config.manifest_path)
+    if manifest is None:
+        return {"heads": "aucun manifeste"}
+    project = project_id or manifest.project_id
+    _events, owned = _owned_view(manager, project, config.owner, config.repo, config.base_branch, config.manifest_path)
+    recorded: List[str] = []
+    deleted: List[str] = []
+    for number, info in sorted(owned.items()):
+        live = clients.prs.get_pr(config.owner, config.repo, int(number))
+        head = str(live.head_branch or "")
+        if not live.merged or not live.head_sha or live.base_branch != config.base_branch:
+            continue
+        if str(live.head_sha).lower() not in info["heads"]:
+            continue
+        try:
+            tip = str(clients.branches.get_branch_sha(config.owner, config.repo, head)).lower()
+        except Exception as exc:  # noqa: BLE001
+            if _status(exc) == 404:
+                continue
+            raise
+        if tip != str(live.head_sha).lower():
+            continue  # branche déplacée depuis la PR : aucune preuve, rien n'est ni consigné ni supprimé
+        issue = re.fullmatch(r"collegue/issue-([1-9][0-9]*)", head)
+        if issue and int(issue.group(1)) in set(manifest.issue_numbers):
+            if (
+                f"<!-- collegue-exec:{issue.group(1)} -->" in str(live.body or "")
+                and manifest.head_shas.get(head) != tip
+            ):
+                manifest.head_shas[head] = tip
+                recorded.append(head)
+        elif head.startswith(tuple(RESIDUAL_HEADS)):
+            clients.branches.delete_branch(config.owner, config.repo, head, expected_sha=tip)
+            deleted.append(head)
+    if recorded:
+        _write_manifest(config.manifest_path, manifest)
+    return {"recorded": recorded, "deleted": deleted}
+
+
+def advance_recorded_base(
+    clients: Any,
+    config: Any,
+    *,
+    anchor_rows: Optional[Mapping[str, Any]] = None,
+    manager: Any = None,
+    project_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Les fusions de la campagne font avancer la base ; le nettoyage nightly ne tolère qu'une base déplacée par le seul commit de SPEC.
+    Le sommet courant n'est adopté comme base enregistrée que si CHAQUE commit entre l'ancienne base et lui (chaîne du premier parent,
+    fusions comprises) est une fusion EXPLIQUÉE par une attribution durable à la campagne (SPEC, cycles de fusion BUILD, PR possédées
+    fusionnées — amélioration, incident, revert) et si ses contrôles sont ceux du socle. Un commit inconnu, étranger ou un trou ⇒ aucune
+    adoption : la base et les ancres sont conservées et le nettoyage est rapporté incomplet."""
     from collegue.pilot.nightly_e2e import _load_manifest, _write_manifest
 
     manifest = _load_manifest(config.manifest_path)
@@ -411,11 +582,24 @@ def advance_recorded_base(
         raise
     if tip == manifest.base_sha:
         return {"base": "inchangée"}
-    cursor, walked = tip, 0
+    project = project_id or manifest.project_id
+    events, owned = _owned_view(manager, project, config.owner, config.repo, config.base_branch, config.manifest_path)
+    try:
+        explained = ownership.merge_commits(manager, project, clients, config.owner, config.repo, owned, events)
+    except ownership.OwnershipError as exc:
+        raise SpecMaterializationError(f"fusions de la campagne non établies : {exc}") from exc
+    cursor, walked, origins = tip, 0, []
     while cursor != manifest.base_sha:
         walked += 1
         if walked > MAX_BASE_WALK:
             raise SpecMaterializationError("base trop éloignée de la base enregistrée : aucune adoption")
+        if cursor not in explained:
+            raise SpecMaterializationError(
+                f"le commit {cursor[:12]} de la base '{config.base_branch}' n'est attribué à aucune fusion durable de cette campagne "
+                "(contribution étrangère, trou ou ressource inconnue) : base et ancres conservées, nettoyage incomplet "
+                f"[fusions attribuées avant lui : {', '.join(reversed(origins)) or 'aucune'} ; connues : {len(explained)}]"
+            )
+        origins.append(explained[cursor])
         commit = clients.branches.get_git_commit(config.owner, config.repo, cursor)
         if not commit.parents:
             raise SpecMaterializationError("la base courante ne descend pas de la base enregistrée : aucune adoption")
@@ -430,49 +614,4 @@ def advance_recorded_base(
             raise SpecMaterializationError(f"contrôles de la base courante altérés : {refused.reason}") from refused
     previous, manifest.base_sha = manifest.base_sha, tip
     _write_manifest(config.manifest_path, manifest)
-    return {"base": "avancée", "from": previous, "to": tip, "commits": walked}
-
-
-def reconcile_merged_heads(clients: Any, config: Any) -> Dict[str, Any]:
-    """Têtes de PR FUSIONNÉES de la campagne (le dépôt fixture conserve les têtes : ``delete_branch_on_merge=false``).
-
-    * ``collegue/issue-<N>`` d'une issue du manifeste, PR fusionnée sur la base, marqueur ``collegue-exec:N``, sommet = tête de la PR :
-      le SHA est CONSIGNÉ au manifeste (sans quoi le nettoyage nightly refuse ``SHA non prouvé`` et conserve la base) ;
-    * ``collegue/improve-…`` et ``collegue/revert-…`` : branches de la campagne dont la PR est fusionnée, supprimées avec garde
-      d'identité (sommet = tête de la PR). Toute branche non prouvée est laissée en place."""
-    import re
-
-    from collegue.pilot.nightly_e2e import _load_manifest, _write_manifest
-
-    manifest = _load_manifest(config.manifest_path)
-    if manifest is None:
-        return {"heads": "aucun manifeste"}
-    recorded: List[str] = []
-    deleted: List[str] = []
-    for pr in clients.prs.list_prs(config.owner, config.repo, state="all", limit=100, base=config.base_branch):
-        full = clients.prs.get_pr(config.owner, config.repo, int(pr.number))
-        head = str(full.head_branch or "")
-        if not full.merged or not full.head_sha:
-            continue
-        try:
-            tip = str(clients.branches.get_branch_sha(config.owner, config.repo, head)).lower()
-        except Exception as exc:  # noqa: BLE001
-            if _status(exc) == 404:
-                continue
-            raise
-        if tip != str(full.head_sha).lower():
-            continue  # branche déplacée depuis la PR : aucune preuve, rien n'est ni consigné ni supprimé
-        issue = re.fullmatch(r"collegue/issue-([1-9][0-9]*)", head)
-        if issue and int(issue.group(1)) in set(manifest.issue_numbers):
-            if (
-                f"<!-- collegue-exec:{issue.group(1)} -->" in str(full.body or "")
-                and manifest.head_shas.get(head) != tip
-            ):
-                manifest.head_shas[head] = tip
-                recorded.append(head)
-        elif head.startswith(tuple(RESIDUAL_HEADS)):
-            clients.branches.delete_branch(config.owner, config.repo, head, expected_sha=tip)
-            deleted.append(head)
-    if recorded:
-        _write_manifest(config.manifest_path, manifest)
-    return {"recorded": recorded, "deleted": deleted}
+    return {"base": "avancée", "from": previous, "to": tip, "commits": walked, "attributions": list(reversed(origins))}

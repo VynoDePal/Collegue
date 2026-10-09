@@ -62,6 +62,10 @@ class BudgetStop(Exception):
     """Arrêt par budget ou échéance : l'étape se termine ``budget_stop``."""
 
 
+class BaseMovedError(RuntimeError):
+    """La base de campagne a bougé hors de ce que la campagne a vérifié : aucune poursuite (BUILD jamais lancé sur une base non prouvée)."""
+
+
 class IncompleteValidation(Exception):
     """La preuve ne peut pas être établie (prérequis, transport, protection) : l'étape se termine ``incomplete_validation``."""
 
@@ -1664,9 +1668,27 @@ def launch_campaign(
     )
     if approved.get("plan_hash") != plan_hash or int(approved.get("task_count") or 0) != 3:
         raise RuntimeError("l'approbation n'a pas scellé le hash attendu")
+    expected_tip: Optional[str] = None
+
+    def _assert_base_unmoved(where: str) -> str:
+        tip = str(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch)).lower()
+        if expected_tip is not None and tip != expected_tip:
+            raise BaseMovedError(
+                f"la base '{cfg.base_branch}' ({tip[:12]}) n'est plus le sommet vérifié ({expected_tip[:12]}) {where} : écriture "
+                "extérieure, aucun BUILD sur une base non prouvée"
+            )
+        return tip
+
     if materialize_spec is not None:
         outcome = materialize_spec(report, context)
-        report.facts["spec_materialization"] = outcome.to_fact() if hasattr(outcome, "to_fact") else outcome
+        fact = outcome.to_fact() if hasattr(outcome, "to_fact") else dict(outcome or {})
+        report.facts["spec_materialization"] = fact
+        expected_tip = str(fact.get("base_after") or "").lower() or None
+        if expected_tip is None:  # la suite exige le sommet post-fusion EXACT : sans lui, aucune base n'est prouvée
+            raise BaseMovedError(
+                "la matérialisation de la SPEC n'a pas établi le sommet exact de la base : aucun BUILD"
+            )
+        _assert_base_unmoved("juste après la matérialisation de la SPEC")
     adapter.create_label(manifest)
     synced = adapter.product("plan", "sync", "--project-id", str(project_id), "--execute", "--format", "json")
     issues = sorted(
@@ -1677,7 +1699,8 @@ def launch_campaign(
     manifest.issue_numbers = issues
     context["issue_numbers"] = issues
     _write_manifest(cfg.manifest_path, manifest)
-    source = adapter.clone(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch))
+    _assert_base_unmoved("après plan sync")
+    source = adapter.clone(_assert_base_unmoved("juste avant le clone de l'opérateur"))
     context["operator_checkout"] = (
         source  # checkout de l'opérateur : resynchronisé par le produit, réutilisé par R04 / R05
     )
@@ -2051,11 +2074,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if (
         args.action == "cleanup"
     ):  # idempotent, sans clé de modèle : ferme PR/issues et supprime les branches/labels du run
+        from collegue.pilot import w5_business as w5
+
         config = business_config(env)
+        clients = _fixture_clients(config.token)
+        # Mêmes preuves DURABLES et mêmes gardes que le nettoyage du run, sans mémoire de ce run : base d'état (preuves de livraison du
+        # projet), registre d'appartenance et manifeste à côté du manifeste nightly. Une ressource inconnue n'est jamais supprimable :
+        # l'étape lève (code 1) AVANT le nettoyage nightly, qui ne tente pas de « passer » la base.
+        resources = w5.cleanup_campaign_resources(
+            CampaignReport("cleanup", args.campaign_id), clients=clients, config=config, env=env
+        )
         payload = NightlyAdapter(
-            config, _fixture_clients(config.token), bounded_command_runner(time.monotonic() + 600)
+            config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)
         ).cleanup()
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+        print(
+            json.dumps(
+                {**dict(payload), "campaign_resources": resources}, ensure_ascii=False, sort_keys=True, default=str
+            )
+        )
         return 0
     # « preflight » : contrôles SANS clé (étape choisie) ; « run » : validation EFFECTIVE juste avant lancement — l'environnement
     # reçoit légitimement la clé du transport choisi (jamais affichée), les routes sont exigées avec leur credential.
@@ -2090,6 +2126,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     manifest=manifest,
                     image=image,
                     deadline_monotonic=deadline(),
+                    config=config,
                 )
             return cache["value"]
 

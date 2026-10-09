@@ -520,24 +520,10 @@ def test_a_residual_spec_branch_is_resumed_only_when_it_is_exactly_the_base_plus
     chain.bridge.write_remote_file("collegue-spec/777-1", "docs/autre.md", "# autre\n")
     before = len(no_remote_mutation_but_the_spec_path(chain))
 
-    with pytest.raises(spec_publication.SpecMaterializationError, match="ni réutilisée ni réécrite"):
+    with pytest.raises(spec_publication.SpecMaterializationError, match="sans que cette campagne l'ait créée"):
         materialize(chain, project)
 
     assert len(no_remote_mutation_but_the_spec_path(chain)) == before and chain.bridge.prs == {}
-
-
-def test_a_resumed_spec_branch_with_exactly_the_spec_is_not_rewritten(chain):
-    project = drafted(chain)
-    chain.bridge.branches["collegue-spec/777-1"] = chain.bridge.branches[BASE]
-    chain.bridge.write_remote_file("collegue-spec/777-1", "SPEC.md", spec_of(chain, project))
-    chain.bridge.calls.clear()
-
-    outcome = materialize(chain, project)
-
-    assert outcome.state == "merged"
-    assert [c for c in chain.bridge.calls if c[0] == "PUT" and "/contents/" in c[1]] == [], (
-        "branche reprise sans réécriture"
-    )
 
 
 def test_a_sync_failure_after_the_spec_stops_before_any_build(chain):
@@ -569,101 +555,7 @@ def test_the_global_deadline_reaching_the_spec_step_is_a_budget_stop_not_a_failu
 # ── 4. le nettoyage connaît ces ressources ───────────────────────────────────────────────────────────────────────────────────
 
 
-def test_the_cleanup_removes_the_spec_branch_closes_residual_pull_requests_and_adopts_the_advanced_base(chain):
-    from collegue.pilot.nightly_e2e import _load_manifest
-
-    business.launch_campaign(
-        CampaignReport("campaign", "unit"),
-        adapter=chain.adapter,
-        env=chain.env,
-        cycle_id=CYCLE,
-        materialize_spec=materializer(chain),
-    )
-    clients = chain.bridge.clients()
-    chain.bridge.branches["collegue/improve-r1-abc"] = chain.bridge.branches[BASE]
-    chain.bridge.write_remote_file("collegue/improve-r1-abc", "docs/gain.md", "# gain\n")
-    residual = clients.prs.create_pr(
-        "fixture", "fixture", "amélioration", "collegue/improve-r1-abc", BASE, "x\n<!-- collegue-exec:1 -->"
-    )
-    recorded = _load_manifest(chain.adapter.config.manifest_path).base_sha
-
-    report = CampaignReport("campaign", "unit")
-    done = w5.cleanup_campaign_resources(
-        report,
-        clients=clients,
-        config=chain.adapter.config,
-        env={**chain.env, fixture_policy.TRUST_ANCHOR_ENV: __import__("os").environ[fixture_policy.TRUST_ANCHOR_ENV]},
-    )
-
-    assert "collegue-spec/777-1" not in chain.bridge.branches and done["spec"]["branch"] == "supprimée"
-    assert done["residual_pull_requests"] == [{"pr": residual.number, "head": "collegue/improve-r1-abc"}]
-    assert (
-        chain.bridge.prs[residual.number]["state"] == "closed"
-        and "collegue/improve-r1-abc" not in chain.bridge.branches
-    )
-    assert chain.bridge.prs[101]["merged"], "la PR fusionnée de la SPEC n'est jamais touchée"
-    new_base = _load_manifest(chain.adapter.config.manifest_path).base_sha
-    assert new_base == chain.bridge.branches[BASE] != recorded and done["base"]["base"] == "avancée"
-
-
-def test_the_cleanup_refuses_to_adopt_a_base_whose_controls_were_altered(chain):
-    business.launch_campaign(
-        CampaignReport("campaign", "unit"),
-        adapter=chain.adapter,
-        env=chain.env,
-        cycle_id=CYCLE,
-        materialize_spec=materializer(chain),
-    )
-    chain.bridge.write_remote_file(BASE, ".github/CODEOWNERS", "* @intrus\n")
-    clients = chain.bridge.clients()
-
-    with pytest.raises(spec_publication.SpecMaterializationError, match="contrôles de la base courante altérés"):
-        w5.cleanup_campaign_resources(
-            CampaignReport("campaign", "unit"), clients=clients, config=chain.adapter.config,
-            env={**chain.env, fixture_policy.TRUST_ANCHOR_ENV: __import__("os").environ[fixture_policy.TRUST_ANCHOR_ENV]},
-        )  # fmt: skip
-
-
 def test_the_cleanup_without_any_spec_resource_is_a_noop_for_the_spec(chain):
     clients = chain.bridge.clients()
     done = spec_publication.cleanup_spec_resources(clients, "fixture", "fixture", chain.adapter.config.manifest_path)
-    assert done == {"spec": "aucune ressource consignée"}
-
-
-def test_merged_task_heads_are_recorded_for_the_nightly_cleanup_and_merged_improvement_heads_are_deleted(chain):
-    """Le dépôt fixture conserve les têtes fusionnées : sans SHA consigné au manifeste, le nettoyage nightly refuse (« SHA non prouvé »)
-    et conserve la base. Les têtes de tâche prouvées (PR fusionnée, marqueur, sommet = tête) sont consignées ; une tête déplacée non."""
-    import os
-
-    from collegue.pilot.nightly_e2e import _load_manifest
-
-    business.launch_campaign(
-        CampaignReport("campaign", "unit"),
-        adapter=chain.adapter,
-        env=chain.env,
-        cycle_id=CYCLE,
-        materialize_spec=materializer(chain),
-    )
-    bridge, clients = chain.bridge, chain.bridge.clients()
-    manifest = _load_manifest(chain.adapter.config.manifest_path)
-    assert manifest.issue_numbers == [11, 12, 13]
-    heads = {}
-    for number, name in ((11, "collegue/issue-11"), (12, "collegue/issue-12"), (13, "collegue/improve-r1-abc")):
-        bridge.branches[name] = bridge.branches[BASE]
-        heads[name] = bridge.write_remote_file(name, f"docs/{number}.md", f"# {number}\n")
-        marker = f"<!-- collegue-exec:{number} -->"
-        pr = clients.prs.create_pr("fixture", "fixture", f"PR {number}", name, BASE, f"corps\n{marker}")
-        bridge.prs[pr.number].update(merged=True, state="closed")
-    bridge.write_remote_file(
-        "collegue/issue-12", "docs/deplace.md", "# déplacée après la PR\n"
-    )  # tête déplacée : aucune preuve
-    env = {**chain.env, fixture_policy.TRUST_ANCHOR_ENV: os.environ[fixture_policy.TRUST_ANCHOR_ENV]}
-
-    done = w5.cleanup_campaign_resources(
-        CampaignReport("campaign", "unit"), clients=clients, config=chain.adapter.config, env=env
-    )
-
-    saved = _load_manifest(chain.adapter.config.manifest_path).head_shas
-    assert saved == {"collegue/issue-11": heads["collegue/issue-11"]}, "seule la tête prouvée est consignée"
-    assert done["merged_heads"] == {"recorded": ["collegue/issue-11"], "deleted": ["collegue/improve-r1-abc"]}
-    assert "collegue/improve-r1-abc" not in bridge.branches and "collegue/issue-12" in bridge.branches
+    assert done == {"branches_etrangeres_conservees": [], "spec": "aucune ressource possédée"}

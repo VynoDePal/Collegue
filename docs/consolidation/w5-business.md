@@ -173,11 +173,29 @@ frontière HTTP REFUSE les écritures directes sur la base, avec le texte réel 
    base + blob) ; SPEC distante relue identique, que `plan sync` relit alors identique (aucun PUT). Un refus à une étape est un arrêt explicite
    (`SpecMaterializationError`, échec de R01) ; l'échéance atteinte est un arrêt budget. Aucun contournement, aucune écriture directe, aucun
    relâchement du ruleset, aucun code métier ajouté au socle.
-3. **Nettoyage** (`cleanup_campaign(before=…)` → `cleanup_campaign_resources`) : le nettoyage nightly refuse une PR ouverte non corrélée, une tête
-   `collegue/issue-N` dont le SHA n'est pas consigné et une base déplacée par autre chose que le commit de SPEC — donc, après les fusions de la campagne, il
-   aurait conservé toutes les ancres. Avant lui : la PR/branche de la SPEC sont connues d'un fichier d'intention écrit AVANT leur création (PR encore ouverte
-   fermée avec gardes d'identité, branche supprimée si son sommet est celui consigné) ; les PR d'amélioration/revert ouvertes sont fermées (gardes) ;
-   les têtes `collegue/issue-N` de PR fusionnées sont consignées au manifeste (sommet = tête de la PR, marqueur du corps) et les têtes
-   d'amélioration/revert fusionnées supprimées ; la base enregistrée avance au sommet courant seulement s'il descend de l'ancienne base par la chaîne du
-   premier parent et si ses contrôles sont ceux du socle.
+3. **Propriété durable des ressources et nettoyage** (B27 ; `cleanup_campaign(before=…)` et l'action publique `cleanup` → `cleanup_campaign_resources`).
+   Un préfixe de branche, un marqueur de PR, la base commune et l'ascendance d'un commit sont PUBLICS : ils ne prouvent jamais l'appartenance. Le
+   nettoyage nightly refuse une PR ouverte non corrélée, une tête `collegue/issue-N` sans SHA consigné et une base déplacée autrement que par le commit
+   de SPEC ; la campagne traite donc d'abord ce qu'il ne connaît pas, mais SEULEMENT ce qu'un état durable de CETTE campagne désigne, recoupé avec GitHub
+   (`pilot/w5_business_ownership.py`) :
+   * **état du produit** : preuves de livraison persistées par `open_pr` pour ce projet (PR et têtes réellement ouvertes par le produit, BUILD et
+     IMPROVE, relues et validées) et cycles de fusion des tâches ;
+   * **registre d'appartenance** `<manifeste>.owned.jsonl` (append-only, fsync, identité dépôt/base/projet/plan sur chaque ligne), écrit AVANT chaque création :
+     une **intention** de branche de SPEC n'est écrite que si l'ABSENCE a été établie (404 confirmé) ; une branche déjà présente, apparue pendant la création ou
+     non consignée est ÉTRANGÈRE (`foreign_branch_seen`) : refusée, jamais reprise, jamais supprimée. Une intention n'est PAS une preuve de création : la création (`create_branch`, jamais
+     `ensure_branch`, qui adopterait une branche existante) est consignée (`spec_branch_created`) seulement après son succès ; une branche de SPEC sans création consignée est
+     ambiguë (conservée, signalée). La reprise d'une écriture interrompue exige l'intention ET la création de cette campagne, la même base et un sommet exactement égal à
+     une étape attendue (sommet créé, base + blob SPEC). Une SPEC identique déjà sur la base avec une PR consignée mais non acquittée est recoupée avec la PR relue :
+     la base doit être SON commit de fusion, sinon refus. R04 consigne l'amélioration, R05 l'incident ET le
+     revert (avant l'acquittement qui supprime l'incident de la base d'état).
+   Conséquences : PR/branche de la SPEC possédées → fermées/supprimées avec gardes de sommet ; PR d'amélioration/revert **possédées** et ouvertes → fermées (tête vivante =
+     tête consignée) ; têtes `collegue/issue-N` fusionnées **prouvées** → SHA consigné au manifeste ; têtes d'amélioration/revert fusionnées **prouvées** → supprimées ;
+     base enregistrée avancée SEULEMENT si CHAQUE commit de la chaîne de premier parent (fusions comprises) est une fusion attribuée durablement à la campagne (SPEC, cycles
+     de fusion, PR possédées fusionnées, incident, revert) et si les contrôles sont ceux du socle — sinon base et ancres conservées et nettoyage rapporté INCOMPLET.
+   Une ressource inconnue, étrangère ou ambiguë est conservée et signalée ; le registre illisible arrête le nettoyage ; sans base d'état lisible, rien de ce que
+   prouve le produit n'est touché. L'action publique `cleanup` rejoue les MÊMES preuves (base d'état, registre, manifeste) sans mémoire du run, avant le nettoyage
+   nightly, qu'elle n'appelle pas si une ressource reste non prouvée.
+4. **Base attendue jusqu'au BUILD** : le matérialiseur exige le sommet post-fusion EXACT (y compris réponse de fusion perdue : relecture de la PR, jamais de seconde
+   fusion) ; `launch_campaign` conserve ce sommet et s'arrête (`BaseMovedError`) sur tout déplacement après la SPEC, après `plan sync` et juste avant le clone.
+   Une reprise sur SPEC identique ne masque pas une base qui a bougé depuis la fusion consignée.
 Limites : le nettoyage nightly complet n'est pas simulé contre un GitHub réel (issues, labels, base) ; seules ses préconditions le sont.
