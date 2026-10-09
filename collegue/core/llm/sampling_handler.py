@@ -202,8 +202,9 @@ def _make_routing_class(inner_cls):
     class RoutingSamplingHandler:
         """Résout la route du rôle de CHAQUE requête puis délègue au handler de cette route.
 
-        Les handlers par route sont mis en cache sur ``(fournisseur, endpoint, authentification, empreinte de clé)`` :
-        une rotation de clé ou un autre endpoint produit un autre client, jamais le client d'une autre identité.
+        Les handlers par route sont mis en cache sur ``(fournisseur, endpoint, authentification, empreinte de clé, modèle)`` :
+        une rotation de clé, un autre endpoint ou un autre modèle produit un autre handler et un autre client, jamais ceux
+        d'une autre identité ni le modèle d'un appel précédent.
         Les erreurs de routage (contradiction, clé absente, abonnement non supporté ici) sont levées AVANT toute émission.
         """
 
@@ -219,7 +220,11 @@ def _make_routing_class(inner_cls):
                     f"rôle {route.role} : l'authentification par abonnement n'est pas supportée par le handler "
                     "serveur (réservée au ctx offline et au worker) — refusé, aucune bascule vers une clé API"
                 )
-            key = route.cache_key()
+            # Clé de cache = destination + identité + MODÈLE de la route résolue À CET APPEL. Le handler interne fige
+            # ``default_model`` (repli quand la requête ne nomme pas de modèle) et son client est enveloppé une fois pour
+            # toutes : deux modèles d'un même fournisseur/endpoint/clé ont donc chacun leur handler et leur client, sans
+            # mutation partagée (sûr en appels concurrents) et sans que le premier modèle vu s'impose aux suivants.
+            key = (*route.cache_key(), route.model)
             handler = self._handlers.get(key)
             if handler is None:
                 client = AsyncOpenAI(api_key=route.transport_key(), base_url=route.endpoint)

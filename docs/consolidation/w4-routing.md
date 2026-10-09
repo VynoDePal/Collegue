@@ -65,8 +65,9 @@ Toute violation lève `LLMRoutingError` **avant** toute émission.
 * `LocalSamplingContext.from_settings(settings)` : un client `AsyncOpenAI` par `(fournisseur, endpoint, auth,
   empreinte de clé)`, toujours créé avec `api_key` et `base_url` explicites (le SDK ne relit jamais
   `OPENAI_API_KEY`/`OPENAI_BASE_URL` de l'hôte). Une rotation de clé produit un autre client.
-* `RoutingSamplingHandler` (`build_routing_sampling_handler`) : même résolution par requête, un handler interne par
-  route. Utilisé par `app.py` au démarrage (le rôle `DEFAULT` doit être cohérent, sinon le serveur refuse de
+* `RoutingSamplingHandler` (`build_routing_sampling_handler`) : même résolution par requête, un handler interne (et un
+  client) par route ET par modèle — le modèle fait partie de la clé de cache, car le handler interne fige son modèle de
+  repli (requête sans modèle) ; aucun état partagé n’est muté, donc sûr en appels concurrents. Utilisé par `app.py` au démarrage (le rôle `DEFAULT` doit être cohérent, sinon le serveur refuse de
   construire le handler).
 * Worker : `runtime._coder_sandbox_env` (non secret : `LLM_MODEL` au format LiteLLM du fournisseur du rôle,
   `LLM_BASE_URL`, `OH_FALLBACK_MODELS` toujours posé — vide = aucun repli) et `_coder_sandbox_secrets` (clé de SA
