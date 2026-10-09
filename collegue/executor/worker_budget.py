@@ -58,6 +58,7 @@ from collegue.state.budget_ledger import (
 
 # Valeurs de ``Agent.budget_enforcement`` (voir l'en-tête du module pour la matrice complète).
 ENFORCEMENT_IN_RUNNER = "in-runner"
+ENFORCEMENT_BROKER = "broker"  # W5 : accepté SEULEMENT avec une preuve de transport vérifiée sur le sandbox réel
 ENFORCEMENT_NONE = "none"
 ENFORCEMENT_TEST_DOUBLE = "test-double"
 
@@ -159,6 +160,18 @@ def _require_enforceable(agent: object, billable: bool, snap) -> None:
             f"agent {name} : appels non bornables (aucun contrôle avant émission) — incompatible avec le mode "
             "budgétaire strict sous plafond ; utiliser l'agent SDK ou BUDGET_MODE=advisory",
         )
+    if enforcement == ENFORCEMENT_BROKER:
+        # Une chaîne ne vaut pas capacité : on exige la PREUVE, recalculée maintenant sur le sandbox réellement instancié
+        # (réseau none, socket unique en lecture seule, aucune clé fournisseur / proxy / passthrough, aucun autre montage).
+        prove = getattr(agent, "broker_transport_proof", None)
+        proof = prove() if callable(prove) else None
+        if proof is None or not getattr(proof, "ok", False):
+            detail = "; ".join(getattr(proof, "failures", []) or ["aucune preuve de transport"])
+            raise BudgetRefused(
+                REFUSED_UNBOUNDED,
+                f"agent {name} : capacité 'broker' non établie ({detail}) — aucune allocation sans transport prouvé",
+            )
+        return  # le courtier réserve et règle chaque appel (tokens ET USD) : plafonds stricts admis pour une clé facturable
     if enforcement == ENFORCEMENT_IN_RUNNER:
         if billable:
             raise BudgetRefused(
@@ -220,7 +233,7 @@ def allocate_worker(
         )
     capped = snap.strict and (snap.cap_micro_usd is not None or snap.cap_tokens is not None)
     model, billable = _coder_model_and_billable(settings)
-    if capped:
+    if capped or getattr(agent, "budget_enforcement", None) == ENFORCEMENT_BROKER:
         _require_enforceable(agent, billable, snap)
     share = _setting(settings, "BUDGET_WORKER_SHARE", DEFAULT_WORKER_SHARE)
     if not 0 < share <= 1:
@@ -304,6 +317,14 @@ def allocate_worker(
             )
     if max_tok_setting > 0:
         alloc_tokens = min(alloc_tokens, max_tok_setting) if alloc_tokens else max_tok_setting
+    if getattr(agent, "budget_enforcement", None) == ENFORCEMENT_BROKER and alloc_tokens <= 0:
+        # Une allocation de tokens nulle n'autorise aucune génération : jamais traduite en « sans plafond » par le courtier.
+        raise BudgetRefused(
+            REFUSED_UNBOUNDED,
+            "mode courtier : allocation de tokens nulle (le scope n'a pas de plafond de tokens) — "
+            "le courtier exige un plafond de tokens explicite",
+            snapshot=snap,
+        )
 
     # Échéance : la plus proche entre le run, le timeout du sandbox et la demande explicite.
     remaining = binding.remaining_seconds()
@@ -312,6 +333,16 @@ def allocate_worker(
     runtime = timeout_seconds
     if remaining is not None:
         runtime = remaining if runtime is None else min(runtime, remaining)
+    # Échéance GLOBALE PERSISTÉE (courtier) : elle a pu commencer avant ce run (planification, canaris) et prime sur toute
+    # fenêtre locale d'un nouveau ``BudgetBinding`` — jamais de reset par phase ou par processus. Dépassée : aucun worker.
+    probe = getattr(agent, "persisted_remaining_seconds", None)
+    persisted = probe(binding) if callable(probe) else None
+    if persisted is not None:
+        if persisted <= 0:
+            raise BudgetRefused(
+                REFUSED_DEADLINE, "échéance globale persistée atteinte : aucun worker lancé", snapshot=snap
+            )
+        runtime = persisted if runtime is None else min(runtime, persisted)
     now = datetime.now(timezone.utc)
     expires = now + timedelta(seconds=(runtime if runtime is not None else 4 * 3600) + 2 * GRACE_SECONDS + 60)
     reservation = ledger.reserve(
@@ -383,6 +414,15 @@ def settle_worker(binding: BudgetBinding, alloc: WorkerAllocation, agent_result:
     ledger = binding.ledger
     if agent_result is None:
         ledger.mark_unknown(alloc.reservation_id, reason="worker interrompu avant tout rapport d'usage")
+        return
+    if getattr(agent_result, "usage_source", "agent") == "broker":
+        # La consolidation a été faite par le courtier à la fermeture de session (autorité unique) : rien n'est recompté ici.
+        # Une réservation parent encore ouverte signifierait que la session n'a pas été consolidée → inconnu, jamais zéro.
+        parent = ledger.get_reservation(alloc.reservation_id)
+        if parent is None or parent.state == "reserved":
+            ledger.mark_unknown(
+                alloc.reservation_id, reason="session du courtier non consolidée dans la réservation parent"
+            )
         return
     prompt, completion, micro, unknown = resolve_agent_usage(agent_result, binding.settings)
     if unknown is not None:
