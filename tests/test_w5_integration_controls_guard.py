@@ -6,8 +6,8 @@ La sécurité du chemin Collègue repose donc sur le produit : contrôle complet
 entrée publique (``run_project_from_settings`` → ``execute_issue`` → ``open_pr``, vrais clients GitHub derrière un VRAI dépôt Git distant, ``tests/w3_remote_bridge.py``) et
 exigent ZÉRO écriture distante (ni branche, ni fichier, ni PR) : un faux GitHub qui compte les écritures, jamais un garde appelé directement.
 
-Chaque famille adverse a son témoin bénin sur le même chemin. Tant que B23 n'est pas intégré, les refus sont ``xfail`` STRICT : le marqueur casse (donc se retire) dès que
-le garde existe ; le témoin bénin, lui, doit déjà passer.
+Chaque famille adverse a son témoin bénin sur le même chemin. Le garde de B (``executor/pr.py``, ``w5_business_policy``) n'est actif que sur la fixture de campagne : ces tests
+y placent le dépôt (identité et socle de confiance réels de la campagne, ``tests/w5_campaign_support.py``) ; sur un autre dépôt la publication reste inchangée (cas bénin de B).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 
 import pytest
-from github_fakes import make_source_repo
+import w5_campaign_support as support
 from test_w3_integration_build import (  # fixtures et aides du raccord de la vague 3 (aucune fonction de test importée)
     FilesAgent,
     bridge,
@@ -34,15 +34,24 @@ BASE_FILES = {
     "requirements.txt": "fastapi==0.141.1\n",
 }
 
-PENDING_B23 = pytest.mark.xfail(
-    strict=True,
-    reason="garde commun de publication de B23 (executor/pr.py) non intégré : ce marqueur casse (donc se retire) à son intégration",
-)
+
+SEED = {k: v for k, v in BASE_FILES.items() if not k.startswith((".github", "ci/"))}
+CONTROLS = {k: v for k, v in BASE_FILES.items() if k.startswith((".github", "ci/"))}
 
 
 @pytest.fixture
-def source(tmp_path):
-    return make_source_repo(tmp_path / "source", BASE_FILES)
+def campaign(tmp_path):
+    return support.campaign_source(tmp_path / "source", seed_files=SEED, controls=CONTROLS)
+
+
+@pytest.fixture
+def source(campaign):
+    return campaign.path
+
+
+@pytest.fixture(autouse=True)
+def _campaign_identity(monkeypatch, campaign, tmp_path):
+    support.attach_identity(monkeypatch, campaign, directory=tmp_path)
 
 
 def _write(path):
@@ -91,7 +100,7 @@ TAMPERINGS = {
     "name",
     [
         # le lien symbolique est DÉJÀ refusé par la livraison (format non représentable, vague 3) : témoin que le chemin refuse sans écrire
-        name if name == "link-into-ci" else pytest.param(name, marks=PENDING_B23)
+        name
         for name in sorted(TAMPERINGS)
     ],
 )

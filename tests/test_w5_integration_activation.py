@@ -4,13 +4,10 @@ Hôte seulement (aucun Docker, aucun SDK), VRAIS modules de A (``collegue.broker
 SQLite ; seul le fournisseur Google est simulé, derrière le VRAI service (``install_runtime_for_tests``, réservé aux tests). Aucun mapping favorable n'est
 écrit ici : ``activate_budget`` de B est appelé tel quel avec ``qualify_models`` de A tel quel ; si le contrat de retour de A (``QualificationReport``) et
 le consommateur de B ne se rejoignent pas, ces tests ÉCHOUENT et le défaut revient à son auteur (B22 adapte le consommateur).
-
-Avant l'intégration de A et de B, ces tests sont marqués ``xfail`` STRICT : le marqueur casse (donc se retire) dès que les deux modules sont présents.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 
 import pytest
@@ -25,23 +22,10 @@ FALLBACK, PRIMARY = "gemma-4-26b-a4b-it", "gemma-4-31b-it"
 CAMPAIGN = "w5-activation-001"
 
 
-def _integrated() -> bool:
-    return all(importlib.util.find_spec(name) is not None for name in ("collegue.broker", "collegue.pilot.w5_business"))
-
-
-PENDING = pytest.mark.xfail(
-    not _integrated(),
-    strict=True,
-    reason="A et B ne sont pas encore intégrés : ce marqueur casse (donc se retire) à l'intégration des deux lots",
-)
-pytestmark = PENDING
-
-
 @pytest.fixture
 def rig(tmp_path):
     from collegue.broker import BrokerConfig
     from collegue.broker.runtime import BrokerRuntime, install_runtime_for_tests
-
     from collegue.pilot import w4_business as business
     from collegue.state import ProjectStateManager
 
@@ -87,7 +71,6 @@ class SimpleRig:
 
 def test_the_static_preflight_capability_proof_is_real_needs_no_key_and_emits_nothing(rig):
     from collegue.broker import capability_proof
-
     from collegue.pilot import w5_business as w5
 
     assert not rig.env.get("LLM_API_KEY"), "le préflight statique n'a aucune clé"

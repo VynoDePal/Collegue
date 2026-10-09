@@ -120,8 +120,8 @@ jobs:
 
       # Vague 5 : état durable du courtier budgétaire (sessions, tentatives, horloge persistée, migration 0012 → 0013), rejoué sur un
       # VRAI PostgreSQL avec les mêmes scénarios que SQLite. Le fichier doit exister (``test -f`` : son absence rend le job rouge,
-      # jamais un pas sauté). Le plancher (76) est le nombre collecté sur le SHA `d5800a8` de A : C le recale sur le nombre exact collecté à l'intégration de A
-      # (checklist de docs/consolidation/w5-integration.md), puis il ne baisse plus.
+      # jamais un pas sauté). Le plancher (118) est le nombre EXACT collecté à l'intégration locale de A29 (`f467978`) ; il ne baisse plus, il se relève si des cas
+      # sont ajoutés (checklist de docs/consolidation/w5-integration.md).
       - name: PostgreSQL broker state - real durable-state proof
         shell: bash
         env:
@@ -133,7 +133,7 @@ jobs:
           expected="$(pytest tests/test_w5_broker_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
           echo "tests PostgreSQL collectés: ${expected}"
           pytest tests/test_w5_broker_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-broker.xml
-          python scripts/ci_require_junit.py pg-broker.xml --min-tests 76 --expect-tests "${expected}"
+          python scripts/ci_require_junit.py pg-broker.xml --min-tests 118 --expect-tests "${expected}"
 
       - name: Upload PostgreSQL proof report
         if: always()

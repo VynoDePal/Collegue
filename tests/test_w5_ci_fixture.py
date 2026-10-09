@@ -227,8 +227,7 @@ def test_the_scaffold_satisfies_the_closed_shape_b_validates_against_the_real_tr
 
 def test_the_example_documents_are_byte_identical_to_the_ones_b_ships_once_integrated(fx):
     root = Path(__file__).resolve().parent / "fixtures" / "w5-business" / "docs"
-    if not root.is_dir():
-        pytest.skip("dossier de B non intégré (recoupement fait à l'intégration, avant tout apply)")
+    assert root.is_dir(), "les documents d'exemple de B sont intégrés : le recoupement est obligatoire"
     assert (root / "runbook-ops.md").read_bytes() == fx.RUNBOOK_OPS_DOC.encode("utf-8")
     assert (root / "deploiement.md").read_bytes() == fx.DEPLOY_DOC.encode("utf-8")
 

@@ -1,8 +1,8 @@
 # Vague 5 — organisation, contrats et checklist d'intégration (C)
 
 **État exact : les vagues 1 à 4 sont livrées sur `main` ; la validation réelle avec modèles est restée INCOMPLÈTE (campagne W4 refusée au
-préflight avant toute émission) ; la vague 5 est autorisée et en cours ; A et B développent en parallèle, rien n'est intégré ni publié ;
-aucune campagne réelle n'a été démarrée, aucune clé n'existe.** Ce document est rédigé AVANT les livraisons de A et B : il consigne la
+préflight avant toute émission) ; la vague 5 est autorisée et en cours ; A29 et B24 sont intégrés LOCALEMENT dans la branche de C (voir § 9), rien n'est publié ;
+aucune campagne réelle n'a été démarrée, aucune clé n'existe.** Ce document a été rédigé AVANT les livraisons de A et B (§ 1 à § 8, conservés) ; l'état d'intégration est au § 9 : il consigne la
 répartition, les contrats du manager (`briefs/w5-common.md`), la préparation de C (CI, image, fixture, workflow) et la checklist
 d'intégration. Il ne décrit aucun résultat du travail de A ou B. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole :
 [`protocole.md`](protocole.md) ; vague précédente : [`w4-integration.md`](w4-integration.md).
@@ -114,7 +114,7 @@ une roue locale est exécuté dans le conteneur sans réseau comme tout son code
 
 Ruleset actif sur `refs/heads/collegue-business/*`, sans bypass (24793056, observé) : PR obligatoire, signal de revue du propriétaire (non compté), check `Fixture tests` lié à l'application GitHub Actions (`integration_id` 15368), base à jour,
 **`do_not_enforce_on_create` faux** : créer une branche sous ce motif exige un commit qui a déjà passé le check (observé : base depuis la graine refusée, 422). Le socle le passe de lui-même : le workflow `push` produit le check sur sa branche.
-**V1 appliquée** : commit `10750c7bd823…`, branche `collegue-business/bootstrap-w5` ; ses commentaires affirmaient à tort la protection par CODEOWNERS. **V2 préparée, NON appliquée** : commit `ad56c0fa0306…` (parent unique = graine), branche
+**V1 appliquée** : commit `10750c7bd823…`, branche `collegue-business/bootstrap-w5` ; ses commentaires affirmaient à tort la protection par CODEOWNERS. **V2 APPLIQUÉE (C49)** : commit `ad56c0fa03066b1f6efb3cf6a5aa26cb496372ca`, arbre `6e6bea13c2d45cd848349b853aceec7fea5f7e85` (parent unique = graine), branche
 `collegue-business/bootstrap-w5-v2`, mêmes fichiers, commentaires corrigés, ruleset IDENTIQUE (aucune modification de protection) ; plan : `evidence/w5-c-fixture-plan-v2/` (dont `update-v2.md` : commandes exactes, et `v1-to-v2.diff`).
 **Voie de mise à jour** : le commit V2 est publié sur une branche de préparation HORS du motif (`collegue-bootstrap-staging/w5-v2`), son check est attendu (workflow `push` du commit V2), puis la branche du socle V2 est créée sous la règle de création intacte ; la V1, le
 ruleset, `main` et la graine ne sont jamais touchés. **Voie par PR vers la branche V1 : bloquée** (la fusion ajoute un commit au-dessus de la V1 ; B exige un descendant direct de la graine, `parents == [graine]`, `ahead_by == 1`) : à trancher par le manager.
@@ -127,8 +127,7 @@ Les têtes qui altèrent `.github/` ou `ci/` ne sont PAS rejouées. Un check abs
 
 ### 4.6 Ordre des mutations
 
-C47 (autorisée) : `inspect` → `apply` → `verify` → `probe` (V1, rc 1). C48 : aucune mutation. À venir, sur ordre du manager après examen de `evidence/w5-c-fixture-plan-v2/` : `inspect` → `apply --order-token APPLIQUER-W5-FIXTURE-ad56c0fa0306` (V2, voie de préparation) → `verify` → `probe`
-(sonde serveur V2, dont `stale-base`) → manifeste V2 pour B. Retour arrière : `cleanup` ne supprime que les branches de la V2 (le ruleset, partagé avec la V1, seulement avec `--with-ruleset`).
+C47 (autorisée) : `inspect` → `apply` → `verify` → `probe` (V1, rc 1). C48 : aucune mutation. **C49 (autorisée, exécutée)** : `inspect` → `apply --order-token APPLIQUER-W5-FIXTURE-ad56c0fa0306` (V2, voie de préparation, rc 0) → `verify` (rc 0, avant et après la sonde) → `probe w5-c49-20261009` (6 scénarios serveur conformes : `green` fusionné, `red-test`, `unapproved-dependency` et `symlink` refusés, base depuis la graine refusée 422, `stale-base` `behind`/`conflict` refusés) ; la 1re passe de la sonde a été interrompue par une coupure DNS (script de C : exception réseau non gérée), corrigé (`NetworkError` distinct d'`ApiError`, réconciliation par identité, `--only`) puis les 3 scénarios restants rejoués sous le même identifiant. Manifeste V2 : `evidence/w5-c49-fixture-manifest.json` (identique octet pour octet à `tests/fixtures/w5-business/manifest.v2.json` de B). Retour arrière : `cleanup` ne supprime que les branches de la V2 (le ruleset, partagé avec la V1, seulement avec `--with-ruleset`).
 
 ## 5. Image broker, dépendances et CI générale (cinq checks inchangés : Ruff, Pytest 3.11, Pytest 3.12, Dependency audit, Docker build)
 
@@ -144,8 +143,8 @@ C47 (autorisée) : `inspect` → `apply` → `verify` → `probe` (V1, rc 1). C4
 - **Ancien verrou `locks/sandbox-openhands.txt`** : audit strict **toujours rouge** (33 avis, 6 paquets, `evidence/w5-c-audit-sandbox-openhands-lock.txt`) ; **non réparé**, non audité par la CI,
   non utilisé par la campagne W5. Sa réparation (ou son retrait) est une décision séparée.
 - **Aucun modèle réel** dans la CI générale ; faux courtier et faux fournisseur dans les tests seulement.
-- **PostgreSQL obligatoire** : étape `PostgreSQL broker state` (service `postgres:16`, `test -f`, `test -n`, collecte égale à l'exécution, JUnit exigé). Plancher 76 = tests collectés sur `d5800a8` de
-  A ; à recaler sur le nombre exact à l'intégration.
+- **PostgreSQL obligatoire** : étape `PostgreSQL broker state` (service `postgres:16`, `test -f`, `test -n`, collecte égale à l'exécution, JUnit exigé). Plancher **118** = nombre exact collecté à l'intégration locale de A29 (`f467978`) ;
+  il ne baisse plus.
 - **Preuves d'image (broker)** : `scripts/ci_w5_broker_transport.py` s'exécute dans l'image construite, `--network none`, sans secret ni montage : isolation, **l'image est son verrou** (chaque entrée du
   verrou embarqué installée à la version exacte, distributions legacy absentes), vrai SDK → relais → faux courtier sur socket Unix, relais non proxy, plafond de volume ; le routage du worker et le
   vérificateur métier de B tournent aussi dans cette image. Aucun de ces scripts n'a pu être exécuté localement avec le vrai SDK (par consigne) : leur logique est éprouvée avec un relais de

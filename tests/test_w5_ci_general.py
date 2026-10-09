@@ -20,11 +20,6 @@ DOCKERFILE = ROOT / "docker" / "sandbox" / "Dockerfile.broker"
 LEGACY_DOCKERFILE = ROOT / "docker" / "sandbox" / "Dockerfile.openhands"
 SANDBOX_LOCK = ROOT / "locks" / "sandbox-broker.txt"
 RELAY_SOURCE = ROOT / "collegue" / "executor" / "oh_broker_relay.py"
-A_NOT_INTEGRATED = pytest.mark.xfail(
-    not RELAY_SOURCE.exists(),
-    strict=True,
-    reason="le relais de A n'est pas encore intégré : ce marqueur casse (donc se retire) à l'intégration de A",
-)
 
 
 @pytest.fixture(scope="module")
@@ -100,7 +95,6 @@ def test_the_general_ci_never_receives_a_model_key_nor_a_real_provider(workflow)
     assert "generativelanguage.googleapis.com" not in text
 
 
-@A_NOT_INTEGRATED
 def test_the_image_embeds_the_relay_next_to_the_runner_before_dropping_privileges():
     text = DOCKERFILE.read_text(encoding="utf-8")
     copy = "COPY collegue/executor/oh_broker_relay.py /opt/oh_broker_relay.py"
@@ -383,4 +377,6 @@ def test_the_activation_composition_tests_use_the_real_modules_and_write_no_favo
     assert "qualify=" not in source, (
         "aucun adaptateur de qualification écrit par C : celui de A est appelé tel quel par celui de B"
     )
-    assert "PENDING" in source and "strict=True" in source and "skip" not in source.replace("jamais un saut", "")
+    assert "xfail" not in source and "skip" not in source.replace("jamais un saut", ""), (
+        "A et B sont intégrés : plus aucun marqueur de raccord, ni saut, dans l'activation"
+    )
