@@ -151,3 +151,33 @@ de C) : proposition au manager, non appliquée ici.
   (contrôles protégés et provenance) à la campagne.
 * La garde interdit, pour la campagne, toute modification de `.github/` et `ci/` : une évolution légitime du socle exige un nouveau socle et un
   nouvel identifiant de campagne.
+
+## 6. Lancement CLI sur base PROTÉGÉE (B25)
+
+Deux raccords que des faux JSON à la place de `adapter.product` ne prouvaient pas, désormais exercés par la VRAIE CLI en processus
+(`tests/test_w5_business_public_launch.py` : argparse, validations, `runtime`, `github_sync`, vrais clients GitHub derrière un vrai dépôt Git dont la
+frontière HTTP REFUSE les écritures directes sur la base, avec le texte réel GH013) :
+
+1. **`--nightly-exact-task-count 3`** : la CLI acceptait seulement `1` (smoke nightly) alors que le lanceur de la campagne émet `3` et que le
+   décomposeur accepte `[1, MAX_TASKS]`. La validation suit désormais la borne du décomposeur ; `0`, négatif, `> MAX_TASKS`, non entier restent refusés à
+   l'analyse des arguments (aucun appel de modèle) ; le témoin nightly (`1`) et l'absence de l'option sont inchangés.
+2. **SPEC sur une base protégée** : `plan sync --execute` committe `SPEC.md` par un PUT Contents DIRECT sur la base, que le ruleset (PR obligatoire,
+   check requis, base à jour, aucun bypass) refuse : la campagne se serait arrêtée à `plan sync`, planification dépensée, avant tout BUILD.
+   Parcours minimal et conforme (`pilot/w5_business_spec.py`, appelé par `launch_campaign(materialize_spec=…)` entre l'approbation et le
+   `plan sync`) : la SPEC vient du SNAPSHOT approuvé (jamais d'un argument) ; SPEC déjà identique ⇒ rien ; divergente ⇒ refus ; protections serveur,
+   socle de confiance et contrôles de la base vérifiés ; branche de tête `collegue-spec/<tag>` hors du motif protégé, créée sur le sommet de la base
+   (ou reprise si elle porte EXACTEMENT base + blob SPEC, refusée sinon, jamais réécrite) avec UN seul fichier ; tête relue sur l'arbre distant ;
+   PR documentaire (pas une tâche BUILD, aucune preuve de livraison fabriquée) ; checks REQUIS et provenance réelle (check-run → job → exécution)
+   attendus dans l'échéance globale de 900 s (temps en général d'une à deux minutes sur le workflow de la fixture, pris sur la fenêtre) ; fusion à la
+   tête et à la base exactes ; réponse de fusion perdue ⇒ relecture de la PR, jamais de seconde fusion ; commit de fusion relu (parent = base, arbre =
+   base + blob) ; SPEC distante relue identique, que `plan sync` relit alors identique (aucun PUT). Un refus à une étape est un arrêt explicite
+   (`SpecMaterializationError`, échec de R01) ; l'échéance atteinte est un arrêt budget. Aucun contournement, aucune écriture directe, aucun
+   relâchement du ruleset, aucun code métier ajouté au socle.
+3. **Nettoyage** (`cleanup_campaign(before=…)` → `cleanup_campaign_resources`) : le nettoyage nightly refuse une PR ouverte non corrélée, une tête
+   `collegue/issue-N` dont le SHA n'est pas consigné et une base déplacée par autre chose que le commit de SPEC — donc, après les fusions de la campagne, il
+   aurait conservé toutes les ancres. Avant lui : la PR/branche de la SPEC sont connues d'un fichier d'intention écrit AVANT leur création (PR encore ouverte
+   fermée avec gardes d'identité, branche supprimée si son sommet est celui consigné) ; les PR d'amélioration/revert ouvertes sont fermées (gardes) ;
+   les têtes `collegue/issue-N` de PR fusionnées sont consignées au manifeste (sommet = tête de la PR, marqueur du corps) et les têtes
+   d'amélioration/revert fusionnées supprimées ; la base enregistrée avance au sommet courant seulement s'il descend de l'ancienne base par la chaîne du
+   premier parent et si ses contrôles sont ceux du socle.
+Limites : le nettoyage nightly complet n'est pas simulé contre un GitHub réel (issues, labels, base) ; seules ses préconditions le sont.

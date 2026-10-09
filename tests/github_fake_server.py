@@ -399,11 +399,14 @@ class FakeGitHubServer:
                 raise HttpError("Not Found", status_code=404)
             return {k: v for k, v in pr.items() if k != "files"}
         if endpoint == f"{prefix}/pulls":
-            head = params.get("head", "").split(":", 1)[-1]
+            head = params.get("head", "").split(":", 1)[-1] if params.get("head") else None
             matches = [
                 p
                 for p in self.prs.values()
-                if p["head"]["ref"] == head
+                if (
+                    head is None or p["head"]["ref"] == head
+                )  # sans filtre ``head`` : liste des PR (filtre ``base`` facultatif)
+                and (not params.get("base") or p["base"]["ref"] == params["base"])
                 and (params.get("state") in (None, "all") or p["state"] == params.get("state", "open"))
             ]
             return [{k: v for k, v in p.items() if k != "files"} for p in matches]

@@ -1612,6 +1612,7 @@ def launch_campaign(
     claim: Optional[Callable[[CampaignReport], Any]] = None,
     activate: Optional[Callable[[CampaignReport], Any]] = None,
     cycle_id: Optional[str] = None,
+    materialize_spec: Optional[Callable[[CampaignReport, Dict[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """Planifie, approuve, synchronise et exécute les TROIS tâches sur la base éphémère (BUILD + fusions W3), puis rend le
     contexte nécessaire à la vérification métier.
@@ -1622,6 +1623,10 @@ def launch_campaign(
     création distante : un identifiant consommé ne donne jamais un nouvel essai gratuit. ``activate`` ouvre ensuite le scope durable
     de la campagne (2 USD / 250000 tokens) et qualifie les deux modèles AVANT toute création distante et toute planification ;
     ``cycle_id`` lie le brouillon public à ce même scope (``--cycle-id``) : même ligne, même solde, même horloge.
+
+    ``materialize_spec`` (campagne sur base PROTÉGÉE) : après l'approbation et AVANT ``plan sync --execute``, matérialise la SPEC
+    approuvée par une PR sous les protections réelles (le commit direct de ``plan sync`` y est refusé par GitHub) ; un refus est un
+    arrêt explicite avant tout BUILD.
 
     Aucun retry payant : une seule exécution du produit ; un arrêt par budget/échéance est rapporté ``budget_stop``."""
     from collegue.pilot.nightly_e2e import NightlyManifest, _write_manifest
@@ -1659,6 +1664,9 @@ def launch_campaign(
     )
     if approved.get("plan_hash") != plan_hash or int(approved.get("task_count") or 0) != 3:
         raise RuntimeError("l'approbation n'a pas scellé le hash attendu")
+    if materialize_spec is not None:
+        outcome = materialize_spec(report, context)
+        report.facts["spec_materialization"] = outcome.to_fact() if hasattr(outcome, "to_fact") else outcome
     adapter.create_label(manifest)
     synced = adapter.product("plan", "sync", "--project-id", str(project_id), "--execute", "--format", "json")
     issues = sorted(
@@ -1999,13 +2007,18 @@ def _real_preflight(env: Mapping[str, str], campaign_id: str, stage: str = STAGE
     )
 
 
-def cleanup_campaign(report: CampaignReport, adapter: Any) -> None:
+def cleanup_campaign(
+    report: CampaignReport, adapter: Any, *, before: Optional[Callable[[CampaignReport], Any]] = None
+) -> None:
     """Nettoyage UNIQUE, après toutes les phases : ressources distantes éphémères (idempotent) puis clone de l'opérateur local.
-    La revendication de l'identifiant de campagne n'est JAMAIS supprimée."""
+    La revendication de l'identifiant de campagne n'est JAMAIS supprimée. ``before`` (campagne W5) traite d'abord ce que le nettoyage
+    nightly ne connaît pas (PR documentaire de la SPEC, PR d'amélioration résiduelles, base avancée par les fusions)."""
     import shutil
 
     launch = report.facts.get("launch") or {}
     try:
+        if before is not None:
+            report.facts["cleanup_campaign_resources"] = before(report)
         report.facts["cleanup"] = adapter.cleanup()
     finally:
         checkout = launch.get("operator_checkout")
@@ -2090,6 +2103,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 claim=lambda rep: w5.revalidate_and_claim(clients, env, args.campaign_id, rep),
                 activate=lambda rep: w5.activate_budget(env, args.campaign_id, rep, on_remaining=tighten),
                 cycle_id=args.campaign_id,
+                materialize_spec=lambda rep, ctx: w5.materialize_spec_for_launch(
+                    clients=clients, config=config, env=env, project_id=int(ctx["project_id"]), deadline=deadline
+                ),
             ),
             verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline()),
             read_registry=registry_reader(env),
@@ -2099,6 +2115,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cleanup=lambda r: cleanup_campaign(
                 r,
                 NightlyAdapter(config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)),
+                before=lambda rep: w5.cleanup_campaign_resources(rep, clients=clients, config=config, env=env),
             ),
             deadline_monotonic=deadline,
         )

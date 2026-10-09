@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 from collegue.pilot import w4_business as business
 from collegue.pilot import w5_business_policy as fixture_policy
+from collegue.pilot import w5_business_spec as spec_publication
 from collegue.pilot.w4_business import (
     BASE_BRANCH_PREFIX,
     FIXTURE_REPOSITORY,
@@ -1412,7 +1413,46 @@ def production_services(
     )  # fmt: skip
 
 
+# ── lancement sur base PROTÉGÉE : SPEC par PR, nettoyage de ce que le nightly ne connaît pas ─────────────────────────────────────
+
+
+def materialize_spec_for_launch(
+    *, clients: Any, config: Any, env: Mapping[str, str], project_id: int, deadline: Callable[[], float]
+) -> Any:
+    """Matérialise la SPEC approuvée par une PR sous les protections réelles (voir :mod:`w5_business_spec`) ; l'échéance globale
+    atteinte est un arrêt budget, tout autre refus un échec explicite AVANT les BUILD."""
+    try:
+        return spec_publication.materialize_approved_spec(
+            clients=clients, owner=config.owner, repo=config.repo, manager=default_manager_factory(env)(), project_id=project_id,
+            manifest_path=config.manifest_path, trust_manifest_path=str(env.get(fixture_policy.TRUST_ANCHOR_ENV, "") or "") or None,
+            deadline_monotonic=deadline,
+        )  # fmt: skip
+    except spec_publication.SpecDeadline as exc:
+        raise BudgetStop(str(exc)) from exc
+
+
+def cleanup_campaign_resources(
+    report: CampaignReport, *, clients: Any, config: Any, env: Mapping[str, str]
+) -> Dict[str, Any]:
+    """Avant le nettoyage nightly : PR documentaire de la SPEC, PR d'amélioration/revert résiduelles, base avancée par les fusions."""
+    out: Dict[str, Any] = {
+        "spec": spec_publication.cleanup_spec_resources(clients, config.owner, config.repo, config.manifest_path)
+    }
+    out["residual_pull_requests"] = spec_publication.close_residual_pull_requests(
+        clients, config.owner, config.repo, config.base_branch
+    )
+    anchor_rows = None
+    manifest_path = str(env.get(fixture_policy.TRUST_ANCHOR_ENV, "") or "")
+    if manifest_path:
+        anchor_rows = fixture_policy.load_trust_anchor(clients.branches, config.owner, config.repo, manifest_path).rows
+    out["merged_heads"] = spec_publication.reconcile_merged_heads(clients, config)
+    out["base"] = spec_publication.advance_recorded_base(clients, config, anchor_rows=anchor_rows)
+    return out
+
+
 __all__ = [
+    "materialize_spec_for_launch",
+    "cleanup_campaign_resources",
     "DeterministicIncidentAgent",
     "PhaseServices",
     "check_gemma_models",

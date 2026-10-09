@@ -71,11 +71,16 @@ def write_manifest(directory, campaign, **overrides) -> str:
     return str(path)
 
 
-def attach_identity(monkeypatch, campaign, *, directory=None, **manifest_overrides) -> Optional[str]:
+def attach_identity(
+    monkeypatch, campaign, *, directory=None, base_prefix="main", **manifest_overrides
+) -> Optional[str]:
     """Rattache la politique au dépôt de test. ``directory`` : où écrire le manifeste du socle de confiance (``W5_BOOTSTRAP_MANIFEST``) ;
     ``None`` : AUCUN socle fourni. Le manifeste est écrit APRÈS la substitution des constantes (il désigne le dépôt de test)."""
     monkeypatch.setattr(fixture_policy, "CAMPAIGN_REPOSITORY", f"{OWNER}/{REPO}")
-    monkeypatch.setattr(fixture_policy, "CAMPAIGN_BASE_PREFIX", "main")
+    if (
+        base_prefix is not None
+    ):  # None : le motif RÉEL ``collegue-business/`` (bases de campagne nommées comme en production)
+        monkeypatch.setattr(fixture_policy, "CAMPAIGN_BASE_PREFIX", base_prefix)
     monkeypatch.setattr(fixture_policy, "CAMPAIGN_SEED_SHA", campaign.seed_sha)
     if directory is None:
         monkeypatch.delenv(fixture_policy.TRUST_ANCHOR_ENV, raising=False)
@@ -85,13 +90,23 @@ def attach_identity(monkeypatch, campaign, *, directory=None, **manifest_overrid
     return path
 
 
-def campaign_mode(monkeypatch, bridge, *, campaign=None, directory=None, job=True, **job_overrides):
+def campaign_mode(
+    monkeypatch,
+    bridge,
+    *,
+    campaign=None,
+    directory=None,
+    job=True,
+    base_prefix="main",
+    check_state="success",
+    **job_overrides,
+):
     """Politique de campagne complète : identité, socle de confiance, check requis ``Fixture tests`` et son job Actions réel.
 
     ``job=True`` : le check est un job réel du workflow approuvé (``job_overrides`` en fait varier un champ) ; ``job=False`` : le
     check est publié SANS job (par l'API des checks) — la forgerie à refuser."""
     if campaign is not None:
-        attach_identity(monkeypatch, campaign, directory=directory)
+        attach_identity(monkeypatch, campaign, directory=directory, base_prefix=base_prefix)
     else:
         monkeypatch.setattr(fixture_policy, "CAMPAIGN_REPOSITORY", f"{OWNER}/{REPO}")
         monkeypatch.setattr(fixture_policy, "CAMPAIGN_BASE_PREFIX", "main")
@@ -99,8 +114,8 @@ def campaign_mode(monkeypatch, bridge, *, campaign=None, directory=None, job=Tru
     original = bridge.set_checks
 
     def set_checks(sha, states, *, app_id=GITHUB_ACTIONS_APP):
-        original(sha, {**states, CHECK: "success"}, app_id=app_id)
-        if job:
+        original(sha, {**states, **({CHECK: check_state} if check_state else {})}, app_id=app_id)
+        if job and check_state:
             produced = next(run for run in bridge.check_runs[sha] if run["name"] == CHECK)
             bridge.register_actions_job(produced["id"], head_sha=sha, name=CHECK, **job_overrides)
 
