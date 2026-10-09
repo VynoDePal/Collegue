@@ -18,7 +18,6 @@ from oracle_sandbox import LocalOracleSandbox
 from collegue.executor.oracle import judge_oracle_run, new_nonce, oracle_pytest_command, parse_oracle_report
 from collegue.pilot import w4_business as business
 
-
 pytestmark = pytest.mark.slow
 
 
