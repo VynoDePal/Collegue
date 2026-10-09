@@ -255,6 +255,8 @@ CAMPAIGN_SETTINGS: Dict[str, str] = {
     "LLM_PROVIDER": "gemini",
     "LLM_MODEL": MODEL_PRIMARY,
     "CODER_FALLBACK_MODELS": MODEL_CODER_FALLBACK,
+    # Échéance globale du relais (ouverte au premier accès Google réel, persistée) : explicitement configurée à l'enveloppe.
+    "BROKER_GLOBAL_DEADLINE_SECONDS": "900",
 }
 
 BUSINESS_PROBLEM = (
