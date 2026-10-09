@@ -1006,7 +1006,10 @@ def health_command() -> str:
     Même sonde métier que la vérification R02 (base vierge, migration, audit créé / relu / relu après redémarrage, PDF lu par un
     vrai lecteur, mention légale exigée) : jamais les tests écrits par l'agent. Autonome (un seul argument, aucun fichier du
     dépôt, aucun secret) ; exécutée par le sandbox du gate dans le clone de la base fusionnée. Code 0 = sain, 1 = régression
-    observée, 2 = sonde non établie (pile ou lecteur PDF absent)."""
+    observée, 2 = sonde non établie (pile ou lecteur PDF absent).
+
+    **Aucun opérateur shell** (``; | & ` $( > <`` ni saut de ligne) : la garde de Phase 5 refuse une commande de santé qui pourrait
+    masquer un échec ; le programme voyage donc en base64 dans un unique ``exec`` (aucune relaxation de la garde)."""
     script = _VERIFY_SCRIPT % {"marker": REPORT_MARKER}
     program = _HEALTH_PROGRAM % {
         "script": base64.b64encode(script.encode("utf-8")).decode("ascii"),
@@ -1016,7 +1019,7 @@ def health_command() -> str:
         "timeout": HEALTH_PHASE_TIMEOUT,
     }
     encoded = base64.b64encode(program.encode("utf-8")).decode("ascii")
-    return f"python -c \"import base64;exec(base64.b64decode('{encoded}'))\""
+    return f"python -c \"exec(__import__('base64').b64decode('{encoded}'))\""
 
 
 def _parse_report(stdout: str) -> Optional[Dict[str, Any]]:

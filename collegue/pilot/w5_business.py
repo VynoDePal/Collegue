@@ -499,6 +499,8 @@ class PhaseServices:
     clock: Callable[[], float] = None  # type: ignore[assignment]
     incident_agent: Any = None
     manifest: Optional[Mapping[str, Any]] = None
+    #: Checks REQUIS sur la base protégée (en production : ``Fixture tests`` de l'application réelle ; en test : ceux du pont).
+    required_checks: Tuple[str, ...] = (REQUIRED_CHECK,)
     controls_ref: Optional[Callable[[Mapping[str, Any]], str]] = None
 
     def remaining(self) -> Optional[float]:
@@ -621,17 +623,19 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
     manager, project_id = services.manager(), context["project_id"]
     tip0, tree0 = _tip_and_tree(services, context)
     pending = manager.get_phase5_incident(project_id)
-    resumed = pending is not None and pending.state != "recovered"
-    if (
-        resumed
-    ):  # reprise après crash : l'incident durable est réconcilié AVANT toute nouvelle passe (aucune seconde injection)
-        outcome = _drive(services, services.resume_incident(context), "reprise R05")
-        step.evidence["resumed_before_pass"] = {
-            "found": outcome.found,
-            "stop_reason": outcome.stop_reason,
-            "reason": outcome.reason,
-        }
-        improvement, promoted = None, []
+    resumed = pending is not None
+    improvement, promoted = None, []
+    if pending is not None:
+        # Reprise après crash : l'incident durable est réconcilié AVANT toute nouvelle passe (aucune seconde injection, aucune
+        # seconde dépense). Un incident déjà « recovered » (acquittement non fait) se juge directement.
+        if pending.state != "recovered":
+            outcome = _drive(services, services.resume_incident(context), "reprise R05")
+            step.evidence["resumed_before_pass"] = {
+                "found": outcome.found,
+                "stop_reason": outcome.stop_reason,
+                "reason": outcome.reason,
+            }
+        step.evidence["incident_state_at_entry"] = pending.state
     else:
         result = _drive(services, services.run_pass(context, improve=True, agent=agent), "R05")
         improvement = getattr(result, "improvement", None)
@@ -655,13 +659,29 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
             message = f"le rollback n'a pas abouti ({improvement.stop_reason}) : {_refusals(improvement)}"
             raise AssertionError(message) if hard else IncompleteValidation(message + " — rollback non exercé")
     incident = manager.get_phase5_incident(project_id)
+    if incident is not None and incident.state in {
+        "merge_pending",
+        "health_pending",
+        "revert_pending",
+        "revert_in_progress",
+    }:
+        raise IncompleteValidation(
+            f"incident Phase 5 durable ENCORE ACTIF (état {incident.state}) : le rollback n'est pas prouvé ; il se poursuit à la reprise "
+            "(un lease de revert non expiré retarde celle-ci — il dure au moins 3600 s côté produit)"
+        )
     if incident is None or incident.state != "recovered":
-        raise AssertionError(f"incident durable non récupéré (état {getattr(incident, 'state', None)})")
+        raise AssertionError(
+            f"incident durable non récupéré (état {getattr(incident, 'state', None)}) : intervention humaine"
+        )
     if incident.health_command != business.health_command():
         raise AssertionError("la santé de Phase 5 n'est pas la sonde métier indépendante")
     merge_sha = str(incident.merge_sha)
     tip1, tree1 = _tip_and_tree(services, context)
     branches, owner, repo = services.clients.branches, services.owner, services.repo
+    # Ancre AUTORITAIRE de l'état d'avant l'incident : celle que Phase 5 a persistée avant sa première écriture (valable aussi
+    # à la reprise, quand la base courante contient déjà la fusion de l'incident).
+    tip0 = str(incident.base_sha_before_merge).lower()
+    tree0 = branches.get_git_commit(owner, repo, tip0).tree_sha
     merge_commit = branches.get_git_commit(owner, repo, merge_sha)
     tip_commit = branches.get_git_commit(owner, repo, tip1)
     if merge_commit.tree_sha == tree0:
@@ -678,19 +698,30 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
         raise AssertionError("aucune PR de revert fusionnée (le rollback doit passer par une vraie PR)")
     checks = services.clients.prs.get_commit_check_details(owner, repo, revert_pr.head_sha)
     states = {c.name: (c.state, getattr(c, "app_id", None)) for c in checks.checks}
+    missing = [name for name in services.required_checks if states.get(name, (None,))[0] != "success"]
     wanted = (services.manifest or {}).get("check_app_id")
-    ok = checks.complete and states.get(business_check_name()) and states[business_check_name()][0] == "success"
-    if not ok or (wanted is not None and states[business_check_name()][1] != wanted):
-        raise AssertionError(f"la PR de revert n'a pas de check requis réel vert ({states})")
+    if not checks.complete or missing or (wanted is not None and states.get(REQUIRED_CHECK, (None, None))[1] != wanted):
+        raise AssertionError(
+            f"la PR de revert n'a pas ses checks requis réels verts (manquants ou rouges : {missing} ; vus : {states})"
+        )
     observation = services.verify_tip(context, tip1)
     if observation.status != "passed" or not observation.checks.get("write:legal_notice_present"):
         raise AssertionError(
             f"santé indépendante non rétablie sur la base restaurée ({observation.status}: {observation.failed})"
         )
     _check_controls(services, context, "après R05")
-    stale = manager.acknowledge_phase5_incident(project_id, expected_revision=incident.revision + 1000)
-    acknowledged = manager.acknowledge_phase5_incident(project_id, expected_revision=incident.revision)
-    again = manager.acknowledge_phase5_incident(project_id, expected_revision=incident.revision)
+    from collegue.state.manager import Phase5IncidentConflictError
+
+    def acknowledge(revision: int) -> bool:
+        """Acquittement CAS : une révision périmée est REFUSÉE (conflit), jamais appliquée."""
+        try:
+            return bool(manager.acknowledge_phase5_incident(project_id, expected_revision=revision))
+        except Phase5IncidentConflictError:
+            return False
+
+    stale = acknowledge(incident.revision + 1000)
+    acknowledged = acknowledge(incident.revision)
+    again = acknowledge(incident.revision)
     if stale or not acknowledged or again or manager.get_phase5_incident(project_id) is not None:
         raise AssertionError(f"acquittement CAS incorrect (périmé={stale}, réel={acknowledged}, rejeu={again})")
     manager.record_decision(project_id, "Incident Phase 5 de la campagne inspecté et acquitté (CAS).")
@@ -705,10 +736,6 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
         health_after=observation.status, acknowledged_revision=incident.revision, cas_stale_rejected=not stale,
         replay_rejected=not again, recovery_found=recovery.found, recovery_continue=recovery.continue_loop, resumed=resumed,
     )  # fmt: skip
-
-
-def business_check_name() -> str:
-    return REQUIRED_CHECK
 
 
 # ── contrôles de préflight W5 (branchés par ``run_preflight(extra_checks=…)``) ───────────────────────────────────────────
