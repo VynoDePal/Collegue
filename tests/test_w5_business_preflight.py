@@ -580,3 +580,49 @@ def test_the_w5_preflight_checks_are_hooked_into_the_preflight_in_order(policy):
         "aucun manifeste fourni : jamais une preuve par défaut"
     )
     assert report.step("P12-campaign-identity").state == "not_executed"
+
+
+# ── P06 : la capacité du worker est celle du relais, pas la matrice historique ──────────────────────────────────────────────
+
+
+def test_with_the_budget_broker_the_worker_capacity_comes_from_the_public_proof_of_lot_a(monkeypatch):
+    proofs = []
+
+    def proof(settings):
+        proofs.append(settings.LLM_TRANSPORT)
+        return {
+            "transport": "budget_broker",
+            "accepted": True,
+            "instance": "BudgetBrokerTransport",
+            "enforcement": "broker",
+        }
+
+    monkeypatch.setattr(w5, "broker_capability_proof", lambda: proof)
+    settings = settings_with(LLM_TRANSPORT="budget_broker")
+
+    outcome = business.effective_worker_capacity(settings)
+
+    assert outcome["accepted"] is True and outcome["worker"] == "BudgetBrokerTransport" and proofs == ["budget_broker"]
+    assert outcome["source"] == "collegue.broker.capability_proof"
+
+
+def test_with_the_budget_broker_an_absent_or_refusing_proof_makes_the_capacity_step_incomplete(monkeypatch):
+    settings = settings_with(LLM_TRANSPORT="budget_broker")
+    report = CampaignReport("preflight", "unit")
+    step = report.declare("P06", "capacité")
+
+    monkeypatch.setattr(
+        w5,
+        "broker_capability_proof",
+        lambda: lambda s: {"transport": "budget_broker", "accepted": False, "reason": "countTokens absent"},
+    )
+    with pytest.raises(IncompleteValidation, match="countTokens absent"):
+        business.check_worker_capacity(report, step, settings=settings)
+
+    import sys
+    import types
+
+    monkeypatch.undo()
+    monkeypatch.setitem(sys.modules, "collegue.broker", types.ModuleType("collegue.broker"))
+    with pytest.raises(IncompleteValidation, match="collegue.broker.capability_proof"):
+        business.check_worker_capacity(report, step, settings=settings)

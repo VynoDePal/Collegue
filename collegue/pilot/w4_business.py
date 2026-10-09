@@ -566,6 +566,22 @@ def effective_worker_capacity(settings: Any, bounds: CampaignBounds = CAMPAIGN_B
     modèle, aucune dépense — la réservation vit dans le registre jetable, pas dans celui de la campagne."""
     from datetime import datetime, timedelta, timezone
 
+    if str(getattr(settings, "LLM_TRANSPORT", "") or "").strip().lower() == "budget_broker":
+        # W5 : la capacité est celle du relais budgétaire RÉELLEMENT instancié, prouvée par l'interface publique du lot A ; la
+        # matrice historique des workers à clé directe n'a plus de sens et ne décide pas à sa place.
+        from collegue.pilot import w5_business as w5
+
+        proof = dict(w5.broker_capability_proof()(settings))
+        accepted = proof.get("accepted") is True and proof.get("transport") == "budget_broker"
+        return {
+            "worker": str(proof.get("instance") or "budget_broker"),
+            "declared_enforcement": proof.get("enforcement"),
+            "accepted": accepted,
+            "code": proof.get("code"),
+            "reason": str(proof.get("reason") or ("capacité non acceptée" if not accepted else "")),
+            "source": "collegue.broker.capability_proof",
+        }
+
     from collegue.core.llm.budget_guard import BudgetBinding
     from collegue.executor import OHSdkAgent
     from collegue.executor.worker_budget import allocate_worker
