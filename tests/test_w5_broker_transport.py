@@ -442,3 +442,12 @@ def test_the_broker_package_and_the_relay_spawn_no_subprocess():
 def test_the_sandbox_subprocess_call_sites_are_exactly_the_inventoried_ones():
     sites = _calls(REPO / "collegue" / "sandbox" / "executor.py", {"subprocess.run"})
     assert [target for _, target in sites] == ["subprocess.run"] * 3  # docker run (worker), docker kill, docker version
+
+
+def test_a_socket_path_too_long_for_af_unix_is_an_explicit_refusal(manager, tmp_path):
+    service, _, ledger, scope_key, parent_rid = service_for(manager)
+    session = open_worker(service, scope_key, parent_rid)
+    deep = tmp_path / ("d" * 40) / ("e" * 40) / ("f" * 40)
+    with pytest.raises(RuntimeError, match="trop long"):
+        BrokerSocketServer(service, session.session_id, run_root=str(deep)).start()
+    assert not any(deep.parent.parent.parent.rglob("cbk-*"))  # rien ne reste sur le disque

@@ -31,6 +31,7 @@ from collegue.broker.policy import MAX_REQUEST_BYTES
 from collegue.broker.service import BrokerService
 
 SOCKET_NAME = "broker.sock"
+MAX_SOCKET_PATH = 100  # AF_UNIX : 108 octets au plus (sun_path), marge comprise
 ROUTE = "/v1/chat/completions"
 MAX_HEADER_BYTES = 16 * 1024
 MAX_HEADERS = 64
@@ -94,6 +95,12 @@ class BrokerSocketServer:
         os.makedirs(root, mode=0o700, exist_ok=True)
         self._dir = Path(tempfile.mkdtemp(prefix="cbk-", dir=root))
         os.chmod(self._dir, 0o700)
+        if len(os.fsencode(self.socket_path)) > MAX_SOCKET_PATH:
+            shutil.rmtree(self._dir, ignore_errors=True)
+            self._dir = None
+            raise RuntimeError(
+                f"chemin de socket Unix trop long (> {MAX_SOCKET_PATH} octets) : raccourcir BROKER_RUN_DIR / TMPDIR"
+            )
         self._thread = threading.Thread(target=self._run, name=f"broker-{self._session_id}", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=15) or self._failure is not None:
