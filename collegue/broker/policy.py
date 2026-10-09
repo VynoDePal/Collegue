@@ -42,9 +42,13 @@ def canonical_model(name: str) -> str:
     Le préfixe ``openai/`` est celui du client LiteLLM compatible Chat Completions : il ne change PAS la destination
     sémantique (toujours Google).
     """
-    text = str(name or "").strip()
-    for prefix in ("models/", "gemini/", "openai/"):
-        if text.lower().startswith(prefix):
+    text = name if isinstance(name, str) else ""
+    for prefix in (
+        "models/",
+        "gemini/",
+        "openai/",
+    ):  # sensible à la casse et aux espaces : aucune normalisation silencieuse
+        if text.startswith(prefix):
             text = text[len(prefix) :]
             break
     if text not in OFFICIAL_MODELS:

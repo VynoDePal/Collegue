@@ -604,6 +604,7 @@ def main() -> int:
     args = ap.parse_args()
 
     broker_socket = os.environ.get("COLLEGUE_BROKER_SOCKET", "").strip()
+    broker_base_url = None
     try:
         # Courtier (W5) : plafonds, échéance et usage sont appliqués par le service de confiance HORS du conteneur ; la garde
         # interne (historique) n'est donc pas armée — elle ne saurait ni tarifer ni borner un relais loopback.
@@ -619,7 +620,9 @@ def main() -> int:
             return 2
         # Le conteneur n'a AUCUN réseau : le SDK parle à un relais loopback qui recopie vers le socket Unix monté. Le jeton de
         # session (LLM_API_KEY) n'est pas une clé fournisseur ; le relais ne se connecte qu'à ce socket.
-        os.environ["LLM_BASE_URL"] = f"http://127.0.0.1:{_start_broker_relay(broker_socket)}/v1"
+        broker_base_url = (
+            f"http://127.0.0.1:{_start_broker_relay(broker_socket)}/v1"  # local : aucune mutation d'os.environ
+        )
 
     from openhands.sdk import LLM, Conversation
     from openhands.tools.preset.default import get_default_agent
@@ -638,7 +641,7 @@ def main() -> int:
     # sans LLM_SUBSCRIPTION=1, le chemin clé-API (gemma) reste inchangé.
     subscription = os.environ.get("LLM_SUBSCRIPTION", "") == "1"
     api_key, _credential_name = resolve_credential(primary)
-    base_url = os.environ.get("LLM_BASE_URL") or None
+    base_url = broker_base_url or os.environ.get("LLM_BASE_URL") or None
     local_endpoint = bool(base_url) and primary.lower().startswith("openai/")
     if not subscription and not api_key and not local_endpoint:
         print("oh_runner: LLM_API_KEY manquante", file=sys.stderr)
