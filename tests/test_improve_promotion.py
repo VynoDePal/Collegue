@@ -449,10 +449,11 @@ async def test_rerunning_the_same_improvement_reuses_the_verified_pr_and_its_imm
 
 
 async def test_a_found_pr_of_another_revision_is_not_an_improvement_delivery(world):
-    clients = world.remote.clients()
-    clients.branches.ensure_branch(OWNER, REPO, "collegue/issue-1", from_branch="main")
-    clients.files.update_file(OWNER, REPO, "intrus.py", "m", "autre révision\n", branch="collegue/issue-1")
-    clients.prs.create_pr(OWNER, REPO, "ancienne", "collegue/issue-1", "main", "x")
+    await improve(world, [metrics(80), metrics(90)], agent=Feature({"gain.py": "GAIN = 1\n"}))
+    refs = world.remote._git("for-each-ref", "--format=%(refname:strip=2)", "refs/heads/collegue/").splitlines()
+    (head,) = refs  # la tête d'AMÉLIORATION publiée (jamais ``collegue/issue-<round>``)
+    assert head.startswith("collegue/improve-r1-") and not head.startswith("collegue/issue-")
+    world.remote._commit_change(head, "intrus.py", "autre révision\n", "tiers")  # un tiers pousse sur la tête
     result = await improve(world, [metrics(80), metrics(90)], agent=Feature({"gain.py": "GAIN = 1\n"}))
     assert result.promoted == [] and "arbre publié" in result.rejected[0][1]
-    assert world.manager.get_decision_journal(world.project_id, "delivery-proof") == []
+    assert len(world.manager.get_decision_journal(world.project_id, "delivery-proof:v1:")) == 1  # pas de 2e preuve
