@@ -74,8 +74,6 @@ async def test_three_dependent_tasks_are_planned_with_sealed_oracles_at_plan_tim
 async def test_every_oracle_was_red_by_assertion_before_and_green_after_with_the_same_fingerprint(main_report):
     for number in (1, 2, 3):
         step = evidence(main_report, {1: "D03-task-1", 2: "D04-interrupted-sync", 3: "D05-restart-resume"}[number])
-        if number == 2:
-            continue  # la tâche 2 est livrée dans D04 (preuve relue plus bas)
         current = next(o for o in step["oracles"] if o["role"] == "current")
         assert current["preimage"]["status"] == "red-assertion"
         assert current["preimage"]["assertion_failures"] >= 1 and current["preimage"]["errors"] == 0
@@ -87,6 +85,10 @@ async def test_every_oracle_was_red_by_assertion_before_and_green_after_with_the
 async def test_delivered_contracts_are_replayed_task_after_task(main_report):
     roles = [sorted(o["role"] for o in evidence(main_report, "D03-task-1")["oracles"])]
     assert roles == [["current"]]
+    assert sorted(o["role"] for o in evidence(main_report, "D04-interrupted-sync")["oracles"]) == [
+        "current",
+        "delivered",
+    ]
     assert sorted(o["role"] for o in evidence(main_report, "D05-restart-resume")["oracles"]) == [
         "current",
         "delivered",

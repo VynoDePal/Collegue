@@ -1366,6 +1366,15 @@ _HOST_PROCESS_INVENTORY = {
     "collegue/sandbox/executor.py": "docker run/kill/version : l'isolation elle-même",
     "collegue/improve/metrics.py": "ruff sur chemins CONFINÉS (workspace_file) ; audit de dépendances en sandbox",
     "collegue/pilot/nightly_e2e.py": "clone public neuf d'une fixture + sous-process CLI produit ; jamais un workspace",
+    "collegue/pilot/w4_business.py": (
+        "campagne ponctuelle : (1) docker run puis docker kill NOMMÉ du vérificateur métier — livrable généré exécuté DANS un "
+        "conteneur (réseau none, racine RO, checkout RO et scratch RW validés par git_control_exposure, UID de l'appelant, "
+        "environnement du client en liste blanche), durée supervisée par timeout(1) processus principal hors du code livré, "
+        "relève hôte et kill par nom sur toute interruption ; (2) docker run fixe de contrôle des modules de l'image "
+        "(python -c constant, --pull never, --network none, sans montage) ; (3) exécuteur borné Popen + killpg des commandes "
+        "produit et du clone public de la fixture (comme nightly_e2e), aucune commande après l'échéance globale ; "
+        "(4) trusted_local_runner : hôte, réservé aux fixtures écrites par les tests, jamais le chemin par défaut"
+    ),
     "collegue/autonomous/proactive_monitor.py": "ChangeDetector sur repo_path configuré par l'opérateur ; jamais un workspace",
     "collegue/core/llm/sampling_ctx.py": "CLI de sampling LLM ; sans rapport avec git/workspace",
     "collegue/tools/clients/kubernetes.py": "kubectl ; sans rapport avec git/workspace",

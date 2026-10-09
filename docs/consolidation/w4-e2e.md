@@ -118,7 +118,9 @@ budgétaire levée. Après un arrêt budget / échéance / erreur, l'identité d
 `verify_business_checkout` ne s'exécute **jamais sur l'hôte par défaut** : conteneur Docker durci (`--network none`, racine en lecture
 seule, `--cap-drop ALL`, `--pull never`, UID de l'appelant, nommé), environnement par liste blanche (aucun secret), montages validés par
 la garde commune W1 `git_control_exposure` (contrôle Git direct, imbriqué ou ancêtre, `:`, racine, lien pendant, erreur de stat),
-échéance autonome dans le conteneur (alarme, code 124) ET `docker kill` par NOM. Docker/image indisponible ou montage refusé =
+durée supervisée par `timeout(1)`, processus principal du conteneur et HORS du code livré (TERM puis KILL après 3 s : codes 124 et 137, une
+expiration n'est déduite que si la durée a effectivement atteint la limite), relève de l'hôte et `docker kill` par NOM sur toute interruption,
+échéance globale partagée (aucune phase après expiration). Docker/image indisponible ou montage refusé =
 `incomplete`. `trusted_local_runner` est réservé aux fixtures de confiance et doit être demandé explicitement.
 
 ### Politique de fusion de la base éphémère
@@ -148,10 +150,14 @@ désactivé) et n'est pas utilisé.
 * Constats F1–F3 (IMPROVE après BUILD, collision de branches, `.coverage`) : corrigés (statut de cycle vs approbation du contenu,
   identité de branche `collegue/improve-r<round>-<empreinte(base_sha, arbres)>`, artefacts de mesure ignorés par la fixture) ;
   historique dans `reports/w4-b-interface.md`.
-* **Blocage restant (fichier d'A)** : `collegue/pilot/runtime.py:499` appelle `load_plan_snapshot(require_approval=True)` et refuse la
-  REPRISE d'un projet déjà `improving` : la seconde passe de D10 appelle donc `run_improvement` avec les hooks Phase 5 de production.
-  Correctif d'une ligne validé (`allow_cycle_status=True`, `evidence/w4-b-runtime-resume-improving.patch`), test xfail strict
-  `test_w4_business_contract_handoff`.
+* **Reprise d'un projet `improving` (résolu à l'intégration)** : l'appel INITIAL de `run_project_from_settings` charge le plan avec la
+  sémantique de contenu approuvé (`allow_cycle_status=True`, `require_approval=not dry_run` conservé) ; la seconde passe de D10 traverse
+  donc l'entrée publique (`improvement_pass`) sans ré-approbation, avec la même vraie mesure enregistrée. La synchronisation GitHub
+  (`sync_project_plan_from_settings`) garde la garde P4 stricte ; un plan modifié, révoqué ou en brouillon reste refusé
+  (`test_w4_business_contract_handoff`, sans `xfail`).
+* **Limite de la campagne réelle** : l'invocation réelle ne câble que planification, approbation, synchronisation, BUILD des trois
+  tâches, vérification métier et lecture du registre. L'amélioration (R04) et l'incident avec rollback (R05) restent déclarés requis,
+  non joués par ce lancement (`incomplete_validation` avec le point d'arrêt exact) : un BUILD réussi n'est pas la validation finale.
 * **Constat produit** : tout fichier de code (`.py`) interdit l'auto-merge Phase 5 même dans l'allowlist ; une amélioration qui ajoute
   des tests (gain de couverture) n'est donc jamais auto-fusionnée. L'incident nominal utilise un gain mesuré par le scan de secrets
   sur de la documentation.

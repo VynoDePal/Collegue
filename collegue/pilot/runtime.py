@@ -531,7 +531,10 @@ async def run_project_from_settings(
     from collegue.planner.plan_review import load_plan_snapshot
     from collegue.planner.plan_target import PlanTargetError, normalize_plan_sync_config
 
-    plan_snapshot = load_plan_snapshot(manager, project_id, require_approval=not dry_run)
+    # Sémantique de CONTENU approuvé (vague 4) : un projet déjà ``improving`` (cycle BUILD -> IMPROVE) est repris sans
+    # réapprobation tant que le plan, sa cible et son hash sont inchangés ; un plan modifié, révoqué ou en brouillon reste
+    # refusé. La synchronisation GitHub (``sync_project_plan_from_settings``) conserve la garde P4 stricte.
+    plan_snapshot = load_plan_snapshot(manager, project_id, require_approval=not dry_run, allow_cycle_status=True)
     planned_deadline = plan_snapshot.deadline if plan_snapshot is not None else None
     target = plan_snapshot.plan_sync_config if plan_snapshot is not None else None
     if target is not None:

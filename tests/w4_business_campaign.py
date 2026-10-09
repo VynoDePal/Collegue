@@ -467,6 +467,24 @@ def registry(world: World) -> Dict[str, Any]:
     return business.registry_counters(world.manager(), world.project_id)
 
 
+def tip_tree(world: World) -> str:
+    return world.bridge.remote.tree_of(world.tip())
+
+
+def assert_current_oracle(proof: Any, number: int) -> None:
+    """Oracle COURANT de la tâche ``number`` : rouge PAR ASSERTION avant, vert après, même SHA-256, zéro collecte/skip/erreur."""
+    current = [evidence for evidence in proof.oracles if evidence.role == "current"]
+    assert len(current) == 1, [evidence.role for evidence in proof.oracles]
+    evidence = current[0]
+    assert evidence.preimage.status == "red-assertion", "rouge PAR ASSERTION avant la correction"
+    assert evidence.preimage.assertion_failures >= 1 and evidence.preimage.errors == 0
+    assert evidence.preimage.collection_errors == 0 and evidence.preimage.skipped == 0
+    assert evidence.candidate.status == "green", "vert après la correction, même empreinte"
+    assert evidence.candidate.failed == 0 and evidence.candidate.errors == 0
+    assert evidence.candidate.collection_errors == 0 and evidence.candidate.skipped == 0
+    assert evidence.source_sha256 == sha256(fixture.ORACLES[number])
+
+
 async def deliver_task(world: World, number: int, step: Any, *, merges_before: Optional[int] = None) -> None:
     """Une passe (= un redémarrage) : la tâche ``number`` est livrée, prouvée, fusionnée et le checkout resynchronisé."""
     before_registry = registry(world)
@@ -490,13 +508,7 @@ async def deliver_task(world: World, number: int, step: Any, *, merges_before: O
     assert sorted(o.role for o in proof.oracles) == sorted(expected_roles), (
         "contrats livrés rejoués d'une tâche à l'autre"
     )
-    for evidence in proof.oracles:
-        if evidence.role == "current":
-            assert evidence.preimage.status == "red-assertion", "rouge PAR ASSERTION avant la correction"
-            assert evidence.preimage.assertion_failures >= 1 and evidence.preimage.errors == 0
-            assert evidence.preimage.collection_errors == 0 and evidence.preimage.skipped == 0
-            assert evidence.candidate.status == "green", "vert après la correction, même empreinte"
-            assert evidence.source_sha256 == sha256(fixture.ORACLES[number])
+    assert_current_oracle(proof, number)
     started_with = set(world.agent.starting_files[-1])
     assert set(fixture.stage_files(number - 1)) <= started_with, (
         "la tâche démarre sur les dépendances INTÉGRÉES dans la base"
@@ -836,9 +848,21 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
         assert task_statuses(world)[fixture.TITLES[2]] == "in_review", "livraison NON comptée prête"
         assert world.checkout_head() != tip, "le checkout opérateur est resté périmé"
         assert world.agent.calls == 2, "aucune tâche suivante lancée depuis un clone périmé"
+        # Preuve DURABLE de la PR 102 relue depuis une NOUVELLE instance du gestionnaire (journal de décisions, jamais le texte
+        # de la PR) : rien n'est injecté ni reconstitué ; l'oracle courant est rouge par assertion puis vert, même empreinte.
+        proof = proofs_by_pr(world)[102]
+        assert (
+            proof.passed and proof.phase == "build" and proof.contracts_required and proof.tree_sha == tip_tree(world)
+        )
+        assert sorted(o.role for o in proof.oracles) == ["current", "delivered"], (
+            "tâche 1 rejouée avec l'oracle courant"
+        )
+        assert_current_oracle(proof, 2)
         step.evidence.update(
             stop_reason=result.stop_reason, cycle_state=row.state, merge_sha=row.merge_sha, remote_tip=tip,
             checkout_head=world.checkout_head(), agent_calls=world.agent.calls,
+            task=fixture.TITLES[2], pr_number=102, head_sha=proof.head_sha, base_sha=proof.base_sha, tree_sha=proof.tree_sha,
+            proof_id=proof.proof_id, oracles=oracle_summary(proof),
         )  # fmt: skip
         snapshot_registry(report, "after-interrupted-sync", world)
 
@@ -938,9 +962,12 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
         measured = RecordingMeasure(measure)  # le VRAI measure, journalisé sans aucun ajustement
         agent = ImprovementAgent(replace_docs(fixture.INCIDENT_DOCS))
         health_before = len(world.sandbox.health_runs)
-        # Seconde passe sur un projet déjà `improving` : l'entrée publique est bloquée par `runtime.py:499` (voir le rapport,
-        # test_w4_business_contract_handoff xfail strict) ; la boucle est donc appelée avec les hooks Phase 5 de PRODUCTION.
-        result = await direct_improvement(world, agent, measure_fn=measured)
+        # Seconde passe PUBLIQUE sur un projet déjà `improving` : la reprise traverse run_project_from_settings (contenu approuvé
+        # inchangé, aucune ré-approbation) avec les hooks Phase 5 de PRODUCTION, et la même vraie mesure enregistrée.
+        run = await improvement_pass(world, agent, measure_fn=measured)
+        assert run.project_status == "improving", "la reprise publique ne réapprouve rien et garde le statut de cycle"
+        result = run.improvement
+        assert result is not None, "la passe publique a rendu un résultat d'amélioration"
         runs = world.sandbox.health_runs[health_before:]
         assert result.stop_reason == "auto_revert_recovered", (result.stop_reason, result.rejected)
         before, after = measured.snapshots[0], measured.snapshots[1]

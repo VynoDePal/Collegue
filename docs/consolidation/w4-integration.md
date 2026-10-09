@@ -1,7 +1,7 @@
 # Vague 4 — organisation, interfaces et checklist d'intégration (C)
 
-**État exact : les vagues 1, 2 et 3 sont livrées sur `main` ; la vague 4 est en cours ; aucune campagne réelle n'a été démarrée.**
-Ce document est rédigé **avant** les livraisons de A et B : il consigne la répartition, les interfaces **proposées** (contrat de
+**État exact : les vagues 1, 2 et 3 sont livrées sur `main` ; la vague 4 est en cours (A et B intégrés localement sur la branche de C, rien de publié) ; aucune campagne réelle n'a été démarrée.**
+Ce document a été rédigé **avant** les livraisons de A et B (§§ 1 à 8) ; l'état réel de l'intégration locale est au § 9. Il consigne la répartition, les interfaces **proposées** (contrat de
 départ du manager, à confronter aux rapports `reports/w4-{a,b}-interface.md`), les preuves attendues et la livraison en deux
 étapes. Il ne décrit aucun résultat de leur travail et n'annonce aucune garantie non testée. Règles générales :
 [`AGENTS.md`](../../AGENTS.md) ; protocole et checklists précédentes : [`protocole.md`](protocole.md) ; vagues précédentes :
@@ -121,3 +121,10 @@ Rien n'est encore publié par A ou B. À vérifier à leur publication, et à si
 - le workflow ponctuel de B est-il bien disjoint du nightly (aucun autre test payant) et du workflow `tests.yml` de C ?
 - un lecteur PDF est-il réellement nécessaire, et la fixture reste-t-elle hors des dépendances runtime ?
 - les tests de B sont-ils compatibles avec `STRICT_MAX_INFLIGHT_PRS=1` et la politique de fusion de W3 sans désactivation ?
+
+## 9. Intégration locale (état réel, avant publication)
+
+- **Sources figées** : base `main` = `5c1cbf5` ; A `249f622496084351cea1397a74861433c2b81ff9` (arbre `f39135297d9b934b9cdaf2730abcafb05d84b94f`) ; B `30c849c7a5eb6b5ad7132bfb48495e006ae6c95c` (arbre `f0349551e1ac14b3a778282144993722218540f4`). Deux merges locaux `--no-ff`, sans conflit. Rien n'est publié ; la publication et la fusion distante exigent des ordres séparés.
+- **Raccords de C** : (1) `run_project_from_settings` charge son plan INITIAL avec `allow_cycle_status=True` (reprise d'un projet `improving` sans ré-approbation, hash/cible/deadline/budget inchangés ; `sync_project_plan_from_settings` et la garde P4 restent stricts) ; (2) retrait du `xfail` de reprise ; (3) D10 passe par l'entrée publique (`improvement_pass`), même vraie mesure, incident rouge réel, rollback exact ; (4) la preuve durable de la tâche 2 (PR 102) est relue depuis une nouvelle instance du gestionnaire et son oracle courant est asserté rouge par assertion puis vert, même SHA-256, zéro collecte/skip/erreur ; (5) l'inventaire des sous-processus hôte (`tests/test_executor_git_boundary.py`) couvre `collegue/pilot/w4_business.py`, test bloquant et sans exclusion ; (6) `tests/test_w4_integration_preflight.py` éprouve le préflight composé avec la VRAIE API d'A, un VRAI `OHSdkAgent` et `allocate_worker` public (aucun validateur ni capacité préparés) ; (7) documents actualisés.
+- **Preuves obtenues localement** : voir `reports/w4-c-integration.md` (suites complètes, wheel installé hors checkout, scénario métier et témoins). Les contrôles préparés pour la CI distante — preuve du SDK 1.19.1 et du routage dans l'image OpenHands (`scripts/ci_w4_worker_routing.py`), preuve du vérificateur métier dans l'image construite (`scripts/ci_w4_business_verifier.py`), audit strict de `locks/dev.txt`, smoke Docker — **n'ont pas été exécutés localement** et ne comptent pas comme acquis avant la CI de la révision publiée.
+- **Limites inchangées** : celles de W2 et W3 (§ 7) ; la campagne réelle n'est pas câblée jusqu'à l'amélioration ni à l'incident (R04/R05 déclarées, non jouées) ; le GitHub du scénario déterministe est simulé ; aucune preuve d'un modèle réel.

@@ -146,16 +146,6 @@ async def test_public_handoff_replays_the_delivered_contracts_in_the_improving_c
     assert open_manager(state_url).get_project(pid).status == "improving"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=PlanNotApproved,
-    reason=(
-        "BESOIN PUBLIÉ AU MANAGER : collegue/pilot/runtime.py:499 (fichier d'A) appelle load_plan_snapshot("
-        "require_approval=True) et refuse la REPRISE d'un projet déjà en `improving`. Correctif d'une ligne validé "
-        "(evidence/w4-b-runtime-resume-improving.patch : allow_cycle_status=True) ; ce test devient vert, et ce "
-        "xfail strict échoue (donc à retirer) dès que le manager l'attribue."
-    ),
-)
 async def test_public_resume_while_improving_keeps_the_same_fingerprint_and_reuses_the_delivery(
     monkeypatch, bridge, source, state_url
 ):

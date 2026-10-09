@@ -288,7 +288,10 @@ def test_a_missing_image_fails_every_case_without_running_any(proof, harness):
 
 
 def test_a_missing_business_module_is_a_failure_not_a_skip(proof, harness, monkeypatch):
-    monkeypatch.delitem(sys.modules, proof.BUSINESS_MODULE, raising=False)
+    def absent(name, *args, **kwargs):  # le lot B peut être intégré : l'absence est SIMULÉE à la frontière d'import
+        raise ModuleNotFoundError(f"No module named {name!r}")
+
+    monkeypatch.setattr(proof.importlib, "import_module", absent)
     report = proof.run_proof(OH_IMAGE, docker=FakeDocker(), stage_files=harness.stage_files)
     assert report["ok"] is False
     assert any("lot B non intégré" in failure for failure in report["failures"])
