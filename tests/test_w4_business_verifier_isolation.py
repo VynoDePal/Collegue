@@ -254,20 +254,181 @@ def test_subprocess_run_is_resolved_at_call_time_not_bound_at_import(monkeypatch
     assert [call[0][:2] for call in boundary.calls] == [["docker", "run"]]
 
 
-def test_the_script_stops_itself_at_its_own_deadline_even_if_nobody_kills_it(tmp_path):
-    """Arrêt autonome : le processus vérifié se termine à l'échéance (code 124) sans aucune intervention du client."""
-    root = tmp_path / "generated"
-    root.mkdir()
-    (root / "alembic.py").write_text("import time\ntime.sleep(4)\n", encoding="utf-8")  # inoffensif, se termine seul
-    started = time.monotonic()
+IMAGE = "fixture-owned:never-pull"
 
-    observation = business.verify_business_checkout(
-        str(root), python=sys.executable, runner=business.trusted_local_runner, timeout=3
+
+def hostile_checkout(folder, tamper, sleep="time.sleep(8)"):
+    """Livrable INOFFENSIF complet (référence de l'étape 3) dont l'import de ``app.main`` exécute d'abord ``tamper`` (minuteurs,
+    signaux), consigne qu'il est atteint, puis ``sleep``."""
+    from w4_business_fixture import stage_files
+
+    checkout = folder / "checkout"
+    for relative, content in stage_files(3).items():
+        target = checkout / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    marker = folder / "import-reached.txt"
+    main = checkout / "app" / "main.py"
+    main.write_text(
+        f"import pathlib, signal, time\n{tamper}\npathlib.Path({str(marker)!r}).write_text('reached')\n{sleep}\n"
+        + main.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    return checkout, marker
+
+
+def run_public_docker_path_locally(monkeypatch, checkout, **kwargs):
+    """Chemin Docker PUBLIC : la commande réelle est construite ; seule la frontière Docker est remplacée par son exécution
+    locale (sans le délai du client hôte : un plafond de secours distinct de 12 s subsiste). Isole le superviseur de durée."""
+    real_run = subprocess.run
+    calls = []
+
+    def docker_boundary(argv, **options):
+        assert argv[:2] == ["docker", "run"], argv[:2]
+        mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
+        scratch = next(value.split(":/scratch:")[0] for value in mounts if ":/scratch:" in value)
+        command = [str(a).replace("/scratch/", scratch + "/") for a in argv[argv.index(IMAGE) + 1 :]]
+        command = [sys.executable if part == "python" else part for part in command]
+        env = dict(options.get("env") or {})
+        env["PATH"] = str(Path(sys.executable).parent) + ":" + os.environ.get("PATH", "")
+        started = time.monotonic()
+        result = real_run(command, cwd=checkout, env=env, capture_output=True, text=True, timeout=12)
+        calls.append({"head": command[:5], "returncode": result.returncode, "seconds": time.monotonic() - started})
+        return result
+
+    monkeypatch.setattr(subprocess, "run", docker_boundary)
+    started = time.monotonic()
+    observation = business.verify_business_checkout(str(checkout), image=IMAGE, **kwargs)
+    return observation, calls, time.monotonic() - started
+
+
+@pytest.mark.parametrize(
+    "tamper, bound",
+    [
+        ("pass", 4.7),  # témoin ordinaire
+        ("signal.alarm(0)", 4.7),  # le livrable annule un minuteur interne
+        ("signal.signal(signal.SIGALRM, signal.SIG_IGN)\nsignal.alarm(0)", 4.7),
+        ("signal.signal(signal.SIGTERM, signal.SIG_IGN)", 8.0),  # ignore TERM : le superviseur tue (KILL)
+    ],
+    ids=["ordinary", "cancels-alarm", "ignores-alarm", "ignores-term"],
+)
+def test_the_duration_supervisor_lives_outside_the_untrusted_interpreter_and_cannot_be_cancelled_by_it(
+    monkeypatch, tmp_path, tamper, bound
+):
+    checkout, marker = hostile_checkout(tmp_path, tamper, sleep="time.sleep(30)")
+
+    observation, calls, elapsed = run_public_docker_path_locally(monkeypatch, checkout, timeout=4)
+
+    assert marker.exists() and calls, "l'import du livrable a réellement été atteint"
+    supervisor = calls[0]["head"]
+    assert supervisor[:4] == ["timeout", "--signal=TERM", f"--kill-after={business.WATCHDOG_KILL_AFTER}", "4.000"]
+    assert observation.status == "incomplete" and "échéance" in observation.detail
+    assert calls[0]["returncode"] in business.DEADLINE_EXITS
+    assert elapsed < bound, (
+        f"arrêté par le superviseur ({elapsed:.1f}s), pas à la fin du témoin ou du plafond de secours"
     )
 
-    assert observation.status == "incomplete" and "échéance autonome" in observation.detail
-    assert time.monotonic() - started < 3.9, "arrêté par l'échéance propre du script, pas par la fin du témoin"
-    time.sleep(1.2)  # laisse le témoin inoffensif se terminer avant le nettoyage du dossier de test
+
+def test_the_container_command_puts_the_supervisor_between_the_image_and_the_script(monkeypatch, tmp_path):
+    checkout, _ = hostile_checkout(tmp_path, "pass", sleep="pass")
+    seen = []
+
+    def boundary(argv, **options):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 125, "", "withheld")
+
+    monkeypatch.setattr(subprocess, "run", boundary)
+    business.verify_business_checkout(str(checkout), image=IMAGE, timeout=30)
+
+    argv = seen[0]
+    after_image = argv[argv.index(IMAGE) + 1 :]
+    assert after_image[:2] == ["timeout", "--signal=TERM"] and after_image[4:6] == ["python", "-c"]
+    assert "--user" in argv and "--network" in argv and "--read-only" in argv, "durcissement et garde W1 inchangés"
+
+
+def test_the_oracle_image_check_requires_the_supervisor_binary():
+    code = None
+
+    def runner(argv):
+        nonlocal code
+        code = argv[-1]
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    report = business.CampaignReport("preflight", "unit")
+    step = report.declare("P08", "image")
+    business.check_oracle_environment(report, step, image="img:x", runner=runner)
+
+    assert "shutil.which('timeout')" in code and "pypdf" in code
+
+
+# ── échéance globale PARTAGÉE par les phases de vérification ────────────────────────────────────────────────────────────
+
+
+class FakeClock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def completed(phase_report):
+    return subprocess.CompletedProcess([], 0, f"{business.REPORT_MARKER}{json.dumps(phase_report)}\n", "")
+
+
+def test_the_two_verification_phases_share_the_remaining_global_time(tmp_path):
+    clock = FakeClock()
+    limits = []
+
+    def runner(argv, cwd, env, limit):
+        limits.append(limit)
+        clock.now += 40.0
+        return completed({"checks": {"ok": True}, "observations": {"audit_id": 7}})
+
+    observation = business.verify_business_checkout(
+        str(tmp_path), runner=runner, timeout=120.0, deadline_monotonic=clock.now + 100.0, clock=clock
+    )
+
+    assert observation.status == "passed"
+    assert limits == [100.0, 60.0], (
+        "chaque phase est bornée par le temps RESTANT, jamais par une nouvelle fenêtre de 120 s"
+    )
+
+
+def test_no_verification_phase_starts_after_expiry_and_a_phase_hitting_the_deadline_is_a_budget_stop(tmp_path):
+    clock = FakeClock()
+    started = []
+
+    def runner(argv, cwd, env, limit):
+        started.append(limit)
+        clock.now += limit
+        raise subprocess.TimeoutExpired(argv, limit)
+
+    with pytest.raises(business.BudgetStop, match="pendant la phase « write »"):
+        business.verify_business_checkout(
+            str(tmp_path), runner=runner, timeout=120.0, deadline_monotonic=clock.now + 30.0, clock=clock
+        )
+    assert started == [30.0]
+    with pytest.raises(business.BudgetStop, match="avant la phase « write »"):
+        business.verify_business_checkout(
+            str(tmp_path), runner=runner, timeout=120.0, deadline_monotonic=clock.now - 1.0, clock=clock
+        )
+    assert started == [30.0], "aucune commande lancée après expiration"
+
+
+def test_a_supervisor_stop_caused_by_the_global_deadline_is_a_budget_stop_not_an_incomplete(tmp_path):
+    clock = FakeClock()
+
+    def runner(argv, cwd, env, limit):
+        return subprocess.CompletedProcess(argv, 124, "", "")
+
+    with pytest.raises(business.BudgetStop):
+        business.verify_business_checkout(
+            str(tmp_path), runner=runner, timeout=120.0, deadline_monotonic=clock.now + 5.0, clock=clock
+        )
+    # sans échéance globale restreignante, le même code reste une validation incomplète
+    observation = business.verify_business_checkout(str(tmp_path), runner=runner, timeout=120.0)
+    assert observation.status == "incomplete"
 
 
 def test_docker_failures_are_incomplete_never_failed(monkeypatch, tmp_path):

@@ -487,8 +487,11 @@ def test_the_oracle_environment_needs_the_fixture_stack_and_a_real_pdf_reader_in
 
 
 @pytest.fixture
-def no_llm(monkeypatch):
-    """Toute tentative d'émission LLM pendant le préflight échoue le test (zéro appel prouvé)."""
+def no_llm(monkeypatch, tmp_path):
+    """Toute tentative d'émission LLM pendant le préflight échoue le test (zéro appel prouvé).
+
+    Répertoire courant vierge : un ``.env`` local rendrait la configuration effective ambiguë (voir test_w4_business_cli)."""
+    monkeypatch.chdir(tmp_path)
     emitted = []
 
     async def forbidden(*args, **kwargs):

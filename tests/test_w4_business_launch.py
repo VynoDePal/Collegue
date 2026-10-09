@@ -191,22 +191,108 @@ def test_a_fully_successful_campaign_validates_only_after_the_business_check_and
     assert report.facts["scope"]["not_wired"] == ["improvement", "incident_rollback"]
 
 
-def test_a_failed_business_check_makes_the_campaign_fail_and_leaves_the_registry_step_unexecuted(tmp_path):
+@pytest.mark.parametrize(
+    "outcome, state, verdict",
+    [
+        ("failed", STEP_FAILED, "failed"),
+        ("incomplete", STEP_INCOMPLETE, "incomplete_validation"),
+        ("budget", STEP_BUDGET_STOP, "budget_stop"),
+    ],
+)
+def test_a_stopped_business_check_still_reads_the_registry_of_the_project_that_spent(tmp_path, outcome, state, verdict):
+    """Une vérification métier qui échoue, est incomplète ou dépasse l'échéance ne fait pas disparaître la dépense réalisée."""
     adapter, _ = launch(tmp_path)
+    seen = []
 
     def verify(report, context):
-        raise AssertionError("assertions métier fausses : write:pdf_text_has_the_persisted_audit_data")
+        if outcome == "failed":
+            raise AssertionError("assertions métier fausses : write:pdf_text_has_the_persisted_audit_data")
+        if outcome == "incomplete":
+            raise business.IncompleteValidation("Docker indisponible")
+        raise BudgetStop("échéance globale atteinte")
+
+    def registry(context):
+        seen.append(dict(context))
+        return GOOD_COUNTERS
 
     report = business.run_campaign(
         ENV,
         preflight=validated_preflight(),
         launch=lambda r: business.launch_campaign(r, adapter=adapter, env=ENV),
         verify=verify,
-        read_registry=lambda ctx: GOOD_COUNTERS,
+        read_registry=registry,
     )
 
-    assert report.step("R01-run").state == STEP_SUCCEEDED and report.step("R02-business").state == STEP_FAILED
-    assert report.step("R03-registry").state == STEP_NOT_EXECUTED and report.verdict() == "failed"
+    assert report.step("R01-run").state == STEP_SUCCEEDED and report.step("R02-business").state == state
+    assert [c["project_id"] for c in seen] == [9], "le MÊME projet est relu, une seule fois"
+    assert report.step("R03-registry").state == STEP_SUCCEEDED
+    assert report.facts["registry_final"]["consumed_tokens"] == 90_000
+    assert report.verdict() == verdict, "le verdict d'origine est conservé"
+    for step_id in ("R04-improvement", "R05-incident-rollback"):
+        assert report.step(step_id).state == STEP_NOT_EXECUTED
+
+
+@pytest.mark.parametrize("outcome", ["failed", "incomplete", "budget"])
+def test_an_unreadable_registry_after_a_verification_stop_keeps_the_stop_and_names_the_missing_proof(tmp_path, outcome):
+    adapter, _ = launch(tmp_path)
+    raised = {
+        "failed": AssertionError("assertions métier fausses"),
+        "incomplete": business.IncompleteValidation("Docker indisponible"),
+        "budget": BudgetStop("échéance globale atteinte"),
+    }[outcome]
+
+    def verify(report, context):
+        raise raised
+
+    def unreadable(context):
+        raise OSError("base illisible")
+
+    report = business.run_campaign(
+        ENV,
+        preflight=validated_preflight(),
+        launch=lambda r: business.launch_campaign(r, adapter=adapter, env=ENV),
+        verify=verify,
+        read_registry=unreadable,
+    )
+
+    expected = {"failed": "failed", "incomplete": "incomplete_validation", "budget": "budget_stop"}[outcome]
+    assert report.verdict() == expected
+    assert report.step("R03-registry").state == STEP_INCOMPLETE
+    assert "dépense non établie" in report.step("R03-registry").detail and "registry_final" not in report.facts
+
+
+def test_the_registry_is_reread_from_a_second_real_ledger_instance_after_any_verification_stop(tmp_path):
+    """Vrai registre SQLite : consommation persistée, relue depuis une AUTRE instance par le vrai ``registry_reader``."""
+    from collegue.state import ProjectStateManager
+
+    url = f"sqlite:///{tmp_path / 'state.sqlite3'}"
+    manager = ProjectStateManager.from_url(url, create=True)
+    for _ in range(8):  # project_id 9 : celui que le faux adaptateur « crée »
+        project_id = manager.create_project(name="registre", spec="x")
+    assert project_id == 8
+    project_id = manager.create_project(name="registre", spec="x")
+    assert project_id == 9
+    ledger = manager.budget_ledger
+    scope = ledger.scope_for_project(9, max_cost_usd=2, max_tokens=250000, strict=True)
+    reservation = ledger.reserve(scope.scope_key, usd=0.2, tokens=1000)
+    ledger.commit(reservation.reservation_id, usd=0.125, tokens=750)
+    adapter, _ = launch(tmp_path)
+
+    def verify(report, context):
+        raise business.IncompleteValidation("Docker indisponible")
+
+    env = {**ENV, "STATE_DATABASE_URL": url}
+    report = business.run_campaign(
+        env,
+        preflight=validated_preflight(),
+        launch=lambda r: business.launch_campaign(r, adapter=adapter, env=env),
+        verify=verify,
+        read_registry=business.registry_reader(env),
+    )
+
+    counters = report.facts["registry_final"]
+    assert (counters["consumed_micro_usd"], counters["consumed_tokens"]) == (125_000, 750)
+    assert report.step("R03-registry").state == STEP_SUCCEEDED and report.verdict() == "incomplete_validation"
 
 
 def test_a_budget_stop_is_reported_as_such_and_still_records_the_registry_stop_point(tmp_path):
@@ -397,7 +483,7 @@ def test_the_global_deadline_forbids_new_commands_and_kills_the_running_one_with
         f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, {str(child)!r}])\ntime.sleep(30)\n",
         encoding="utf-8",
     )
-    runner = business.bounded_command_runner(time.monotonic() + 0.3, grace=0.2)
+    runner = business.bounded_command_runner(time.monotonic() + 0.3)
     started = time.monotonic()
 
     with pytest.raises(BudgetStop, match="groupe de processus"):
@@ -406,6 +492,32 @@ def test_the_global_deadline_forbids_new_commands_and_kills_the_running_one_with
     assert time.monotonic() - started < 10
     time.sleep(3.5)
     assert not marker.exists(), "aucun enfant n'a survécu à l'échéance (rien ne continue à tourner hors surveillance)"
+
+
+def test_there_is_no_grace_after_the_deadline_a_command_that_would_finish_just_after_is_stopped(tmp_path):
+    """Contre-épreuve du manager : 0,15 s restantes et un enfant qui dort 0,5 s ne doivent PAS aboutir normalement."""
+    runner = business.bounded_command_runner(time.monotonic() + 0.15)
+    started = time.monotonic()
+
+    with pytest.raises(BudgetStop, match="échéance globale"):
+        runner([sys.executable, "-c", "import time; time.sleep(0.5); print('FINISHED')"])
+
+    assert time.monotonic() - started < 0.45, "arrêt immédiat à l'échéance, sans fenêtre de grâce"
+
+
+def test_the_runner_signature_offers_no_grace_parameter():
+    import inspect
+
+    assert "grace" not in inspect.signature(business.bounded_command_runner).parameters
+
+
+def test_the_deadline_clock_is_resolved_at_call_time_for_a_controlled_clock():
+    now = [100.0]
+    runner = business.bounded_command_runner(110.0, clock=lambda: now[0])
+    assert runner([sys.executable, "-c", "print('ok')"]).stdout.strip() == "ok"
+    now[0] = 110.5
+    with pytest.raises(BudgetStop, match="avant le lancement"):
+        runner([sys.executable, "-c", "print('jamais')"])
 
 
 def test_a_command_finishing_before_the_deadline_returns_its_streams():

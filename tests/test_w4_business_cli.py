@@ -47,8 +47,11 @@ def cli_environment(root, **extra):
 
 
 @pytest.fixture
-def boundary(monkeypatch):
-    """GitHub factice à la frontière ; toute autre sortie (socket, sous-processus) échoue le test."""
+def boundary(monkeypatch, tmp_path):
+    """GitHub factice à la frontière ; toute autre sortie (socket, sous-processus) échoue le test.
+
+    Le répertoire courant est un dossier vierge : un ``.env`` de développeur ne doit pas rendre la configuration ambiguë."""
+    monkeypatch.chdir(tmp_path)
     server = FixtureNamedServer()
     server.add_ruleset(1)
     clients = full_clients(server)
@@ -76,8 +79,10 @@ class SimpleBoundary:
         self.server, self.docker_calls, self.real_run = server, docker_calls, real_run
 
 
-def invoke(monkeypatch, tmp_path, action, *arguments, **extra):
+def invoke(monkeypatch, tmp_path, action, *arguments, drop=(), **extra):
     env = cli_environment(tmp_path, **extra)
+    for name in drop:
+        env.pop(name)
     output = tmp_path / f"{action}.json"
     out = io.StringIO()
     monkeypatch.setattr(os, "environ", env)
@@ -161,3 +166,182 @@ def test_a_validated_run_preflight_checks_the_gate_image_and_launches_exactly_on
     assert steps["R01-run"]["state"] == "budget_stop" and report["facts"]["launch"]["project_id"] == 9
     assert code == 4 and report["verdict"] == "budget_stop"
     assert steps["R04-improvement"]["state"] == "not_executed" and steps["R04-improvement"]["required"]
+
+
+# ── .env local : la configuration validée est celle qui sera émise, ou le lancement est refusé ─────────────────────────────
+
+FAKE_DOTENV_KEY = "fake-dotenv-key-never-real"
+
+
+def write_dotenv(folder):
+    (folder / ".env").write_text(
+        f"LLM_PROVIDER_CODER=openai\nLLM_MODEL_CODER=gpt-5.4\nLLM_API_KEY_CODER={FAKE_DOTENV_KEY}\n", encoding="utf-8"
+    )
+
+
+def test_a_local_dotenv_makes_the_effective_configuration_ambiguous_and_is_refused_unread(monkeypatch, tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    write_dotenv(work)
+    monkeypatch.chdir(work)
+
+    with pytest.raises(business.IncompleteValidation, match=r"configuration locale ambiguë.*\.env") as refusal:
+        business.effective_settings({"PATH": os.environ["PATH"], "LLM_PROVIDER": "gemini"})
+
+    assert FAKE_DOTENV_KEY not in str(refusal.value) and "gpt-5.4" not in str(refusal.value), (
+        "le fichier n'est ni lu ni cité"
+    )
+    with pytest.raises(
+        business.IncompleteValidation
+    ):  # l'environnement ne lève PAS l'ambiguïté : le produit lit aussi le fichier
+        business.effective_settings(
+            {"PATH": os.environ["PATH"], "LLM_PROVIDER_CODER": "gemini", "LLM_MODEL_CODER": "x"}
+        )
+    other = tmp_path / "other"
+    other.mkdir()
+    settings = business.effective_settings({"PATH": os.environ["PATH"], "LLM_PROVIDER": "gemini"}, cwd=str(other))
+    assert settings.LLM_PROVIDER == "gemini", (
+        "témoin : sans .env la validation reste exactement celle de l'environnement"
+    )
+
+
+def test_the_clean_directory_control_matches_the_product_settings(monkeypatch, tmp_path):
+    from collegue.config import Settings
+
+    monkeypatch.chdir(tmp_path)
+    env = {
+        "PATH": os.environ["PATH"],
+        "LLM_PROVIDER": "gemini",
+        "LLM_MODEL": "gemini-2.5-flash",
+        "LLM_API_KEY": FAKE_KEY,
+    }
+    monkeypatch.setattr(os, "environ", dict(env))
+
+    product = Settings()
+    checked = business.effective_settings(env)
+
+    for name in ("LLM_PROVIDER", "LLM_MODEL", "LLM_PROVIDER_CODER", "LLM_MODEL_CODER", "LLM_BASE_URL_CODER"):
+        assert getattr(checked, name, None) == getattr(product, name, None)
+
+
+def test_the_keyless_preflight_refuses_a_local_dotenv_before_the_worker_check_and_never_leaks_it(
+    monkeypatch, tmp_path, boundary
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    write_dotenv(work)
+    monkeypatch.chdir(work)
+
+    code, report, steps = invoke(
+        monkeypatch, tmp_path, "preflight", "--stage", "static", drop=("LLM_API_KEY", "LLM_API_KEY_CODER")
+    )
+
+    assert steps["P03-secret-scope"]["state"] == "succeeded"
+    assert steps["P05-role-routes"]["state"] == "incomplete_validation"
+    assert "configuration locale ambiguë" in steps["P05-role-routes"]["detail"]
+    assert steps["P06-worker-capacity"]["state"] == "not_executed"
+    assert code == 3 and FAKE_DOTENV_KEY not in json.dumps(report)
+    assert boundary.docker_calls == []
+
+
+def test_run_in_a_directory_with_a_dotenv_never_launches(monkeypatch, tmp_path, boundary):
+    work = tmp_path / "work"
+    work.mkdir()
+    write_dotenv(work)
+    monkeypatch.chdir(work)
+    launched = []
+    monkeypatch.setattr(business, "launch_campaign", lambda *a, **k: launched.append(a))
+
+    code, report, steps = invoke(monkeypatch, tmp_path, "run")
+
+    assert steps["P05-role-routes"]["state"] == "incomplete_validation" and launched == []
+    assert report["facts"]["billable_actions_emitted"] == 0 and code == 3
+
+
+# ── entrée CLI composée : échéance partagée, registre relu après l'arrêt de la vérification ────────────────────────────────
+
+
+class ControlledClock:
+    def __init__(self, now=5000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def spend_in_registry(url, *, usd=0.125, tokens=750):
+    from collegue.state import ProjectStateManager
+
+    manager = ProjectStateManager.from_url(url, create=True)
+    project_id = manager.create_project(name="cli accounting", spec="x")
+    ledger = manager.budget_ledger
+    scope = ledger.scope_for_project(project_id, max_cost_usd=2, max_tokens=250000, strict=True)
+    reservation = ledger.reserve(scope.scope_key, usd=0.2, tokens=1000)
+    ledger.commit(reservation.reservation_id, usd=usd, tokens=tokens)
+    return project_id
+
+
+def fake_launch(monkeypatch, tmp_path, project_id, clock, *, advance):
+    clone = tmp_path / "clone" / "fixture"
+    clone.mkdir(parents=True)
+
+    def launch(report, **kwargs):
+        report.facts["launch"] = {"project_id": project_id}
+        clock.now += advance
+        return {"project_id": project_id, "final_checkout": str(clone)}
+
+    monkeypatch.setattr(business, "launch_campaign", launch)
+    return clone
+
+
+def test_the_cli_shares_one_global_deadline_with_the_verification_and_reads_the_spent_registry(
+    monkeypatch, tmp_path, boundary
+):
+    url = business.campaign_environment("cli", str(tmp_path))["STATE_DATABASE_URL"]
+    project_id = spend_in_registry(url)
+    clock = ControlledClock()
+    monkeypatch.setattr(business.time, "monotonic", clock)
+    monkeypatch.setattr(business, "effective_worker_capacity", accepting_capacity)
+    clone = fake_launch(monkeypatch, tmp_path, project_id, clock, advance=901.0)  # le BUILD consomme TOUTE l'enveloppe
+
+    code, report, steps = invoke(monkeypatch, tmp_path, "run")
+
+    assert steps["R01-run"]["state"] == "succeeded"
+    assert steps["R02-business"]["state"] == "budget_stop", (
+        "aucune nouvelle vérification après l'expiration de l'enveloppe"
+    )
+    assert "avant la phase" in steps["R02-business"]["detail"]
+    assert steps["R03-registry"]["state"] == "succeeded"
+    assert report["facts"]["registry_final"]["consumed_micro_usd"] == 125_000
+    assert report["facts"]["registry_final"]["consumed_tokens"] == 750
+    assert code == 4 and report["verdict"] == "budget_stop"
+    assert steps["R04-improvement"]["state"] == "not_executed"
+    assert not [c for c in boundary.docker_calls if "importlib.util" not in " ".join(c)], (
+        "aucun conteneur de vérification"
+    )
+    assert not clone.exists(), "le clone généré est supprimé même à l'expiration"
+
+
+def test_the_cli_hands_the_remaining_time_not_a_new_window_to_the_verification(monkeypatch, tmp_path, boundary):
+    url = business.campaign_environment("cli", str(tmp_path))["STATE_DATABASE_URL"]
+    project_id = spend_in_registry(url)
+    clock = ControlledClock()
+    monkeypatch.setattr(business.time, "monotonic", clock)
+    monkeypatch.setattr(business, "effective_worker_capacity", accepting_capacity)
+    fake_launch(monkeypatch, tmp_path, project_id, clock, advance=800.0)
+    received = {}
+
+    def verify(checkout, **kwargs):
+        received.update(kwargs)
+        remaining = kwargs["deadline_monotonic"] - clock()
+        received["remaining"] = remaining
+        return business.BusinessObservation("passed", {}, {}, [])
+
+    monkeypatch.setattr(business, "verify_business_checkout", verify)
+
+    invoke(monkeypatch, tmp_path, "run")
+
+    assert received["deadline_monotonic"] == 5000.0 + business.CAMPAIGN_BOUNDS.max_seconds
+    assert received["remaining"] == pytest.approx(100.0), (
+        "il reste 100 s sur les 900 s, pas une nouvelle fenêtre de 120 s"
+    )

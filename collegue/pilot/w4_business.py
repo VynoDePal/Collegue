@@ -467,10 +467,21 @@ def _process_environment(env: Mapping[str, str]):
         os.environ.update(saved)
 
 
-def effective_settings(env: Mapping[str, str]) -> Any:
-    """Réglages EFFECTIFS du produit pour cet environnement (``collegue.config.Settings``), sans fichier ``.env`` implicite."""
+def effective_settings(env: Mapping[str, str], *, cwd: Optional[str] = None) -> Any:
+    """Réglages EFFECTIFS du produit pour cet environnement (``collegue.config.Settings``).
+
+    Les commandes produit héritent du répertoire courant et ``Settings`` y lit ``.env`` : un ``.env`` présent rendrait la
+    configuration VALIDÉE (environnement seul) différente de la configuration ÉMISE. Plutôt que de lire un fichier local
+    (clés comprises) ou de modifier la sémantique de ``Settings`` (lot A), la validation REFUSE explicitement avant tout
+    lancement ; le fichier n'est ni lu ni cité. Le workflow dédié (checkout vierge) n'a pas de ``.env``."""
     from collegue.config import Settings
 
+    dotenv = os.path.join(cwd or os.getcwd(), ".env")
+    if os.path.lexists(dotenv):
+        raise IncompleteValidation(
+            "configuration locale ambiguë : un fichier .env existe dans le répertoire de lancement et serait lu par le "
+            "produit, mais pas par ce préflight (environnement seul) — le retirer ou lancer depuis un répertoire sans .env"
+        )
     with _process_environment(env):
         return Settings(_env_file=None)
 
@@ -622,6 +633,7 @@ def check_oracle_environment(
     code = (
         "import importlib.util, sys; "
         f"missing=[m for m in {ORACLE_MODULES!r} if importlib.util.find_spec(m) is None]; "
+        "import shutil; missing += [] if shutil.which('timeout') else ['timeout (superviseur de durée)']; "
         "print(','.join(missing)); sys.exit(1 if missing else 0)"
     )
     argv = [
@@ -716,6 +728,8 @@ def run_preflight(
     if settings is None:
         try:
             settings = effective_settings(env)
+        except IncompleteValidation as exc:  # message sûr (jamais de valeur de configuration)
+            settings_error = str(exc)
         except Exception as exc:  # noqa: BLE001 - jamais le message : une validation pydantic peut citer une valeur
             fields = [".".join(map(str, e.get("loc", ()))) for e in getattr(exc, "errors", lambda: [])()]
             settings_error = f"{type(exc).__name__}" + (f" ({', '.join(fields)})" if fields else "")
@@ -768,15 +782,10 @@ REFERENCE_AUDIT = {
 LEGAL_NOTICE = "CONFIDENTIEL"
 
 _VERIFY_SCRIPT = r"""
-import io, json, os, signal, sqlite3, subprocess, sys, tempfile
+import io, json, os, sqlite3, subprocess, sys, tempfile
 from pathlib import Path
 
 REPORT_MARKER = %(marker)r
-DEADLINE_EXIT = %(deadline_exit)d
-# Arrêt AUTONOME : même si le client docker disparaît, le processus principal du conteneur se termine à l'échéance
-# (un gestionnaire explicite est nécessaire : PID 1 ignore les signaux sans gestionnaire).
-signal.signal(signal.SIGALRM, lambda *_: os._exit(DEADLINE_EXIT))
-signal.alarm(int(sys.argv[6]))
 phase = sys.argv[1]
 database = Path(sys.argv[2])
 audit_id = int(sys.argv[3]) if sys.argv[3] else None
@@ -870,8 +879,14 @@ class BusinessObservation:
     detail: str = ""
 
 
-#: Code de sortie du script de vérification quand son échéance autonome expire (convention ``timeout(1)``).
-DEADLINE_EXIT = 124
+#: Superviseur de durée HORS de l'interpréteur non fiable : ``timeout(1)`` est le processus principal du conteneur et lance le
+#: script en enfant ; un livrable ne peut ni annuler ni remplacer un minuteur qui ne vit pas dans son propre processus.
+#: 124 = échéance atteinte (TERM), 137 = TERM ignoré puis KILL après ``WATCHDOG_KILL_AFTER`` secondes.
+DEADLINE_EXITS = (124, 137)
+WATCHDOG_KILL_AFTER = 3
+#: Marge du client hôte au-delà du superviseur du conteneur : fenêtre de relève et de ``docker kill`` — aucun appel de modèle,
+#: aucun travail de vérification supplémentaire (ce n'est PAS une nouvelle enveloppe).
+HOST_KILL_MARGIN = 2.0
 #: ``docker run`` : 125 = démon/lancement refusé, 126/127 = commande de l'image non exécutable/introuvable.
 DOCKER_UNAVAILABLE_EXITS = (125, 126, 127)
 DEFAULT_VERIFIER_IMAGE = DEFAULT_SANDBOX_IMAGE  # même défaut que le gate de production (SANDBOX_IMAGE)
@@ -932,6 +947,8 @@ def verify_business_checkout(
     runner: Optional[Callable[..., "subprocess.CompletedProcess"]] = None,
     database_dir: Optional[str] = None,
     image: Optional[str] = None,
+    deadline_monotonic: Optional[float] = None,
+    clock: Optional[Callable[[], float]] = None,
 ) -> BusinessObservation:
     """Observe le livrable : base VIERGE → migration → création/lecture → redémarrage → PDF lu par un vrai lecteur.
 
@@ -941,7 +958,11 @@ def verify_business_checkout(
     **Isolement.** Sans ``runner``, le livrable (code NON FIABLE) s'exécute dans un conteneur Docker durci (voir
     :func:`docker_verifier_command`) ; si Docker ou l'image est indisponible, ou si un montage est refusé par la garde commune
     W1, le résultat est ``incomplete`` — jamais une exécution sur l'hôte. Le runner local (:func:`trusted_local_runner`) est
-    réservé aux fixtures de confiance et doit être demandé explicitement."""
+    réservé aux fixtures de confiance et doit être demandé explicitement.
+
+    **Durée.** ``timeout`` borne chaque phase ; ``deadline_monotonic`` (échéance GLOBALE de la campagne, horloge ``clock``) est
+    PARTAGÉE par les deux phases : aucune phase ne démarre après expiration (``BudgetStop``) et chacune est bornée par le temps
+    restant. En conteneur, la durée est supervisée par ``timeout(1)`` hors du processus non fiable ET par le client hôte."""
     if runner is None:
         return _verify_in_docker(
             checkout,
@@ -949,6 +970,8 @@ def verify_business_checkout(
             require_legal_notice=require_legal_notice,
             reference=reference,
             timeout=timeout,
+            deadline_monotonic=deadline_monotonic,
+            clock=clock,
         )
     return _observe(
         checkout,
@@ -958,6 +981,8 @@ def verify_business_checkout(
         reference=reference,
         timeout=timeout,
         database_dir=database_dir,
+        deadline_monotonic=deadline_monotonic,
+        clock=clock,
     )
 
 
@@ -970,25 +995,38 @@ def _observe(
     reference: Optional[Dict[str, Any]],
     timeout: float,
     database_dir: Optional[str],
+    deadline_monotonic: Optional[float] = None,
+    clock: Optional[Callable[[], float]] = None,
 ) -> BusinessObservation:
     from collegue.sandbox.executor import SandboxRefused
 
+    now = clock or time.monotonic  # résolu à l'appel (horloge contrôlable)
     reference = reference or REFERENCE_AUDIT
     notice = LEGAL_NOTICE if require_legal_notice else ""
     with tempfile.TemporaryDirectory(prefix="w4-business-") as folder:
         # ``database_dir`` : répertoire (vu du process vérifié) d'une base qui n'existe PAS encore ; en conteneur, c'est le
         # montage de travail partagé entre les deux phases (écriture puis relecture après « redémarrage »).
         database = os.path.join(database_dir or folder, "audits.db")
-        script = _VERIFY_SCRIPT % {"marker": REPORT_MARKER, "deadline_exit": DEADLINE_EXIT}
-        deadline = str(max(1, int(timeout * 0.9)))
+        script = _VERIFY_SCRIPT % {"marker": REPORT_MARKER}
         env = credential_free_env(extra={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": ""})
         merged: Dict[str, Any] = {"checks": {}, "observations": {}}
         audit_id: Optional[int] = None
         for phase in ("write", "reread"):
-            argv = [python, "-c", script, phase, database, str(audit_id or ""), json.dumps(reference), notice, deadline]
+            argv = [python, "-c", script, phase, database, str(audit_id or ""), json.dumps(reference), notice]
+            limit, bounded = float(timeout), False
+            if deadline_monotonic is not None:
+                remaining = deadline_monotonic - now()
+                if remaining <= 0:  # aucune nouvelle vérification après expiration de l'enveloppe globale
+                    raise BudgetStop(f"échéance globale atteinte avant la phase « {phase} » de la vérification métier")
+                if remaining < limit:
+                    limit, bounded = remaining, True
             try:
-                proc = run(argv, checkout, env, timeout)
+                proc = run(argv, checkout, env, limit)
             except subprocess.TimeoutExpired:
+                if bounded:
+                    raise BudgetStop(
+                        f"échéance globale atteinte pendant la phase « {phase} » de la vérification"
+                    ) from None
                 return BusinessObservation(
                     "incomplete", merged["checks"], merged["observations"], [], "délai de vérification dépassé"
                 )
@@ -1003,13 +1041,15 @@ def _observe(
             report = _parse_report(proc.stdout)
             if report is None:
                 tail = ((proc.stderr or "") + (proc.stdout or ""))[-400:]
-                if proc.returncode == DEADLINE_EXIT:
+                if proc.returncode in DEADLINE_EXITS:
+                    if bounded:
+                        raise BudgetStop(f"échéance globale atteinte pendant la phase « {phase} » de la vérification")
                     return BusinessObservation(
                         "incomplete",
                         merged["checks"],
                         merged["observations"],
                         [],
-                        "échéance autonome de la vérification",
+                        "échéance de la vérification (superviseur hors du processus non fiable)",
                     )
                 if proc.returncode in DOCKER_UNAVAILABLE_EXITS:
                     return BusinessObservation(
@@ -1104,7 +1144,14 @@ def run_in_named_container(
 
 
 def _verify_in_docker(
-    checkout: str, *, image: str, require_legal_notice: bool, reference: Optional[Dict[str, Any]], timeout: float
+    checkout: str,
+    *,
+    image: str,
+    require_legal_notice: bool,
+    reference: Optional[Dict[str, Any]],
+    timeout: float,
+    deadline_monotonic: Optional[float] = None,
+    clock: Optional[Callable[[], float]] = None,
 ) -> BusinessObservation:
     import shutil
     import uuid
@@ -1114,8 +1161,16 @@ def _verify_in_docker(
     client_env = credential_free_env(DOCKER_CLIENT_ENV_ALLOWLIST)
 
     def runner(argv: Sequence[str], cwd: str, _env: Mapping[str, str], limit: float) -> Any:
-        command = docker_verifier_command(image=image, name=name, checkout=checkout, scratch=scratch) + list(argv)
-        return run_in_named_container(command, name=name, timeout=limit, env=client_env)
+        # Le superviseur de durée est le processus principal du conteneur (``timeout`` lance le script en ENFANT) : le code
+        # livré, qui s'exécute dans l'enfant, ne peut pas l'annuler. Le client hôte garde une marge de relève, puis tue par NOM.
+        supervisor = ["timeout", "--signal=TERM", f"--kill-after={WATCHDOG_KILL_AFTER}", f"{max(0.1, limit):.3f}"]
+        command = docker_verifier_command(image=image, name=name, checkout=checkout, scratch=scratch)
+        return run_in_named_container(
+            command + supervisor + list(argv),
+            name=name,
+            timeout=limit + WATCHDOG_KILL_AFTER + HOST_KILL_MARGIN,
+            env=client_env,
+        )
 
     try:
         return _observe(
@@ -1126,6 +1181,8 @@ def _verify_in_docker(
             reference=reference,
             timeout=timeout,
             database_dir="/scratch",
+            deadline_monotonic=deadline_monotonic,
+            clock=clock,
         )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -1230,25 +1287,27 @@ class NightlyAdapter:
 
 
 def bounded_command_runner(
-    deadline_monotonic: float, *, clock: Callable[[], float] = time.monotonic, grace: float = 30.0
+    deadline_monotonic: float, *, clock: Optional[Callable[[], float]] = None
 ) -> Callable[..., Any]:
-    """Exécuteur de commandes BORNÉ par l'échéance globale : jamais de commande lancée passé 900 s, et une commande en cours à
-    l'échéance est tuée avec son groupe de processus (rien d'orphelin qui continuerait à facturer)."""
+    """Exécuteur de commandes BORNÉ par l'échéance globale : aucune commande n'est lancée passé 900 s, et une commande en cours
+    à l'échéance est tuée IMMÉDIATEMENT avec son groupe de processus. Aucune grâce : une commande de planification ou de
+    développement ne peut pas dépenser après l'expiration (la relève du processus tué n'émet rien)."""
     from collegue.pilot.nightly_e2e import CommandResult
 
     def run(argv: Sequence[str], *, cwd: Optional[str] = None) -> Any:
-        remaining = deadline_monotonic - clock()
+        remaining = deadline_monotonic - (clock or time.monotonic)()
         if remaining <= 0:
             raise BudgetStop("échéance globale de 900 s atteinte avant le lancement de la commande suivante")
         process = subprocess.Popen(
             list(argv), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True
         )
         try:
-            stdout, stderr = process.communicate(timeout=remaining + grace)
+            stdout, stderr = process.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
             import signal
 
-            os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
             raise BudgetStop("échéance globale atteinte : commande arrêtée avec son groupe de processus") from None
         return CommandResult(process.returncode, stdout, stderr)
@@ -1437,14 +1496,13 @@ def run_campaign(
         raise IncompleteValidation(NOT_WIRED_STOP_POINT)
 
     report.run("R02-business", _verify)
-    if report.step("R01-run").state != STEP_SUCCEEDED:
-        # Même après un arrêt budget/échec/validation incomplète, le registre est consigné (point d'arrêt) SANS masquer
-        # l'état de R01 : une lecture impossible reste une preuve manquante, pas un nouvel échec.
-        report.halted = False
-        report.run("R03-registry", _registry)
-        report.halted = True
-    else:
-        report.run("R03-registry", _registry)
+    # Le registre est relu après TOUT arrêt dès que le lancement a eu lieu (projet/scope créé ou non) : la vérification
+    # métier qui échoue, est incomplète ou dépasse l'échéance ne fait pas disparaître la dépense déjà réalisée. La lecture ne
+    # masque jamais l'arrêt d'origine : impossible ⇒ preuve manquante (incomplete_validation), jamais un zéro inventé.
+    halted_before = report.halted
+    report.halted = False
+    report.run("R03-registry", _registry)
+    report.halted = halted_before or report.halted
     for step_id in CAMPAIGN_SCOPE_NOT_WIRED:
         report.run(step_id, _not_wired)  # arrêt amont ⇒ reste not_executed ; sinon validation incomplète documentée
     return report
@@ -1456,15 +1514,26 @@ def _fixture_clients(token: str) -> Any:
     return NightlyClients.real(token)
 
 
-def verify_in_container(report: CampaignReport, context: Mapping[str, Any], *, env: Mapping[str, str]) -> None:
-    """R02 : la vérification métier du livrable généré s'exécute dans un conteneur durci, nommé et arrêté à l'échéance."""
+def verify_in_container(
+    report: CampaignReport,
+    context: Mapping[str, Any],
+    *,
+    env: Mapping[str, str],
+    deadline_monotonic: Optional[float] = None,
+    clock: Optional[Callable[[], float]] = None,
+) -> None:
+    """R02 : la vérification métier du livrable généré s'exécute dans un conteneur durci, nommé et arrêté à l'échéance.
+
+    Elle PARTAGE l'échéance globale de la campagne (``deadline_monotonic``) : ni nouvelle fenêtre, ni démarrage après expiration."""
     import shutil
 
     checkout = str(context["final_checkout"])
     image = str(env.get("SANDBOX_IMAGE", "") or DEFAULT_VERIFIER_IMAGE)
     step = report.step("R02-business")
     try:
-        observation = verify_business_checkout(checkout, python="python", image=image)
+        observation = verify_business_checkout(
+            checkout, python="python", image=image, deadline_monotonic=deadline_monotonic, clock=clock
+        )
     finally:
         shutil.rmtree(os.path.dirname(checkout), ignore_errors=True)
     step.evidence.update(status=observation.status, checks=observation.checks, observations=observation.observations)
@@ -1553,7 +1622,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             env,
             preflight=preflight,
             launch=lambda r: launch_campaign(r, adapter=adapter, env=env),
-            verify=lambda r, ctx: verify_in_container(r, ctx, env=env),
+            verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline),
             read_registry=registry_reader(env),
         )
     if args.output:
