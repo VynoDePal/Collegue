@@ -76,7 +76,9 @@ def test_the_project_own_tests_pass_at_every_stage(tmp_path):
 def test_business_verifier_accepts_the_complete_reference_and_reads_the_pdf_with_a_real_reader(tmp_path):
     root = materialize(tmp_path / "ok", 3)
 
-    observation = business.verify_business_checkout(str(root), python=sys.executable)
+    observation = business.verify_business_checkout(
+        str(root), python=sys.executable, runner=business.trusted_local_runner
+    )
 
     assert observation.status == "passed", observation.failed
     seen = observation.observations
@@ -103,7 +105,9 @@ def test_business_verifier_accepts_the_complete_reference_and_reads_the_pdf_with
 def test_business_verifier_is_red_before_each_task_by_assertion(tmp_path, stage, failing):
     root = materialize(tmp_path / "pre", stage)
 
-    observation = business.verify_business_checkout(str(root), python=sys.executable)
+    observation = business.verify_business_checkout(
+        str(root), python=sys.executable, runner=business.trusted_local_runner
+    )
 
     assert observation.status == "failed" and failing in observation.failed, observation
 
@@ -112,7 +116,9 @@ def test_a_valid_pdf_with_the_wrong_data_is_rejected_by_the_reader_based_check(t
     """Témoin négatif : PDF valide (200, application/pdf, %PDF-) mais données d'un AUTRE audit."""
     root = materialize(tmp_path / "wrong", 3, wrong_data=True)
 
-    observation = business.verify_business_checkout(str(root), python=sys.executable)
+    observation = business.verify_business_checkout(
+        str(root), python=sys.executable, runner=business.trusted_local_runner
+    )
 
     assert observation.status == "failed"
     assert "write:pdf_served" not in observation.failed, "le PDF est servi et valide : seules les DONNÉES sont fausses"
@@ -130,7 +136,7 @@ def test_a_documentation_only_change_that_drops_the_legal_notice_is_invisible_to
     root = materialize(tmp_path / "incident", 3)
     (root / "docs" / "export_header.md").write_text(F.BROKEN_NOTICE_HEADER, encoding="utf-8")
 
-    probe = business.verify_business_checkout(str(root), python=sys.executable)
+    probe = business.verify_business_checkout(str(root), python=sys.executable, runner=business.trusted_local_runner)
     oracle = run_oracle(root, 3, phase="candidate")
 
     assert oracle.status == "green", "les données persistées sont toujours dans le PDF : l'oracle de données reste vert"
@@ -140,7 +146,12 @@ def test_a_documentation_only_change_that_drops_the_legal_notice_is_invisible_to
     ]
     harmless = materialize(tmp_path / "harmless", 3)
     (harmless / "docs" / "export_header.md").write_text(F.HARMLESS_HEADER, encoding="utf-8")
-    assert business.verify_business_checkout(str(harmless), python=sys.executable).status == "passed"
+    assert (
+        business.verify_business_checkout(
+            str(harmless), python=sys.executable, runner=business.trusted_local_runner
+        ).status
+        == "passed"
+    )
 
 
 def test_the_pdf_writer_output_is_a_well_formed_pdf_for_an_independent_reader(tmp_path):

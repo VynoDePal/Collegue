@@ -221,7 +221,9 @@ class BusinessSandbox:
         if "COLLEGUE-ORACLE" in command:
             return self.oracles.run_tests(workspace, command)
         if command == HEALTH_COMMAND:
-            observation = business.verify_business_checkout(str(workspace), python=sys.executable)
+            observation = business.verify_business_checkout(
+                str(workspace), python=sys.executable, runner=business.trusted_local_runner
+            )
             record = {
                 "status": observation.status,
                 "failed_checks": observation.failed,
@@ -514,7 +516,9 @@ async def deliver_task(world: World, number: int, step: Any, *, merges_before: O
 
 def verify_main(world: World, step: Any, *, notice: bool = True) -> None:
     """Vérification métier du livrable fusionné, sur le checkout opérateur resynchronisé."""
-    observation = business.verify_business_checkout(world.source, python=sys.executable, require_legal_notice=notice)
+    observation = business.verify_business_checkout(
+        world.source, python=sys.executable, require_legal_notice=notice, runner=business.trusted_local_runner
+    )
     step.evidence.update(
         status=observation.status,
         checks=observation.checks,

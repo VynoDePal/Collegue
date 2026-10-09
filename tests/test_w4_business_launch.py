@@ -245,7 +245,7 @@ def test_the_container_verification_maps_its_status_and_removes_the_clone(tmp_pa
     seen = {}
 
     def fake_verify(path, **kwargs):
-        seen.update(path=path, **{k: v for k, v in kwargs.items() if k in {"python", "database_dir"}})
+        seen.update(path=path, **{k: v for k, v in kwargs.items() if k in {"python", "image", "runner"}})
         return business.BusinessObservation(
             status, {"x": status == "passed"}, {"o": 1}, [] if status == "passed" else ["x"], "détail"
         )
@@ -259,7 +259,8 @@ def test_the_container_verification_maps_its_status_and_removes_the_clone(tmp_pa
     )
 
     assert report.step("R02-business").state == state
-    assert seen["python"] == "python" and seen["database_dir"] == "/scratch"
+    assert seen["python"] == "python" and seen["image"] == business.DEFAULT_VERIFIER_IMAGE
+    assert "runner" not in seen, "chemin par défaut : conteneur isolé, jamais le runner local de confiance"
     assert not clone_parent.exists(), "le clone généré est supprimé après la vérification"
 
 

@@ -549,7 +549,7 @@ def run_preflight(
     report.run(
         "P07-oracle-environment",
         lambda s: check_oracle_environment(
-            report, s, image=str(env.get("SANDBOX_IMAGE", "") or "collegue-sandbox-openhands:ci"), runner=image_runner
+            report, s, image=str(env.get("SANDBOX_IMAGE", "") or DEFAULT_VERIFIER_IMAGE), runner=image_runner
         ),
     )
     return report
@@ -572,10 +572,15 @@ REFERENCE_AUDIT = {
 LEGAL_NOTICE = "CONFIDENTIEL"
 
 _VERIFY_SCRIPT = r"""
-import io, json, os, sqlite3, subprocess, sys, tempfile
+import io, json, os, signal, sqlite3, subprocess, sys, tempfile
 from pathlib import Path
 
 REPORT_MARKER = %(marker)r
+DEADLINE_EXIT = %(deadline_exit)d
+# Arrêt AUTONOME : même si le client docker disparaît, le processus principal du conteneur se termine à l'échéance
+# (un gestionnaire explicite est nécessaire : PID 1 ignore les signaux sans gestionnaire).
+signal.signal(signal.SIGALRM, lambda *_: os._exit(DEADLINE_EXIT))
+signal.alarm(int(sys.argv[6]))
 phase = sys.argv[1]
 database = Path(sys.argv[2])
 audit_id = int(sys.argv[3]) if sys.argv[3] else None
@@ -669,8 +674,46 @@ class BusinessObservation:
     detail: str = ""
 
 
-def _run_local(argv: Sequence[str], cwd: str, env: Mapping[str, str], timeout: float) -> "subprocess.CompletedProcess":
-    return subprocess.run(list(argv), cwd=cwd, env=dict(env), capture_output=True, text=True, timeout=timeout)
+#: Code de sortie du script de vérification quand son échéance autonome expire (convention ``timeout(1)``).
+DEADLINE_EXIT = 124
+#: ``docker run`` : 125 = démon/lancement refusé, 126/127 = commande de l'image non exécutable/introuvable.
+DOCKER_UNAVAILABLE_EXITS = (125, 126, 127)
+DEFAULT_VERIFIER_IMAGE = "collegue-sandbox-openhands:ci"
+#: Variables conservées pour le code vérifié (liste BLANCHE : aucune clé, aucun jeton, rien d'hérité par accident).
+VERIFIER_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "TZ")
+#: Variables conservées pour le CLIENT docker (jamais transmises au conteneur : ``docker run`` ne propage rien sans ``-e``).
+DOCKER_CLIENT_ENV_ALLOWLIST = (
+    "PATH", "HOME", "LANG", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "XDG_RUNTIME_DIR",
+)  # fmt: skip
+
+
+def credential_free_env(
+    allowlist: Sequence[str] = VERIFIER_ENV_ALLOWLIST,
+    extra: Optional[Mapping[str, str]] = None,
+    *,
+    source: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """Environnement construit par liste blanche : ne reprend de ``source`` (défaut ``os.environ``) que les noms autorisés."""
+    origin = os.environ if source is None else source
+    env = {name: origin[name] for name in allowlist if name in origin}
+    env.update(extra or {})
+    leaked = [name for name in SECRET_ENV_NAMES if name in env]
+    if leaked:  # défense en profondeur : une liste blanche modifiée ne doit jamais laisser passer un secret connu
+        raise ValueError(f"environnement du vérificateur non sûr : {', '.join(leaked)}")
+    return env
+
+
+def trusted_local_runner(
+    argv: Sequence[str], cwd: str, env: Mapping[str, str], timeout: float
+) -> "subprocess.CompletedProcess":
+    """Exécution SUR L'HÔTE — réservée aux fixtures de CONFIANCE (arbres écrits par les tests eux-mêmes).
+
+    Jamais le chemin par défaut : du code généré par un agent ne doit pas s'exécuter sur l'hôte. L'appelant doit la passer
+    explicitement (``runner=trusted_local_runner``). L'environnement reçu est re-filtré par liste blanche."""
+    clean = credential_free_env(
+        source=env, allowlist=tuple(VERIFIER_ENV_ALLOWLIST) + ("PYTHONDONTWRITEBYTECODE", "PYTHONPATH")
+    )
+    return subprocess.run(list(argv), cwd=cwd, env=clean, capture_output=True, text=True, timeout=timeout)
 
 
 def _parse_report(stdout: str) -> Optional[Dict[str, Any]]:
@@ -692,34 +735,94 @@ def verify_business_checkout(
     timeout: float = 120.0,
     runner: Optional[Callable[..., "subprocess.CompletedProcess"]] = None,
     database_dir: Optional[str] = None,
+    image: Optional[str] = None,
 ) -> BusinessObservation:
     """Observe le livrable : base VIERGE → migration → création/lecture → redémarrage → PDF lu par un vrai lecteur.
 
-    Indépendant des tests écrits par l'agent. ``incomplete`` = pile ou lecteur PDF indisponible (jamais un succès ni un échec
-    de l'application) ; ``failed`` = au moins une assertion métier est fausse."""
-    run = runner or _run_local
-    interpreter = python or sys.executable
+    Indépendant des tests écrits par l'agent. ``incomplete`` = pile, lecteur PDF, Docker ou échéance indisponible (jamais un
+    succès ni un échec de l'application) ; ``failed`` = au moins une assertion métier est fausse.
+
+    **Isolement.** Sans ``runner``, le livrable (code NON FIABLE) s'exécute dans un conteneur Docker durci (voir
+    :func:`docker_verifier_command`) ; si Docker ou l'image est indisponible, ou si un montage est refusé par la garde commune
+    W1, le résultat est ``incomplete`` — jamais une exécution sur l'hôte. Le runner local (:func:`trusted_local_runner`) est
+    réservé aux fixtures de confiance et doit être demandé explicitement."""
+    if runner is None:
+        return _verify_in_docker(
+            checkout,
+            image=image or os.environ.get("SANDBOX_IMAGE") or DEFAULT_VERIFIER_IMAGE,
+            require_legal_notice=require_legal_notice,
+            reference=reference,
+            timeout=timeout,
+        )
+    return _observe(
+        checkout,
+        runner,
+        python=python or sys.executable,
+        require_legal_notice=require_legal_notice,
+        reference=reference,
+        timeout=timeout,
+        database_dir=database_dir,
+    )
+
+
+def _observe(
+    checkout: str,
+    run: Callable[..., "subprocess.CompletedProcess"],
+    *,
+    python: str,
+    require_legal_notice: bool,
+    reference: Optional[Dict[str, Any]],
+    timeout: float,
+    database_dir: Optional[str],
+) -> BusinessObservation:
+    from collegue.sandbox.executor import SandboxRefused
+
     reference = reference or REFERENCE_AUDIT
     notice = LEGAL_NOTICE if require_legal_notice else ""
     with tempfile.TemporaryDirectory(prefix="w4-business-") as folder:
         # ``database_dir`` : répertoire (vu du process vérifié) d'une base qui n'existe PAS encore ; en conteneur, c'est le
         # montage de travail partagé entre les deux phases (écriture puis relecture après « redémarrage »).
         database = os.path.join(database_dir or folder, "audits.db")
-        script = _VERIFY_SCRIPT % {"marker": REPORT_MARKER}
-        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": ""}
+        script = _VERIFY_SCRIPT % {"marker": REPORT_MARKER, "deadline_exit": DEADLINE_EXIT}
+        deadline = str(max(1, int(timeout * 0.9)))
+        env = credential_free_env(extra={"PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": ""})
         merged: Dict[str, Any] = {"checks": {}, "observations": {}}
         audit_id: Optional[int] = None
         for phase in ("write", "reread"):
-            argv = [interpreter, "-c", script, phase, database, str(audit_id or ""), json.dumps(reference), notice]
+            argv = [python, "-c", script, phase, database, str(audit_id or ""), json.dumps(reference), notice, deadline]
             try:
                 proc = run(argv, checkout, env, timeout)
             except subprocess.TimeoutExpired:
                 return BusinessObservation(
                     "incomplete", merged["checks"], merged["observations"], [], "délai de vérification dépassé"
                 )
+            except SandboxRefused as exc:
+                return BusinessObservation(
+                    "incomplete", merged["checks"], merged["observations"], [], f"montage refusé (garde W1) : {exc}"
+                )
+            except OSError as exc:  # docker absent, non exécutable, démon injoignable
+                return BusinessObservation(
+                    "incomplete", merged["checks"], merged["observations"], [], f"exécution isolée indisponible : {exc}"
+                )
             report = _parse_report(proc.stdout)
             if report is None:
                 tail = ((proc.stderr or "") + (proc.stdout or ""))[-400:]
+                if proc.returncode == DEADLINE_EXIT:
+                    return BusinessObservation(
+                        "incomplete",
+                        merged["checks"],
+                        merged["observations"],
+                        [],
+                        "échéance autonome de la vérification",
+                    )
+                if proc.returncode in DOCKER_UNAVAILABLE_EXITS:
+                    return BusinessObservation(
+                        "incomplete",
+                        merged["checks"],
+                        merged["observations"],
+                        [],
+                        f"Docker ou image indisponible (code {proc.returncode}) : {tail}",
+                    )
                 return BusinessObservation(
                     "failed",
                     merged["checks"],
@@ -741,16 +844,42 @@ def verify_business_checkout(
         return BusinessObservation("failed" if failed else "passed", merged["checks"], merged["observations"], failed)
 
 
-def docker_verifier_command(*, image: str, name: str, checkout: str, scratch: str, memory: str = "512m") -> List[str]:
+def _verifier_mount(path: str, label: str) -> str:
+    """Chemin de montage validé par la garde COMMUNE W1 (contrôles Git direct/imbriqué/ancêtre, ``:``, liens, erreurs de stat)."""
+    from collegue.sandbox.executor import SandboxRefused, git_control_exposure
+
+    raw = os.path.abspath(os.fspath(path))
+    real = os.path.realpath(raw)
+    if ":" in raw or ":" in real:
+        raise SandboxRefused(f"{label} invalide (contient ':')")
+    if real == os.path.sep:
+        raise SandboxRefused(f"{label} invalide : la racine du FS ne peut pas être montée")
+    reason = git_control_exposure(raw)  # chemin BRUT : un lien pendant doit rester visible
+    if reason is not None:
+        raise SandboxRefused(f"{label} refusé : montage exposant les métadonnées Git de contrôle ({reason})")
+    return real
+
+
+def docker_verifier_command(
+    *, image: str, name: str, checkout: str, scratch: str, memory: str = "512m", user: Optional[str] = None
+) -> List[str]:
     """Commande Docker DURCIE de la vérification d'un livrable généré (code non fiable) : aucun réseau, aucun secret, racine en
     lecture seule, checkout monté en lecture seule, répertoire de travail ``scratch`` (hôte, vierge) monté sur ``/scratch``,
-    conteneur NOMMÉ (donc arrêtable à l'échéance)."""
+    conteneur NOMMÉ (donc arrêtable à l'échéance), exécuté sous l'UID de l'appelant (jamais root).
+
+    Les deux montages passent par la garde commune W1 (``git_control_exposure``) : un répertoire de contrôle Git, direct,
+    imbriqué ou ancêtre, un ``:`` ou une erreur de stat ⇒ :class:`SandboxRefused` AVANT toute commande."""
+    checkout_path = _verifier_mount(checkout, "checkout")
+    scratch_path = _verifier_mount(scratch, "scratch")
+    if user is None and hasattr(os, "getuid"):
+        user = f"{os.getuid()}:{os.getgid()}"
     return [
         "docker", "run", "--rm", "--name", name, "--pull", "never", "--network", "none", "--read-only",
         "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", memory, "--cpus", "1",
-        "--pids-limit", "128", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
-        "-e", "PYTHONDONTWRITEBYTECODE=1", "-w", "/workspace",
-        "-v", f"{checkout}:/workspace:ro", "-v", f"{scratch}:/scratch:rw", image,
+        "--pids-limit", "128", "--stop-timeout", "5", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
+        *(["--user", user] if user else []),
+        "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "HOME=/tmp", "-w", "/workspace",
+        "-v", f"{checkout_path}:/workspace:ro", "-v", f"{scratch_path}:/scratch:rw", image,
     ]  # fmt: skip
 
 
@@ -759,14 +888,51 @@ def run_in_named_container(
     *,
     name: str,
     timeout: float,
-    runner: Callable[..., "subprocess.CompletedProcess"] = subprocess.run,
+    runner: Optional[Callable[..., "subprocess.CompletedProcess"]] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> "subprocess.CompletedProcess":
-    """Exécute ``argv`` (un ``docker run --name <name>``) et, à l'échéance, ARRÊTE le conteneur par son nom avant de propager."""
+    """Exécute ``argv`` (un ``docker run --name <name>``) et, à l'échéance (ou à toute interruption), ARRÊTE le conteneur par son
+    NOM avant de propager : tuer le client ``docker`` ne tue pas le conteneur. ``subprocess.run`` est résolu à l'appel."""
+    run = runner if runner is not None else subprocess.run
+    options: Dict[str, Any] = {"capture_output": True, "text": True}
+    if env is not None:
+        options["env"] = dict(env)
     try:
-        return runner(list(argv), capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        runner(["docker", "kill", name], capture_output=True, text=True, timeout=30)
+        return run(list(argv), timeout=timeout, **options)
+    except BaseException:
+        try:
+            run(["docker", "kill", name], timeout=30, **options)
+        except (OSError, subprocess.SubprocessError):
+            pass  # best-effort : le conteneur est de toute façon sous --rm et sous son échéance autonome
         raise
+
+
+def _verify_in_docker(
+    checkout: str, *, image: str, require_legal_notice: bool, reference: Optional[Dict[str, Any]], timeout: float
+) -> BusinessObservation:
+    import shutil
+    import uuid
+
+    name = f"w4-verify-{uuid.uuid4().hex[:12]}"
+    scratch = tempfile.mkdtemp(prefix="w4-scratch-")  # 0700, vierge, jetable, propre à cette vérification
+    client_env = credential_free_env(DOCKER_CLIENT_ENV_ALLOWLIST)
+
+    def runner(argv: Sequence[str], cwd: str, _env: Mapping[str, str], limit: float) -> Any:
+        command = docker_verifier_command(image=image, name=name, checkout=checkout, scratch=scratch) + list(argv)
+        return run_in_named_container(command, name=name, timeout=limit, env=client_env)
+
+    try:
+        return _observe(
+            checkout,
+            runner,
+            python="python",
+            require_legal_notice=require_legal_notice,
+            reference=reference,
+            timeout=timeout,
+            database_dir="/scratch",
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # ── registre W2 : les plafonds viennent du registre durable, jamais d'un compteur propre ─────────────────────────────────
@@ -1041,20 +1207,11 @@ def verify_in_container(report: CampaignReport, context: Mapping[str, Any], *, e
     import shutil
 
     checkout = str(context["final_checkout"])
-    image = str(env.get("SANDBOX_IMAGE", "") or "collegue-sandbox-openhands:ci")
-    scratch = tempfile.mkdtemp(prefix="w4-scratch-")
-    name = f"w4-verify-{env.get('GITHUB_RUN_ID', '0')}"
+    image = str(env.get("SANDBOX_IMAGE", "") or DEFAULT_VERIFIER_IMAGE)
     step = report.step("R02-business")
-
-    def runner(argv: Sequence[str], cwd: str, _env: Mapping[str, str], timeout: float) -> Any:
-        command = docker_verifier_command(image=image, name=name, checkout=checkout, scratch=scratch) + list(argv)
-        return run_in_named_container(command, name=name, timeout=timeout)
-
     try:
-        os.chmod(scratch, 0o777)  # le conteneur s'exécute sous un autre UID : dossier de travail vierge, jetable
-        observation = verify_business_checkout(checkout, python="python", runner=runner, database_dir="/scratch")
+        observation = verify_business_checkout(checkout, python="python", image=image)
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
         shutil.rmtree(os.path.dirname(checkout), ignore_errors=True)
     step.evidence.update(status=observation.status, checks=observation.checks, observations=observation.observations)
     if observation.status == "incomplete":

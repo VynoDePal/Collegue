@@ -1366,7 +1366,6 @@ _HOST_PROCESS_INVENTORY = {
     "collegue/sandbox/executor.py": "docker run/kill/version : l'isolation elle-même",
     "collegue/improve/metrics.py": "ruff sur chemins CONFINÉS (workspace_file) ; audit de dépendances en sandbox",
     "collegue/pilot/nightly_e2e.py": "clone public neuf d'une fixture + sous-process CLI produit ; jamais un workspace",
-    "collegue/pilot/w4_business.py": "docker run NOMMÉ (vérification d'un livrable généré) + commandes CLI produit bornées par l'échéance ; jamais git sur un workspace",
     "collegue/autonomous/proactive_monitor.py": "ChangeDetector sur repo_path configuré par l'opérateur ; jamais un workspace",
     "collegue/core/llm/sampling_ctx.py": "CLI de sampling LLM ; sans rapport avec git/workspace",
     "collegue/tools/clients/kubernetes.py": "kubectl ; sans rapport avec git/workspace",
