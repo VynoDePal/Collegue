@@ -425,6 +425,20 @@ class BrokerStore:
 
         return self._run(_do)
 
+    def reopen_released(self, attempt_id: str) -> bool:
+        """Rouvre une tentative ``released`` (absence d'émission ÉTABLIE) pour un renvoi du MÊME ``request_id`` (CAS)."""
+        return self._transition(
+            attempt_id,
+            (BROKER_ATTEMPT_RELEASED,),
+            state=BROKER_ATTEMPT_PREPARED,
+            reservation_id=None,
+            counted_tokens=None,
+            reserved_tokens=0,
+            error_code=None,
+            error_detail=None,
+            settled_at=None,
+        )
+
     def attach_reservation(
         self, attempt_id: str, *, reservation_id: str, counted_tokens: int, reserved_tokens: int
     ) -> bool:

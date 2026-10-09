@@ -133,6 +133,8 @@ class SessionSummary:
     blocked_reason: Optional[str]
     attempts: int
     parent_settlement: str  # "committed" | "unknown" | "none"
+    prompt_tokens: int = 0
+    completion_tokens: int = 0  # candidats + raisonnement
 
     @property
     def prompt_completion_known(self) -> bool:
@@ -325,6 +327,7 @@ class BrokerService:
         session: Optional[SessionRecord],
         request_id: Optional[str],
     ) -> dict:
+        reopened: Optional[AttemptRecord] = None
         if request_id is not None:
             known = self.store.find_attempt(scope_key, request_id)
             if known is not None:
@@ -334,21 +337,32 @@ class BrokerService:
                         code="request_id_conflict",
                         status=409,
                     )
-                return self._replay(known)  # AVANT tout contrôle de blocage : un résultat déjà obtenu se rend tel quel
+                if known.state != BROKER_ATTEMPT_RELEASED:
+                    return self._replay(
+                        known
+                    )  # AVANT tout contrôle de blocage : un résultat déjà obtenu se rend tel quel
+                reopened = known
         self._refuse_if_blocked(scope_key, session, root_scope_key)
+        if reopened is not None:
+            # Libérée = absence d'émission ÉTABLIE : le renvoi du même request_id est une NOUVELLE exécution légitime.
+            if not self.store.reopen_released(reopened.attempt_id):
+                return self._replay(self.store.get_attempt(reopened.attempt_id))
         attempt_id = f"{session.session_id if session else 'direct'}:{uuid.uuid4().hex[:16]}"
-        attempt, replayed = self.store.create_attempt(
-            attempt_id=attempt_id,
-            request_id=request_id,
-            session_id=session.session_id if session else None,
-            scope_key=scope_key,
-            role=role,
-            model=nr.model,
-            request_sha256=nr.sha256,
-            output_cap=nr.output_cap,
-        )
-        if replayed:
-            return self._replay(attempt)
+        if reopened is not None:
+            attempt = self.store.get_attempt(reopened.attempt_id)
+        else:
+            attempt, replayed = self.store.create_attempt(
+                attempt_id=attempt_id,
+                request_id=request_id,
+                session_id=session.session_id if session else None,
+                scope_key=scope_key,
+                role=role,
+                model=nr.model,
+                request_sha256=nr.sha256,
+                output_cap=nr.output_cap,
+            )
+            if replayed:
+                return self._replay(attempt)
         attempt_id = attempt.attempt_id
 
         # 4. countTokens — aucune dépense ; n'importe quel échec ici ne peut PAS avoir généré.
@@ -366,7 +380,9 @@ class BrokerService:
 
         # 5. réservation ATOMIQUE dans le scope concerné (CAS du registre) — refus ⇒ rien n'est émis.
         reserve_tokens = counted + nr.output_cap
-        reservation_id = f"broker:{attempt_id}"
+        reservation_id = (
+            f"broker:{attempt_id}:{uuid.uuid4().hex[:8]}"  # une réservation par EXÉCUTION (renvoi après libération)
+        )
         try:
             self.ledger.reserve(
                 scope_key,
@@ -484,11 +500,6 @@ class BrokerService:
         """Même ``request_id`` : le résultat déjà obtenu est rendu, JAMAIS une seconde génération."""
         if attempt.state == BROKER_ATTEMPT_SETTLED and attempt.response_json:
             return json.loads(attempt.response_json)
-        if attempt.state == BROKER_ATTEMPT_RELEASED:
-            raise BrokerForbidden(
-                "cette requête a été libérée sans génération : renvoyer avec un nouveau request_id",
-                code="attempt_released",
-            )
         raise BrokerBlocked(
             f"rejeu refusé : la tentative est {attempt.state} (émission possible, résultat inconnu)",
             code="replay_refused",
@@ -562,7 +573,9 @@ class BrokerService:
 
     # ── fermeture / consolidation ────────────────────────────────────────────────────────────────────────
 
-    async def close_session(self, session_id: str, reason: str = "closed") -> SessionSummary:
+    async def close_session(
+        self, session_id: str, reason: str = "closed", *, consolidate_parent: bool = True
+    ) -> SessionSummary:
         """Ferme la session (plus aucune génération), attend les appels en vol, consolide dans la réservation parent.
 
         Concurrent-sûr : ``open → closing`` est un CAS, les appels en vol se terminent (et libèrent ou règlent) AVANT la
@@ -582,16 +595,16 @@ class BrokerService:
                         pending, record.scope_key, record, "closed_in_flight", "fermeture avant la fin de l'appel"
                     )
         self.repair(session_id=session_id)
-        return self._consolidate(session_id)
+        return self._consolidate(session_id, consolidate_parent=consolidate_parent)
 
-    def _consolidate(self, session_id: str) -> SessionSummary:
+    def _consolidate(self, session_id: str, *, consolidate_parent: bool = True) -> SessionSummary:
         record = self.store.get_session(session_id)
         child = self.ledger.snapshot(record.scope_key)
         unknown = (
             child.unknown_micro_usd > 0 or child.unknown_tokens > 0 or child.blocked_reason or record.unknown_reason
         )
         settlement = "none"
-        if record.parent_reservation_id:
+        if record.parent_reservation_id and consolidate_parent:
             parent = self.ledger.get_reservation(record.parent_reservation_id)
             if parent is not None and parent.state == "reserved":
                 if unknown:
@@ -623,6 +636,7 @@ class BrokerService:
         if settlement is None:
             parent = self.ledger.get_reservation(record.parent_reservation_id) if record.parent_reservation_id else None
             settlement = "none" if parent is None else ("committed" if parent.state == "committed" else parent.state)
+        attempts = self.store.attempts(scope_key=record.scope_key)
         return SessionSummary(
             session_id=record.session_id,
             state=record.state,
@@ -631,8 +645,14 @@ class BrokerService:
             unknown=unknown,
             unknown_reason=record.unknown_reason or child.blocked_reason,
             blocked_reason=child.blocked_reason,
-            attempts=len(self.store.attempts(scope_key=record.scope_key)),
+            attempts=len(attempts),
             parent_settlement=settlement,
+            prompt_tokens=sum(int(a.usage_prompt or 0) for a in attempts if a.state == BROKER_ATTEMPT_SETTLED),
+            completion_tokens=sum(
+                int(a.usage_candidates or 0) + int(a.usage_thoughts or 0)
+                for a in attempts
+                if a.state == BROKER_ATTEMPT_SETTLED
+            ),
         )
 
     # ── réparation après arrêt / crash ───────────────────────────────────────────────────────────────────

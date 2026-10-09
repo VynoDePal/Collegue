@@ -33,6 +33,7 @@ différée en Phase 2 ; le pilote Phase 3 câblera cet exécuteur).
 
 from __future__ import annotations
 
+import copy
 import errno
 import math
 import os
@@ -53,6 +54,26 @@ SANDBOX_PIP_CACHE_MOUNT = "/tmp/.pip_cache"
 # creds NE peuvent PAS vivre sous /tmp (le ``--tmpfs /tmp`` les masquerait), d'où
 # le fail-loud si HOME pointe sous /tmp (cf. _build_run_argv).
 SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
+# Courtier budgétaire (W5) : répertoire hôte ne contenant QUE le socket Unix d'UNE session, monté en lecture seule. Le worker
+# n'a aucun réseau (``--network none``) ; un relais loopback embarqué (``oh_broker_relay``) recopie vers ce socket.
+SANDBOX_BROKER_MOUNT = "/run/collegue-broker"
+BROKER_SOCKET_NAME = "broker.sock"
+# Variables qu'un worker raccordé au courtier ne reçoit JAMAIS : clés fournisseur et proxy (aucun chemin réseau détourné).
+BROKER_FORBIDDEN_ENV = frozenset(
+    {
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENAI_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+    }
+)
 
 # Marqueur posé dans le répertoire de contrôle Git d'un workspace (frontière Git,
 # ``collegue.executor.git_boundary``). Ce répertoire — hooks/config/refs/index,
@@ -282,6 +303,7 @@ class DockerSandbox:
         dns: Optional[Tuple[str, ...]] = None,
         pip_cache_dir: Optional[str] = None,
         subscription_auth_dir: Optional[str] = None,
+        broker_socket_dir: Optional[str] = None,
         memory: str = "512m",
         cpus: str = "1.0",
         pids_limit: int = 256,
@@ -314,6 +336,8 @@ class DockerSandbox:
         # hors-run). Opt-in : vide (défaut) = aucun montage, argv inchangé. Validé
         # comme un -v (realpath + refus ':'/racine) ; hors confinement workspace_root.
         self.subscription_auth_dir = subscription_auth_dir or None
+        # Courtier budgétaire (W5) : répertoire du socket d'UNE session (voir ``with_broker``). Vide = aucun montage.
+        self.broker_socket_dir = broker_socket_dir or None
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
@@ -341,6 +365,69 @@ class DockerSandbox:
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or name in self.env or name in self.env_passthrough:
                 raise SandboxRefused(f"env_secrets : nom de variable invalide ou dupliqué ({name!r})")
         self.read_only = bool(read_only)
+        if self.broker_socket_dir:
+            self._validate_broker()
+
+    # ── courtier budgétaire (W5) ──────────────────────────────────────────────────
+
+    def with_broker(
+        self,
+        socket_dir: str,
+        *,
+        env: Optional[Mapping[str, str]] = None,
+        env_secrets: Optional[Mapping[str, Any]] = None,
+    ) -> "DockerSandbox":
+        """Copie de ce sandbox RACCORDÉE au socket d'UNE session du courtier (``socket_dir``), sans toucher à l'original.
+
+        ``env`` (non secret) et ``env_secrets`` (par référence : ``-e NAME``, valeur dans l'env du seul process docker) sont
+        AJOUTÉS ; le jeton de session passe ainsi comme secret par référence. Refus (``SandboxRefused``) si le sandbox a un
+        réseau, un passthrough d'environnement, une variable de clé fournisseur / de proxy, des creds d'abonnement montés, ou
+        si ``socket_dir`` n'est pas un répertoire ordinaire ne contenant que ``broker.sock``.
+        """
+        clone = copy.copy(self)
+        clone.env = {**self.env, **dict(env or {})}
+        clone._env_secrets = {**self._env_secrets, **{str(k): v for k, v in (env_secrets or {}).items()}}
+        clone.broker_socket_dir = socket_dir
+        for name in clone._env_secrets:
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or name in clone.env or name in clone.env_passthrough:
+                raise SandboxRefused(f"env_secrets : nom de variable invalide ou dupliqué ({name!r})")
+        clone._validate_broker()
+        return clone
+
+    def _validate_broker(self) -> str:
+        """Valide le raccordement au courtier ; renvoie le chemin canonique du répertoire. Rejoué à CHAQUE lancement."""
+        if self.network != "none":
+            raise SandboxRefused("courtier : un worker raccordé doit tourner sans réseau (--network none)")
+        if self.env_passthrough:
+            raise SandboxRefused("courtier : env_passthrough interdit (l'environnement hôte ne doit rien transmettre)")
+        if self.subscription_auth_dir:
+            raise SandboxRefused("courtier : creds d'abonnement et courtier sont exclusifs")
+        names = {str(k).upper() for k in list(self.env) + list(self._env_secrets)}
+        if names & BROKER_FORBIDDEN_ENV:
+            raise SandboxRefused(
+                f"courtier : variable(s) interdite(s) dans le worker : {sorted(names & BROKER_FORBIDDEN_ENV)}"
+            )
+        directory = str(self.broker_socket_dir)
+        try:
+            top = os.lstat(directory)
+        except OSError as exc:
+            raise SandboxRefused(f"broker_socket_dir illisible : {exc.strerror}") from None
+        if stat.S_ISLNK(top.st_mode) or not stat.S_ISDIR(top.st_mode):
+            raise SandboxRefused("broker_socket_dir doit être un répertoire ordinaire (ni lien symbolique ni fichier)")
+        real = os.path.realpath(os.path.abspath(directory))
+        if ":" in real or real == os.path.sep:
+            raise SandboxRefused(f"broker_socket_dir invalide (':' ou racine) : {real}")
+        _refuse_if_git_control_exposed(directory, "broker_socket_dir")
+        try:
+            entries = sorted(entry.name for entry in os.scandir(real))
+            sock = os.lstat(os.path.join(real, BROKER_SOCKET_NAME))
+        except OSError as exc:
+            raise SandboxRefused(f"broker_socket_dir : socket absent ou illisible ({exc.strerror})") from None
+        if entries != [BROKER_SOCKET_NAME] or not stat.S_ISSOCK(sock.st_mode):
+            raise SandboxRefused(
+                f"broker_socket_dir ne doit contenir que le socket {BROKER_SOCKET_NAME!r} (contenu : {entries})"
+            )
+        return real
 
     # ── validation / construction (pur, testable sans Docker) ─────────────────────
 
@@ -420,6 +507,16 @@ class DockerSandbox:
                     "(le tmpfs /tmp masquerait le montage des creds d'abonnement)"
                 )
             argv += ["-v", f"{auth}:{home}/{SANDBOX_OPENHANDS_AUTH_SUBPATH}"]
+        if self.broker_socket_dir:
+            # Courtier (W5) : le SEUL chemin vers un fournisseur est ce socket, monté en lecture seule (la connexion à un socket
+            # n'exige pas d'écriture sur le système de fichiers). Revalidé à chaque lancement (le socket a pu disparaître).
+            broker = self._validate_broker()
+            argv += [
+                "-v",
+                f"{broker}:{SANDBOX_BROKER_MOUNT}:ro",
+                "-e",
+                f"COLLEGUE_BROKER_SOCKET={SANDBOX_BROKER_MOUNT}/{BROKER_SOCKET_NAME}",
+            ]
         if self.read_only:
             argv += ["--read-only"]  # root FS en lecture seule
         argv += [

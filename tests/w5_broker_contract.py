@@ -476,6 +476,25 @@ async def test_the_same_request_id_returns_the_stored_result_without_a_second_ge
     assert caught.value.code == "request_id_conflict" and caught.value.status == 409
 
 
+async def test_a_released_request_id_can_be_sent_again_as_a_new_execution(manager):
+    """429 (rejet démontré) puis renvoi du MÊME request_id : nouvelle exécution, une seule consommation au final."""
+    upstream = FakeUpstream()
+    upstream.generate_error = http_error(429)
+    service, _, ledger, scope_key, parent_rid = service_for(manager, upstream)
+    session = open_worker(service, scope_key, parent_rid)
+    with pytest.raises(BrokerUpstreamRejected):
+        await chat(service, session, request_id="req-429")
+    upstream.generate_error = None
+
+    completion = await chat(service, session, request_id="req-429")
+
+    assert completion["choices"] and len(upstream.generate_calls) == 2
+    child = ledger.snapshot(session.scope_key)
+    assert (child.consumed_tokens, child.reserved_tokens, child.unknown_tokens) == (15, 0, 0)
+    assert await chat(service, session, request_id="req-429") == completion  # puis rejeu pur
+    assert len(upstream.generate_calls) == 2
+
+
 async def test_a_replay_of_an_uncertain_emission_is_refused_not_reissued(manager):
     upstream = FakeUpstream()
     upstream.generate_error = http_error(503)
