@@ -26,7 +26,11 @@ Rôles : `CODER`, `QA`, `REVIEWER`, `PLANNER`, `DEFAULT`. Fournisseurs : `gemini
 3. Clé : `LLM_API_KEY_<ROLE>` sinon `LLM_API_KEY` **seulement si le fournisseur du rôle est le fournisseur global**.
    Fournisseur local sans clé : accepté (`auth=none`, transport `api_key="local"`). Hébergé sans clé : refus.
 4. Endpoint : `LLM_BASE_URL_<ROLE>` ; sinon `LLM_BASE_URL` global si le fournisseur est celui du global ; sinon défaut
-   du fournisseur. `gemini` garde toujours l'endpoint Google (`LLM_BASE_URL` global ignoré pour lui).
+   du fournisseur. Un endpoint configuré n'est **jamais ignoré en silence**, y compris pour `gemini` : il est respecté
+   (passerelle compatible) ou refusé. Un endpoint dont l'hôte est un AUTRE fournisseur hébergé (`api.openai.com` sous
+   `gemini`, `generativelanguage.googleapis.com` sous `openai`) est une contradiction refusée avant émission, car il
+   recevrait la clé de ce rôle. Le worker OpenHands, lui, refuse explicitement un endpoint personnalisé pour un
+   codeur `gemini` (LiteLLM route `gemini/…` vers l'API Google).
 5. Abonnement (ChatGPT/Codex) : **jamais déduit du nom du modèle**. Explicite par `CODER_SUBSCRIPTION=true` (codeur)
    ou `LLM_AUTH_<ROLE>=subscription`, fournisseur `openai` uniquement, sans clé de rôle contradictoire.
 6. Préférences d'appelant : une préférence de modèle qui différerait du modèle du rôle est refusée
@@ -72,9 +76,29 @@ tokenizer et la gratuité d'un fournisseur local. Chaque tentative (retries comp
 le client du rôle. Une destination non attestée (passerelle dont l'identité de modèle n'est pas reconnue) est refusée
 en mode strict avant émission. `worker_budget` tarife chaque modèle de la chaîne selon l'endpoint et la famille de la
 route (abonnement : famille openai, 0 $). La capacité du worker reste unique dans `worker_budget`
-(`budget_enforcement = "in-runner"` ne borne pas une commande du workspace qui réutiliserait une clé facturable :
-refus en strict sous plafond, abonnement accepté, mode `advisory` disponible) — rien n'est assoupli pour 2 USD /
-250 000 tokens / 900 s.
+(`budget_enforcement = "in-runner"` ne borne pas une commande du workspace qui réutiliserait les credentials) :
+
+* clé facturable sous plafond strict : **refus** ;
+* abonnement sous plafond strict de **tokens** : **refus** (le backend abonnement ne garantit pas le plafond de sortie
+  en amont, les commandes du workspace ont les credentials montés). La campagne 2 USD / 250 000 tokens / 900 s est donc
+  refusée en strict avec un codeur par abonnement comme avec une clé facturable ;
+* seul un plafond **USD sans plafond de tokens** est accepté pour l'abonnement (0 $ établi) ;
+* mode `advisory` : disponible, sans garantie stricte.
+
+Rien n'est assoupli.
+
+### Limite de sortie du handler serveur
+
+FastMCP transmet `max_completion_tokens` ; le handler ramène la requête à UNE seule limite effective
+(`normalize_output_limit`), la même pour la réservation et pour le corps HTTP. La limite de l'appelant n'est jamais
+réduite ni complétée ; sans limite (appel direct) la borne par défaut est 4096 (`max_tokens`) ; une valeur invalide
+(non entière, booléenne, ≤ 0) ou deux limites différentes sont refusées avant réservation et émission.
+
+### Montage d'abonnement du worker
+
+`SANDBOX_SUBSCRIPTION_AUTH_DIR` n'est monté (avec `HOME` hors `/tmp`) que si la route **du codeur** est en abonnement.
+Un reviewer ou un QA en abonnement n'impose pas ce montage à un codeur par clé API ; un codeur en abonnement sans ce
+dossier est refusé avant lancement. La garde W1 (`HOME` hors `/tmp`) est inchangée.
 
 ## Portée exacte du sampling délégué
 
@@ -117,13 +141,14 @@ SANDBOX_SUBSCRIPTION_AUTH_DIR=~/.openhands
 * Un rôle non codeur qui utilisait l'abonnement parce que son modèle n'était « pas Gemini » doit maintenant le demander :
   `LLM_AUTH_<ROLE>=subscription` (avec `LLM_PROVIDER_<ROLE>=openai`). Sans cela il part sur l'API facturée avec la
   clé du rôle, ou est refusé faute de clé.
-* `LLM_BASE_URL` global est ignoré pour un rôle `gemini`. Un `LLM_BASE_URL_<ROLE>` pour un codeur `gemini` est refusé
-  (LiteLLM route `gemini/…` vers l'API Google).
+* `LLM_BASE_URL` global n'est plus ignoré pour `gemini` : respecté pour le sampling, refusé s'il désigne un autre
+  fournisseur hébergé. Un endpoint (de rôle ou hérité du global) pour un codeur `gemini` est refusé par le worker
+  (LiteLLM route `gemini/…` vers l'API Google) : retirer `LLM_BASE_URL` pour ce codeur.
 * Repli du codeur : Gemini garde `gemma-4-26b-a4b-it` ; tout autre fournisseur n'a aucun repli sans
   `CODER_FALLBACK_MODELS` (un repli d'un autre fournisseur est refusé).
 * L'abonnement n'est pas supporté par le handler serveur FastMCP (refus explicite, pas de bascule vers une clé).
 * Le SDK OpenHands (1.19.1, `locks/sandbox-openhands.txt`) n'est pas installé dans l'environnement de développement :
-  le constructeur est testé avec un module `openhands.sdk` factice ; le contrôle réel
-  `set(LLM_CONSTRUCTOR_KWARGS) <= set(openhands.sdk.LLM.model_fields)` est un test qui s'exécute dès que le SDK est
-  présent (image) — à brancher côté CI/image par C.
+  le constructeur est testé avec un module `openhands.sdk` factice. Le contrôle réel
+  (`LLM_CONSTRUCTOR_KWARGS` ⊂ `LLM.model_fields`) est porté par `scripts/ci_w4_worker_routing.py` (C), qui charge
+  `/opt/oh_runner.py` par chemin dans l'image : le paquet `collegue` n'y est PAS installé, aucun `import collegue`.
 * `validate_role_routes(settings, roles)` : préflight sans émission ni dépense, sortie sans secret.

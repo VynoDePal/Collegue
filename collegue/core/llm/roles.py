@@ -131,7 +131,7 @@ class LLMRoute:
             if self.explicit_endpoint:
                 raise LLMRoutingError(
                     f"rôle {self.role} : un endpoint personnalisé pour le fournisseur gemini n'est pas supporté par le "
-                    "worker (LiteLLM route 'gemini/…' vers l'API Google) — retirer LLM_BASE_URL_<ROLE>"
+                    "worker (LiteLLM route 'gemini/…' vers l'API Google) — retirer LLM_BASE_URL_<ROLE> (ou LLM_BASE_URL global hérité)"
                 )
             return None
         if self.provider == "openai" and not self.explicit_endpoint:
@@ -365,13 +365,9 @@ def resolve_route(
     explicit = True
     if role_url:
         endpoint = role_url
-    elif (
-        provider == g_provider
-        and provider != "gemini"
-        and (_setting(settings_obj, "llm_base_url") or _setting(settings_obj, "LLM_BASE_URL"))
-    ):
-        # Même fournisseur que le global : son endpoint configuré s'applique. (``gemini`` garde l'endpoint Google :
-        # un LLM_BASE_URL résiduel d'un ancien fournisseur ne doit pas recevoir la clé Gemini.)
+    elif provider == g_provider and (_setting(settings_obj, "llm_base_url") or _setting(settings_obj, "LLM_BASE_URL")):
+        # Même fournisseur que le global : son endpoint configuré s'applique, JAMAIS ignoré en silence. Un endpoint qui
+        # désigne un autre fournisseur hébergé (ex. api.openai.com sous « gemini ») est refusé par ``_check_endpoint``.
         endpoint = _setting(settings_obj, "llm_base_url") or _setting(settings_obj, "LLM_BASE_URL")
     else:
         explicit = False

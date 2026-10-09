@@ -37,6 +37,45 @@ from typing import Any, Optional
 DEFAULT_BOUNDED_MAX_TOKENS = 4096
 
 
+_OUTPUT_LIMIT_KEYS = ("max_completion_tokens", "max_tokens")
+
+
+class OutputLimitError(ValueError):
+    """Limite de sortie invalide ou contradictoire : refusée AVANT toute réservation et toute émission."""
+
+
+def normalize_output_limit(kwargs: dict, *, default: Optional[int] = None) -> Optional[int]:
+    """Ramène ``kwargs`` à UNE seule limite de sortie effective (modifie ``kwargs``) et la renvoie.
+
+    FastMCP transmet ``max_completion_tokens`` ; un appelant direct peut passer ``max_tokens``. Les deux ensemble
+    donneraient un corps HTTP à deux bornes qui peuvent diverger : la réservation budgétaire et la requête réellement
+    émise doivent partager la MÊME. Valeurs non entières, booléennes ou ≤ 0 : refus ; deux valeurs différentes : refus
+    (jamais la plus petite ou la plus grande « au hasard »). Absente, la limite vaut ``default`` (nom historique
+    ``max_tokens``) ; sans ``default`` elle reste absente (``None``). La limite demandée par l'appelant n'est jamais réduite.
+    """
+    present = {}
+    for key in _OUTPUT_LIMIT_KEYS:
+        if key in kwargs and kwargs[key] is not None:
+            value = kwargs[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise OutputLimitError(f"{key} invalide ({type(value).__name__}) : entier strictement positif requis")
+            present[key] = value
+    for key in _OUTPUT_LIMIT_KEYS:
+        kwargs.pop(key, None)
+    if len(set(present.values())) > 1:
+        raise OutputLimitError(
+            "max_tokens et max_completion_tokens contradictoires : une seule limite de sortie permise"
+        )
+    if present:
+        key = next(k for k in _OUTPUT_LIMIT_KEYS if k in present)
+        kwargs[key] = present[key]
+        return present[key]
+    if default is not None:
+        kwargs["max_tokens"] = int(default)
+        return int(default)
+    return None
+
+
 def _usage_of(resp):
     usage = getattr(resp, "usage", None)
     if usage is None:
@@ -68,9 +107,9 @@ def _make_handler_class():
                 if binding is not None:
                     # Registre durable lié (moteur autonome) : réservation AVANT chaque tentative, pas de
                     # retry interne du SDK (max_retries=0), règlement avec l'usage réel.
-                    # La sortie DOIT être bornée par un max_tokens réellement transmis : sans lui elle ne l'est pas.
-                    if not kw.get("max_tokens"):
-                        kw["max_tokens"] = DEFAULT_BOUNDED_MAX_TOKENS
+                    # La sortie DOIT être bornée par UNE limite réellement transmise (celle de l'appelant, sinon la
+                    # borne par défaut) : la même sert à la réservation et au corps de la requête.
+                    limit = normalize_output_limit(kw, default=DEFAULT_BOUNDED_MAX_TOKENS)
                     once = self.client.with_options(max_retries=0) if hasattr(self.client, "with_options") else None
                     target = once.chat.completions.create if once is not None else inner
 
@@ -83,7 +122,7 @@ def _make_handler_class():
                         model=str(kw.get("model") or self.default_model or ""),
                         messages=kw.get("messages"),
                         tools=kw.get("tools"),
-                        max_tokens=int(kw["max_tokens"]),
+                        max_tokens=int(limit),
                         transport=TRANSPORT_HTTP,
                         usage_of=_usage_of,
                         max_attempts=3,  # = les 2 retries par défaut du SDK, désormais réservés un à un
@@ -95,6 +134,7 @@ def _make_handler_class():
                     # stricte du registre durable (serveur MCP sans projet). No-op si plafonds désactivés.
                     from collegue.monitoring.metrics import enforce_budget
 
+                    normalize_output_limit(kw)  # une seule borne dans le corps, même sans registre
                     enforce_budget()
                     response = await inner(*a, **kw)
                 usage = getattr(response, "usage", None)

@@ -170,14 +170,26 @@ def _coder_sandbox_secrets(settings_obj) -> dict:
 
 def _coder_sandbox_kwargs(settings_obj) -> dict:
     """Arguments de ``DockerSandbox`` du codeur (pur : testable sans Docker)."""
+    from collegue.core.llm.roles import LLMRoutingError
+    from collegue.executor.openhands_sdk_agent import OHSdkAgent
     from collegue.sandbox import DEFAULT_SANDBOX_IMAGE
+
+    # Le montage des creds d'abonnement est exigé par la route DU CODEUR, jamais par celle d'un autre rôle : un reviewer
+    # en abonnement ne doit pas imposer ce montage (ni son HOME hors /tmp) à un codeur par clé API.
+    uses_subscription = OHSdkAgent(object(), settings_obj=settings_obj).route(require_credential=True).uses_subscription
+    subscription_auth = _sandbox_subscription_auth(settings_obj) if uses_subscription else None
+    if uses_subscription and subscription_auth is None:
+        raise LLMRoutingError(
+            "rôle coder : authentification par abonnement sélectionnée mais SANDBOX_SUBSCRIPTION_AUTH_DIR "
+            "(creds montées) est absent"
+        )
 
     return dict(
         image=str(getattr(settings_obj, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE),
         network=str(getattr(settings_obj, "SANDBOX_NETWORK", "bridge") or "bridge"),
         dns=_sandbox_dns(settings_obj),
         pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
-        subscription_auth_dir=_sandbox_subscription_auth(settings_obj),  # creds abo Codex/ChatGPT
+        subscription_auth_dir=subscription_auth,  # creds abo Codex/ChatGPT, seulement si la route du codeur l'exige
         env=_coder_sandbox_env(settings_obj),
         env_secrets=_coder_sandbox_secrets(settings_obj),
         memory=str(getattr(settings_obj, "SANDBOX_MEMORY", "6g") or "6g"),
