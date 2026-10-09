@@ -222,7 +222,7 @@ def _make_routing_class(inner_cls):
             key = route.cache_key()
             handler = self._handlers.get(key)
             if handler is None:
-                client = AsyncOpenAI(api_key=route.credential() or "local", base_url=route.endpoint)
+                client = AsyncOpenAI(api_key=route.transport_key(), base_url=route.endpoint)
                 handler = inner_cls(default_model=route.model, client=client, provider=route.provider)
                 self._handlers[key] = handler
             return handler

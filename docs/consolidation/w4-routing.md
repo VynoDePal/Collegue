@@ -24,7 +24,15 @@ Rôles : `CODER`, `QA`, `REVIEWER`, `PLANNER`, `DEFAULT`. Fournisseurs : `gemini
 2. Le modèle doit appartenir au fournisseur : `gemini-*`/`gemma-*` refusés sous `openai`, `gpt-*` refusé sous `gemini`
    ; un préfixe `gemini/` ou `openai/` contradictoire est refusé. Un préfixe cohérent est accepté et retiré.
 3. Clé : `LLM_API_KEY_<ROLE>` sinon `LLM_API_KEY` **seulement si le fournisseur du rôle est le fournisseur global**.
-   Fournisseur local sans clé : accepté (`auth=none`, transport `api_key="local"`). Hébergé sans clé : refus.
+   Fournisseur local **sans choix d'authentification** ou avec `LLM_AUTH_<ROLE>=none` : accepté sans clé (`auth=none`,
+   valeur fictive explicite `local` au transport) ; `none` avec une clé effective (de rôle ou héritée) est une
+   contradiction refusée. `LLM_AUTH_<ROLE>=api_key` est un choix **explicite** : sans clé effective (de rôle, ou globale du
+   MÊME fournisseur) la route est refusée avant tout transport (`LLMMissingCredentialError`), même pour un fournisseur
+   local — jamais dégradée en accès anonyme. Hébergé sans clé : refus.
+   `require_credential=False` (nom, préflight, tarification) valide la cohérence mais conserve `auth=api_key` sans
+   credential ; aucun transport émetteur ne l'accepte (`LLMRoute.transport_key()` refuse), et `validate_role_routes` /
+   `resolve_route` sont stricts par défaut. Au démarrage, ce cas est un rôle « sans credential » (refusé à son appel), pas une
+   contradiction : les autres rôles valides continuent de servir.
 4. Endpoint : `LLM_BASE_URL_<ROLE>` ; sinon `LLM_BASE_URL` global si le fournisseur est celui du global ; sinon défaut
    du fournisseur. Un endpoint configuré n'est **jamais ignoré en silence**, y compris pour `gemini` : il est respecté
    (passerelle compatible) ou refusé. Un endpoint dont l'hôte est un AUTRE fournisseur hébergé (`api.openai.com` sous

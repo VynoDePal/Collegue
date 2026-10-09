@@ -109,6 +109,20 @@ class LLMRoute:
         """Valeur de la clé (à ne transmettre qu'au transport) ; ``None`` sans clé."""
         return self._credential
 
+    def transport_key(self) -> str:
+        """Valeur ``api_key`` à donner au client HTTP ÉMETTEUR, ou refus si la route n'a pas de credential.
+
+        ``api_key`` sans credential (route obtenue avec ``require_credential=False``) n'est JAMAIS transformée en clé
+        factice ``local`` : seule une route ``none`` (fournisseur local choisi sans clé) reçoit la valeur fictive explicite.
+        """
+        if self._credential:
+            return self._credential
+        if self.auth == AUTH_NONE:
+            return "local"
+        raise LLMMissingCredentialError(
+            f"rôle {self.role} : authentification {self.auth} sans credential — émission refusée"
+        )
+
     @property
     def uses_subscription(self) -> bool:
         return self.auth == AUTH_SUBSCRIPTION
@@ -395,20 +409,32 @@ def resolve_route(
     if auth_choice == AUTH_NONE and key:
         raise LLMRoutingError(f"{where} : LLM_AUTH_{suffix}=none contredit une clé définie")
     if not key:
-        if provider in LOCAL_PROVIDERS or auth_choice == AUTH_NONE:
+        if auth_choice == AUTH_NONE or (not auth_choice and provider in LOCAL_PROVIDERS):
+            # Sans clé : seulement par CHOIX (``LLM_AUTH_<ROLE>=none``) ou par défaut d'un fournisseur local.
             if provider not in LOCAL_PROVIDERS:
                 raise LLMRoutingError(f"{where} : le fournisseur hébergé {provider!r} exige une clé")
             auth = AUTH_NONE
         elif require_credential:
+            # Une authentification ``api_key`` EXPLICITE sans clé effective n'est jamais dégradée en accès anonyme, même
+            # pour un fournisseur local ; un fournisseur hébergé sans choix exige aussi une clé.
             hint = f"définir LLM_API_KEY_{suffix}" if suffix else "définir LLM_API_KEY"
+            explicit = (
+                f" (LLM_AUTH_{suffix}=api_key est explicite : retirer ce choix ou utiliser none pour un accès sans clé)"
+                if auth_choice == AUTH_API_KEY and provider in LOCAL_PROVIDERS
+                else ""
+            )
             inherit = (
                 f" ; la clé globale n'est héritée que pour le fournisseur global ({g_provider!r}), "
                 f"pas pour {provider!r}"
                 if provider != g_provider
                 else ""
             )
-            raise LLMMissingCredentialError(f"{where} : aucune clé pour le fournisseur {provider!r} — {hint}{inherit}")
+            raise LLMMissingCredentialError(
+                f"{where} : aucune clé pour le fournisseur {provider!r} — {hint}{explicit}{inherit}"
+            )
         else:
+            # ``require_credential=False`` : cohérence seulement (nom, préflight, tarification). La route reste
+            # ``api_key`` SANS credential ; aucun transport émetteur ne l'accepte (``LLMRoute.transport_key``).
             auth = AUTH_API_KEY
     else:
         auth = AUTH_API_KEY

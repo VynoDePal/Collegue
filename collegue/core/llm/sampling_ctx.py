@@ -270,9 +270,7 @@ class LocalSamplingContext:
         if client is None:
             # ``base_url`` et ``api_key`` TOUJOURS explicites : le SDK relirait sinon OPENAI_BASE_URL/OPENAI_API_KEY
             # de l'environnement hôte, c'est-à-dire une autre destination ou une autre identité que la route.
-            client = AsyncOpenAI(
-                api_key=route.credential() or "local", base_url=route.endpoint, max_retries=self._max_retries
-            )
+            client = AsyncOpenAI(api_key=route.transport_key(), base_url=route.endpoint, max_retries=self._max_retries)
             self._clients[key] = client
         return client
 
