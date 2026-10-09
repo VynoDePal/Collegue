@@ -366,7 +366,7 @@ jobs:
           expected="$(pytest tests/test_w5_integration_image.py -o addopts= -m w5_image --collect-only -q -p no:cacheprovider | grep -c '::')"
           echo "tests de la preuve composée collectés: ${expected}"
           pytest tests/test_w5_integration_image.py -o addopts= -m w5_image -p no:cacheprovider -rA --junitxml=w5-image-proof.xml
-          python scripts/ci_require_junit.py w5-image-proof.xml --min-tests 7 --expect-tests "${expected}"
+          python scripts/ci_require_junit.py w5-image-proof.xml --min-tests 18 --expect-tests "${expected}"
 
       - name: Upload the composed proof report
         if: always()

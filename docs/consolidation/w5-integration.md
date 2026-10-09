@@ -80,16 +80,17 @@ immuable sans workflow il ne peut jamais partir. Le workflow du socle utilise do
   éphémère (issue du socle, qui porte le fichier) le déclenche ; le check est le **job** `Fixture tests`, rattaché à la tête de la PR ;
 * `push` sur `collegue-business/bootstrap-w5` : produit le check sur le commit du socle lui-même (« Les workflows de `push` s'exécutent aussi hors de la branche par défaut »).
 
-**Ce déclenchement n'est pas démontré tant que la contre-épreuve distante n'a pas tourné** (scénario `green`) : le plan l'organise, il ne le prouve pas. Les workflows d'une PR créée
+**Observé en C47** : le `push` du commit du socle sur `collegue-business/bootstrap-w5` a déclenché le workflow (hors branche par défaut) et le check `Fixture tests` de l'application 15368 a réussi sur ce commit ; chaque PR de sonde vers une base jetable a déclenché le workflow `pull_request` et produit un check de l'application 15368 sur la TÊTE de la PR (job réel, `head_sha` = tête, exécution `path` = workflow approuvé). Les workflows d'une PR créée
 par le jeton de campagne (PAT) ne demandent pas d'approbation ; une PR en conflit de fusion ne déclenche rien.
 
 ### 4.2 Protection INDÉPENDANTE contre la substitution du workflow
 
 Avec `pull_request`, le fichier appliqué est celui du commit de fusion : une PR peut le modifier, donc un check de même nom et de la même application ne prouve pas son contenu.
 Couches, de la plus forte à la plus faible :
-1. **Serveur** : le CODEOWNERS du socle attribue `/.github/` et `/ci/` au propriétaire du dépôt ; le ruleset exige `require_code_owner_review`. L'auteur d'une PR ne peut pas
-   approuver la sienne : aucune PR qui modifie le workflow, le CODEOWNERS ou le verrou approuvé ne peut fusionner, quel que soit son check. **Comportement réel avec 0 approbation
-   requise : établi seulement par la sonde** (scénarios `workflow-touch`, `codeowners-touch`, `lock-touch` : check VERT, fusion refusée) ; s'il est inefficace, c'est le résultat à rapporter.
+1. **Serveur** (CODEOWNERS `/.github/` et `/ci/` + `require_code_owner_review`) : **OBSERVÉ INEFFICACE** (sonde distante C47, 2026-10-09) : avec 0 approbation requise, une PR de l'auteur-propriétaire qui modifie le
+   workflow, le CODEOWNERS ou le verrou approuvé, check VERT, a été **fusionnée** dans sa base jetable (PR #10, #11, #12 ; `mergeable` accepté, règle `pull_request` « pass » dans les rule-suites). Cette couche ne protège donc
+   rien tant que le ruleset n'est pas modifié ; elle n'a pas été modifiée (ni affaiblie ni renforcée) en C47. Un renforcement (p. ex. une approbation requise) bloquerait aussi les fusions légitimes de la campagne (un seul compte) :
+   décision du manager.
 2. **Fusionneur de confiance** (propriété de B : `collegue/pilot/merge_policy.py`, décision manager `w5-manager-fixture-check-design.md`) : avant toute fusion dans `collegue-business/*`, compare l'arbre
    Git RÉEL de la tête à celui de la base de confiance pour **`.github/` ET `ci/`** (deux entrées racine : SHA de sous-arbre, qui couvre tout le contenu, ajout / modification / suppression /
    renommage compris ; lecture impossible ou arbre tronqué = refus) — `ci/` porte le verrou approuvé : le laisser hors garde laisserait remplacer la pile « approuvée » sans que CODEOWNERS ne soit

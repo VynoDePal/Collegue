@@ -328,7 +328,7 @@ def test_the_composed_image_proof_is_selected_collected_and_never_skipped_in_the
                 if isinstance(arg, ast.List)
             ]
             declared += params[0] if params else 1
-    assert declared == floor == 7
+    assert declared == floor == 18
 
 
 def test_the_general_pytest_run_excludes_the_image_proof_but_the_marker_is_registered():
@@ -344,4 +344,43 @@ def test_the_composed_proof_depends_only_on_the_published_interface_of_the_broke
     assert "INTERFACE_CONTRACT" in text and "DockerUnavailable" in text
     # la preuve ne parle JAMAIS directement au SDK avec un faux serveur de succès : le fournisseur simulé n'est branché que derrière le service
     assert "BrokerRuntime(" in text and "upstream=upstream" in text and "http.server" not in text
-    assert "docker_bin" not in text, "le vrai binaire docker : aucun docker simulé dans la preuve distante"
+    # le VRAI docker : le seul enveloppeur admis ne fait qu'attendre avant de lui passer la main (démarrage lent), jamais un docker simulé
+    assert 'exec docker "$@"' in text and text.count("docker_bin") == 1
+
+
+def test_the_composed_proof_measures_worker_life_against_the_absolute_deadline_and_not_the_collection_time():
+    source = (ROOT / "tests" / "test_w5_integration_image.py").read_text(encoding="utf-8")
+    harness = (ROOT / "tests" / "w5_integration_harness.py").read_text(encoding="utf-8")
+    assert "DEADLINE + 15 + 25" not in source, "l'ancienne borne (temps de collecte) ne prouve pas l'arrêt à l'échéance"
+    assert "SCHEDULING_TOLERANCE = 2.0" in source and "COLLECTION_BOUND" in source and "heartbeat_epochs" in source
+    tolerance = float(re.search(r"SCHEDULING_TOLERANCE = ([0-9.]+)", source).group(1))
+    assert tolerance <= 2.0, "aucun délai de grâce de travail (le TERM→KILL de 15 s n'y entre pas)"
+    for scenario in ("ignore_sigterm", "setup_delay", "slow_docker_start", "started_expected=False"):
+        assert scenario in source or scenario in harness, scenario
+    assert "time.time()" in harness and "heartbeat.log" in harness, (
+        "horloge murale partagée avec l'hôte, battement du worker"
+    )
+
+
+def test_the_real_sdk_policy_tests_cover_text_json_fallback_retry_and_concurrency():
+    source = (ROOT / "tests" / "test_w5_integration_image.py").read_text(encoding="utf-8")
+    for needle in (
+        "free_text_and_structured_json",
+        "fallback_after_an_established_refusal",
+        "ambiguous_timeout",
+        "same_model_retry_after_lost_response",
+        "fallback_without_antecedent" if "fallback_without_antecedent" in source else "established_refusal",
+        "another_role_keeps_working_concurrently",
+    ):
+        assert needle in source, needle
+    harness = (ROOT / "tests" / "w5_integration_harness.py").read_text(encoding="utf-8")
+    assert "from openhands.sdk import LLM" in harness and "response_format" in harness and "num_retries" in harness
+
+
+def test_the_activation_composition_tests_use_the_real_modules_and_write_no_favourable_mapping():
+    source = (ROOT / "tests" / "test_w5_integration_activation.py").read_text(encoding="utf-8")
+    assert "activate_budget" in source and "capability_proof" in source and "install_runtime_for_tests" in source
+    assert "qualify=" not in source, (
+        "aucun adaptateur de qualification écrit par C : celui de A est appelé tel quel par celui de B"
+    )
+    assert "PENDING" in source and "strict=True" in source and "skip" not in source.replace("jamais un saut", "")

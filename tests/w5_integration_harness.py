@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,11 +92,19 @@ def google_response(
     }
 
 
+def rejection(status: int = 400):
+    """Rejet DÉMONTRÉ du fournisseur (4xx avant tout traitement) : le courtier libère la réservation (aucune consommation)."""
+    from collegue.broker.upstream import UpstreamHTTPError
+
+    return UpstreamHTTPError(status, "fixture")
+
+
 class FakeGoogle:
     """Fournisseur injectable : enregistre l'objet EXACT reçu par ``countTokens`` et ``generateContent`` et rejoue un scénario.
 
-    ``gate`` : si présent, ``generate`` n'a jamais de réponse (requête émise, worker bloqué en vol). ``script`` : ``callable(body) -> dict``
-    choisit la réponse selon la requête normalisée (outils déclarés, historique)."""
+    ``gate`` : si présent, ``generate`` n'a jamais de réponse (requête émise, worker bloqué en vol) ; ``gate_first_n`` : seules les N premières
+    générations bloquent (les suivantes répondent : concurrence légitime d'un autre rôle). ``script(body, model=, index=)`` choisit la réponse
+    (un dict, ou une exception à lever) selon la requête NORMALISÉE reçue, le modèle et le rang de la génération."""
 
     PROMPT, CANDIDATES = 10, 5
 
@@ -102,6 +112,7 @@ class FakeGoogle:
         self.count_calls: List[dict] = []
         self.generate_calls: List[dict] = []
         self.gate: Optional[asyncio.Event] = None
+        self.gate_first_n: Optional[int] = None
         self.script = script
 
     async def count_tokens(self, request) -> dict:
@@ -110,12 +121,20 @@ class FakeGoogle:
 
     async def generate(self, request) -> dict:
         body = copy.deepcopy(request.generate_body())
+        index = len(self.generate_calls)
         self.generate_calls.append({"model": request.model, "body": body})
-        if self.gate is not None:
+        if self.gate is not None and (self.gate_first_n is None or index < self.gate_first_n):
             await self.gate.wait()
         if self.script is not None:
-            return self.script(body)
+            result = self.script(body, model=request.model, index=index)
+            if isinstance(result, BaseException):
+                raise result
+            return result
         return google_response("ok", prompt=self.PROMPT, candidates=self.CANDIDATES)
+
+    @property
+    def models_seen(self) -> List[str]:
+        return [call["model"] for call in self.generate_calls]
 
 
 def declared_functions(body: dict) -> Dict[str, dict]:
@@ -137,7 +156,7 @@ def sdk_script(marker_file: str):
     Le choix se fait sur la requête NORMALISÉE reçue par le fournisseur (outils déclarés, présence d'un résultat d'outil) : si le SDK
     n'émet pas ces outils, la preuve échoue (champ ou outil non pris en charge = défaut à renvoyer à A, jamais assoupli ici)."""
 
-    def respond(body: dict) -> dict:
+    def respond(body: dict, **_kw) -> dict:
         functions = declared_functions(body)
         if "terminal" not in functions or "finish" not in functions:
             raise AssertionError(f"outils OpenHands absents de la requête normalisée : {sorted(functions)}")
@@ -146,6 +165,15 @@ def sdk_script(marker_file: str):
         else:
             call = {"functionCall": {"name": "finish", "args": {"message": "done"}}}
         return google_response(parts=[call], prompt=FakeGoogle.PROMPT, candidates=FakeGoogle.CANDIDATES)
+
+    return respond
+
+
+def with_first_rejected(script, status: int = 400):
+    """La PREMIÈRE génération est rejetée (refus établi avant traitement) ; les suivantes suivent ``script``."""
+
+    def respond(body: dict, *, model: str, index: int):
+        return rejection(status) if index == 0 else script(body, model=model, index=index)
 
     return respond
 
@@ -177,6 +205,8 @@ class HostStack:
         worker_source: Optional[str] = None,
         image: str = IMAGE,
         extra_env: Optional[Dict[str, str]] = None,
+        slow_docker_start: float = 0.0,
+        setup_delay: float = 0.0,
     ):
         from collegue.broker import BrokerConfig
         from collegue.broker.runtime import BrokerRuntime
@@ -207,8 +237,22 @@ class HostStack:
         relay_path = os.environ.get(
             "W5_RELAY_PATH", "/opt/oh_broker_relay.py"
         )  # le relais EMBARQUÉ dans l'image (défaut)
-        kwargs["env"] = {**kwargs["env"], "W5_RELAY_PATH": relay_path, **(extra_env or {})}
+        kwargs["env"] = {
+            **kwargs["env"],
+            "W5_RELAY_PATH": relay_path,
+            "W5_WORKSPACE": "/workspace",
+            **(extra_env or {}),
+        }
+        if slow_docker_start:
+            # Démarrage LENT du conteneur par le VRAI docker : un enveloppeur qui attend avant de lui passer la main (``docker run`` seulement).
+            wrapper = tmp_path / "slow-docker"
+            wrapper.write_text(
+                f'#!/bin/sh\ncase "$1" in run) sleep {slow_docker_start} ;; esac\nexec docker "$@"\n', encoding="utf-8"
+            )
+            wrapper.chmod(0o755)
+            kwargs["docker_bin"] = str(wrapper)
         self.sandbox = DockerSandbox(workspace_root=str(tmp_path), **kwargs)
+        self.setup_delay = setup_delay
         self.workspace = tmp_path / "ws"
         self.workspace.mkdir()
         runner = "/opt/oh_runner.py"
@@ -233,7 +277,7 @@ class HostStack:
         from collegue.executor.agent import IssueSpec
         from collegue.executor.runner import _run_agent_under_budget
 
-        with self.binding(window=window):
+        with self.binding(window=window), _delayed_socket_setup(self.setup_delay):
             return _run_agent_under_budget(
                 self.agent, str(self.workspace), IssueSpec(number=1, title="preuve composée", body="écrire le fichier")
             )
@@ -242,27 +286,114 @@ class HostStack:
         shutil.rmtree(self.run_root, ignore_errors=True)
 
 
+@contextmanager
+def _delayed_socket_setup(delay: float):
+    """Retard de PRÉPARATION entre la décision de lancer et le lancement réel (socket du courtier prêt trop tard)."""
+    if not delay:
+        yield
+        return
+    from collegue.broker.server import BrokerSocketServer
+
+    original = BrokerSocketServer.start
+
+    def slow_start(self, *args, **kwargs):
+        time.sleep(delay)
+        return original(self, *args, **kwargs)
+
+    BrokerSocketServer.start = slow_start
+    try:
+        yield
+    finally:
+        BrokerSocketServer.start = original
+
+
 # ── worker de la preuve d'échéance (même comportements que la preuve hôte de A, mais DANS le conteneur réel) ──────────────────
 
 WORKER = """\
-    import importlib.util, os, sys, time
+    import importlib.util, os, signal, sys, threading, time
     import openai
+    WS = os.environ["W5_WORKSPACE"]
+    HEARTBEAT = os.path.join(WS, "heartbeat.log")
+
+    def beat():
+        # Preuve de VIE du worker : une horloge murale (la même que celle de l'hôte) écrite toutes les 0,2 s, indépendante de ce que fait le worker.
+        with open(HEARTBEAT, "a", buffering=1) as handle:
+            while True:
+                handle.write(f"{time.time():.3f}\\n")
+                handle.flush()
+                time.sleep(0.2)
+
+    with open(os.path.join(WS, "started.txt"), "w") as handle:
+        handle.write(f"{time.time():.3f}\\n")
+    threading.Thread(target=beat, daemon=True).start()
+    behaviour = os.environ.get("W5_BEHAVIOUR", "quick")
+    if behaviour == "ignore_sigterm":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # un worker qui n'obéit pas au TERM : seul un KILL l'arrête
     spec = importlib.util.spec_from_file_location("oh_broker_relay", os.environ["W5_RELAY_PATH"])
     relay = importlib.util.module_from_spec(spec); spec.loader.exec_module(relay)
     _server, port = relay.start(os.environ["COLLEGUE_BROKER_SOCKET"])
     client = openai.OpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key=os.environ["LLM_API_KEY"], max_retries=0, timeout=300)
-    behaviour = os.environ.get("W5_BEHAVIOUR", "quick")
     def call():
         client.chat.completions.create(model="openai/gemma-4-31b-it", messages=[{"role": "user", "content": "x"}], max_tokens=64)
     if behaviour == "sleep_only":
         time.sleep(600)
     call()
-    if behaviour == "sleep_after_call":
+    if behaviour in ("sleep_after_call", "ignore_sigterm"):
         time.sleep(600)
     elif behaviour == "compute_after_call":
         while True:
             pass
     print("WORKER_DONE")
+"""
+
+#: Worker du VRAI SDK OpenHands (``openhands.sdk.LLM``) : texte libre, sortie JSON structurée, repli et retries contrôlés, concurrence de connexions.
+#: Tout passe par le vrai relais et le vrai courtier ; les faits rapportés sont CONTRÔLÉS côté hôte contre le fournisseur simulé et le registre.
+SDK_WORKER = """\
+    import importlib.util, json, os, sys, threading, time
+    from pydantic import SecretStr
+    from openhands.sdk import LLM, Message, TextContent
+    spec = importlib.util.spec_from_file_location("oh_broker_relay", os.environ["W5_RELAY_PATH"])
+    relay = importlib.util.module_from_spec(spec); spec.loader.exec_module(relay)
+    _server, port = relay.start(os.environ["COLLEGUE_BROKER_SOCKET"])
+    base = f"http://127.0.0.1:{port}/v1"
+    token = os.environ["LLM_API_KEY"]
+    PRIMARY, FALLBACK = "gemma-4-31b-it", "gemma-4-26b-a4b-it"
+
+    def make(model, **kw):
+        return LLM(model=f"openai/{model}", base_url=base, api_key=SecretStr(token), usage_id="coder",
+                   num_retries=kw.pop("num_retries", 0), timeout=kw.pop("timeout", 60), max_output_tokens=64, **kw)
+
+    def ask(llm, text="x", **kw):
+        response = llm.completion(messages=[Message(role="user", content=[TextContent(text=text)])], **kw)
+        blocks = getattr(response.message, "content", None) or []
+        return "".join(getattr(block, "text", "") or "" for block in blocks)
+
+    def attempt(label, fn):
+        try:
+            facts[label] = {"ok": True, "text": fn()}
+        except BaseException as exc:  # noqa: BLE001 - on rapporte la classe seulement, jamais un message susceptible de contenir un secret
+            facts[label] = {"ok": False, "error": type(exc).__name__}
+
+    facts = {}
+    scenario = os.environ["W5_SCENARIO"]
+    if scenario == "formats":
+        attempt("text", lambda: ask(make(PRIMARY), "dis bonjour"))
+        attempt("json_object", lambda: ask(make(PRIMARY), "réponds en JSON", response_format={"type": "json_object"}))
+    elif scenario == "fallback_after_rejection":
+        attempt("primary", lambda: ask(make(PRIMARY)))
+        attempt("fallback", lambda: ask(make(FALLBACK)))
+    elif scenario == "no_fallback_after_ambiguous_timeout":
+        attempt("primary", lambda: ask(make(PRIMARY, timeout=3)))
+        attempt("fallback", lambda: ask(make(FALLBACK)))
+    elif scenario == "same_model_retry_after_lost_response":
+        attempt("primary_with_sdk_retries", lambda: ask(make(PRIMARY, timeout=3, num_retries=2)))
+    elif scenario == "concurrent_connections":
+        holder = threading.Thread(target=lambda: attempt("primary_in_flight", lambda: ask(make(PRIMARY, timeout=8))), daemon=True)
+        holder.start()
+        time.sleep(1.5)
+        attempt("fallback_while_primary_in_flight", lambda: ask(make(FALLBACK)))
+        holder.join(timeout=20)
+    print("SDK_FACTS=" + json.dumps(facts))
 """
 
 #: Code HOSTILE exécuté dans le conteneur : il appelle le socket du courtier avec ce qu'il veut, sans passer par le SDK, puis sonde son isolation.
@@ -291,6 +422,8 @@ HOSTILE = """\
         return int(out.split(b" ", 2)[1]) if out else 0
 
     good = {"model": "gemma-4-31b-it", "messages": [{"role": "user", "content": "x"}], "max_tokens": 64}
+    # AVANT toute génération de la session : le 26B n'est un repli qu'APRÈS un refus établi ou une consommation connue, jamais d'emblée
+    facts["fallback_without_antecedent"] = post("/v1/chat/completions", {**good, "model": "gemma-4-26b-a4b-it"})
     facts["unauthorized_model"] = post("/v1/chat/completions", {**good, "model": "gemini-2.5-pro"})
     facts["unknown_session_token"] = post("/v1/chat/completions", good, bearer="cbk_0000000000000000000000000000000000000000")
     facts["no_token"] = post("/v1/chat/completions", good, bearer=None)
@@ -330,3 +463,38 @@ def parse_facts(stdout: str) -> dict:
         if line.startswith("HOSTILE_FACTS="):
             return json.loads(line.split("=", 1)[1])
     raise AssertionError("le code hostile n'a rien rapporté : " + stdout[-500:])
+
+
+def parse_sdk_facts(stdout: str) -> dict:
+    for line in stdout.splitlines():
+        if line.startswith("SDK_FACTS="):
+            return json.loads(line.split("=", 1)[1])
+    raise AssertionError("le worker du SDK n'a rien rapporté : " + stdout[-500:])
+
+
+def heartbeat_epochs(workspace: Path) -> List[float]:
+    """Horodatages de vie du worker (horloge murale partagée avec l'hôte) ; vide si le worker n'a jamais démarré."""
+    path = Path(workspace) / "heartbeat.log"
+    if not path.exists():
+        return []
+    return [float(line) for line in path.read_text().split() if line.replace(".", "", 1).isdigit()]
+
+
+def capability_of(body: dict) -> str:
+    """Capacité demandée, lue sur la requête NORMALISÉE reçue par le fournisseur : ``tools``, ``json`` ou ``text``."""
+    if declared_functions(body):
+        return "tools"
+    return "json" if body.get("generationConfig", {}).get("responseMimeType") == "application/json" else "text"
+
+
+def canary_script(body: dict, **_kw) -> dict:
+    """Réponse GÉNÉRIQUE selon la capacité demandée (jamais un mapping écrit pour les canaris de A) : texte, objet JSON, appel du 1er outil déclaré."""
+    capability = capability_of(body)
+    if capability == "tools":
+        name, declaration = next(iter(declared_functions(body).items()))
+        schema = declaration.get("parametersJsonSchema") or declaration.get("parameters") or {}
+        args = {key: "ok" for key in (schema.get("properties") or {})}
+        return google_response(parts=[{"functionCall": {"name": name, "args": args}}])
+    if capability == "json":
+        return google_response('{"ok": true}')
+    return google_response("OK")
