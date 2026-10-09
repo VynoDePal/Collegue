@@ -30,6 +30,13 @@ from collegue.planner.plan_target import PlanTargetError, normalize_plan_sync_co
 from collegue.planner.status import PROJECT_STATUS_APPROVED
 from collegue.state.models import Decision, Project, Task
 
+# Statut de CYCLE posé par le pilote après la construction du MVP : le plan n'est pas ré-approuvé, il est en phase
+# d'amélioration. L'approbation du CONTENU scellé (hash approuvé == hash courant) et le statut de cycle sont deux
+# choses : seule la première conditionne la relecture des contrats déjà livrés ; la garde d'écriture P4
+# (``require_approved``) reste liée au statut ``approved``.
+PROJECT_STATUS_IMPROVING = "improving"
+CONTENT_APPROVED_STATUSES = frozenset({PROJECT_STATUS_APPROVED, PROJECT_STATUS_IMPROVING})
+
 
 class PlanNotApproved(Exception):
     """Le plan n'a pas été approuvé (ou a changé depuis) — P4 doit refuser d'écrire."""
@@ -68,6 +75,9 @@ class PlanStateSnapshot:
     tasks: tuple[PlanTaskSnapshot, ...]
     plan_hash: str
     approved: bool
+    # Contenu scellé approuvé et inchangé, QUEL QUE SOIT le statut de cycle (``approved`` ou ``improving``).
+    # ``approved`` (statut strictement ``approved``) reste la seule condition des écritures GitHub (P4).
+    content_approved: bool = False
 
     @property
     def plan_sync_config(self) -> Optional[Dict[str, Any]]:
@@ -222,6 +232,7 @@ def load_plan_snapshot(
     *,
     require_approval: bool = False,
     require_target: bool = False,
+    allow_cycle_status: bool = False,
 ) -> Optional[PlanStateSnapshot]:
     """Charge projet+tâches dans une transaction verrouillée puis les détache.
 
@@ -262,7 +273,12 @@ def load_plan_snapshot(
             and project.status == PROJECT_STATUS_APPROVED
             and project.approved_plan_hash == plan_hash
         )
-        if require_approval and not approved:
+        content_approved = (
+            bool(project.approved_plan_hash)
+            and project.status in CONTENT_APPROVED_STATUSES
+            and project.approved_plan_hash == plan_hash
+        )
+        if require_approval and not (content_approved if allow_cycle_status else approved):
             raise PlanNotApproved(
                 f"Projet {project_id} non approuvé (ou modifié depuis l'approbation) : "
                 "validation humaine requise avant écriture GitHub."
@@ -281,6 +297,7 @@ def load_plan_snapshot(
             tasks=tasks,
             plan_hash=plan_hash,
             approved=approved,
+            content_approved=content_approved,
         )
 
 
@@ -422,3 +439,13 @@ def approve_plan(
 def require_approved(manager: Any, project_id: int) -> None:
     """Lève :class:`PlanNotApproved` si le plan n'est pas approuvé/inchangé (garde pour P4)."""
     load_plan_snapshot(manager, project_id, require_approval=True)
+
+
+def require_approved_content(manager: Any, project_id: int) -> None:
+    """Lève :class:`PlanNotApproved` si le CONTENU scellé n'est plus celui que l'humain a approuvé.
+
+    Accepte le statut de cycle ``improving`` (posé par le pilote une fois le MVP livré) tant que le hash approuvé est
+    toujours celui du plan courant. Un plan modifié, jamais approuvé, révoqué (hash effacé) ou en brouillon reste
+    refusé, et cette garde n'approuve jamais rien : aucune ré-approbation implicite, aucune écriture P4 autorisée.
+    """
+    load_plan_snapshot(manager, project_id, require_approval=True, allow_cycle_status=True)
