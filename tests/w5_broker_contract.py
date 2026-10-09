@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -267,7 +268,8 @@ async def test_the_registry_refuses_before_any_emission_when_the_allocation_cann
     assert ledger.snapshot(session.scope_key).reserved_tokens == 0
 
 
-async def test_concurrent_calls_never_exceed_the_allocation(manager):
+async def test_the_generations_of_one_session_are_serialized_and_a_refused_one_keeps_nothing(manager):
+    """Contrat explicite : UNE génération en vol par session worker ; les autres sont refusées (429, rien émis, rien gardé)."""
     upstream = FakeUpstream(count=100, response=google_response(prompt=100, candidates=100))
     gate = asyncio.Event()
     upstream.gate = gate
@@ -277,17 +279,40 @@ async def test_concurrent_calls_never_exceed_the_allocation(manager):
     async def one():
         try:
             return await chat(service, session, chat_request(max_tokens=100))
-        except BrokerBudgetRefused as exc:
+        except BrokerRequestRefused as exc:
             return exc
 
-    tasks = [asyncio.create_task(one()) for _ in range(8)]  # chaque appel réserve 200 ⇒ 5 tiennent dans 1000
+    tasks = [asyncio.create_task(one()) for _ in range(8)]
     for _ in range(100):
         await asyncio.sleep(0.02)
-        if len(upstream.generate_calls) >= 5:
+        if len(upstream.generate_calls) >= 1 and sum(t.done() for t in tasks) >= 7:
             break
+    assert len(upstream.generate_calls) == 1  # jamais deux émissions simultanées dans la session
+    assert (
+        ledger.snapshot(session.scope_key).reserved_tokens == 200
+    )  # la seule réserve est celle de la génération en vol
     gate.set()
     results = await asyncio.gather(*tasks)
 
+    ok = [r for r in results if isinstance(r, dict)]
+    refused = [r for r in results if isinstance(r, BrokerRequestRefused)]
+    assert len(ok) == 1 and len(refused) == 7 and len(upstream.generate_calls) == 1
+    assert {(r.code, r.status) for r in refused} == {("generation_in_flight", 429)}
+    child = ledger.snapshot(session.scope_key)
+    assert (child.consumed_tokens, child.reserved_tokens, child.unknown_tokens) == (200, 0, 0) and not child.blocked
+    assert not ledger.snapshot(scope_key).blocked  # le refus ne crée AUCUNE inconnue artificielle
+
+
+async def test_sequential_calls_never_exceed_the_allocation(manager):
+    upstream = FakeUpstream(count=100, response=google_response(prompt=100, candidates=100))
+    service, _, ledger, scope_key, parent_rid = service_for(manager, upstream, worker_tokens=1000)
+    session = open_worker(service, scope_key, parent_rid)
+    results = []
+    for _ in range(8):  # chaque appel réserve 200 ⇒ 5 tiennent dans 1000
+        try:
+            results.append(await chat(service, session, chat_request(max_tokens=100)))
+        except BrokerBudgetRefused as exc:
+            results.append(exc)
     ok = [r for r in results if isinstance(r, dict)]
     refused = [r for r in results if isinstance(r, BrokerBudgetRefused)]
     assert len(ok) == 5 and len(refused) == 3 and len(upstream.generate_calls) == 5
@@ -297,6 +322,52 @@ async def test_concurrent_calls_never_exceed_the_allocation(manager):
     summary = await service.close_session(session.session_id)
     assert summary.consumed_tokens == 1000 and not summary.unknown
     assert ledger.snapshot(scope_key).consumed_tokens == 1000
+
+
+async def test_distinct_sessions_of_one_scope_run_in_parallel_and_never_exceed_their_allocations(manager):
+    """Concurrence légitime : plusieurs workers (réservations distinctes) du MÊME scope émettent simultanément ; chaque plafond tient."""
+    upstream = FakeUpstream(count=100, response=google_response(prompt=100, candidates=100))
+    gate = asyncio.Event()
+    upstream.gate = gate
+    service, _, ledger, scope_key, first_parent = service_for(manager, upstream, worker_tokens=1000)
+    parents = [first_parent] + [
+        ledger.reserve(
+            scope_key,
+            micro_usd=1000,
+            tokens=1000,
+            kind="worker",
+            role="coder",
+            model="gemma-4-31b-it",
+            transport="worker",
+        ).reservation_id
+        for _ in range(3)
+    ]
+    sessions = [open_worker(service, scope_key, rid) for rid in parents]
+
+    async def one(session):
+        try:
+            return await chat(service, session, chat_request(max_tokens=100))
+        except (BrokerRequestRefused, BrokerBudgetRefused) as exc:
+            return exc
+
+    tasks = [asyncio.create_task(one(session)) for session in sessions for _ in range(6)]
+    for _ in range(150):
+        await asyncio.sleep(0.02)
+        if len(upstream.generate_calls) >= 4 and sum(t.done() for t in tasks) >= 20:
+            break
+    assert len(upstream.generate_calls) == 4  # une génération par session, TOUTES en vol en même temps
+    gate.set()
+    results = await asyncio.gather(*tasks)
+    assert len([r for r in results if isinstance(r, dict)]) == 4
+    for session in sessions:
+        child = ledger.snapshot(session.scope_key)
+        assert (child.consumed_tokens, child.reserved_tokens, child.unknown_tokens) == (200, 0, 0)
+        assert child.used_tokens <= 1000
+    for session in sessions:
+        summary = await service.close_session(session.session_id)
+        assert summary.consumed_tokens == 200 and not summary.unknown
+    project = ledger.snapshot(scope_key)
+    assert project.consumed_tokens == 800 and project.reserved_tokens == 0 and not project.blocked
 
 
 # ── droits décidés côté serveur ──────────────────────────────────────────────────────────────────────────────
@@ -771,7 +842,7 @@ async def test_the_attempt_journal_never_stores_a_credential(manager):
 
 
 def test_threads_with_their_own_event_loops_never_exceed_the_allocation(manager):
-    """Huit threads, huit boucles, un seul registre : la réservation CAS tranche, jamais plus que l'allocation."""
+    """Huit threads, huit boucles, un seul registre ET une seule session : la sérialisation (429) puis la réservation CAS tranchent."""
     import threading
 
     upstream = FakeUpstream(count=100, response=google_response(prompt=100, candidates=100))
@@ -782,10 +853,17 @@ def test_threads_with_their_own_event_loops_never_exceed_the_allocation(manager)
 
     def worker():
         barrier.wait()
-        try:
-            outcomes.append(asyncio.run(chat(service, session, chat_request(max_tokens=100))))
-        except BrokerBudgetRefused as exc:
-            outcomes.append(exc)
+        while True:
+            try:
+                outcomes.append(asyncio.run(chat(service, session, chat_request(max_tokens=100))))
+            except (
+                BrokerRequestRefused
+            ):  # une autre génération de la session est en vol : on renvoie une fois son issue connue
+                time.sleep(0.005)
+                continue
+            except BrokerBudgetRefused as exc:
+                outcomes.append(exc)
+            break
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
     for thread in threads:

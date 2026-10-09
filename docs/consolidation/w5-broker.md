@@ -211,3 +211,30 @@ courtier tranche. `broker_failure_verdict(exc)` : code `upstream_rejected` / `co
 (budget, blocage, échéance, session fermée, modèle interdit…) ⇒ fin (`rc=4`), aucun repli ; échec de LLM sans verdict (délai dépassé, connexion
 perdue) ⇒ issue inconnue, aucun repli (`rc=4`) ; exception étrangère au LLM ⇒ bascule historique. Preuve de bout en bout :
 `tests/test_w5_broker_fallback_runner.py` (vrai `oh_runner.main()` → relais → socket → courtier → faux fournisseur).
+
+## Admission finale (A28) : argv, démarrage tardif, sérialisation par session, reprise du serveur MCP
+
+### Échéance absolue portée jusqu'au démarrage du travail dans le conteneur
+`run_command(..., deadline_epoch=…)` construit d'abord l'argv COMPLET (la construction peut être lente), puis relit l'horloge **une dernière
+fois, immédiatement avant `subprocess.run`** : échéance atteinte (ou < 1 s) ⇒ `SandboxRefused`, aucun `docker run`. La commande transporte
+l'échéance ABSOLUE (`floor(deadline_epoch)`), pas une durée : `timeout --signal=KILL <plafond hôte> sh -c DEADLINE_GUARD_SCRIPT collegue-deadline
+<epoch> <commande…>`. La garde, exécutée par le conteneur au démarrage effectif du travail, relit l'horloge du conteneur (même noyau que
+l'hôte), sort en 124 sans rien exécuter si l'échéance est atteinte, sinon `exec timeout --signal=KILL <reste> <commande>`. Un démon qui
+démarre le conteneur en retard ne peut donc pas faire travailler après l'échéance ; le filet hôte (kill du conteneur par nom à
+`échéance + DEADLINE_HOST_MARGIN`) subsiste pour un conteneur qui ne démarre pas. Aucun délai de grâce de travail. Exigence image : `sh`,
+`date` et `timeout` (coreutils/busybox), déjà utilisés ; **aucun changement de Dockerfile**.
+
+### Une génération en vol par session worker
+`_model_sequence_refusal` (transaction d'admission) refuse toute nouvelle émission d'une session tant qu'une AUTRE tentative de cette session
+est `emitting` ou d'usage inconnu, quel que soit le modèle : `429 generation_in_flight` (rien d'émis, tentative libérée, réserve de la
+première intacte, aucune inconnue artificielle). Un renvoi avec un nouvel identifiant après un délai client est donc refusé tant que l'issue
+de la première n'est pas connue ; ensuite il est une génération légitime (réservée, imputée à part). Le rejeu du même `request_id` ne régénère
+rien. Les sessions distinctes (autres workers, même scope) émettent en parallèle ; les producteurs hors session (planner, QA, reviewer,
+canaris) ne sont pas concernés. L'antécédent du repli reste exigé (`403 fallback_not_authorized`, vérifié avant la sérialisation).
+
+### Reprise au démarrage du serveur MCP
+`collegue.broker.runtime.recover_at_startup(settings)` est appelée par `core_lifespan` (`collegue/app.py`) juste après `validate_llm_config()` :
+hors mode courtier ou sans `STATE_DATABASE_URL` ⇒ sans effet ; état jamais migré (pas de tables du courtier) ⇒ rien à réparer ; sinon
+`recover_all()` d'un service JETABLE (`BrokerRuntime.recovery_service`) sur le registre de `STATE_DATABASE_URL` (celui du pilote et des
+outils). Émission abandonnée ⇒ inconnue + projet bloqué ; propriétaire vivant conservé ; aucune échéance ouverte, aucune requête Google.
+Toute autre erreur (état illisible) REFUSE le démarrage. Aucun opérateur n'a à appeler `recover_all`.

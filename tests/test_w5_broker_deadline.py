@@ -417,20 +417,59 @@ def test_a_worker_ignoring_term_is_dead_at_the_deadline_with_no_grace(manager, t
 
 
 def test_a_slow_docker_start_does_not_extend_the_worker_life_beyond_the_deadline(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "FAKE_DOCKER_START_DELAY", "2.5"
-    )  # le conteneur démarre 2,5 s APRÈS la prise de décision de lancement
+    """L'échéance ABSOLUE est portée dans le conteneur : un démarrage tardif réduit le temps de travail, il ne le décale pas."""
+    monkeypatch.setenv("FAKE_DOCKER_START_DELAY", "2.5")  # le conteneur démarre 2,5 s APRÈS la décision de lancement
     rig = Rig(manager, tmp_path, monkeypatch, behaviour="stubborn_heartbeat", deadline=5)
     rig.service.open_clock(rig.scope)
     deadline = rig.service.persisted_deadline(rig.scope).timestamp()
     rig.run(window=7200)
     beat = rig.last_heartbeat()
-    assert beat is not None
-    # sans filet hôte, l'auto-limite démarrée en retard aurait laissé vivre le worker jusqu'à ~ échéance + 2,5 s
-    assert beat <= deadline + DEADLINE_HOST_MARGIN + SCHEDULING_TOLERANCE, (
-        f"vie après échéance : {beat - deadline:.2f}s"
-    )
-    assert [c for c in rig.docker_calls() if "kill" in c]  # c'est bien le filet hôte (kill par nom) qui a agi
+    assert beat is not None  # il restait ~2 s : le worker a bien travaillé
+    # un délai relatif figé avant le démarrage l'aurait laissé vivre jusqu'à ~ échéance + 2,5 s
+    assert beat <= deadline + SCHEDULING_TOLERANCE, f"vie après échéance : {beat - deadline:.2f}s"
+
+
+def test_a_container_started_by_the_daemon_after_the_deadline_never_starts_the_work(manager, tmp_path, monkeypatch):
+    """Le client Docker attend encore (filet hôte pas échu) mais le conteneur démarre APRÈS l'échéance : le travail est refusé DANS le conteneur."""
+    monkeypatch.setenv("FAKE_DOCKER_START_DELAY", "3.8")
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="stubborn_heartbeat", deadline=3)
+    rig.service.open_clock(rig.scope)
+    result = rig.run(window=7200)
+    assert [c for c in rig.docker_calls() if "run" in c]  # le démon a bien été sollicité à temps
+    assert rig.last_heartbeat() is None, "le worker a travaillé après l'échéance"  # aucun battement, jamais
+    assert not result.success
+
+
+def test_the_final_command_assembly_cannot_shift_the_deadline(manager, tmp_path, monkeypatch):
+    """Sonde manager : la dernière construction de l'argv (vérifications de montages…) est lente ; l'horloge est relue APRÈS."""
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="sleep_only", deadline=3)
+    rig.service.open_clock(rig.scope)
+    build = DockerSandbox._build_run_argv
+    delayed = []
+
+    def slow_final_build(sandbox, cmd, *args, **kwargs):
+        result = build(sandbox, cmd, *args, **kwargs)
+        if isinstance(cmd, list) and cmd[:2] == ["timeout", "--signal=KILL"]:
+            delayed.append(True)
+            time.sleep(4)
+        return result
+
+    monkeypatch.setattr(DockerSandbox, "_build_run_argv", slow_final_build)
+    with pytest.raises((SandboxRefused, BudgetRefused)):
+        rig.run(window=3600)
+    assert delayed and not [c for c in rig.docker_calls() if "run" in c]  # aucun lancement
+    assert rig.ledger.snapshot(rig.scope).reserved_tokens == 0 and rig.service.store.open_sessions() == []
+
+
+def test_the_command_carries_the_absolute_deadline_into_the_container(manager, tmp_path, monkeypatch):
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="quick", deadline=30)
+    rig.service.open_clock(rig.scope)
+    deadline = rig.service.persisted_deadline(rig.scope).timestamp()
+    rig.run(window=7200)
+    (call,) = rig.docker_calls()
+    inner = call["inner"]
+    assert inner[3:5] == ["sh", "-c"] and inner[6] == "collegue-deadline"
+    assert int(inner[7]) == int(deadline)  # échéance ABSOLUE entière (≤ échéance), pas une durée
 
 
 def test_run_command_revalidates_an_absolute_deadline_at_the_last_point_before_launch(tmp_path, monkeypatch):

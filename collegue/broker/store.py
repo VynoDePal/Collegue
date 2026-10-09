@@ -592,9 +592,9 @@ class BrokerStore:
             if attempt is None or attempt.reservation_id is None:
                 return False, "tentative sans réservation"
             if session_id is not None:
-                refused = self._model_sequence_refusal(session, row, attempt)
+                code, refused = self._model_sequence_refusal(session, row, attempt)
                 if refused:
-                    return False, f"{FALLBACK_REFUSAL_PREFIX}{refused}"
+                    return False, f"{FALLBACK_REFUSAL_PREFIX}{code}|{refused}"
             reservation = session.scalar(
                 select(BudgetReservation).where(BudgetReservation.reservation_id == attempt.reservation_id)
             )
@@ -610,40 +610,47 @@ class BrokerStore:
         return self._run(_do)
 
     @staticmethod
-    def _model_sequence_refusal(session: Session, row: BrokerSession, attempt: BrokerAttempt) -> str:
-        """Règle SERVEUR de séquencement des modèles d'une session (le client, même hostile, ne la décide jamais).
+    def _model_sequence_refusal(session: Session, row: BrokerSession, attempt: BrokerAttempt) -> Tuple[str, str]:
+        """Règle SERVEUR de séquencement des générations d'une session (le client, même hostile, ne la décide jamais).
 
         * Le repli (26B) n'est admis qu'APRÈS un antécédent qui l'autorise : la dernière tentative du modèle principal de la
           session est terminée avec une absence d'émission ÉTABLIE (``released`` : refus avant traitement) ou une consommation
           CONNUE (``settled``). Une réservation bornée n'est PAS un antécédent ; sans aucune tentative du principal, pas de repli.
-        * Jamais de repli (ni de retour au principal) tant qu'une AUTRE tentative de la session dont le modèle diffère est en
-          vol (``emitting``) ou d'usage inconnu : le client a pu perdre la réponse, le fournisseur la traite peut-être encore.
+        * Une session worker n'a JAMAIS deux générations en vol : tant qu'une autre tentative de la session est ``emitting`` (ou d'usage
+          inconnu), aucune nouvelle émission, quel que soit le modèle. Un client qui perd la réponse (délai dépassé) ne peut donc pas
+          obtenir une seconde génération du même appel tant que l'issue de la première n'est pas connue. Le refus libère la tentative :
+          il ne crée AUCUNE inconnue artificielle et la réservation de la première reste intacte.
         La vérification est faite dans la transaction d'admission : deux connexions de la même session ne peuvent pas la contourner
-        en course. Les autres sessions (autres rôles / allocations) ne sont pas concernées.
-        Retourne le motif de refus, ou ``""``.
+        en course. Les autres sessions (autres workers, autres rôles) et les producteurs hors session restent concurrents.
+        Retourne ``(code, motif)`` du refus, ou ``("", "")``.
         """
         others = session.scalars(
             select(BrokerAttempt)
             .where(BrokerAttempt.session_id == row.id, BrokerAttempt.attempt_id != attempt.attempt_id)
             .order_by(BrokerAttempt.id.desc())
         ).all()
-        for other in others:
-            if other.model != attempt.model and other.state in (BROKER_ATTEMPT_EMITTING, BROKER_ATTEMPT_UNKNOWN):
-                status = "en vol" if other.state == BROKER_ATTEMPT_EMITTING else "d'usage inconnu"
-                return (
-                    f"une génération {other.model} de cette session est {status} : "
-                    f"aucune génération {attempt.model} tant que son issue n'est pas établie"
-                )
         if attempt.model == FALLBACK_MODEL:
             primary = next((o for o in others if o.model == PRIMARY_MODEL), None)
             if primary is None:
-                return f"repli {FALLBACK_MODEL} sans antécédent autorisant : aucune tentative du modèle principal dans la session"
+                return (
+                    "fallback_not_authorized",
+                    f"repli {FALLBACK_MODEL} sans antécédent autorisant : aucune tentative du modèle principal dans la session",
+                )
             if primary.state not in (BROKER_ATTEMPT_RELEASED, BROKER_ATTEMPT_SETTLED):
                 return (
+                    "fallback_not_authorized",
                     f"repli {FALLBACK_MODEL} refusé : la dernière tentative principale est {primary.state} "
-                    "(ni refus établi avant traitement, ni consommation connue)"
+                    "(ni refus établi avant traitement, ni consommation connue)",
                 )
-        return ""
+        for other in others:
+            if other.state in (BROKER_ATTEMPT_EMITTING, BROKER_ATTEMPT_UNKNOWN):
+                status = "en vol" if other.state == BROKER_ATTEMPT_EMITTING else "d'usage inconnu"
+                return (
+                    "generation_in_flight",
+                    f"une génération {other.model} de cette session est {status} : "
+                    "aucune nouvelle génération tant que son issue n'est pas établie",
+                )
+        return "", ""
 
     def settle(
         self,

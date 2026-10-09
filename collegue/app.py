@@ -250,6 +250,17 @@ async def core_lifespan(server):
     # Validation stricte du LLM au démarrage
     await validate_llm_config()
 
+    # Mode courtier : AVANT toute dépense de ce processus, les producteurs abandonnés par un arrêt / crash précédent sont réparés
+    # (émission en vol ⇒ usage inconnu, projet bloqué ; propriétaire vivant conservé). Même registre que les outils
+    # (STATE_DATABASE_URL) ; aucune échéance ouverte, aucune requête Google. Une erreur refuse le démarrage.
+    from collegue.broker.runtime import recover_at_startup
+
+    repaired = await recover_at_startup(settings)
+    if repaired:
+        logger.warning(
+            "⚠️ Courtier : %d élément(s) abandonné(s) réparé(s) au démarrage (voir l'état du budget)", repaired
+        )
+
     # Eager tool discovery — runs once at startup. Before #211 this was driven
     # lazily by the first `smart_orchestrator` call through a module-level
     # ``_TOOLS_CACHE`` global, which had no lock around initialisation. Running

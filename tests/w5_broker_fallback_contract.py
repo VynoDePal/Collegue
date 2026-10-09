@@ -14,7 +14,7 @@ import pytest
 from w5_broker_contract import chat, open_worker, service_for
 from w5_broker_support import FakeUpstream, chat_request, http_error
 
-from collegue.broker import BrokerBlocked, BrokerForbidden, BrokerUpstreamRejected
+from collegue.broker import BrokerBlocked, BrokerForbidden, BrokerRequestRefused, BrokerUpstreamRejected
 
 PRIMARY = "gemma-4-31b-it"
 FALLBACK = "gemma-4-26b-a4b-it"
@@ -129,23 +129,34 @@ async def test_two_connections_of_the_same_session_cannot_race_the_primary_and_t
     assert results[0]["model"] == PRIMARY and upstream.models == [PRIMARY]
 
 
-async def test_a_same_model_retry_after_a_lost_response_is_accounted_on_its_own_and_never_free(manager):
-    """Le renvoi du MÊME modèle (nouvelle identité) est une génération distincte : réservée, réglée, imputée — jamais gratuite."""
+async def test_a_same_model_retry_with_a_new_id_after_a_lost_response_cannot_emit_again(manager):
+    """Serialisation par session : tant que l'issue de la première génération n'est pas connue, AUCUNE autre, même modèle."""
     upstream = ModelGatedUpstream()
     service, _, ledger, scope, rid = service_for(manager, upstream)
     worker = open_worker(service, scope, rid)
     first = asyncio.create_task(chat(service, worker, chat_request(model=PRIMARY), request_id="p1"))
     await _wait_sent(upstream)
-    retry = asyncio.create_task(chat(service, worker, chat_request(model=PRIMARY), request_id="p2"))
-    await asyncio.sleep(0.2)
+    reserved_by_the_first = ledger.snapshot(worker.scope_key).reserved_tokens
+    assert reserved_by_the_first > 0
+    with pytest.raises(asyncio.TimeoutError):  # le client perd la réponse ; le serveur continue
+        await asyncio.wait_for(asyncio.shield(first), timeout=0.01)
+    for request_id in ("p2", "p3", None):
+        with pytest.raises(BrokerRequestRefused) as caught:
+            await chat(service, worker, chat_request(model=PRIMARY), request_id=request_id)
+        assert (caught.value.code, caught.value.status) == ("generation_in_flight", 429)
+    assert upstream.models == [PRIMARY]  # UNE seule émission
+    assert (
+        ledger.snapshot(worker.scope_key).reserved_tokens == reserved_by_the_first
+    )  # la réserve de la première est intacte, rien d'autre
     upstream.release.set()
-    done = await asyncio.gather(first, retry)
-    assert [d["model"] for d in done] == [PRIMARY, PRIMARY]
+    assert (await first)["model"] == PRIMARY
     snapshot = ledger.snapshot(worker.scope_key)
-    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (30, 0, 0)
-    # le même identifiant rejoué ne régénère PAS : résultat déjà obtenu rendu tel quel
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (15, 0, 0)
+    assert not ledger.snapshot(scope).blocked  # le refus n'a créé aucune inconnue artificielle
+    # une fois l'issue connue, le renvoi est une génération légitime ; le MÊME identifiant rejoue sans régénérer
+    assert (await chat(service, worker, chat_request(model=PRIMARY), request_id="p2"))["model"] == PRIMARY
     again = await chat(service, worker, chat_request(model=PRIMARY), request_id="p1")
-    assert again["model"] == PRIMARY and len(upstream.models) == 2
+    assert again["model"] == PRIMARY and upstream.models == [PRIMARY, PRIMARY]
 
 
 async def test_other_sessions_stay_concurrent_with_a_primary_in_flight(manager):

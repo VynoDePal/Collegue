@@ -101,6 +101,12 @@ SELF_LIMIT_HOST_MARGIN = 30
 # Échéance ABSOLUE (``deadline_epoch``) : aucun délai de grâce de travail. Le processus interne est tué (KILL) à l'échéance ; le filet
 # hôte (kill du conteneur par nom) ne tolère que cette marge d'ordonnancement/démarrage, jamais le délai de grâce ci-dessus.
 DEADLINE_HOST_MARGIN = 2.0
+# Garde exécutée DANS le conteneur au démarrage effectif du travail : l'échéance ABSOLUE (epoch, secondes entières par défaut) y est relue
+# avec l'horloge du conteneur (même noyau que l'hôte). Échéance atteinte ⇒ rien n'est exécuté (code 124) ; sinon le travail est lancé
+# sous ``timeout --signal=KILL <reste>``. Un démon qui démarre le conteneur en retard ne peut donc pas faire travailler après l'échéance.
+DEADLINE_GUARD_SCRIPT = (
+    'r=$(( $1 - $(date +%s) )) || exit 124; [ "$r" -ge 1 ] || exit 124; shift; exec timeout --signal=KILL "$r" "$@"'
+)
 
 # Préfixe de la note ajoutée à stderr quand le conteneur est tué au timeout —
 # consommé par le moteur (#461 : classification infra ; #464 : usage perdu).
@@ -623,7 +629,9 @@ class DockerSandbox:
             effective_timeout = float(timeout) + SELF_LIMIT_KILL_AFTER + SELF_LIMIT_HOST_MARGIN
         else:
             effective_timeout = self.timeout
-        argv = self._build_run_argv(cmd, ws, name=name)
+        argv = (
+            None if deadline_epoch is not None else self._build_run_argv(cmd, ws, name=name)
+        )  # sous échéance : plus bas
         limit = timeout
 
         out_f = tempfile.NamedTemporaryFile(prefix="sbx-out-", delete=False)
@@ -637,9 +645,30 @@ class DockerSandbox:
                     # Environnement du SEUL process docker enfant : os.environ de l'hôte n'est jamais muté.
                     run_kwargs["env"] = {**os.environ, **{k: _secret_text(v) for k, v in self._env_secrets.items()}}
                 if deadline_epoch is not None:
-                    # DERNIER point avant le lancement : le temps restant est relu ICI (après la préparation du workspace, des
-                    # fichiers de sortie et de l'argv), puis imposé au conteneur (KILL) et au filet hôte.
-                    remaining = float(deadline_epoch) - time.time()
+                    # Construction COMPLÈTE de l'argv d'abord (elle peut être lente : vérifications de montages…), échéance ABSOLUE
+                    # portée dans la commande (garde au démarrage du travail dans le conteneur) ; puis DERNIÈRE relecture de l'horloge,
+                    # immédiatement avant le lancement : aucune préparation ne recrée une fenêtre de durée ancienne.
+                    absolute = math.floor(
+                        float(deadline_epoch)
+                    )  # entier INFÉRIEUR : le travail ne dépasse jamais l'échéance
+                    if timeout is not None and timeout >= 1:
+                        absolute = min(absolute, math.floor(time.time() + timeout))
+                    ceiling = math.floor(float(deadline_epoch) - time.time())
+                    if timeout is not None and timeout >= 1:
+                        ceiling = min(ceiling, math.floor(timeout))
+                    guarded = [
+                        "timeout",
+                        "--signal=KILL",
+                        str(max(ceiling, 1)),  # plafond hôte (filet) ; la borne ABSOLUE est celle de la garde interne
+                        "sh",
+                        "-c",
+                        DEADLINE_GUARD_SCRIPT,
+                        "collegue-deadline",
+                        str(absolute),
+                        *inner,
+                    ]
+                    argv = self._build_run_argv(guarded, ws, name=name)
+                    remaining = float(deadline_epoch) - time.time()  # DERNIÈRE relecture, juste avant subprocess.run
                     limit = math.floor(remaining)
                     if timeout is not None and timeout >= 1:
                         limit = min(limit, math.floor(timeout))
@@ -648,7 +677,6 @@ class DockerSandbox:
                             "échéance absolue atteinte avant le lancement du conteneur : rien n'est lancé "
                             f"(reste {remaining:.2f}s)"
                         )
-                    argv = self._build_run_argv(["timeout", "--signal=KILL", str(limit), *inner], ws, name=name)
                     effective_timeout = min(float(limit), remaining) + DEADLINE_HOST_MARGIN
                 proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=effective_timeout, **run_kwargs)
                 exit_code = proc.returncode

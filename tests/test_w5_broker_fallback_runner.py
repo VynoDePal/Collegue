@@ -150,6 +150,12 @@ def test_a_definitive_broker_refusal_is_not_followed_by_a_fallback(rig):
             ),
             "stop",
         ),
+        (
+            type("RateLimitError", (Exception,), {"__module__": "openai"})(
+                "Error code: 429 - {'error': {'code': 'generation_in_flight'}}"
+            ),
+            "stop",
+        ),  # une génération de la session est en vol : ni retry ni repli
         (type("Timeout", (Exception,), {"__module__": "litellm.exceptions"})("request timed out"), "ambiguous"),
         (type("APIConnectionError", (Exception,), {"__module__": "openai"})("Connection error."), "ambiguous"),
         (RuntimeError("outil en échec"), "fallback"),  # le courtier ne la voit pas : bascule historique

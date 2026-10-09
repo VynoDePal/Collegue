@@ -456,9 +456,15 @@ class BrokerService:
         )
         if not admitted_ok:
             if why.startswith(FALLBACK_REFUSAL_PREFIX):
-                # Règle serveur de séquencement (repli sans antécédent autorisant, génération d'un autre modèle en vol / inconnue).
-                self._release(attempt, "fallback_refused", why)
-                raise BrokerForbidden(why, code="fallback_not_authorized")
+                # Règle serveur de séquencement (repli sans antécédent autorisant ; une seule génération en vol par session).
+                code, _, detail = why[len(FALLBACK_REFUSAL_PREFIX) :].partition("|")
+                self._release(
+                    attempt, code, detail
+                )  # libérée : aucune inconnue artificielle, la réserve de la première reste intacte
+                if code == "generation_in_flight":
+                    # 429 : seul statut que le SDK réessaie ; la requête n'a RIEN émis et pourra être renvoyée une fois l'issue connue.
+                    raise BrokerRequestRefused(detail, code=code, status=429)
+                raise BrokerForbidden(detail, code=code)
             self._release(attempt, "admission_refused", why)
             if "échéance" in why:
                 raise BrokerForbidden(why, code="session_expired")

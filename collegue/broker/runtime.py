@@ -136,6 +136,10 @@ class BrokerRuntime:
                 self._services[id(ledger)] = held
             return held[1]
 
+    def recovery_service(self, ledger: Any) -> BrokerService:
+        """Service JETABLE (non mis en cache) pour la réparation au démarrage : son propriétaire est clos après usage."""
+        return BrokerService(ledger, self._upstream, config=self.config)
+
     # ── attachement d'un worker ──────────────────────────────────────────────────────────────────────────
 
     @contextmanager
@@ -301,6 +305,44 @@ def runtime_for(settings: Any) -> BrokerRuntime:
             found = BrokerRuntime.from_settings(settings)
             _RUNTIMES_BY_ID[id(settings)] = found
         return found
+
+
+async def recover_at_startup(settings: Any, manager: Any = None) -> int:
+    """Réparation des producteurs abandonnés AVANT la première dépense d'un processus redémarré (serveur MCP, hors pilote).
+
+    * Sans effet hors mode courtier (le transport direct est inchangé) et sans état durable configuré (aucun registre ⇒ aucune
+      dépense possible, un contexte sans registre est refusé).
+    * Registre = celui des outils / du pilote : ``STATE_DATABASE_URL`` (ou ``manager`` fourni). Un état jamais migré (pas de tables du
+      courtier) n'a rien pu émettre : rien à réparer.
+    * Répare les tentatives de TOUS les producteurs (workers comme appels en processus) ; une émission abandonnée devient inconnue et
+      BLOQUE le projet (aucune poursuite stricte), un propriétaire vivant n'est jamais touché. N'ouvre ni ne renouvelle l'échéance
+      globale et n'interroge pas Google. Toute autre erreur se propage : le démarrage est refusé plutôt que de servir sur un état douteux.
+    """
+    if not is_broker_mode(settings):
+        return 0
+    owned = manager is None
+    if owned:
+        url = getattr(settings, "STATE_DATABASE_URL", None)
+        if not url:
+            return 0
+        from collegue.state import ProjectStateManager
+
+        manager = ProjectStateManager.from_url(url)
+    engine = manager._session_factory.kw.get("bind")
+    try:
+        if engine is not None:
+            from sqlalchemy import inspect
+
+            if not inspect(engine).has_table("broker_attempts"):
+                return 0
+        service = runtime_for(settings).recovery_service(manager.budget_ledger)
+        try:
+            return await service.recover_all()
+        finally:
+            service.shutdown()
+    finally:
+        if owned and engine is not None:
+            engine.dispose()
 
 
 async def qualify_models(settings: Any, ledger: Any, scope_key: str):
