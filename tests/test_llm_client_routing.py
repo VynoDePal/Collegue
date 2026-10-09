@@ -35,13 +35,13 @@ def _settings(**kwargs) -> Settings:
 
 def test_preferences_for_role_with_dedicated_model():
     s = _settings(LLM_PROVIDER="gemini", LLM_MODEL="flash", LLM_MODEL_CODER="pro")
-    assert model_preferences_for_role(LLMRole.CODER, s) == ["pro"]
+    assert model_preferences_for_role(LLMRole.CODER, s) == ["pro", "collegue-route:coder"]
 
 
 def test_preferences_for_role_falls_back_to_global():
     s = _settings(LLM_PROVIDER="gemini", LLM_MODEL="flash")
     # Pas de modèle CODER dédié → préférence = modèle global.
-    assert model_preferences_for_role(LLMRole.CODER, s) == ["flash"]
+    assert model_preferences_for_role(LLMRole.CODER, s) == ["flash", "collegue-route:coder"]
 
 
 def test_preferences_none_when_no_model():

@@ -198,9 +198,9 @@ async def test_default_sampler_uses_ctx_reviewer_role_and_settings(tmp_path):
 
     settings = SimpleNamespace(
         LLM_PROVIDER="gemini",
-        LLM_MODEL="fallback-model",
+        LLM_MODEL="gemini-2.5-flash",
         LLM_PROVIDER_REVIEWER="openai",
-        LLM_MODEL_REVIEWER="reviewer-model",
+        LLM_MODEL_REVIEWER="gpt-5.4",
         LLM_CALL_TIMEOUT=0,
         MAX_TOKENS=321,
     )
@@ -209,7 +209,7 @@ async def test_default_sampler_uses_ctx_reviewer_role_and_settings(tmp_path):
         str(tmp_path), DIFF, ISSUE_AC, ctx, sandbox=LocalOracleSandbox()
     )
     assert out.passed is True
-    assert ctx.kwargs["model_preferences"] == ["reviewer-model"]
+    assert ctx.kwargs["model_preferences"] == ["gpt-5.4", "collegue-route:reviewer"]
     assert ctx.kwargs["temperature"] == 0.2
     assert ctx.kwargs["max_tokens"] == 321
     assert ctx.kwargs["system_prompt"]

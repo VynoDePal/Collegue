@@ -27,9 +27,22 @@ def test_litellm_model_prefixes_gemini_when_unprefixed():
     assert agent.litellm_model() == "gemini/gemma-x"
 
 
-def test_litellm_model_keeps_already_prefixed():
-    agent = OHSdkAgent(object(), settings_obj=_settings(LLM_MODEL_CODER="openai/gpt-5.5"))
+def test_litellm_model_keeps_a_prefix_that_matches_the_role_provider():
+    agent = OHSdkAgent(object(), settings_obj=_settings(LLM_PROVIDER_CODER="openai", LLM_MODEL_CODER="openai/gpt-5.5"))
     assert agent.litellm_model() == "openai/gpt-5.5"
+    gemini = OHSdkAgent(object(), settings_obj=_settings(LLM_MODEL_CODER="gemini/gemma-x"))
+    assert gemini.litellm_model() == "gemini/gemma-x"
+
+
+def test_a_prefix_of_another_provider_is_refused_not_silently_kept_or_converted():
+    import pytest
+
+    from collegue.core.llm import LLMRoutingError
+
+    # fournisseur gemini + modèle « openai/gpt-5.5 » : contradiction (l'ancienne version gardait le préfixe, envoyant
+    # le modèle OpenAI avec la clé Gemini)
+    with pytest.raises(LLMRoutingError, match="préfixe"):
+        OHSdkAgent(object(), settings_obj=_settings(LLM_MODEL_CODER="openai/gpt-5.5")).litellm_model()
 
 
 def test_litellm_model_falls_back_to_global():

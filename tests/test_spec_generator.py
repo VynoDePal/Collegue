@@ -1,6 +1,7 @@
 """Tests P1 (#352) : générateur de SPEC.md (problématique → contrat structuré)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -200,11 +201,13 @@ async def test_generate_spec_includes_context():
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_routes_planner_role(monkeypatch):
-    monkeypatch.setattr(sg, "model_preferences_for_role", lambda role, settings_obj=None: ["planner-model"])
+async def test_generate_spec_routes_planner_role():
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini", LLM_MODEL="gemini-2.5-flash", LLM_MODEL_PLANNER="gemini-2.5-pro", LLM_API_KEY="fake-key"
+    )
     ctx = _Ctx(_Result(result=_spec()))
-    await generate_spec("x", ctx)
-    assert ctx.kwargs["model_preferences"] == ["planner-model"]
+    await generate_spec("x", ctx, settings_obj=settings)
+    assert ctx.kwargs["model_preferences"] == ["gemini-2.5-pro", "collegue-route:planner"]
 
 
 @pytest.mark.asyncio

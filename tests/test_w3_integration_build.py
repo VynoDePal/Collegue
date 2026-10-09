@@ -482,7 +482,7 @@ async def plan_with_oracles(monkeypatch, url, sources, *, depends=True):
         "construire une application testable",
         owner=OWNER,
         repo=REPO,
-        settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True, LLM_PROVIDER="test", LLM_MODEL="qa-fixture"),
+        settings_obj=SimpleNamespace(GATE_ACCEPTANCE_TESTS=True, LLM_PROVIDER="gemini", LLM_MODEL="qa-fixture"),
         manager=open_manager(url, create=True),
         ctx=ctx,
     )

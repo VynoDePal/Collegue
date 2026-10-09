@@ -356,6 +356,7 @@ def _sub_ctx(tmp_path, runner):
     return LocalSamplingContext(
         default_model="d",
         subscription_enabled=True,
+        subscription_models=["gpt-5.4"],  # abonnement choisi explicitement pour ce modèle (jamais déduit du nom)
         subscription_auth_dir=str(auth),
         sampler_script=str(script),
         runner=runner,

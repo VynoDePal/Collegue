@@ -287,9 +287,14 @@ def test_coder_sandbox_env_subscription_mode():
 def test_coder_sandbox_env_api_key_mode():
     import collegue.pilot.runtime as runtime
 
-    settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_MODEL="gemma-x")  # CODER_SUBSCRIPTION absent → False
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini", LLM_MODEL="gemma-x", LLM_API_KEY="fake-key"
+    )  # CODER_SUBSCRIPTION absent → False
     env = runtime._coder_sandbox_env(settings)
     assert env["LLM_MODEL"] == "gemini/gemma-x"  # format LiteLLM
+    assert env["OH_FALLBACK_MODELS"] == "gemini/gemma-4-26b-a4b-it"  # repli historique, même fournisseur
+    assert "fake-key" not in repr(env)  # la clé ne figure jamais dans l'env non secret
+    assert runtime._coder_sandbox_secrets(settings) == {"LLM_API_KEY": "fake-key"}  # transmise par référence
     assert "LLM_SUBSCRIPTION" not in env
     assert "HOME" not in env  # DockerSandbox conserve son HOME=/tmp écrivable
     assert "OH_LLM_TIMEOUT" not in env  # 0/absent conserve le défaut sûr du runner
@@ -299,7 +304,9 @@ def test_coder_sandbox_env_api_key_mode():
 def test_coder_sandbox_env_ignores_invalid_call_timeout(value):
     import collegue.pilot.runtime as runtime
 
-    settings = SimpleNamespace(LLM_PROVIDER="gemini", LLM_MODEL="gemini-2.5-flash", LLM_CALL_TIMEOUT=value)
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini", LLM_MODEL="gemini-2.5-flash", LLM_API_KEY="fake-key", LLM_CALL_TIMEOUT=value
+    )
 
     assert "OH_LLM_TIMEOUT" not in runtime._coder_sandbox_env(settings)
 

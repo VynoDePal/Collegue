@@ -165,86 +165,62 @@ class LazyPromptEngine:
         return getattr(self._engine, name)
 
 
-async def validate_llm_config():
-    """Valide la clé API et le modèle configuré au lancement.
+def _llm_route_report(settings_obj) -> dict:
+    """Contrôle LOCAL des routes de tous les rôles (aucune requête, aucune clé lue hors de la résolution).
 
-    Supporte plusieurs fournisseurs via ``settings.LLM_PROVIDER`` :
-    - ``gemini`` (défaut) — utilise ``google-genai``
-    - ``openai`` — utilise ``openai``
-    - ``anthropic`` — utilise ``anthropic``
-    - ``lmstudio`` / ``unsloth`` / ``ollama`` — serveur local compatible OpenAI
+    Renvoie ``{"report", "invalid", "missing", "sampling"}`` : ``invalid`` = contradictions (fournisseur / modèle /
+    endpoint / authentification, fournisseur hors catalogue), ``missing`` = rôles cohérents mais sans clé de leur
+    fournisseur, ``sampling`` = rôles que le handler serveur peut servir (clé ou fournisseur local ; l'abonnement n'est
+    pas servi par le handler serveur).
     """
-    provider = getattr(settings, "LLM_PROVIDER", "gemini").lower()
+    from collegue.core.llm.roles import check_role_routes
 
-    # Les providers locaux n'exigent pas de clé côté Collègue (Unsloth la vérifie
-    # lui-même à la connexion ci-dessous).
-    if not settings.LLM_API_KEY and not settings.is_local_provider:
-        error_msg = "❌ Configuration LLM manquante : LLM_API_KEY n'est pas définie."
+    report = check_role_routes(settings_obj)
+    return {
+        "report": report,
+        "invalid": {role: item["error"] for role, item in report.items() if item["status"] == "invalid"},
+        "missing": {role: item["error"] for role, item in report.items() if item["status"] == "missing_credential"},
+        "sampling": [
+            role for role, item in report.items() if item["status"] == "ok" and item["route"]["auth"] != "subscription"
+        ],
+    }
+
+
+async def validate_llm_config():
+    """Valide LOCALEMENT la configuration de routage LLM au démarrage — aucune requête distante.
+
+    Chaque rôle (default, coder, qa, reviewer, planner) est résolu par ``resolve_route`` : fournisseur du catalogue
+    (gemini, openai, lmstudio, ollama, unsloth), modèle cohérent avec le fournisseur, endpoint cohérent, authentification
+    cohérente. Une configuration contradictoire est REFUSÉE (``ValueError``). Un rôle cohérent mais sans clé de son
+    fournisseur n'empêche pas les autres rôles de servir : son appel sera refusé avant émission. Si aucun rôle ne peut
+    servir le sampling, le démarrage est refusé.
+
+    Cette validation ne prouve PAS que le fournisseur est joignable ni que le modèle existe : la disponibilité n'est pas
+    présumée et rien n'est émis au démarrage, donc aucune clé n'est jamais envoyée ailleurs que par un appel routé.
+    """
+    state = _llm_route_report(settings)
+    if state["invalid"]:
+        detail = " ; ".join(f"{role} : {error}" for role, error in state["invalid"].items())
+        error_msg = f"❌ Configuration LLM incohérente, démarrage refusé — {detail}"
         logger.error(error_msg)
         raise ValueError(error_msg)
-
-    logger.info(f"🔍 Validation du modèle LLM '{settings.LLM_MODEL}' (provider={provider}) en cours...")
-    try:
-        if settings.is_local_provider:
-            import openai
-
-            base_url = settings.llm_base_url
-            # Clé factice si absente : le SDK OpenAI en exige une, les locaux l'ignorent.
-            client = openai.OpenAI(api_key=settings.LLM_API_KEY or "local", base_url=base_url)
-
-            def check_connection():
-                return list(client.models.list())
-
-            models = await asyncio.to_thread(check_connection)
-            available = [getattr(m, "id", "?") for m in models]
-            if settings.LLM_MODEL in available:
-                model_display = settings.LLM_MODEL
-            elif available:
-                # Modèle non listé : ne pas échouer, le serveur peut le charger à la demande.
-                model_display = f"{settings.LLM_MODEL} (modèles chargés: {', '.join(available[:3])})"
-            else:
-                model_display = f"{settings.LLM_MODEL} (aucun modèle chargé)"
-            logger.info(f"✅ Connexion {provider} OK ({base_url}). {model_display}")
-            return True
-
-        elif provider == "gemini":
-            from google import genai
-
-            client = genai.Client(api_key=settings.LLM_API_KEY)
-
-            def check_model():
-                return client.models.get(model=settings.LLM_MODEL)
-
-            model = await asyncio.to_thread(check_model)
-            model_display = getattr(model, "name", settings.LLM_MODEL)
-
-        elif provider == "openai":
-            import openai
-
-            client = openai.OpenAI(api_key=settings.LLM_API_KEY)
-
-            def check_model():
-                return client.models.retrieve(settings.LLM_MODEL)
-
-            model = await asyncio.to_thread(check_model)
-            model_display = getattr(model, "id", settings.LLM_MODEL)
-
-        elif provider == "anthropic":
-            model_display = settings.LLM_MODEL
-
-        else:
-            error_msg = f"❌ Fournisseur LLM inconnu : '{provider}'. Valeurs acceptées : gemini, openai, anthropic"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        logger.info(f"✅ Configuration LLM validée: Le modèle '{model_display}' est disponible (provider={provider}).")
-        return True
-    except ValueError:
-        raise
-    except Exception as e:
-        error_msg = f"❌ Configuration LLM invalide (provider={provider}, modèle='{settings.LLM_MODEL}') : {str(e)}"
+    if not state["sampling"]:
+        detail = " ; ".join(f"{role} : {error}" for role, error in state["missing"].items())
+        error_msg = f"❌ Configuration LLM manquante : aucun rôle n'a de route utilisable — {detail}"
         logger.error(error_msg)
-        raise ValueError(error_msg) from e
+        raise ValueError(error_msg)
+    for role, error in state["missing"].items():
+        logger.warning("⚠️ Rôle %s sans credential : ses appels seront refusés avant émission (%s)", role, error)
+    routes = ", ".join(
+        f"{role}={item['route']['provider']}/{item['route']['model']}"
+        for role, item in state["report"].items()
+        if item["status"] == "ok"
+    )
+    logger.info(
+        "✅ Routage LLM validé localement (aucune requête émise ; la disponibilité des fournisseurs n'est pas vérifiée) : %s",
+        routes,
+    )
+    return True
 
 
 _lazy_engine_instance = None
@@ -328,28 +304,32 @@ async def core_lifespan(server):
 
 
 sampling_handler = None
-if settings.LLM_API_KEY or settings.is_local_provider:
-    try:
-        from collegue.core.llm.sampling_handler import build_sampling_handler, resolve_openai_endpoint
+try:
+    from collegue.core.llm.sampling_handler import build_routing_sampling_handler
 
-        provider = settings.LLM_PROVIDER.lower()
-        # Résolution provider→endpoint partagée avec le ctx offline (source unique).
-        default_model, api_key, base_url = resolve_openai_endpoint(settings)
-
-        sampling_handler = build_sampling_handler(
-            default_model=default_model,
-            api_key=api_key,
-            base_url=base_url,
+    # Une destination PAR RÔLE (vague 4) : le handler résout, à chaque requête, la route du rôle porté par les
+    # préférences de modèle (fournisseur, endpoint, clé). Il est attaché dès qu'AU MOINS UN rôle peut servir et qu'aucune
+    # route n'est contradictoire ; un rôle sans clé (le rôle par défaut compris) est refusé à son appel, avant émission,
+    # sans désactiver les routes indépendamment configurées. Une contradiction refuse aussi le démarrage
+    # (``validate_llm_config``).
+    _llm_state = _llm_route_report(settings)
+    if _llm_state["invalid"]:
+        print(f"⚠️ Sampling handler non configuré (routage incohérent) : {_llm_state['invalid']}", file=sys.stderr)
+    elif not _llm_state["sampling"]:
+        print(
+            f"⚠️ Sampling handler non configuré (aucun rôle avec credential) : {_llm_state['missing']}", file=sys.stderr
         )
+    else:
+        sampling_handler = build_routing_sampling_handler(settings)
         if sampling_handler is None:
             print("⚠️ Sampling handler indisponible - pip install 'fastmcp[openai]'", file=sys.stderr)
         else:
             print(
-                f"✅ Sampling handler configuré (provider={provider}, modèle={settings.LLM_MODEL})",
+                f"✅ Sampling handler routé par rôle (rôles servis : {', '.join(_llm_state['sampling'])})",
                 file=sys.stderr,
             )
-    except Exception as e:
-        print(f"⚠️ Impossible de configurer le sampling handler: {e}", file=sys.stderr)
+except Exception as e:
+    print(f"⚠️ Impossible de configurer le sampling handler: {e}", file=sys.stderr)
 
 app = FastMCP(
     auth=auth_provider,

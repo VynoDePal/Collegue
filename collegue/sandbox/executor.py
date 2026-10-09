@@ -36,12 +36,13 @@ from __future__ import annotations
 import errno
 import math
 import os
+import re
 import stat
 import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
-from typing import List, Mapping, Optional, Tuple, Union
+from typing import Any, List, Mapping, Optional, Tuple, Union
 
 DEFAULT_SANDBOX_IMAGE = "collegue-sandbox:latest"
 # #496 : point de montage du cache pip persistant dans le conteneur.
@@ -255,6 +256,12 @@ class SandboxResult:
         return self.exit_code == 0 and not self.timed_out
 
 
+def _secret_text(value: Any) -> str:
+    """Valeur d'un secret (``SecretStr`` ou str) pour l'environnement du process enfant ; jamais journalisée."""
+    reveal = getattr(value, "get_secret_value", None)
+    return str(reveal() if callable(reveal) else value)
+
+
 class DockerSandbox:
     """Exécute des commandes dans un conteneur Docker isolé et durci.
 
@@ -285,6 +292,7 @@ class DockerSandbox:
         docker_bin: str = "docker",
         env: Optional[Mapping[str, str]] = None,
         env_passthrough: Tuple[str, ...] = (),
+        env_secrets: Optional[Mapping[str, Any]] = None,
         read_only: bool = True,
     ):
         self.image = image
@@ -321,8 +329,17 @@ class DockerSandbox:
         #   secret (ex. LLM_API_KEY) n'apparaît JAMAIS dans l'argv (ni dans `ps`).
         # ``read_only`` : root FS en lecture seule (durci) ; désactivable pour les
         #   workers qui écrivent hors workspace/tmp (au prix d'un durcissement moindre).
+        # - ``env_secrets`` : secrets PAR RÉFÉRENCE (vague 4) — ``-e NAME`` sans valeur dans l'argv, et la valeur est remise
+        #   au SEUL process ``docker`` enfant (environnement de ce sous-process, jamais ``os.environ`` de l'hôte). Contrairement
+        #   à ``env_passthrough``, la valeur ne dépend pas d'une variable exportée dans le process appelant : une clé
+        #   résolue pour CE rôle ne peut pas être remplacée (ni complétée) par une autre clé de l'environnement hôte.
+        #   Les valeurs (str ou SecretStr) ne figurent ni dans ``repr`` ni dans l'argv ni dans les journaux.
         self.env = dict(env) if env else {}
         self.env_passthrough = tuple(env_passthrough)
+        self._env_secrets = {str(k): v for k, v in (env_secrets or {}).items()}
+        for name in self._env_secrets:
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or name in self.env or name in self.env_passthrough:
+                raise SandboxRefused(f"env_secrets : nom de variable invalide ou dupliqué ({name!r})")
         self.read_only = bool(read_only)
 
     # ── validation / construction (pur, testable sans Docker) ─────────────────────
@@ -423,7 +440,7 @@ class DockerSandbox:
         # couples explicites triés) — pour le worker OpenHands (clé API par réf.,
         # modèle/flags en clair). Vide par défaut → argv identique au comportement
         # historique (tests inchangés).
-        for name in sorted(self.env_passthrough):
+        for name in sorted(set(self.env_passthrough) | set(self._env_secrets)):
             argv += ["-e", name]
         for key in sorted(self.env):
             argv += ["-e", f"{key}={self.env[key]}"]
@@ -498,7 +515,11 @@ class DockerSandbox:
         timed_out = False
         try:
             try:
-                proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=effective_timeout)
+                run_kwargs: dict = {}
+                if self._env_secrets:
+                    # Environnement du SEUL process docker enfant : os.environ de l'hôte n'est jamais muté.
+                    run_kwargs["env"] = {**os.environ, **{k: _secret_text(v) for k, v in self._env_secrets.items()}}
+                proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=effective_timeout, **run_kwargs)
                 exit_code = proc.returncode
                 if timeout and exit_code in (TIMEOUT_EXIT_CODE, 137):  # auto-limite du conteneur atteinte
                     timed_out = True
