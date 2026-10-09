@@ -118,6 +118,23 @@ jobs:
           pytest tests/test_delivery_proof_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-delivery-proofs.xml
           python scripts/ci_require_junit.py pg-delivery-proofs.xml --min-tests 5 --expect-tests "${expected}"
 
+      # Vague 5 : état durable du courtier budgétaire (sessions, tentatives, horloge persistée, migration 0012 → 0013), rejoué sur un
+      # VRAI PostgreSQL avec les mêmes scénarios que SQLite. Le fichier doit exister (``test -f`` : son absence rend le job rouge,
+      # jamais un pas sauté). Le plancher est un MINIMUM provisoire : C le fixe au nombre exact de tests collectés à l'intégration de A
+      # (checklist de docs/consolidation/w5-integration.md), puis il ne baisse plus.
+      - name: PostgreSQL broker state - real durable-state proof
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          test -n "${COLLEGUE_TEST_POSTGRES_URL:-}"
+          test -f tests/test_w5_broker_postgres.py
+          expected="$(pytest tests/test_w5_broker_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests PostgreSQL collectés: ${expected}"
+          pytest tests/test_w5_broker_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-broker.xml
+          python scripts/ci_require_junit.py pg-broker.xml --min-tests 2 --expect-tests "${expected}"
+
       - name: Upload PostgreSQL proof report
         if: always()
         uses: actions/upload-artifact@v4
@@ -127,6 +144,7 @@ jobs:
             pg-budget.xml
             pg-task-merges.xml
             pg-delivery-proofs.xml
+            pg-broker.xml
           if-no-files-found: warn
 
       - name: Run pytest with coverage
@@ -249,6 +267,19 @@ jobs:
           docker run --rm -i --network none \
             collegue-sandbox-openhands:pr-check \
             python - < scripts/ci_w4_worker_routing.py
+
+      # Transport W5 SANS MODÈLE ni clé : le VRAI SDK OpenHands de l'image appelle le relais embarqué /opt/oh_broker_relay.py, qui recopie
+      # vers un socket Unix tenu par un FAUX courtier (route OpenAI, jeton de session factice, usage). Conteneur SANS réseau, aucun
+      # secret ni variable d'hôte, script transmis sur l'entrée standard (aucun montage). Le script prouve aussi l'isolation (seule la
+      # boucle locale, aucune connexion externe, aucune variable ressemblant à une clé) et que le relais n'est pas un proxy (autre
+      # route ou URL absolue → 404, corps au-delà du plafond coupé). Le VRAI courtier, ses budgets et son fournisseur sont éprouvés par
+      # les tests de A et la preuve d'intégration hôte ; aucun fournisseur réel n'est joint ici.
+      - name: Verify OpenHands broker transport (real SDK, fake broker, network none)
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i --network none \
+            collegue-sandbox-openhands:pr-check \
+            python - < scripts/ci_w5_broker_transport.py
 
       # Preuve du VRAI vérificateur métier public (collegue.pilot.w4_business.verify_business_checkout, runner omis) dans
       # l'image CONSTRUITE ci-dessus, sans modèle, sans clé et sans réseau applicatif (les conteneurs sont lancés par B en
