@@ -24,6 +24,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from pg_connection_proof import assert_no_client_connection_leak
 from sqlalchemy import create_engine, inspect, text
 
 from collegue.state import BudgetIdentityError, BudgetRefused, ProjectStateManager
@@ -96,10 +97,14 @@ def pg_url():
 @pytest.fixture(autouse=True)
 def _close_every_engine_and_prove_no_connection_leaks(pg_url, monkeypatch):
     """Ferme EXPLICITEMENT chaque engine créé pendant le test (managers de threads compris), puis PROUVE côté
-    serveur qu'aucune connexion de la base de test ne survit : pas de dépendance au ramasse-miettes, et le seuil
-    de connexions du serveur (60, comme le service CI standard à 100) n'est jamais approché au fil du module."""
+    serveur qu'aucune connexion CLIENT de la base de test ne survit : pas de dépendance au ramasse-miettes, et le seuil
+    de connexions du serveur (60, comme le service CI standard à 100) n'est jamais approché au fil du module.
+
+    Le contrôle (``pg_connection_proof``) ne compte que les ``client backend`` — les processus internes du serveur
+    (autovacuum worker…) ne sont pas des connexions d'application — et attend leur disparition pendant une fenêtre BORNÉE
+    (horloge monotone, observations fraîches) : une fermeture côté client n'est pas instantanée côté serveur. Une vraie
+    connexion persistante à l'échéance échoue toujours, avec PID, type et état."""
     import sqlalchemy
-    from sqlalchemy.pool import NullPool
 
     real_create = sqlalchemy.create_engine
     created = []
@@ -114,17 +119,7 @@ def _close_every_engine_and_prove_no_connection_leaks(pg_url, monkeypatch):
     yield
     for engine in created:
         engine.dispose()
-    probe = real_create(pg_url, poolclass=NullPool)
-    try:
-        with probe.connect() as conn:
-            leaked = conn.execute(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()"
-                )
-            ).scalar_one()
-    finally:
-        probe.dispose()
-    assert leaked == 0, f"{leaked} connexion(s) PostgreSQL encore ouvertes après le test (fuite de pool/engine)"
+    assert_no_client_connection_leak(pg_url, create_engine=real_create)
 
 
 @pytest.fixture
