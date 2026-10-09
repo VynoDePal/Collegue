@@ -187,3 +187,102 @@ async def test_host_privileged_fallback_canaries_do_not_depend_on_a_session(mana
         scope, "coder", chat_request(model=FALLBACK), request_id="canary-26b"
     )
     assert completion["model"] == FALLBACK and upstream.generate_calls
+
+
+# ── précontrôle local AVANT countTokens (A29) : observable, sans réserve, sans changement d'usage connu ──────────────────────
+
+
+def _attempts(service, session):
+    from sqlalchemy import select
+
+    from collegue.state.models import BrokerAttempt
+
+    def read(db):
+        return [
+            (a.model, a.state, a.error_code, a.reservation_id)
+            for a in db.scalars(select(BrokerAttempt).order_by(BrokerAttempt.id))
+        ]
+
+    return service.ledger._run(read)
+
+
+async def test_an_unauthorized_fallback_never_reaches_the_provider_not_even_to_count(manager):
+    upstream = ModelGatedUpstream()
+    service, _, ledger, scope, rid = service_for(manager, upstream)
+    worker = open_worker(service, scope, rid)
+    with pytest.raises(BrokerForbidden) as caught:
+        await chat(service, worker, chat_request(model=FALLBACK), request_id="forbidden-fallback")
+    assert caught.value.code == "fallback_not_authorized"
+    assert (
+        upstream.count_calls == [] and upstream.generate_calls == []
+    )  # AUCUNE requête fournisseur, countTokens compris
+    # observable : la tentative est journalisée et libérée ; rien n'a été réservé ni imputé, aucune inconnue
+    assert _attempts(service, worker) == [(FALLBACK, "released", "fallback_not_authorized", None)]
+    snapshot = ledger.snapshot(worker.scope_key)
+    assert (snapshot.reserved_tokens, snapshot.consumed_tokens, snapshot.unknown_tokens) == (0, 0, 0)
+    assert not snapshot.blocked and not ledger.snapshot(scope).blocked
+
+
+async def test_a_busy_session_refuses_a_new_generation_before_counting_it(manager):
+    upstream = ModelGatedUpstream()
+    service, _, ledger, scope, rid = service_for(manager, upstream)
+    worker = open_worker(service, scope, rid)
+    first = asyncio.create_task(chat(service, worker, chat_request(model=PRIMARY), request_id="p1"))
+    await _wait_sent(upstream)
+    counted_before = len(upstream.count_calls)
+    reserved_before = ledger.snapshot(worker.scope_key).reserved_tokens
+    with pytest.raises(BrokerRequestRefused) as caught:
+        await chat(service, worker, chat_request(model=PRIMARY), request_id="p2")
+    assert (caught.value.code, caught.value.status) == ("generation_in_flight", 429)
+    assert len(upstream.count_calls) == counted_before  # le refus précoce n'a pas atteint le fournisseur
+    assert (
+        ledger.snapshot(worker.scope_key).reserved_tokens == reserved_before
+    )  # réserve de la première intacte, rien d'abandonné
+    upstream.release.set()
+    await first
+    snapshot = ledger.snapshot(worker.scope_key)
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (15, 0, 0)
+    assert [a[:3] for a in _attempts(service, worker)] == [
+        (PRIMARY, "settled", None),
+        (PRIMARY, "released", "generation_in_flight"),
+    ]
+
+
+async def test_the_final_admission_stays_decisive_when_the_session_gets_busy_during_count_tokens(manager):
+    """Le précontrôle ne remplace pas l'admission transactionnelle : une génération admise PENDANT countTokens interdit l'émission de la première."""
+
+    class FirstCountPaused(ModelGatedUpstream):
+        def __init__(self):
+            super().__init__()
+            self.count_started = asyncio.Event()
+            self.count_release = asyncio.Event()
+
+        async def count_tokens(self, request):
+            first = not self.count_calls
+            counted = await super().count_tokens(request)
+            if first:
+                self.count_started.set()
+                await self.count_release.wait()
+            return counted
+
+    upstream = FirstCountPaused()
+    service, _, ledger, scope, rid = service_for(manager, upstream)
+    worker = open_worker(service, scope, rid)
+    slow = asyncio.create_task(chat(service, worker, chat_request(model=PRIMARY), request_id="slow"))
+    await asyncio.wait_for(upstream.count_started.wait(), 5)  # le précontrôle de « slow » est passé (session libre)
+    fast = asyncio.create_task(chat(service, worker, chat_request(model=PRIMARY), request_id="fast"))
+    await _wait_sent(upstream)  # « fast » est admise et en vol
+    upstream.count_release.set()  # « slow » reprend : réservation, puis admission finale
+    with pytest.raises(BrokerRequestRefused) as caught:
+        await slow
+    assert caught.value.code == "generation_in_flight"
+    assert upstream.models == [PRIMARY]  # une seule émission
+    upstream.release.set()
+    await fast
+    snapshot = ledger.snapshot(worker.scope_key)
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (
+        15,
+        0,
+        0,
+    )  # « slow » : réserve libérée
+    assert not ledger.snapshot(scope).blocked

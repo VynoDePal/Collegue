@@ -238,3 +238,18 @@ hors mode courtier ou sans `STATE_DATABASE_URL` ⇒ sans effet ; état jamais mi
 `recover_all()` d'un service JETABLE (`BrokerRuntime.recovery_service`) sur le registre de `STATE_DATABASE_URL` (celui du pilote et des
 outils). Émission abandonnée ⇒ inconnue + projet bloqué ; propriétaire vivant conservé ; aucune échéance ouverte, aucune requête Google.
 Toute autre erreur (état illisible) REFUSE le démarrage. Aucun opérateur n'a à appeler `recover_all`.
+
+## Précontrôle de séquence avant countTokens (A29) et précision de la garde
+
+**Précontrôle.** Dans `_generate`, après création de la tentative et avant toute requête fournisseur, `BrokerStore.sequence_refusal` applique en lecture seule la
+règle de séquence (pas de 26B sans antécédent ; pas de nouvelle génération sur une session occupée). Refus précoce : même erreur que l'admission finale
+(`403 fallback_not_authorized` / `429 generation_in_flight`), **aucun countTokens**, tentative journalisée et libérée (`error_code` = le code), aucune réservation prise, aucun
+changement d'usage connu, réserve de la génération en vol intacte. Ce n'est qu'un précontrôle : l'**admission transactionnelle après countTokens reste obligatoire et décisive**
+(une génération peut être admise, un blocage ou une fermeture survenir pendant le comptage ; test : une génération admise pendant le countTokens de la première lui interdit
+l'émission et sa réserve est libérée).
+
+**Précision de la garde (mesurée, pas postulée).** La garde interne tronque l'échéance (`floor(deadline_epoch)`) ET l'heure courante (`date +%s`) : l'arrêt tombe dans
+`[D_int, D_int + 1[` secondes d'horloge conteneur, soit **entre −1 s et +1 s** de l'échéance réelle `D`, plus la latence d'ordonnancement. Le travail PEUT donc dépasser l'échéance de
+moins d'une seconde ; il n'est pas vrai qu'il ne puisse « jamais gagner » du temps. Mesure (12 exécutions, faux docker + vrai `DockerSandbox`, worker qui ignore TERM, dernier battement −
+échéance) : sans retard de démarrage −1,00 s à −0,97 s ; démarrage retardé de 2,5 s −0,50 s à +0,50 s (`evidence/w5-a29-guard-measure.json`). Critère retenu, étroit et explicite :
+`SCHEDULING_TOLERANCE = 1,0 s` dans les tests (le filet hôte à `+DEADLINE_HOST_MARGIN` = 2 s ne couvre que le conteneur qui ne démarre pas). Hypothèse non vérifiée ici : horloge du conteneur = horloge de l'hôte.

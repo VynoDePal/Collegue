@@ -609,6 +609,23 @@ class BrokerStore:
 
         return self._run(_do)
 
+    def sequence_refusal(self, attempt_id: str, session_id: str) -> Tuple[str, str]:
+        """PRÉCONTRÔLE local (lecture seule) du droit de séquence, AVANT toute requête fournisseur (countTokens compris).
+
+        Même règle que l'admission transactionnelle (``_model_sequence_refusal``) mais sans verrou : il évite d'envoyer au fournisseur
+        une requête qui sera forcément refusée ; il ne la REMPLACE PAS — l'admission finale, après countTokens, reste la seule
+        autorité (une génération peut démarrer, un blocage ou une fermeture survenir pendant l'appel). ``("", "")`` = pas d'objection.
+        """
+
+        def _do(session: Session):
+            row = session.scalar(select(BrokerSession).where(BrokerSession.session_id == session_id))
+            attempt = session.scalar(select(BrokerAttempt).where(BrokerAttempt.attempt_id == attempt_id))
+            if row is None or attempt is None:
+                return "", ""
+            return self._model_sequence_refusal(session, row, attempt)
+
+        return self._run(_do)
+
     @staticmethod
     def _model_sequence_refusal(session: Session, row: BrokerSession, attempt: BrokerAttempt) -> Tuple[str, str]:
         """Règle SERVEUR de séquencement des générations d'une session (le client, même hostile, ne la décide jamais).

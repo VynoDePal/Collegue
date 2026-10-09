@@ -391,6 +391,14 @@ class BrokerService:
                 return self._replay(attempt)
         attempt_id = attempt.attempt_id
 
+        # 3 bis. PRÉCONTRÔLE local du droit de séquence, AVANT toute requête fournisseur : un repli sans antécédent ou une nouvelle
+        # génération sur une session occupée est refusé sans countTokens, sans réserve (rien n'est pris) et sans toucher à l'usage connu.
+        # Ce n'est qu'un précontrôle : l'admission transactionnelle APRÈS countTokens (étape 6) reste obligatoire et décisive.
+        if session is not None:
+            early_code, early_detail = self.store.sequence_refusal(attempt_id, session.session_id)
+            if early_code:
+                self._raise_sequence_refusal(attempt, early_code, early_detail)
+
         # 4. countTokens — aucune dépense ; n'importe quel échec ici ne peut PAS avoir généré.
         self._open_global_clock(root_scope_key, self._now())
         try:
@@ -456,15 +464,8 @@ class BrokerService:
         )
         if not admitted_ok:
             if why.startswith(FALLBACK_REFUSAL_PREFIX):
-                # Règle serveur de séquencement (repli sans antécédent autorisant ; une seule génération en vol par session).
                 code, _, detail = why[len(FALLBACK_REFUSAL_PREFIX) :].partition("|")
-                self._release(
-                    attempt, code, detail
-                )  # libérée : aucune inconnue artificielle, la réserve de la première reste intacte
-                if code == "generation_in_flight":
-                    # 429 : seul statut que le SDK réessaie ; la requête n'a RIEN émis et pourra être renvoyée une fois l'issue connue.
-                    raise BrokerRequestRefused(detail, code=code, status=429)
-                raise BrokerForbidden(detail, code=code)
+                self._raise_sequence_refusal(attempt, code, detail)
             self._release(attempt, "admission_refused", why)
             if "échéance" in why:
                 raise BrokerForbidden(why, code="session_expired")
@@ -560,6 +561,18 @@ class BrokerService:
         return f"broker:{attempt.attempt_id}" + (f"#{attempt.runs}" if attempt.runs else "")
 
     # ── règlements (état durable PUIS registre ; réparables) ─────────────────────────────────────────────
+
+    def _raise_sequence_refusal(self, attempt: AttemptRecord, code: str, detail: str):
+        """Règle serveur de séquencement (repli sans antécédent ; une seule génération en vol par session) : libère la tentative et refuse.
+
+        Appelée par le précontrôle (avant countTokens) ET par l'admission finale : même erreur, même journal (tentative ``released``
+        portant ``code``) ; aucune inconnue artificielle, la réserve de la génération en vol n'est pas touchée.
+        """
+        self._release(attempt, code, detail)
+        if code == "generation_in_flight":
+            # 429 : seul statut que le SDK réessaie ; la requête n'a RIEN émis et pourra être renvoyée une fois l'issue connue.
+            raise BrokerRequestRefused(detail, code=code, status=429)
+        raise BrokerForbidden(detail, code=code)
 
     def _release(self, attempt: AttemptRecord, code: str, detail: str, *, reserved: bool = True) -> None:
         if self.store.release(attempt.attempt_id, now=self._now(), code=code, detail=detail):
