@@ -1626,6 +1626,20 @@ def run_campaign(
         if counters.get("blocked_reason") or counters.get("unknown_micro_usd") or counters.get("unknown_tokens"):
             gate["block"] = "usage inconnu : le scope est bloqué, aucune nouvelle émission"
             return
+        used_usd = (
+            counters.get("consumed_micro_usd", 0)
+            + counters.get("reserved_micro_usd", 0)
+            + counters.get("unknown_micro_usd", 0)
+        ) / 1_000_000
+        used_tokens = (
+            counters.get("consumed_tokens", 0) + counters.get("reserved_tokens", 0) + counters.get("unknown_tokens", 0)
+        )
+        cap_usd, cap_tokens = counters.get("cap_usd"), counters.get("cap_tokens")
+        if (cap_usd is not None and used_usd >= cap_usd - 1e-9) or (
+            cap_tokens is not None and used_tokens >= cap_tokens
+        ):
+            gate["block"] = f"enveloppe atteinte ({used_usd:.6f} $ / {used_tokens} tokens) : aucune nouvelle émission"
+            return
         try:
             assert_registry_within_bounds(counters)
         except BudgetStop as exc:
@@ -1699,8 +1713,10 @@ def run_campaign(
         report.halted = halted_before or report.halted
     finally:
         _snapshot("exit")
-        verdict_before_cleanup = report.verdict()
-        report.facts["verdict_before_cleanup"] = verdict_before_cleanup
+        cleanup_step = report.step("R06-cleanup")
+        cleanup_step.required = False  # le verdict « avant nettoyage » ne dépend pas du nettoyage lui-même
+        report.facts["verdict_before_cleanup"] = report.verdict()
+        cleanup_step.required = True
         if cleanup is not None:
             report.halted = False
             report.run("R06-cleanup", lambda step: cleanup(report))
