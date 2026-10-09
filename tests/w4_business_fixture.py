@@ -58,7 +58,8 @@ SEED: Dict[str, str] = {
 
 STAGE_1: Dict[str, str] = {
     "requirements.txt": "alembic>=1.13\nfastapi==0.116.1\nhttpx==0.28.1\npytest==8.4.1\nsqlalchemy>=2.0\nuvicorn==0.35.0\n",
-    ".gitignore": "__pycache__/\n.pytest_cache/\n.venv/\n*.py[cod]\n*.db\n",
+    # Artefacts de MESURE ignorés dès la tâche 1 (donc avant toute mesure) : `.coverage` (binaire) ne doit jamais être publié.
+    ".gitignore": "__pycache__/\n.pytest_cache/\n.venv/\n*.py[cod]\n*.db\n.coverage\nhtmlcov/\n",
     "alembic.ini": "[alembic]\nscript_location = migrations\nprepend_sys_path = .\n",
     "app/db.py": '''"""Accès à la base SQLite : l'URL vient de l'environnement (``DATABASE_URL``), jamais d'un fichier versionné."""
 
@@ -372,11 +373,29 @@ HEADER_DOC = (
     "CONFIDENTIEL - diffusion restreinte aux destinataires de l'audit\n"
 )
 
+# Runbook de déploiement livré avec l'export : il cite des identifiants d'EXEMPLE (valeurs factices publiées dans la documentation
+# d'AWS) que le scan de secrets du moteur compte, ce qui donne à une vraie amélioration de DOCUMENTATION un gain MESURÉ.
+DEPLOY_DOC = (
+    "# Déploiement\n\n"
+    "L'export lit le fichier `docs/export_header.md`. Pour publier le service, exporter les identifiants :\n\n"
+    "    AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n"
+    "    AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n\n"
+    "Puis lancer `alembic upgrade head` avant le premier démarrage.\n"
+)
+# Version nettoyée par l'amélioration d'incident : les identifiants disparaissent (gain mesuré par le scan de secrets).
+CLEAN_DEPLOY_DOC = (
+    "# Déploiement\n\n"
+    "L'export lit le fichier `docs/export_header.md`. Les identifiants sont fournis par le coffre de secrets de la "
+    "plateforme.\n\n"
+    "Lancer `alembic upgrade head` avant le premier démarrage.\n"
+)
+
 STAGE_3: Dict[str, str] = {
     "requirements.txt": (
         "alembic>=1.13\nfastapi==0.116.1\nhttpx==0.28.1\npypdf>=5\npytest==8.4.1\nsqlalchemy>=2.0\nuvicorn==0.35.0\n"
     ),
     "docs/export_header.md": HEADER_DOC,
+    "docs/deploiement.md": DEPLOY_DOC,
     "app/export.py": _EXPORT_MODULE,
     "app/main.py": STAGE_2["app/main.py"]
     .replace(
@@ -464,6 +483,8 @@ WRONG_DATA_STAGE_3: Dict[str, str] = {
 
 # Modification de DOCUMENTATION (chemin autorisé par la politique de faible risque) : retire la mention légale de l'export.
 BROKEN_NOTICE_HEADER = "Rapport d'audit n° {id} : {title}\nAuditeur : {auditor}\n"
+# Chemins touchés par l'amélioration d'incident (tous en documentation, donc éligibles à l'auto-merge de faible risque).
+INCIDENT_DOCS = {"docs/deploiement.md": CLEAN_DEPLOY_DOC, "docs/export_header.md": BROKEN_NOTICE_HEADER}
 # Modification de documentation inoffensive : reformule l'en-tête en gardant la mention légale.
 HARMLESS_HEADER = (
     "Rapport d'audit n° {id} : {title}\n"

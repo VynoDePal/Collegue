@@ -275,12 +275,13 @@ class World:
 
 
 class BusinessBridge(BridgeServer):
-    """Pont W3 + réglage de dépôt « supprimer la branche de tête après fusion » (comme sur GitHub quand l'option est activée).
+    """Pont W3 + réglage de dépôt « supprimer la branche de tête après fusion ».
 
-    Sans cette option, la branche ``collegue/issue-<n>`` d'une tâche BUILD fusionnée subsiste et une ronde IMPROVE de même
-    numéro la RÉUTILISERAIT (voir ``reports/w4-b.md``, constat « collision de branches BUILD/IMPROVE »)."""
+    Le dépôt fixture réel a ``delete_branch_on_merge=false`` (vérifié en lecture seule) : le scénario NOMINAL conserve donc les
+    têtes fusionnées (défaut ``False``). Un second témoin peut activer la suppression ; les deux doivent aboutir, l'identité
+    de branche d'amélioration étant distincte de celle des tâches BUILD (``collegue/improve-…`` vs ``collegue/issue-<n>``)."""
 
-    delete_head_after_merge = True
+    delete_head_after_merge = False
 
     def _merge(self, number: int, body: Dict[str, Any]) -> Dict[str, Any]:
         head_ref = self.prs[number]["head"]["ref"]
@@ -338,6 +339,12 @@ def build_world(
         agent=agent or ReferenceAgent(),
         sandbox=BusinessSandbox(),
     )
+
+
+def business_plan_hash(world: World) -> Optional[str]:
+    from collegue.planner.plan_review import current_plan_hash
+
+    return current_plan_hash(world.manager(), world.project_id)
 
 
 def sha256(text: str) -> str:
@@ -559,7 +566,9 @@ class ImprovementAgent:
 
 
 def reformat_python(workspace: Path) -> List[str]:
-    """Le « codeur » reformate le code Python du projet (travail réel : ``ruff format``, lignes ≤ 88)."""
+    """Le « codeur » reformate le code Python du projet (travail réel : ``ruff format``, lignes ≤ 88).
+
+    Les artefacts de mesure (``.coverage``) sont ignorés par la configuration de la fixture dès la tâche 1 : rien à contourner."""
     from collegue.improve.metrics import _find_ruff
 
     ruff = _find_ruff()
@@ -569,21 +578,17 @@ def reformat_python(workspace: Path) -> List[str]:
         if ".git" not in p.parts and "__pycache__" not in p.parts
     )
     subprocess.run([ruff, "format", "--isolated", *files], cwd=workspace, check=True, capture_output=True)
-    # Hygiène : la mesure de couverture dépose `.coverage` (binaire) dans le workspace ; la graine ne l'ignore pas et la
-    # publication REFUSE un binaire. L'amélioration l'ignore donc explicitement (jamais livré par accident).
-    ignore = workspace / ".gitignore"
-    text = ignore.read_text(encoding="utf-8")
-    if ".coverage" not in text:
-        ignore.write_text(text + ".coverage\nhtmlcov/\n", encoding="utf-8")
-        files.append(".gitignore")
     return files
 
 
-def replace_header(content: str):
+def replace_docs(contents: Dict[str, str]):
+    """Le « codeur » réécrit des fichiers de DOCUMENTATION (chemins éligibles à l'auto-merge de faible risque)."""
+
     def action(workspace: Path) -> List[str]:
-        (workspace / "docs").mkdir(exist_ok=True)
-        (workspace / "docs" / "export_header.md").write_text(content, encoding="utf-8")
-        return ["docs/export_header.md"]
+        for relative, content in contents.items():
+            (workspace / relative).parent.mkdir(parents=True, exist_ok=True)
+            (workspace / relative).write_text(content, encoding="utf-8")
+        return sorted(contents)
 
     return action
 
@@ -715,28 +720,15 @@ async def direct_improvement(world: World, agent: ImprovementAgent, *, measure_f
     )
 
 
-class ClaimedGain:
-    """Frontière de MESURE simulée pour le seul tour d'incident : baseline réelle, puis la même mesure réelle où l'outil
-    « rapporte » trois violations de lint en moins. Le gain est annoncé par la mesure (un changement de documentation
-    n'en produit aucun) ; la régression comportementale qui s'ensuit, elle, est RÉELLE."""
+class RecordingMeasure:
+    """Journalise les mesures du VRAI ``measure`` sans les modifier (avant / après de chaque round)."""
 
     def __init__(self, real):
         self.real = real
-        self.calls = 0
         self.snapshots: List[Dict[str, Any]] = []
 
     async def __call__(self, workspace, ctx, **kwargs):
-        from collegue.improve.metrics import composite_score
-
         result = await self.real(workspace, ctx, **kwargs)
-        self.calls += 1
-        if self.calls >= 2:
-            lint = max(0, result.lint_violations - 3)
-            result = dataclasses.replace(
-                result,
-                lint_violations=lint,
-                composite=composite_score(result.coverage_pct, result.security_weighted, lint_violations=lint),
-            )
         self.snapshots.append(metrics_row(result))
         return result
 
@@ -765,7 +757,8 @@ STEPS = [
     ),
     (
         "D07-improve",
-        "Amélioration (lint réel) : promue avec preuve IMPROVE ; fusion automatique refusée par la politique de faible risque",
+        "Amélioration par l'entrée publique (handoff BUILD→IMPROVE, lint réel) : promue avec preuve IMPROVE ; "
+        "fusion automatique refusée par la politique de faible risque ; têtes BUILD conservées intactes",
     ),
     (
         "D08-operator-merge",
@@ -774,7 +767,8 @@ STEPS = [
     ("D09-no-regression", "Aucune régression : tests, couverture, comportement métier ; lint réduit"),
     (
         "D10-incident-rollback",
-        "Incident contrôlé (documentation autorisée) : santé rouge réelle, rollback Phase 5, comportement restauré",
+        "Incident contrôlé (documentation autorisée, gain mesuré par le vrai scan) : santé rouge réelle, rollback Phase 5, "
+        "comportement restauré",
     ),
     ("D11-acknowledge", "Acquittement de l'incident récupéré ; reprise autorisée"),
     ("D12-registry", "Registre W2 : enveloppe 2 USD / 250000 tokens respectée, rien de réservé ni d'inconnu"),
@@ -862,6 +856,11 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
     async def d06(step):
         verify_main(world, step)
         report.facts["main_after_build"] = {"tip": world.tip(), "tree": world.bridge.remote.tree_of(world.tip())}
+        # Têtes BUILD CONSERVÉES (le dépôt fixture ne supprime pas les branches fusionnées) : elles ne doivent plus jamais bouger.
+        heads = {name: sha for name, sha in world.bridge.branches.items() if name.startswith("collegue/issue-")}
+        assert sorted(heads) == ["collegue/issue-1", "collegue/issue-2", "collegue/issue-3"], sorted(heads)
+        state["build_heads"] = heads
+        step.evidence["build_heads_kept"] = heads
 
     state: Dict[str, Any] = {}
 
@@ -869,10 +868,17 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
         state["before"] = await measure_checkout(world)
         agent = ImprovementAgent(reformat_python)
         tip_before = world.tip()
-        result = await direct_improvement(world, agent, measure_fn=measure)
-        assert result.stop_reason == "auto_merge_blocked" and len(result.promoted) == 1, (
-            result.stop_reason,
-            result.rejected,
+        approved_hash = world.manager().get_project(world.project_id).approved_plan_hash
+        run = await improvement_pass(world, agent)  # entrée publique : BUILD terminé → statut `improving` → IMPROVE
+        result = run.improvement
+        project = world.manager().get_project(world.project_id)
+        assert run.project_status == project.status == "improving", "statut de CYCLE posé par le pilote avant la boucle"
+        assert project.approved_plan_hash == approved_hash == business_plan_hash(world), (
+            "l'empreinte approuvée n'a pas changé : aucune ré-approbation, aucune réécriture du plan"
+        )
+        assert result is not None and run.stop_reason == "auto_merge_blocked" and len(result.promoted) == 1, (
+            run.stop_reason,
+            getattr(result, "rejected", None),
         )
         promoted = result.promoted[0]
         assert not promoted.auto_merged and world.tip() == tip_before, (
@@ -884,11 +890,18 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
         assert sorted(o.role for o in proof.oracles) == ["delivered"] * 3, "les trois contrats livrés ont été rejoués"
         for evidence in proof.oracles:
             assert evidence.candidate.status == "green"
+        head = world.bridge.prs[promoted.pr_number]["head"]["ref"]
+        assert head.startswith("collegue/improve-") and head not in state["build_heads"], head
+        assert {n: world.bridge.branches[n] for n in state["build_heads"]} == state["build_heads"], (
+            "aucune écriture distante sur une tête BUILD historique"
+        )
         state["improve_pr"], state["improve_proof"] = promoted.pr_number, proof
         step.evidence.update(
-            pr_number=promoted.pr_number, head_sha=promoted.head_sha, dimension=promoted.dimension, delta=round(promoted.delta, 6),
-            proof_id=proof.proof_id, oracles=oracle_summary(proof), policy_refusal=result.rejected[0][1],
-            stop_reason=result.stop_reason, metrics_before=metrics_row(state["before"]), main_tip_unchanged=tip_before,
+            entry="run_project_from_settings (improve=True)", project_status=run.project_status, approved_plan_hash=approved_hash,
+            pr_number=promoted.pr_number, head_branch=head, head_sha=promoted.head_sha, dimension=promoted.dimension,
+            delta=round(promoted.delta, 6), proof_id=proof.proof_id, oracles=oracle_summary(proof),
+            policy_refusal=result.rejected[0][1], stop_reason=run.stop_reason, metrics_before=metrics_row(state["before"]),
+            main_tip_unchanged=tip_before,
         )  # fmt: skip
         snapshot_registry(report, "after-improvement", world)
 
@@ -922,12 +935,21 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
         tip_before = world.tip()
         tree_before = world.bridge.remote.tree_of(tip_before)
         commits_before = int(git(world.source, "rev-list", "--count", "HEAD"))
-        gain = ClaimedGain(measure)
-        agent = ImprovementAgent(replace_header(fixture.BROKEN_NOTICE_HEADER))
+        measured = RecordingMeasure(measure)  # le VRAI measure, journalisé sans aucun ajustement
+        agent = ImprovementAgent(replace_docs(fixture.INCIDENT_DOCS))
         health_before = len(world.sandbox.health_runs)
-        result = await direct_improvement(world, agent, measure_fn=gain)
+        # Seconde passe sur un projet déjà `improving` : l'entrée publique est bloquée par `runtime.py:499` (voir le rapport,
+        # test_w4_business_contract_handoff xfail strict) ; la boucle est donc appelée avec les hooks Phase 5 de PRODUCTION.
+        result = await direct_improvement(world, agent, measure_fn=measured)
         runs = world.sandbox.health_runs[health_before:]
         assert result.stop_reason == "auto_revert_recovered", (result.stop_reason, result.rejected)
+        before, after = measured.snapshots[0], measured.snapshots[1]
+        assert after["security_findings"] < before["security_findings"], (before, after)
+        assert after["composite"] > before["composite"], (
+            "gain RÉEL mesuré (identifiants d'exemple retirés de la documentation)"
+        )
+        assert after["coverage_pct"] == before["coverage_pct"] and after["lint_violations"] == before["lint_violations"]
+        assert after["tests_passed"] and before["tests_passed"]
         assert len(runs) >= 2 and runs[0]["status"] == "failed" and runs[-1]["status"] == "passed", runs
         assert set(runs[0]["failed_checks"]) <= {"write:legal_notice_present", "reread:legal_notice_present"}
         assert runs[0]["failed_checks"], "la sonde de santé a observé une régression comportementale RÉELLE"
@@ -946,13 +968,16 @@ async def run_deterministic_campaign(root: Path, *, campaign_id: str = "w4-busin
         assert incident is not None and incident.state == "recovered", (
             "état durable : incident récupéré, acquittement requis"
         )
+        assert {n: world.bridge.branches.get(n) for n in state["build_heads"]} == state["build_heads"]
         state["incident_revision"] = incident.revision
         verify_main(world, step)  # comportement métier restauré (mention légale incluse)
         step.evidence.update(
             stop_reason=result.stop_reason, tip_before=tip_before, tip_after=tip, tree_before=tree_before,
             tree_after=world.bridge.remote.tree_of(tip), incident_state=incident.state, incident_merge_sha=incident.merge_sha,
-            incident_pr=incident.source_pr_number, health_runs=runs, measurement_snapshots=gain.snapshots,
-            note="le gain de mesure est annoncé par une mesure SIMULÉE ; la régression, la santé rouge et le rollback sont réels",
+            incident_pr=incident.source_pr_number, health_runs=runs, measurements=measured.snapshots,
+            changed_files=sorted(fixture.INCIDENT_DOCS),
+            note="le gain est MESURÉ par le vrai scan de secrets (identifiants d'exemple retirés) ; la régression, la santé "
+            "rouge et le rollback sont réels ; la mesure n'est ni simulée ni ajustée",
         )  # fmt: skip
 
     async def d11(step):
