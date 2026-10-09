@@ -76,10 +76,6 @@ COPY collegue/executor/oh_runner.py /opt/oh_runner.py
 # offline (SubscriptionSampler) via ``docker run``. Le ctx le monte par défaut depuis la
 # source committée ; baké ici pour les images self-contained.
 COPY collegue/executor/oh_sampler.py /opt/oh_sampler.py
-# Relais loopback du transport W5 (stdlib seule, aucun import ``collegue``). Le codeur tourne SANS réseau (``--network none``) : ses
-# clients HTTP/SDK parlent à 127.0.0.1 et ce relais recopie les octets vers le socket Unix du courtier, monté en lecture seule dans
-# un répertoire qui ne contient que ``broker.sock``. Aucune clé fournisseur n'est dans l'image ni dans l'environnement du codeur.
-COPY collegue/executor/oh_broker_relay.py /opt/oh_broker_relay.py
 
 # Utilisateur non-root (le `docker run` surcharge --user pour matcher l'UID hôte).
 RUN useradd --create-home --uid 1000 sandbox

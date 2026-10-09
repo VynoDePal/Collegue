@@ -238,32 +238,32 @@ def test_the_interface_listing_reads_proc_net_dev_format(proof, tmp_path):
 
 def test_the_whole_proof_passes_with_a_healthy_relay_and_fails_for_each_fault(proof, tmp_path, fake_sdk, pristine):
     fake_sdk("ok")
-    report = proof.run_checks(write_relay(tmp_path))
+    report = proof.run_checks(write_relay(tmp_path), None)
     assert report["failures"] == [], report
     assert report["sdk"]["usage"] == [7, 2] and report["sdk"]["usage_id"] == "coder"
     assert report["relay"] == {"other_route": 404, "absolute_url": 404, "oversized": report["relay"]["oversized"]}
 
     fake_sdk("bad-token")
     assert any(
-        "jeton" in m or "réponse" in m or "SDK" in m for m in proof.run_checks(write_relay(tmp_path))["failures"]
+        "jeton" in m or "réponse" in m or "SDK" in m for m in proof.run_checks(write_relay(tmp_path), None)["failures"]
     )
     fake_sdk("wrong-usage")
-    assert any("usage" in m for m in proof.run_checks(write_relay(tmp_path))["failures"])
+    assert any("usage" in m for m in proof.run_checks(write_relay(tmp_path), None)["failures"])
 
 
 def test_a_relay_that_forwards_oversized_bodies_or_listens_beyond_loopback_is_rejected(
     proof, tmp_path, fake_sdk, pristine
 ):
     fake_sdk("ok")
-    unbounded = proof.run_checks(write_relay(tmp_path, forward_all=True))
+    unbounded = proof.run_checks(write_relay(tmp_path, forward_all=True), None)
     assert any("plafond" in m for m in unbounded["failures"]), unbounded["failures"]
-    wide = proof.run_checks(write_relay(tmp_path, host="0.0.0.0"))
+    wide = proof.run_checks(write_relay(tmp_path, host="0.0.0.0"), None)
     assert any("boucle locale" in m for m in wide["failures"]), wide["failures"]
 
 
 def test_a_missing_relay_or_sdk_is_a_failure_not_a_skip(proof, tmp_path, pristine):
-    assert any("non chargeable" in m for m in proof.run_checks(str(tmp_path / "absent.py"))["failures"])
-    report = proof.run_checks(write_relay(tmp_path))
+    assert any("non chargeable" in m for m in proof.run_checks(str(tmp_path / "absent.py"), None)["failures"])
+    report = proof.run_checks(write_relay(tmp_path), None)
     assert any("VRAI SDK" in m for m in report["failures"]), "sans SDK installé le contrôle échoue au lieu d'être sauté"
 
 
@@ -271,3 +271,52 @@ def test_the_script_never_reads_a_credentials_file_nor_opens_a_non_loopback_sock
     text = SCRIPT.read_text(encoding="utf-8")
     assert not re.search(r"~/|expanduser|\.aws|\.ssh|\.config/|id_rsa|\.netrc", text)
     assert "0.0.0.0" not in text and "AF_INET6" not in text
+
+
+def _lock(tmp_path, lines):
+    path = tmp_path / "sandbox-broker.txt"
+    path.write_text("# GENERATED\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def test_the_image_contents_check_proves_the_image_is_its_lock_and_rejects_every_drift(proof, tmp_path):
+    import importlib.metadata as metadata
+
+    pytest_version = metadata.version("pytest")
+    ok = _lock(
+        tmp_path,
+        [
+            f"pytest=={pytest_version} \\",
+            "    --hash=sha256:" + "0" * 64,
+            "colorama==0.4.6 ; sys_platform == 'nonexistent-platform' \\",  # marqueur faux : ignoré
+            "    --hash=sha256:" + "1" * 64,
+        ],
+    )
+    good = proof.Failures()
+    report = proof.check_image_contents(ok, good, min_entries=2)
+    assert good.items == [] and report["checked"] == 1 and report["skipped_by_marker"] == 1
+
+    for lines, needle in (
+        ([f"pytest=={pytest_version}.dev0 \\", "pytest-fake-absent-pkg==1.0 \\"], "versions installées"),
+        (["pytest-fake-absent-pkg==1.0 \\", f"pytest=={pytest_version} \\"], "non installées"),
+    ):
+        bad = proof.Failures()
+        proof.check_image_contents(_lock(tmp_path, lines), bad, min_entries=2)
+        assert any(needle in m for m in bad.items), bad.items
+
+    short = proof.Failures()
+    proof.check_image_contents(ok, short)  # seuil par défaut : un verrou tronqué ne prouve rien
+    assert any("anormalement court" in m for m in short.items)
+    unreadable = proof.Failures()
+    proof.check_image_contents(str(tmp_path / "absent.txt"), unreadable)
+    assert any("illisible" in m for m in unreadable.items)
+
+
+def test_the_image_contents_check_refuses_the_legacy_web_application_and_jose(proof, tmp_path, monkeypatch):
+    assert {"openhands-ai", "python-jose", "ecdsa", "passlib"} <= set(proof.FORBIDDEN_DISTRIBUTIONS)
+    monkeypatch.setattr(proof, "FORBIDDEN_DISTRIBUTIONS", ("pytest",))  # simule une distribution interdite présente
+    import importlib.metadata as metadata
+
+    failures = proof.Failures()
+    proof.check_image_contents(_lock(tmp_path, [f"pytest=={metadata.version('pytest')} \\"]), failures, min_entries=1)
+    assert any("interdites" in m and "pytest" in m for m in failures.items)

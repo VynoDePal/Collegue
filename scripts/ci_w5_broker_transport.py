@@ -13,7 +13,9 @@ Ce que le script établit :
 2. **chemin réel** : le VRAI ``openhands.sdk.LLM`` (celui du codeur) appelle ``http://127.0.0.1:<port>/v1``, le relais embarqué
    ``/opt/oh_broker_relay.py`` recopie les octets vers le socket Unix, le faux courtier reçoit UNE requête ``POST /v1/chat/completions``
    avec le jeton de session factice (et lui seul) et répond au format OpenAI avec ``usage`` ; le SDK relit réponse et usage ;
-3. **le relais n'est pas un proxy** : une requête vers une autre route, ou vers une URL absolue, n'atteint que le faux courtier (404,
+3. **contenu de l'image** : chaque entrée du verrou embarqué ``/opt/locks/sandbox-broker.txt`` (marqueurs évalués) est installée EXACTEMENT à
+   la version verrouillée, et l'application web legacy (``openhands-ai``) ainsi que ``python-jose`` / ``ecdsa`` / ``passlib`` sont ABSENTES ;
+4. **le relais n'est pas un proxy** : une requête vers une autre route, ou vers une URL absolue, n'atteint que le faux courtier (404,
    aucune sortie) ; un corps client au-delà du plafond du relais est coupé avant le courtier.
 
 Sortie : un rapport JSON sur stdout (aucune clé) ; code 0 si tout est vérifié, 1 sinon.
@@ -37,6 +39,8 @@ import threading
 from typing import Any, Dict, List, Optional
 
 DEFAULT_RELAY = "/opt/oh_broker_relay.py"
+DEFAULT_LOCK = "/opt/locks/sandbox-broker.txt"
+FORBIDDEN_DISTRIBUTIONS = ("openhands-ai", "python-jose", "ecdsa", "passlib")
 SESSION_TOKEN = "w5-ci-session-token-0123456789abcdef"  # FACTICE : n'ouvre rien, jamais une clé fournisseur
 MODEL = "gemma-4-31b-it"
 ANSWER = "pong"
@@ -266,10 +270,75 @@ def check_relay_is_not_a_proxy(relay: Any, port: int, broker: FakeBroker, failur
     }
 
 
-def run_checks(relay_path: str) -> Dict[str, Any]:
+_LOCK_ENTRY = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[^\s;\\]+)(?:\s*;\s*(?P<marker>[^\\]*?))?\s*\\?$"
+)
+
+
+def lock_entries(text: str) -> List[Dict[str, Optional[str]]]:
+    entries = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", "--hash")):
+            continue
+        match = _LOCK_ENTRY.match(line)
+        if match:
+            entries.append(match.groupdict())
+    return entries
+
+
+def check_image_contents(lock_path: str, failures: Failures, min_entries: int = 100) -> Dict[str, Any]:
+    """L'image EST son verrou : chaque entrée applicable installée à la version exacte ; distributions interdites absentes."""
+    import importlib.metadata as metadata
+
+    from packaging.markers import Marker
+
+    try:
+        with open(lock_path, encoding="utf-8") as handle:
+            entries = lock_entries(handle.read())
+    except OSError as exc:
+        failures.check(False, f"verrou embarqué illisible ({lock_path}) : {type(exc).__name__}")
+        return {"lock": lock_path, "entries": 0}
+    failures.check(len(entries) >= min_entries, f"verrou embarqué anormalement court : {len(entries)} entrées")
+    checked, skipped, wrong, missing = 0, 0, [], []
+    for entry in entries:
+        marker = entry.get("marker")
+        if marker and not Marker(marker.strip()).evaluate():
+            skipped += 1
+            continue
+        try:
+            installed = metadata.version(str(entry["name"]))
+        except metadata.PackageNotFoundError:
+            missing.append(str(entry["name"]))
+            continue
+        checked += 1
+        if installed != entry["version"]:
+            wrong.append(f"{entry['name']} {installed} ≠ {entry['version']}")
+    failures.check(not missing, f"entrées du verrou non installées : {missing[:10]}")
+    failures.check(not wrong, f"versions installées différentes du verrou : {wrong[:10]}")
+    present = []
+    for name in FORBIDDEN_DISTRIBUTIONS:
+        try:
+            metadata.version(name)
+            present.append(name)
+        except metadata.PackageNotFoundError:
+            pass
+    failures.check(not present, f"distributions interdites présentes dans l'image broker : {present}")
+    return {
+        "lock": lock_path,
+        "entries": len(entries),
+        "checked": checked,
+        "skipped_by_marker": skipped,
+        "forbidden_present": present,
+    }
+
+
+def run_checks(relay_path: str, lock_path: Optional[str] = DEFAULT_LOCK) -> Dict[str, Any]:
     failures = Failures()
     report: Dict[str, Any] = {"relay_path": relay_path}
     report["isolation"] = check_isolation(failures)
+    if lock_path:
+        report["image_contents"] = check_image_contents(lock_path, failures)
     try:
         relay = load_relay(relay_path)
     except Exception as exc:  # noqa: BLE001
@@ -304,8 +373,9 @@ def run_checks(relay_path: str) -> Dict[str, Any]:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--relay", default=DEFAULT_RELAY)
+    parser.add_argument("--lock", default=DEFAULT_LOCK, help="verrou embarqué ('' pour ne pas contrôler le contenu)")
     args = parser.parse_args(argv)
-    report = run_checks(args.relay)
+    report = run_checks(args.relay, args.lock or None)
     report["ok"] = not report["failures"]
     print(json.dumps(report, indent=1, ensure_ascii=False, sort_keys=True, default=str))
     for message in report["failures"]:

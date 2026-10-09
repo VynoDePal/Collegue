@@ -2,13 +2,15 @@
 
 * le commit du socle calculé par le script est IDENTIQUE à celui de ``git`` réel (même arbre, même SHA) et l'arbre de la graine
   recalculé est celui du dépôt distant (``c8bffa32…``) ;
-* le workflow de confiance, le ruleset et le manifeste ont le contenu exigé (statique) ;
+* le workflow (``pull_request`` + ``push`` : jamais ``pull_request_target``, inutilisable avec une branche par défaut immuable sans workflow),
+  le CODEOWNERS, le verrou approuvé, le ruleset et le manifeste ont le contenu exigé (statique) ;
 * ``apply`` / ``cleanup`` / ``probe`` sont éprouvés sur un faux serveur GitHub EN MÉMOIRE : jeton d'ordre, idempotence, collisions,
   ressources non possédées, ``main`` et PR étrangères intacts, nettoyage restreint aux ressources de la campagne ;
 * l'évaluation des checks et le contrôle d'intégrité (fonctions pures utilisables par B) refusent faux succès, autre application,
   autre tête, check manquant et workflow altéré.
 
-Rien de tout cela ne prouve le comportement de GitHub Actions : la contre-épreuve réelle (``probe``) n'est exécutable que sur ordre.
+Rien de tout cela ne prouve le comportement de GitHub (déclenchement, code owner à 0 approbation, règle de création) : la contre-épreuve réelle
+(``probe``) n'est exécutable que sur ordre du manager.
 """
 
 from __future__ import annotations
@@ -86,7 +88,7 @@ def test_the_bootstrap_commit_is_byte_identical_to_what_real_git_produces(fx, pl
         "GIT_COMMITTER_DATE": f"{fx.COMMIT_EPOCH} +0000",
     }
     # parent local (le SHA de la graine distante n'existe pas ici) : la formule du commit est la même pour tout parent
-    seed_tree_files = {p: t for p, t in plan["files"].items() if p in fx.SEED_PATHS}
+    seed_tree_files = fx.load_seed()
     for path, text in seed_tree_files.items():
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -115,17 +117,27 @@ def test_the_plan_is_deterministic_and_its_hashes_match_the_contents(fx, plan):
     assert plan["order_token"] == "APPLIQUER-W5-FIXTURE-" + plan["bootstrap_sha"][:12]
 
 
-def test_the_scaffold_adds_only_the_workflow_and_the_two_example_runbooks_and_never_edits_the_seed(fx, plan):
-    assert plan["created_files"] == [
-        ".github/workflows/fixture-tests.yml",
-        "docs/deploiement.md",
-        "docs/runbook-ops.md",
-    ]
-    assert plan["modified_seed_files"] == []
-    assert list(plan["approved_files"]) == plan["created_files"], "approved_files = exactement ce que le socle ajoute"
+def test_the_scaffold_adds_the_control_files_and_changes_only_requirements_of_the_seed(fx, plan):
+    assert (
+        plan["created_files"]
+        == plan["added_files"]
+        == [
+            ".github/CODEOWNERS",
+            ".github/workflows/fixture-tests.yml",
+            "ci/requirements-approved.lock",
+            "docs/deploiement.md",
+            "docs/runbook-ops.md",
+        ]
+    )
+    assert plan["modified_seed_files"] == ["requirements.txt"], (
+        "seule modification autorisée de la graine (décision du manager)"
+    )
+    assert set(plan["approved_files"]) == set(plan["added_files"]) | {"requirements.txt"}
     seed = fx.load_seed()
-    assert not set(plan["approved_files"]) & set(seed)
-    assert all(plan["files"][path] == text for path, text in seed.items()), "la graine est conservée octet pour octet"
+    for path, text in seed.items():
+        if path != "requirements.txt":
+            assert plan["files"][path] == text, f"{path} : la graine est conservée octet pour octet"
+    assert plan["files"]["requirements.txt"] != seed["requirements.txt"]
     forbidden = (
         "alembic",
         "migrations",
@@ -140,9 +152,47 @@ def test_the_scaffold_adds_only_the_workflow_and_the_two_example_runbooks_and_ne
         "aucune implémentation ni en-tête d'export du BUILD"
     )
     both = plan["files"]["docs/deploiement.md"] + plan["files"]["docs/runbook-ops.md"]
-    assert "AKIAIOSFODNN7EXAMPLE" in plan["files"]["docs/deploiement.md"]
-    assert "AKIAI44QH8DHBEXAMPLE" in plan["files"]["docs/runbook-ops.md"]
-    assert both.count("EXAMPLE") >= 4, "uniquement des identifiants d'EXEMPLE publiés (distincts entre R04 et R05)"
+    assert (
+        "AKIAIOSFODNN7EXAMPLE" in plan["files"]["docs/deploiement.md"]
+        and "AKIAI44QH8DHBEXAMPLE" in plan["files"]["docs/runbook-ops.md"]
+    )
+    assert both.count("EXAMPLE") >= 4
+
+
+def test_the_scaffold_refuses_any_other_modification_of_the_seed(fx, monkeypatch):
+    original = fx.scaffold_files
+    monkeypatch.setattr(fx, "scaffold_files", lambda: {**original(), "app/main.py": "print('x')\n"})
+    with pytest.raises(fx.FixtureError, match="que requirements.txt"):
+        fx.build_plan()
+    monkeypatch.setattr(fx, "scaffold_files", lambda: {k: v for k, v in original().items() if k != "requirements.txt"})
+    with pytest.raises(fx.FixtureError, match="que requirements.txt"):
+        fx.build_plan()
+
+
+def test_the_approved_stack_is_one_locked_source_for_the_socle_and_the_image(fx, plan):
+    import tomllib
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    group = pyproject["dependency-groups"]["fixture-stack"]
+    assert plan["files"]["requirements.txt"] == "\n".join(group) + "\n"
+    assert all(re.fullmatch(r"[A-Za-z0-9_.\-]+==\d[^\s;]*", item) for item in group), "versions EXACTES"
+    lock = (ROOT / "locks" / "fixture-stack.txt").read_text(encoding="utf-8")
+    assert plan["files"]["ci/requirements-approved.lock"] == lock, (
+        "copie octet pour octet du verrou généré par scripts/locks.py"
+    )
+    assert "--hash=sha256:" in lock and lock.count("==") >= len(group)
+    # le verrou de l'image du transport broker épingle les MÊMES versions de premier niveau
+    broker = (ROOT / "locks" / "sandbox-broker.txt").read_text(encoding="utf-8")
+    for item in group:
+        name, version = item.split("==")
+        assert re.search(rf"^{re.escape(name)}=={re.escape(version)}\b", broker, re.M | re.I), item
+        assert re.search(rf"^{re.escape(name)}=={re.escape(version)}\b", lock, re.M | re.I), item
+
+
+def test_the_codeowners_gives_the_control_paths_to_the_owner_and_nothing_else(fx, plan):
+    entries = [ln.split() for ln in plan["files"][".github/CODEOWNERS"].splitlines() if ln and not ln.startswith("#")]
+    assert entries == [["/.github/", "@VynoDePal"], ["/ci/", "@VynoDePal"]]
+    assert set(fx.PROTECTED_PREFIXES) == {".github/", "ci/"}
 
 
 def test_the_scaffold_satisfies_the_closed_shape_b_validates_against_the_real_tree(fx, plan):
@@ -150,6 +200,7 @@ def test_the_scaffold_satisfies_the_closed_shape_b_validates_against_the_real_tr
     for path, digest in plan["approved_files"].items():
         assert safe.fullmatch(path) and (not path.startswith(".") or path.startswith(".github/"))
         assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert plan["bootstrap_sha"] != fx.SEED_SHA and len(plan["approved_files"]) == 6
 
 
 def test_the_example_documents_are_byte_identical_to_the_ones_b_ships_once_integrated(fx):
@@ -171,10 +222,19 @@ def test_the_manifest_skeleton_matches_the_common_contract_and_is_never_a_proof_
     assert manifest["required_check"] == "Fixture tests" and manifest["check_app_id"] == 15368
     assert manifest["branch_pattern"] == "refs/heads/collegue-business/*" and manifest["ruleset_id"] is None
     assert manifest["approved_files"] == plan["approved_files"]
-    producer = manifest["check_producer"]
-    assert producer["trigger"] == "pull_request_target" and producer["publishes"] == "Fixture tests"
-    assert producer["workflow"] in manifest["approved_files"] and producer["app_id"] == manifest["check_app_id"]
-    assert producer["job"] != manifest["required_check"], "le check requis n'est pas le check automatique d'un job"
+    assert manifest["added_files"] == plan["added_files"] and manifest["modified_seed_files"] == ["requirements.txt"]
+    detail = manifest["modified_seed_hashes"]["requirements.txt"]
+    seed = fx.load_seed()
+    assert detail["seed_sha256"] == hashlib.sha256(seed["requirements.txt"].encode()).hexdigest()
+    assert detail["approved_sha256"] == manifest["approved_files"]["requirements.txt"] != detail["seed_sha256"]
+    workflow = manifest["check_workflow"]
+    assert workflow["triggers"] == ["pull_request", "push"] and workflow["job"] == "Fixture tests"
+    assert (
+        workflow["workflow"] in manifest["approved_files"]
+        and workflow["dependency_source"] in manifest["approved_files"]
+    )
+    assert manifest["protected_prefixes"] == [".github/", "ci/"] and manifest["code_owner"] == "@VynoDePal"
+    assert "check_producer" not in manifest, "le check est celui d'un job : plus de publication manuelle"
 
 
 def test_write_plan_produces_every_artifact_with_consistent_sums(fx, tmp_path):
@@ -191,94 +251,120 @@ def test_write_plan_produces_every_artifact_with_consistent_sums(fx, tmp_path):
         and "git/trees" in calls
         and "/rulesets" in calls
     )
+    assert "check-runs" in calls, "l'attente du check du socle précède la création du ruleset"
     diff = (tmp_path / "plan" / "bootstrap.diff").read_text(encoding="utf-8")
-    assert "+++ b/.github/workflows/fixture-tests.yml" in diff and "app/main.py" not in diff
+    assert (
+        "+++ b/.github/workflows/fixture-tests.yml" in diff
+        and "+++ b/requirements.txt" in diff
+        and "app/main.py" not in diff
+    )
+    probes = (tmp_path / "plan" / "probe-plan.md").read_text(encoding="utf-8")
+    for scenario in (
+        "green",
+        "red-test",
+        "workflow-touch",
+        "codeowners-touch",
+        "lock-touch",
+        "unapproved-dependency",
+        "symlink",
+        "seed-base",
+    ):
+        assert f"`{scenario}`" in probes
 
 
-# ── workflow de confiance et ruleset (statique) ───────────────────────────────────────────────────────────────────────────
+# ── workflow du socle (statique) ──────────────────────────────────────────────────────────────────────────────────────────
 
 
 def _workflow(fx):
     return yaml.safe_load(fx.TRUSTED_WORKFLOW)
 
 
-def test_the_trusted_workflow_is_judged_from_the_base_and_never_runs_candidate_code_on_the_host(fx):
+def _steps(fx):
+    return _workflow(fx)["jobs"]["fixture-tests"]["steps"]
+
+
+def test_the_workflow_runs_on_pull_request_and_on_the_bootstrap_push_never_on_pull_request_target(fx):
+    text = fx.TRUSTED_WORKFLOW
     wf = _workflow(fx)
     on = wf.get(True) or wf.get("on")  # PyYAML lit « on » comme un booléen
-    assert set(on) == {"pull_request_target"} and on["pull_request_target"]["branches"] == ["collegue-business/**"]
-    assert wf["permissions"] == {"contents": "read", "pull-requests": "read", "checks": "write"}
-    job = wf["jobs"]["fixture-runner"]
-    assert job["name"] == "Fixture runner" != fx.REQUIRED_CHECK, (
-        "le check automatique (porté par la base) ne peut pas être confondu avec le check requis"
+    assert set(on) == {"pull_request", "push"}, (
+        "pull_request_target s'exécute sur la branche par défaut (graine sans workflow)"
     )
-    steps = job["steps"]
-    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
-    assert steps.index(checkout) == 0
-    assert (
-        checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
-        and checkout["with"]["persist-credentials"] is False
+    assert on["pull_request"]["branches"] == ["collegue-business/**"]
+    assert on["push"]["branches"] == [fx.BOOTSTRAP_BRANCH], "le commit du socle porte son propre check"
+    assert re.search(r"^[^#\n]*pull_request_target", text, re.M) is None, (
+        "jamais comme déclencheur ; seulement expliqué en commentaire"
     )
-    text = fx.TRUSTED_WORKFLOW
-    assert "secrets." not in text, "aucun secret du dépôt n'est référencé"
-    assert "github.event.pull_request.title" not in text and "github.event.pull_request.body" not in text
-    # aucune installation ni exécution sur l'hôte : tout passe par des conteneurs sans privilège
-    host_runs = "\n".join(s.get("run", "") for s in steps)
-    assert "pip install" not in host_runs.replace("python -m pip install", "").replace(
-        "/tmp/venv/bin/python -m pip install", ""
+    assert wf["permissions"] == {"contents": "read"}
+    job = wf["jobs"]["fixture-tests"]
+    assert job["name"] == fx.REQUIRED_CHECK == "Fixture tests", (
+        "le check requis EST le job (aucune publication manuelle)"
     )
-    assert "pytest" not in host_runs.replace("/tmp/venv/bin/python -m pytest", "")
-    assert "sudo" not in host_runs and "docker.sock" not in host_runs
-    download = next(s for s in steps if s.get("id") == "wheels")["run"]
-    tests = next(s for s in steps if s.get("id") == "tests")["run"]
+    assert "secrets." not in text and "github.token" not in text and "GH_TOKEN" not in text and "checks:" not in text
+
+
+def test_candidate_code_never_runs_on_the_host_and_dependencies_come_only_from_the_approved_hashed_lock(fx):
+    steps = _steps(fx)
+    assert str(steps[0]["uses"]).startswith("actions/checkout") and steps[0]["with"]["persist-credentials"] is False
+    runs = [s.get("run", "") for s in steps]
+    host = re.sub(
+        r"bash -c '.*?'", "", "\n".join(runs), flags=re.S
+    )  # le script entre quotes s'exécute DANS le conteneur
+    assert "sudo" not in host and "docker.sock" not in host and "--privileged" not in host
+    assert not re.search(r"^\s*(python|pytest|pip)\b", host, re.M), (
+        "aucune commande Python sur l'hôte : tout passe par un conteneur"
+    )
+    download = next(r for r in runs if "pip download" in r)
+    tests = next(r for r in runs if "pytest" in r)
     for command in (download, tests):
         for flag in ("--user 65534:65534", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only"):
             assert flag in command
-        assert "docker.sock" not in command and "--privileged" not in command and "-e GH_TOKEN" not in command
-    assert "--only-binary=:all:" in download and "--network none" not in download
-    assert "--network none" in tests and "--no-index" in tests, (
-        "installation et tests sans réseau, depuis les roues téléchargées"
-    )
-    assert '"$GITHUB_WORKSPACE:/src:ro"' in tests
-
-
-def test_the_workflow_hands_the_token_only_to_the_guard_and_the_publisher_never_to_a_candidate_container(fx):
-    steps = _workflow(fx)["jobs"]["fixture-runner"]["steps"]
-    with_token = [s["name"] for s in steps if "GH_TOKEN" in (s.get("env") or {})]
-    assert len(with_token) == 2 and with_token[0].startswith("Garde") and with_token[1].startswith("Publier")
-    job_env = _workflow(fx)["jobs"]["fixture-runner"]["env"]
-    assert not any("token" in k.lower() or "secret" in k.lower() for k in job_env)
-
-
-def test_the_workflow_refuses_a_pr_that_modifies_dot_github_and_publishes_the_required_check_on_the_exact_head(fx):
-    steps = _workflow(fx)["jobs"]["fixture-runner"]["steps"]
-    guard = next(s for s in steps if s.get("id") == "guard")
+        assert "-e GH_TOKEN" not in command and "GITHUB_TOKEN" not in command and "secrets" not in command
+        assert '"$PY_IMAGE"' in command
+    assert "--network none" not in download and "--network none" in tests
     assert (
-        "pulls/${PR_NUMBER}/files" in guard["run"] and "previous_filename" in guard["run"] and "exit 1" in guard["run"]
+        "--require-hashes" in download
+        and "-r /src/ci/requirements-approved.lock" in download
+        and "--only-binary=:all:" in download
     )
-    publish = steps[-1]
-    assert publish["if"] == "${{ !cancelled() }}", "publié même si une étape a échoué (un échec est un check rouge)"
-    run = publish["run"]
-    assert 'name="Fixture tests"' in run and 'head_sha="$HEAD_SHA"' in run and "check-runs" in run
-    assert run.count("success") >= 4 and 'test "$conclusion" = success' in run
+    assert "--no-index" in tests and "--require-hashes" in tests and "--find-links /wheels" in tests
     assert (
-        'if [ "$GUARD" = success ] && [ "$WHEELS" = success ] && [ "$TESTS" = success ]; then conclusion=success; fi'
-        in run
-    ), "succès seulement si garde, roues ET tests ont réussi"
-    assert _workflow(fx)["jobs"]["fixture-runner"]["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+        "requirements.txt demande une dépendance hors de la pile approuvée" in tests
+        and "pip install --no-index" in tests
+    )
+    assert "pip download" not in tests and "requirements.txt" not in download, (
+        "le requirements.txt du candidat ne dicte aucun téléchargement"
+    )
 
 
-def test_the_ruleset_is_active_without_bypass_and_binds_the_check_to_the_actions_app(fx, plan):
+def test_mounts_are_directories_never_a_candidate_controlled_file_path(fx):
+    for run in (s.get("run", "") for s in _steps(fx)):
+        for source in re.findall(r'-v\s+"([^"]+)"', run):
+            host = source.split(":")[0]
+            assert host in ("$GITHUB_WORKSPACE", "$RUNNER_TEMP/wheels"), f"montage de source inattendue : {host}"
+    guard = next(s for s in _steps(fx) if s.get("name", "").startswith("Garde"))["run"]
+    assert "-type l" in guard and "requirements.txt ci/requirements-approved.lock" in guard and "[ -L" in guard
+    assert "exit 1" in guard
+
+
+def test_the_runner_image_is_pinned_by_digest(fx):
+    image = _workflow(fx)["jobs"]["fixture-tests"]["env"]["PY_IMAGE"]
+    assert re.fullmatch(r"python:3\.12-slim@sha256:[0-9a-f]{64}", image) and image == fx.PY_IMAGE
+
+
+def test_the_ruleset_is_active_without_bypass_requires_the_owner_and_binds_the_check_to_the_actions_app(fx, plan):
     rs = plan["ruleset"]
     assert rs["enforcement"] == "active" and rs["bypass_actors"] == [] and rs["target"] == "branch"
     assert rs["conditions"]["ref_name"] == {"include": ["refs/heads/collegue-business/*"], "exclude": []}
-    types = {r["type"] for r in rs["rules"]}
-    assert types == {"pull_request", "required_status_checks"}, (
-        "pas de règle deletion : le nettoyage supprime ses propres bases"
+    assert {r["type"] for r in rs["rules"]} == {"pull_request", "required_status_checks"}, (
+        "pas de règle deletion : le nettoyage supprime ses bases"
     )
+    pr = next(r for r in rs["rules"] if r["type"] == "pull_request")["parameters"]
+    assert pr["require_code_owner_review"] is True and pr["required_approving_review_count"] == 0
     checks = next(r for r in rs["rules"] if r["type"] == "required_status_checks")["parameters"]
     assert checks["strict_required_status_checks_policy"] is True
-    assert checks["do_not_enforce_on_create"] is True, (
-        "créer une base éphémère depuis le socle ne peut pas exiger un check déjà passé ; les FUSIONS restent protégées"
+    assert checks["do_not_enforce_on_create"] is False, (
+        "une base ne peut être créée que depuis un commit qui a passé le check"
     )
     assert checks["required_status_checks"] == [{"context": "Fixture tests", "integration_id": 15368}]
     assert "~DEFAULT_BRANCH" not in json.dumps(rs) and "main" not in rs["conditions"]["ref_name"]["include"][0]
@@ -299,7 +385,7 @@ def test_the_ruleset_pattern_covers_the_ephemeral_bases_and_never_main(fx, branc
     assert fnmatch.fnmatch(f"refs/heads/{branch}", fx.BRANCH_PATTERN) is expected
 
 
-# ── évaluation des checks et intégrité (fonctions pures) ──────────────────────────────────────────────────────────────────
+# ── évaluation des checks, arbre protégé et provenance (fonctions pures) ──────────────────────────────────────────────────
 
 HEAD = "a" * 40
 
@@ -312,19 +398,52 @@ def run(name="Fixture tests", app=15368, head=HEAD, status="completed", conclusi
     "runs, expected",
     [
         ([run()], "success"),
-        ([run(conclusion="failure")], "failure"),  # test rouge -> check rouge
+        ([run(conclusion="failure")], "failure"),
         ([run(conclusion="cancelled")], "failure"),
         ([run(status="in_progress", conclusion=None)], "pending"),
-        ([], "missing"),  # check manquant
-        ([run(app=99999)], "missing"),  # faux succès d'une AUTRE application
-        ([run(name="fixture tests")], "missing"),  # autre nom
-        ([run(head="b" * 40)], "missing"),  # succès d'une AUTRE tête
-        ([run(), run(conclusion="failure")], "failure"),  # un homonyme rouge suffit
-        ([run(), run(app=99999, conclusion="failure")], "success"),  # un autre émetteur ne retire rien
+        ([], "missing"),
+        ([run(app=99999)], "missing"),
+        ([run(name="fixture tests")], "missing"),
+        ([run(head="b" * 40)], "missing"),
+        ([run(), run(conclusion="failure")], "failure"),
+        ([run(), run(app=99999, conclusion="failure")], "success"),
     ],
 )
 def test_check_evaluation_never_turns_a_wrong_check_into_a_success(fx, runs, expected):
     assert fx.evaluate_check(runs, head_sha=HEAD)[0] == expected
+
+
+def _entries(fx, plan, **changes):
+    out = {}
+    for path, text in plan["files"].items():
+        out[path] = {"path": path, "type": "blob", "mode": "100644", "sha": fx.git_blob_sha(text.encode())}
+    for path, value in changes.items():
+        path = path.replace("__", "/").replace("_dot_", ".")
+        if value is None:
+            out.pop(path, None)
+        else:
+            out[path] = value
+    return list(out.values())
+
+
+def test_the_protected_tree_check_flags_a_modified_removed_added_or_irregular_object(fx, plan):
+    assert fx.protected_tree_violations(_entries(fx, plan), plan) == []
+    tampered = _entries(fx, plan)
+    wf = next(e for e in tampered if e["path"] == fx.WORKFLOW_PATH)
+    wf["sha"] = "0" * 40
+    assert any("modifié" in m and fx.WORKFLOW_PATH in m for m in fx.protected_tree_violations(tampered, plan))
+    removed = [e for e in _entries(fx, plan) if e["path"] != fx.CODEOWNERS_PATH]
+    assert any("supprimé" in m for m in fx.protected_tree_violations(removed, plan))
+    added = _entries(fx, plan) + [{"path": "ci/extra.sh", "type": "blob", "mode": "100644", "sha": "1" * 40}]
+    assert any("ajouté" in m and "ci/extra.sh" in m for m in fx.protected_tree_violations(added, plan))
+    link = _entries(fx, plan) + [{"path": "docs/lien", "type": "blob", "mode": "120000", "sha": "2" * 40}]
+    assert any("irrégulier" in m for m in fx.protected_tree_violations(link, plan))
+    sub = _entries(fx, plan) + [{"path": "vendor/x", "type": "commit", "mode": "160000", "sha": "3" * 40}]
+    assert any("irrégulier" in m for m in fx.protected_tree_violations(sub, plan))
+    business = _entries(fx, plan) + [{"path": "app/new.py", "type": "blob", "mode": "100644", "sha": "4" * 40}]
+    assert fx.protected_tree_violations(business, plan) == [], (
+        "le code métier n'est PAS protégé : c'est ce que la campagne produit"
+    )
 
 
 def test_integrity_flags_a_modified_removed_or_added_protected_file_only(fx, plan):
@@ -334,11 +453,12 @@ def test_integrity_flags_a_modified_removed_or_added_protected_file_only(fx, pla
     assert any("modifié" in m for m in fx.integrity_violations(tree, plan["approved_files"]))
     del tree[fx.WORKFLOW_PATH]
     assert any("supprimé" in m for m in fx.integrity_violations(tree, plan["approved_files"]))
-    tree[fx.WORKFLOW_PATH] = plan["approved_files"][fx.WORKFLOW_PATH]
-    tree[".github/workflows/evil.yml"] = "1" * 64
-    assert any("ajouté" in m for m in fx.integrity_violations(tree, plan["approved_files"]))
     tree = dict(plan["approved_files"])
-    tree["app/main.py"] = "2" * 64  # le code métier n'est PAS protégé : c'est ce que la campagne produit
+    tree[".github/workflows/evil.yml"] = "1" * 64
+    tree["ci/evil.lock"] = "1" * 64
+    assert sum("ajouté" in m for m in fx.integrity_violations(tree, plan["approved_files"])) == 2
+    tree = dict(plan["approved_files"])
+    tree["app/main.py"] = "2" * 64
     tree["app/new.py"] = "3" * 64
     assert fx.integrity_violations(tree, plan["approved_files"]) == []
 
@@ -349,8 +469,9 @@ def test_integrity_flags_a_modified_removed_or_added_protected_file_only(fx, pla
 class FakeGitHub:
     """Modélise seulement ce dont le script a besoin ; chaque écriture est journalisée pour prouver ce qui n'a PAS été touché."""
 
-    def __init__(self, fx, plan, *, main_sha=None):
+    def __init__(self, fx, plan, *, main_sha=None, bootstrap_check="success"):
         self.fx, self.plan = fx, plan
+        self.bootstrap_check = bootstrap_check  # success | failure | None (aucun check) | pending (jamais terminé)
         self.refs = {"refs/heads/main": main_sha or fx.SEED_SHA}
         self.commits = {fx.SEED_SHA: {"tree": fx.SEED_TREE_SHA, "parents": []}}
         self.rulesets = {
@@ -368,9 +489,28 @@ class FakeGitHub:
         self.pulls = {4: {"state": "closed"}, 7: {"state": "closed"}}
         self.writes: list = []
         self.trees = {}
-        self.check_runs = {}
-        self.blobs: dict = {}
         self.contents_by_ref: dict = {}
+        self.ruleset_created_after_check = None
+
+    def bootstrap_runs(self):
+        if self.bootstrap_check is None:
+            return []
+        done = self.bootstrap_check in ("success", "failure")
+        return [
+            {
+                "id": 1,
+                "name": "Fixture tests",
+                "app": {"id": 15368},
+                "head_sha": self.plan["bootstrap_sha"],
+                "status": "completed" if done else "in_progress",
+                "conclusion": self.bootstrap_check if done else None,
+            }
+        ]
+
+    def check_runs_for(self, sha):
+        if sha == self.plan["bootstrap_sha"]:
+            return self.bootstrap_runs()
+        return []
 
     def __call__(self, method, path, payload):
         if method != "GET":
@@ -386,6 +526,9 @@ class FakeGitHub:
             }
         if path == "/apps/github-actions":
             return {"id": 15368, "slug": "github-actions"}
+        m = re.fullmatch(rf"{repo}/commits/([0-9a-f]{{40}})/check-runs", path)
+        if m:
+            return {"check_runs": self.check_runs_for(m.group(1))}
         m = re.fullmatch(rf"{repo}/git/ref/(heads/.+)", path)
         if m:
             ref = "refs/" + m.group(1)
@@ -419,6 +562,7 @@ class FakeGitHub:
         if path == f"{repo}/rulesets" and method == "GET":
             return [{"id": r["id"], "name": r["name"]} for r in self.rulesets.values()]
         if path == f"{repo}/rulesets" and method == "POST":
+            self.ruleset_created_after_check = [r["conclusion"] for r in self.bootstrap_runs()] == ["success"]
             self.next_ruleset += 1
             made = {**json.loads(json.dumps(payload)), "id": self.next_ruleset}
             self.rulesets[made["id"]] = made
@@ -458,6 +602,24 @@ def remote(fx, plan):
     return FakeGitHub(fx, plan)
 
 
+class Clock:
+    """Horloge simulée : chaque ``sleep`` fait avancer le temps, donc aucun test n'attend réellement."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def __call__(self):
+        return self.now
+
+
+def apply(fx, plan, remote, **kw):
+    clock = Clock()
+    return fx.apply_plan(remote, plan, order_token=plan["order_token"], sleep=clock.sleep, clock=clock, **kw)
+
+
 def test_apply_without_the_exact_order_token_writes_nothing(fx, plan, remote):
     for token in (None, "", "APPLIQUER-W5-FIXTURE-000000000000", plan["order_token"] + "x"):
         with pytest.raises(fx.FixtureError, match="jeton d'ordre"):
@@ -465,11 +627,12 @@ def test_apply_without_the_exact_order_token_writes_nothing(fx, plan, remote):
     assert remote.writes == []
 
 
-def test_apply_creates_the_bootstrap_branch_and_the_ruleset_and_never_touches_main_or_foreign_resources(
+def test_apply_creates_the_branch_waits_for_its_check_then_creates_the_ruleset_and_never_touches_main_or_foreign_resources(
     fx, plan, remote
 ):
-    result = fx.apply_plan(remote, plan, order_token=plan["order_token"])
+    result = apply(fx, plan, remote)
     assert result["created"] == ["branch", "ruleset"] and result["idempotent"] is False
+    assert remote.ruleset_created_after_check is True, "le ruleset n'est créé qu'APRÈS le check réussi du socle"
     assert remote.refs["refs/heads/collegue-business/bootstrap-w5"] == plan["bootstrap_sha"]
     assert remote.refs["refs/heads/main"] == fx.SEED_SHA
     manifest = result["manifest"]
@@ -483,10 +646,31 @@ def test_apply_creates_the_bootstrap_branch_and_the_ruleset_and_never_touches_ma
     assert fx.verify_remote(remote, plan)["ok"] is True
 
 
+@pytest.mark.parametrize(
+    ("state", "message"),
+    [
+        (None, "ne s'est pas déclenché"),  # le workflow du socle ne tourne pas : jamais un succès présumé
+        ("pending", "ne s'est pas déclenché"),
+        ("failure", "check du socle est rouge"),
+    ],
+)
+def test_apply_never_creates_the_ruleset_without_a_green_bootstrap_check(fx, plan, state, message):
+    remote = FakeGitHub(fx, plan, bootstrap_check=state)
+    with pytest.raises(fx.FixtureError, match=message):
+        apply(fx, plan, remote, check_timeout=60.0)
+    assert not any(path.endswith("/rulesets") for _m, path in remote.writes), "aucun ruleset"
+    assert remote.refs["refs/heads/collegue-business/bootstrap-w5"] == plan["bootstrap_sha"], (
+        "état conservé pour examen"
+    )
+    assert fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"])["removed"] == [
+        "branche collegue-business/bootstrap-w5"
+    ]
+
+
 def test_apply_is_idempotent_and_a_second_run_writes_nothing(fx, plan, remote):
-    fx.apply_plan(remote, plan, order_token=plan["order_token"])
+    apply(fx, plan, remote)
     writes = len(remote.writes)
-    again = fx.apply_plan(remote, plan, order_token=plan["order_token"])
+    again = apply(fx, plan, remote)
     assert again["created"] == [] and again["idempotent"] is True and len(remote.writes) == writes
 
 
@@ -502,11 +686,11 @@ def test_apply_refuses_every_collision_and_unowned_resource_without_any_write(fx
     }
     remote.rulesets[555] = other
     with pytest.raises(fx.FixtureError, match="collision de ruleset"):
-        fx.apply_plan(remote, plan, order_token=plan["order_token"])
+        apply(fx, plan, remote)
     del remote.rulesets[555]
     remote.refs["refs/heads/collegue-business/bootstrap-w5"] = "f" * 40
     with pytest.raises(fx.FixtureError, match="ressource non possédée"):
-        fx.apply_plan(remote, plan, order_token=plan["order_token"])
+        apply(fx, plan, remote)
     del remote.refs["refs/heads/collegue-business/bootstrap-w5"]
     remote.rulesets[600] = {
         **json.loads(json.dumps(plan["ruleset"])),
@@ -514,41 +698,55 @@ def test_apply_refuses_every_collision_and_unowned_resource_without_any_write(fx
         "bypass_actors": [{"actor_id": 1, "actor_type": "RepositoryRole"}],
     }
     with pytest.raises(fx.FixtureError, match="autre contenu"):
-        fx.apply_plan(remote, plan, order_token=plan["order_token"])
+        apply(fx, plan, remote)
     assert remote.writes == []
 
 
 def test_apply_refuses_when_main_is_no_longer_the_seed_or_the_identity_changes(fx, plan):
     moved = FakeGitHub(fx, plan, main_sha="c" * 40)
     with pytest.raises(fx.FixtureError, match="graine immuable"):
-        fx.apply_plan(moved, plan, order_token=plan["order_token"])
+        apply(fx, plan, moved)
     assert moved.writes == []
     inactive = FakeGitHub(fx, plan)
     inactive.rulesets[fx.SEED_RULESET_ID]["enforcement"] = "disabled"
     with pytest.raises(fx.FixtureError, match="ruleset de la graine"):
-        fx.apply_plan(inactive, plan, order_token=plan["order_token"])
+        apply(fx, plan, inactive)
     assert inactive.writes == []
 
 
-def test_verify_detects_a_tampered_branch_file_or_ruleset(fx, plan, remote):
-    fx.apply_plan(remote, plan, order_token=plan["order_token"])
+def test_verify_detects_a_tampered_branch_file_ruleset_or_missing_bootstrap_check(fx, plan):
+    good = FakeGitHub(fx, plan)
+    apply(fx, plan, good)
+    assert fx.verify_remote(good, plan)["ok"] is True
     tampered = FakeGitHub(fx, plan)
-    fx.apply_plan(tampered, plan, order_token=plan["order_token"])
+    apply(fx, plan, tampered)
     rid = next(i for i, r in tampered.rulesets.items() if r["name"] == fx.RULESET_NAME)
     tampered.rulesets[rid]["bypass_actors"] = [{"actor_id": 5, "actor_type": "RepositoryRole"}]
     result = fx.verify_remote(tampered, plan)
     assert not result["ok"] and any("ruleset différent" in p for p in result["problems"])
+    weakened = FakeGitHub(fx, plan)
+    apply(fx, plan, weakened)
+    rid = next(i for i, r in weakened.rulesets.items() if r["name"] == fx.RULESET_NAME)
+    pr_rule = next(r for r in weakened.rulesets[rid]["rules"] if r["type"] == "pull_request")
+    pr_rule["parameters"]["require_code_owner_review"] = False
+    assert any("ruleset différent" in p for p in fx.verify_remote(weakened, plan)["problems"]), (
+        "code owner retiré = écart"
+    )
     moved = FakeGitHub(fx, plan)
-    fx.apply_plan(moved, plan, order_token=plan["order_token"])
+    apply(fx, plan, moved)
     moved.refs["refs/heads/collegue-business/bootstrap-w5"] = "d" * 40
     assert any("au lieu de" in p for p in fx.verify_remote(moved, plan)["problems"])
+    nocheck = FakeGitHub(fx, plan)
+    apply(fx, plan, nocheck)
+    nocheck.bootstrap_check = None
+    assert any("check du socle non réussi" in p for p in fx.verify_remote(nocheck, plan)["problems"])
     assert not fx.verify_remote(FakeGitHub(fx, plan), plan)["ok"], (
         "rien d'appliqué : vérification rouge, pas verte par défaut"
     )
 
 
 def test_cleanup_removes_only_this_campaigns_bootstrap_resources(fx, plan, remote):
-    fx.apply_plan(remote, plan, order_token=plan["order_token"])
+    apply(fx, plan, remote)
     remote.refs["refs/heads/collegue-business/run-etranger"] = "e" * 40
     remote.writes.clear()
     with pytest.raises(fx.FixtureError, match="jeton d'ordre"):
@@ -564,7 +762,7 @@ def test_cleanup_removes_only_this_campaigns_bootstrap_resources(fx, plan, remot
 
 
 def test_cleanup_refuses_a_foreign_branch_or_ruleset_under_our_names(fx, plan, remote):
-    fx.apply_plan(remote, plan, order_token=plan["order_token"])
+    apply(fx, plan, remote)
     remote.refs["refs/heads/collegue-business/bootstrap-w5"] = "9" * 40
     remote.writes.clear()
     with pytest.raises(fx.FixtureError, match="non possédée"):
@@ -572,43 +770,108 @@ def test_cleanup_refuses_a_foreign_branch_or_ruleset_under_our_names(fx, plan, r
     assert not any(m == "DELETE" and "git/refs" in p for m, p in remote.writes)
 
 
-# ── probe : contre-épreuves du check (simulées) ───────────────────────────────────────────────────────────────────────────
+# ── probe : contre-épreuves (simulées) ────────────────────────────────────────────────────────────────────────────────────
+
+# scénario -> (conclusion du check | None, fusion « accepted » | « refused »)
+GOOD = {
+    "green": ("success", "accepted"),
+    "red-test": ("failure", "refused"),
+    "workflow-touch": ("success", "refused"),
+    "codeowners-touch": ("success", "refused"),
+    "lock-touch": ("success", "refused"),
+    "unapproved-dependency": ("failure", "refused"),
+    "symlink": ("failure", "refused"),
+    "seed-base": (None, "refused"),
+}
 
 
 class ProbeServer(FakeGitHub):
-    """Ajoute pulls, contenus et check-runs : le comportement de chaque scénario est INJECTÉ pour éprouver l'évaluation du probe."""
+    """Ajoute pulls, contenus, objets Git, fusions et check-runs : le comportement de chaque scénario est INJECTÉ."""
 
-    def __init__(self, fx, plan, outcomes):
-        super().__init__(fx, plan)
-        self.outcomes = outcomes  # scénario -> (conclusion | None, mergeable_state)
+    def __init__(self, fx, plan, outcomes, **kw):
+        super().__init__(fx, plan, **kw)
+        self.outcomes = outcomes
         self.counter = 0
-        self.heads = {}
+        self.heads = {}  # branche de tête -> SHA courant
         self.prs = {}
+        self.merges = []
         self.spoof_mode = "refused"  # refused | foreign (acceptée, autre application) | counted (acceptée, application Actions : défaut)
         self.spoofed = {}
-        fx.apply_plan(self, plan, order_token=plan["order_token"])
+        self.refuse_seed_base = True
+        self.provenance_ok = True
+        self.tree_override = None
+        self.symlink_commits = []
+        apply(fx, plan, self)
         self.writes.clear()
+
+    def scenario_of(self, branch):
+        return self.fx.probe_scenarios(self.plan)[int(branch.rsplit("-", 1)[-1])]["id"]
+
+    def head_branch(self, sha):
+        return next(h for h, s in self.heads.items() if s == sha)
 
     def __call__(self, method, path, payload):
         repo = f"/repos/{self.fx.REPOSITORY}"
+        if (
+            method == "POST"
+            and path == f"{repo}/git/refs"
+            and payload["sha"] == self.fx.SEED_SHA
+            and self.refuse_seed_base
+        ):
+            if payload["ref"].startswith("refs/heads/collegue-business/probe-"):
+                self.writes.append((method, path))
+                raise self.fx.ApiError(422, "Repository rule violations found: required status check")
+        if method == "POST" and path == f"{repo}/git/refs" and payload["ref"].startswith("refs/heads/collegue-probe/"):
+            self.heads[payload["ref"].removeprefix("refs/heads/")] = payload["sha"]
         if method == "PUT" and path.startswith(f"{repo}/contents/"):
             self.writes.append((method, path))
             self.counter += 1
             sha = f"{self.counter:040x}"
             self.heads[payload["branch"]] = sha
             return {"commit": {"sha": sha}}
+        if method == "POST" and path == f"{repo}/git/blobs":
+            self.writes.append((method, path))
+            return {"sha": "b" * 40}
+        if (
+            method == "POST"
+            and path == f"{repo}/git/trees"
+            and "base_tree" in payload
+            and payload["tree"][0]["mode"] == "120000"
+        ):
+            self.writes.append((method, path))
+            self.symlink_commits.append(payload["tree"][0]["path"])
+            return {"sha": "7" * 40}
+        if method == "POST" and path == f"{repo}/git/commits" and payload["tree"] == "7" * 40:
+            self.writes.append((method, path))
+            self.counter += 1
+            return {"sha": f"{self.counter:040x}"}
+        m = re.fullmatch(rf"{repo}/git/refs/heads/(collegue-probe/.+)", path)
+        if m and method == "PATCH":
+            self.writes.append((method, path))
+            self.heads[m.group(1)] = payload["sha"]
+            return {"object": {"sha": payload["sha"]}}
         if method == "POST" and path == f"{repo}/pulls":
             self.writes.append((method, path))
             number = 100 + len(self.prs)
             self.prs[number] = {"head": payload["head"], "base": payload["base"], "state": "open"}
             self.pulls[number] = self.prs[number]
             return {"number": number}
+        m = re.fullmatch(rf"{repo}/pulls/(\d+)/merge", path)
+        if m and method == "PUT":
+            self.writes.append((method, path))
+            pr = self.prs[int(m.group(1))]
+            self.merges.append((pr["head"], payload["sha"]))
+            behaviour = self.outcomes[self.scenario_of(pr["head"])][1]
+            if behaviour == "refused":
+                raise self.fx.ApiError(405, "Repository rule violations found: Waiting on code owner review")
+            return {"merged": True, "message": "Pull Request successfully merged"}
         if method == "POST" and path == f"{repo}/check-runs":
             self.writes.append((method, path))
             if self.spoof_mode == "refused":
                 raise self.fx.ApiError(403, "Resource not accessible by personal access token")
             self.spoofed.setdefault(payload["head_sha"], []).append(
                 {
+                    "id": 5000,
                     "name": payload["name"],
                     "app": {"id": 15368 if self.spoof_mode == "counted" else 99},
                     "head_sha": payload["head_sha"],
@@ -617,18 +880,38 @@ class ProbeServer(FakeGitHub):
                 }
             )
             return {"id": 1}
-        m = re.fullmatch(rf"{repo}/commits/([0-9a-f]{{40}})/check-runs", path)
+        m = re.fullmatch(rf"{repo}/actions/jobs/(\d+)", path)
         if m:
-            head = next(h for h, s in self.heads.items() if s == m.group(1))
-            scenario = head.rsplit("-", 1)[-1]
-            conclusion, _state = self.outcomes[int(scenario)]
-            runs = list(self.spoofed.get(m.group(1), []))
+            head = self.head_for_job(int(m.group(1)))
+            if head is None or not self.provenance_ok:
+                raise self.fx.ApiError(404, "Not Found")
+            return {"head_sha": head, "run_id": int(m.group(1)) + 1}
+        m = re.fullmatch(rf"{repo}/actions/runs/(\d+)", path)
+        if m:
+            head = self.head_for_job(int(m.group(1)) - 1)
+            return {"path": self.fx.WORKFLOW_PATH, "head_sha": head, "event": "pull_request"}
+        m = re.fullmatch(rf"{repo}/git/trees/([0-9a-f]{{40}})\?recursive=1", path)
+        if m:
+            if self.tree_override is not None:
+                return {"truncated": False, "tree": self.tree_override}
+            entries = [
+                {"path": p, "type": "blob", "mode": "100644", "sha": self.fx.git_blob_sha(t.encode())}
+                for p, t in self.plan["files"].items()
+            ]
+            return {"truncated": False, "tree": entries}
+        m = re.fullmatch(rf"{repo}/commits/([0-9a-f]{{40}})/check-runs", path)
+        if m and m.group(1) in self.heads.values():
+            sha = m.group(1)
+            scenario = self.scenario_of(self.head_branch(sha))
+            conclusion = self.outcomes[scenario][0]
+            runs = list(self.spoofed.get(sha, []))
             if conclusion is not None:
                 runs.append(
                     {
+                        "id": 9000 + list(self.heads.values()).index(sha) * 10,
                         "name": "Fixture tests",
                         "app": {"id": 15368},
-                        "head_sha": m.group(1),
+                        "head_sha": sha,
                         "status": "completed",
                         "conclusion": conclusion,
                     }
@@ -637,64 +920,116 @@ class ProbeServer(FakeGitHub):
         m = re.fullmatch(rf"{repo}/pulls/(\d+)", path)
         if m and method == "GET":
             pr = self.prs[int(m.group(1))]
-            idx = int(pr["head"].rsplit("-", 1)[-1])
-            return {"mergeable_state": self.outcomes[idx][1], "state": pr["state"]}
-        if method == "GET" and "/contents/tests/test_probe.py" in path:
-            raise self.fx.ApiError(404, "Not Found")
+            return {"state": pr["state"]}
+        if method == "GET" and "/contents/" in path and "?ref=collegue-probe/" in path:
+            target = path.split("/contents/", 1)[1].split("?ref=")[0]
+            if target == "tests/test_probe.py":
+                raise self.fx.ApiError(404, "Not Found")
+            return {"content": base64.b64encode(self.plan["files"][target].encode()).decode(), "sha": "5" * 40}
         return super().__call__(method, path, payload)
 
-
-GOOD = {0: ("success", "clean"), 1: ("failure", "blocked"), 2: ("failure", "blocked"), 3: (None, "blocked")}
+    def head_for_job(self, job_id):
+        index = (job_id - 9000) // 10
+        values = list(self.heads.values())
+        return values[index] if 0 <= index < len(values) else None
 
 
 def no_sleep(_seconds):
     return None
 
 
-def test_the_probe_passes_when_each_counter_proof_behaves_and_cleans_up_everything(fx, plan):
-    server = ProbeServer(fx, plan, GOOD)
-    ticks = iter(range(10_000))
-    result = fx.run_probe(
+def probe(fx, plan, server, **kw):
+    ticks = iter(range(100_000))
+    return fx.run_probe(
         server,
         plan,
         order_token=plan["order_token"],
         probe_id="probe-1",
         sleep=no_sleep,
         clock=lambda: float(next(ticks)) * 100,
+        **kw,
     )
+
+
+def test_the_probe_passes_when_each_counter_proof_behaves_and_cleans_up_everything(fx, plan):
+    server = ProbeServer(fx, plan, GOOD)
+    result = probe(fx, plan, server)
     assert result["ok"] is True, result
-    assert [r["scenario"] for r in result["results"]] == ["green", "red-test", "forged-workflow", "missing-check"]
+    assert [r["scenario"] for r in result["results"]] == list(GOOD)
     assert not [r for r in server.refs if "probe" in r], "toutes les branches de sonde sont supprimées"
     assert all(pr["state"] == "closed" for pr in server.prs.values())
-    red = result["results"][1]
-    assert red["spoof"]["accepted_by_api"] is False and red["spoof"]["counted"] is False
-    assert red["checks_seen"] == [{"name": "Fixture tests", "app_id": 15368, "head_sha": red["head_sha"]}]
     assert server.refs["refs/heads/collegue-business/bootstrap-w5"] == plan["bootstrap_sha"]
+    by = {r["scenario"]: r for r in result["results"]}
+    assert by["green"]["merge"]["accepted"] is True and by["green"]["provenance"]["ok"] is True
+    assert by["red-test"]["spoof"]["accepted_by_api"] is False and by["red-test"]["spoof"]["counted"] is False
+    for touched in ("workflow-touch", "codeowners-touch", "lock-touch"):
+        assert by[touched]["check_observed"] == "success" and by[touched]["merge"]["accepted"] is False, (
+            "check VERT et fusion refusée : seul le propriétaire explique le refus"
+        )
+    assert by["seed-base"]["creation"] == "refused" and by["seed-base"]["ok"] is True
+    assert server.symlink_commits == ["docs/lien-sonde"], (
+        "le lien symbolique est poussé par l'API Git Data (mode 120000)"
+    )
+    # chaque fusion a été tentée sur la TÊTE EXACTE observée
+    assert all(
+        sha == by[name]["head_sha"]
+        for (head, sha), name in zip(server.merges, [s for s in GOOD if s != "seed-base"], strict=True)
+    )
 
 
 @pytest.mark.parametrize(
-    "bad",
+    "scenario, outcome",
     [
-        {1: ("success", "clean")},  # un test rouge qui donnerait un check vert
-        {2: ("success", "clean")},  # un workflow altéré qui donnerait un faux succès
-        {3: ("success", "clean")},  # un check qui apparaît là où il ne devait pas exister
-        {0: ("failure", "blocked")},  # le nominal rouge
-        {1: ("failure", "clean")},  # check rouge mais PR fusionnable
+        ("red-test", ("success", "refused")),  # un test rouge qui donnerait un check vert
+        ("red-test", ("failure", "accepted")),  # check rouge mais fusion acceptée
+        ("workflow-touch", ("success", "accepted")),  # la protection du propriétaire est INEFFICACE
+        ("codeowners-touch", ("success", "accepted")),
+        ("lock-touch", ("success", "accepted")),
+        ("workflow-touch", ("failure", "refused")),  # refus mais pas isolé : le check n'était pas vert
+        ("unapproved-dependency", ("success", "refused")),  # une dépendance hors pile ne rend pas le check rouge
+        ("symlink", ("success", "refused")),
+        ("green", ("success", "refused")),  # la voie nominale ne fusionne pas
+        ("green", ("failure", "refused")),  # le workflow ne passe pas
+        ("green", (None, "accepted")),  # le workflow ne se déclenche pas : jamais un succès présumé
     ],
 )
-def test_the_probe_fails_on_a_false_success_or_a_mergeable_red_pr(fx, plan, bad):
-    server = ProbeServer(fx, plan, {**GOOD, **bad})
-    ticks = iter(range(10_000))
-    result = fx.run_probe(
-        server,
-        plan,
-        order_token=plan["order_token"],
-        probe_id="probe-2",
-        sleep=no_sleep,
-        clock=lambda: float(next(ticks)) * 100,
-    )
-    assert result["ok"] is False
+def test_the_probe_fails_when_any_protection_does_not_hold(fx, plan, scenario, outcome):
+    server = ProbeServer(fx, plan, {**GOOD, scenario: outcome})
+    result = probe(fx, plan, server, observe_missing_seconds=1.0, timeout=3.0)
+    assert result["ok"] is False and not {r["scenario"]: r["ok"] for r in result["results"]}[scenario]
     assert not [r for r in server.refs if "probe" in r], "même en échec, rien ne reste"
+
+
+def test_the_probe_fails_if_a_base_can_be_created_from_the_seed_and_a_check_appears(fx, plan):
+    server = ProbeServer(fx, plan, {**GOOD, "seed-base": ("success", "refused")})
+    server.refuse_seed_base = False
+    result = probe(fx, plan, server, observe_missing_seconds=1.0)
+    seed = {r["scenario"]: r for r in result["results"]}["seed-base"]
+    assert seed["creation"] == "accepted" and seed["ok"] is False and result["ok"] is False
+
+
+def test_the_probe_accepts_an_unrefused_seed_base_only_if_no_check_exists_and_the_merge_is_refused(fx, plan):
+    server = ProbeServer(fx, plan, GOOD)
+    server.refuse_seed_base = False
+    result = probe(fx, plan, server, observe_missing_seconds=1.0)
+    seed = {r["scenario"]: r for r in result["results"]}["seed-base"]
+    assert seed["creation"] == "accepted" and "note" in seed and seed["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "ok"),
+    [
+        ("refused", True),  # une PAT ne peut pas créer de check-run
+        ("foreign", True),  # acceptée mais d'une autre application : ne compte pas pour le ruleset
+        ("counted", False),  # un faux check qui compterait = le contrôle est contournable
+    ],
+)
+def test_the_probe_proves_that_a_forged_check_from_another_actor_never_counts(fx, plan, mode, ok):
+    server = ProbeServer(fx, plan, GOOD)
+    server.spoof_mode = mode
+    result = probe(fx, plan, server)
+    assert result["ok"] is ok, result
+    assert not [r for r in server.refs if "probe" in r]
 
 
 def test_the_probe_requires_the_order_a_valid_id_and_a_verified_remote(fx, plan):
@@ -710,6 +1045,38 @@ def test_the_probe_requires_the_order_a_valid_id_and_a_verified_remote(fx, plan)
     assert blank.writes == []
 
 
+# ── provenance d'un check (lectures seules) ───────────────────────────────────────────────────────────────────────────────
+
+
+def test_provenance_accepts_only_a_real_job_of_the_approved_workflow_with_an_intact_protected_tree(fx, plan):
+    server = ProbeServer(fx, plan, GOOD)
+    probe(fx, plan, server)  # remplit les têtes simulées
+    head = next(iter(server.heads.values()))  # tête du scénario « green »
+    server.outcomes = GOOD  # les têtes ont été supprimées côté refs, pas côté modèle
+    ok, why = fx.check_provenance(server, head, plan)
+    assert ok is True, why
+    server.provenance_ok = False  # le check n'est pas un job réel (publié par l'API des checks)
+    ok, why = fx.check_provenance(server, head, plan)
+    assert ok is False and "pas un job" in why
+    server.provenance_ok = True
+    server.tree_override = [e for e in server_tree(fx, plan) if e["path"] != fx.CODEOWNERS_PATH]
+    ok, why = fx.check_provenance(server, head, plan)
+    assert ok is False and "supprimé" in why
+    server.tree_override = None
+    server.spoofed[head] = [run(app=99, head=head)]
+    # un faux check d'une autre application ne remplace pas le vrai ; sans vrai check il n'y a pas de provenance
+    server.outcomes = {**GOOD, "green": (None, "accepted")}
+    ok, why = fx.check_provenance(server, head, plan)
+    assert ok is False and "non réussi" in why
+
+
+def server_tree(fx, plan):
+    return [
+        {"path": p, "type": "blob", "mode": "100644", "sha": fx.git_blob_sha(t.encode())}
+        for p, t in plan["files"].items()
+    ]
+
+
 def test_the_script_never_reads_a_credentials_file_nor_prints_the_token(fx):
     source = SCRIPT.read_text(encoding="utf-8")
     assert "GITHUB_TOKEN" in source and not re.search(r"(?<![A-Za-z_.])open\(", source)
@@ -718,25 +1085,58 @@ def test_the_script_never_reads_a_credentials_file_nor_prints_the_token(fx):
         fx.GitHubApi("")
 
 
-@pytest.mark.parametrize(
-    ("mode", "ok"),
-    [
-        ("refused", True),  # une PAT ne peut pas créer de check-run
-        ("foreign", True),  # acceptée mais d'une autre application : ne compte pas pour le ruleset
-        ("counted", False),  # un faux check qui compterait = le contrôle est contournable
-    ],
-)
-def test_the_probe_proves_that_a_forged_check_from_another_actor_never_counts(fx, plan, mode, ok):
-    server = ProbeServer(fx, plan, GOOD)
-    server.spoof_mode = mode
-    ticks = iter(range(10_000))
-    result = fx.run_probe(
-        server,
-        plan,
-        order_token=plan["order_token"],
-        probe_id="probe-4",
-        sleep=no_sleep,
-        clock=lambda: float(next(ticks)) * 100,
+# ── exécution RÉELLE du script de garde du workflow (bash) ────────────────────────────────────────────────────────────────
+
+
+def _run_guard(fx, tmp_path, build):
+    import subprocess
+
+    workspace = tmp_path / "ws"
+    (workspace / "ci").mkdir(parents=True)
+    (workspace / ".git").mkdir()
+    (workspace / "requirements.txt").write_text("fastapi==1\n")
+    (workspace / "ci" / "requirements-approved.lock").write_text("fastapi==1 \\\n    --hash=sha256:" + "0" * 64 + "\n")
+    build(workspace)
+    guard = next(s for s in _steps(fx) if s.get("name", "").startswith("Garde"))["run"]
+    return subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", guard],
+        env={"PATH": os.environ["PATH"], "GITHUB_WORKSPACE": str(workspace)},
+        capture_output=True,
+        text=True,
     )
-    assert result["ok"] is ok, result
-    assert not [r for r in server.refs if "probe" in r]
+
+
+def test_the_guard_script_accepts_a_regular_tree_and_refuses_every_symlink_and_irregular_dependency_file(fx, tmp_path):
+    assert _run_guard(fx, tmp_path / "a", lambda w: None).returncode == 0
+    docker_socket = lambda w: (w / "docs").mkdir() or (w / "docs" / "sock").symlink_to("/var/run/docker.sock")  # noqa: E731
+    refused = _run_guard(fx, tmp_path / "b", docker_socket)
+    assert refused.returncode == 1 and "liens symboliques" in refused.stdout + refused.stderr
+
+    def requirements_to_socket(w):
+        (w / "requirements.txt").unlink()
+        (w / "requirements.txt").symlink_to("/var/run/docker.sock")
+
+    assert _run_guard(fx, tmp_path / "c", requirements_to_socket).returncode == 1
+
+    def lock_missing(w):
+        (w / "ci" / "requirements-approved.lock").unlink()
+
+    missing = _run_guard(fx, tmp_path / "d", lock_missing)
+    assert missing.returncode == 1 and "fichier régulier" in missing.stdout + missing.stderr
+
+    def link_inside_git_only(w):
+        (w / ".git" / "lien").symlink_to("/etc/hostname")
+
+    assert _run_guard(fx, tmp_path / "e", link_inside_git_only).returncode == 0, (
+        "les liens internes à .git ne sont pas montés"
+    )
+
+
+def test_the_workflow_satisfies_the_job_detection_rule_b_applies_to_approved_workflows(fx):
+    """Réplique de ``_workflow_jobs`` de B (SHA ``13548f6``) : déclencheur ``pull_request`` ET job nommé comme le check requis."""
+    document = _workflow(fx)
+    triggers = document.get("on", document.get(True))
+    triggered = list(triggers) if isinstance(triggers, dict) else [triggers]
+    assert "pull_request" in triggered
+    names = [str((job or {}).get("name") or key) for key, job in document["jobs"].items()]
+    assert fx.REQUIRED_CHECK in names

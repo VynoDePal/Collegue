@@ -8,8 +8,10 @@
 # STATE_DATABASE_URL propres à ce run). L'échéance de 900 s est persistée dans ce registre : aucune étape ne la remet à zéro.
 #
 # Environnement GitHub « w5-gemma-campaign » : propre à la campagne, créé vide ; le manager y injecte la clé TEMPORAIRE
-# (W5_GOOGLE_API_KEY) après la livraison W5 et la retire à la fin, même sur refus. La clé n'existe QUE dans l'étape de campagne,
-# où elle n'atteint que le service du courtier (processus de confiance) : jamais l'environnement du codeur, du gate ni des tests.
+# (W5_GOOGLE_API_KEY) après la livraison W5 et la retire à la fin, même sur refus. La clé n'existe QUE dans l'étape de campagne, sous le
+# nom ``LLM_API_KEY`` (le seul que les réglages du produit lisent ; ce n'est pas le secret du nightly) : elle n'atteint que le service du
+# courtier (processus de confiance), jamais l'environnement du codeur, du gate ni des tests. Un scanner de confiance (scripts/w5_leak_scan.py)
+# la cherche, en octets et par la variable d'environnement, dans tout ce qui sera déposé ; un fichier contaminé n'est jamais déposé.
 # Le contrôle des deux modèles Gemma (canaris) consomme la MÊME enveloppe : aucune estimation de secours, aucune seconde campagne.
 #
 # Ordre (une étape qui échoue arrête tout, aucune étape suivante ne s'exécute) :
@@ -18,7 +20,8 @@
 #   2. image du sandbox (construite seulement si 1. a réussi), puis préflight COMPLET (pile des oracles + lecteur PDF réel), sans clé.
 #   3. campagne : c'est la SEULE étape qui reçoit la clé du fournisseur de modèle ; le courtier est activé, les modèles contrôlés,
 #      puis BUILD, R04, R05 et le nettoyage unique, dans l'enveloppe commune.
-#   4. nettoyage idempotent des ressources éphémères, puis dépôt du rapport (machine JSON + humain) ET du registre durable, sans secret.
+#   4. nettoyage idempotent des ressources éphémères, puis dépôt du rapport (machine JSON + humain) ET du registre durable, sans secret
+#      (fichier contaminé : mis en quarantaine, jamais déposé, campagne rouge ; les preuves saines et le nettoyage sont conservés).
 # Un préflight qui ne peut pas ÉTABLIR un plafond ou une protection termine « validation incomplète » (code 3) AVANT toute
 # émission : ce n'est ni un succès ni une preuve du parcours avec modèles réels.
 
@@ -80,8 +83,11 @@ jobs:
       LLM_PROVIDER: gemini
       LLM_MODEL: gemma-4-31b-it
       CODER_FALLBACK_MODELS: gemma-4-26b-a4b-it
-      # Le codeur n'a AUCUN réseau : il parle au relais loopback de l'image, qui recopie vers le socket Unix du courtier.
-      SANDBOX_IMAGE: collegue-sandbox-openhands:ci
+      # Le codeur n'a AUCUN réseau : il parle au relais loopback de l'image, qui recopie vers le socket Unix du courtier. L'image est celle du
+      # transport broker (SDK/outils seuls, pile métier approuvée, verrou audité) : docker/sandbox/Dockerfile.broker.
+      BROKER_GLOBAL_DEADLINE_SECONDS: "900"
+      BROKER_RUN_DIR: /tmp/cbk
+      SANDBOX_IMAGE: collegue-sandbox-broker:ci
       SANDBOX_NETWORK: none
       SANDBOX_MEMORY: 6g
       SANDBOX_CPUS: "2.0"
@@ -101,7 +107,8 @@ jobs:
             exit 1
           fi
           root="$RUNNER_TEMP/w5-business"
-          mkdir -p "$root/home" "$root/report" "$root/pip-cache"
+          mkdir -p "$root/home" "$root/report" "$root/pip-cache" "$BROKER_RUN_DIR"
+          chmod 700 "$BROKER_RUN_DIR"
           # Manifeste du socle de la fixture (variable d'environnement GitHub, non secrète) : le préflight le relit par l'API,
           # il n'est jamais une preuve à lui seul.
           printf '%s' "$W5_BOOTSTRAP_MANIFEST_JSON" > "$root/bootstrap-manifest.json"
@@ -148,7 +155,7 @@ jobs:
       - name: Construire l'image du sandbox
         if: steps.preflight_static.outcome == 'success'
         shell: bash
-        run: docker build -f docker/sandbox/Dockerfile.openhands -t "$SANDBOX_IMAGE" .
+        run: docker build -f docker/sandbox/Dockerfile.broker -t "$SANDBOX_IMAGE" .
 
       - name: Préflight complet (pile des oracles et lecteur PDF réel)
         id: preflight_full
@@ -167,20 +174,21 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
-          GOOGLE_API_KEY: ${{ secrets.W5_GOOGLE_API_KEY }}
+          LLM_API_KEY: ${{ secrets.W5_GOOGLE_API_KEY }}
         run: |
           set +e
           python -m collegue.pilot.w4_business run \
             --campaign-id "$W4_BUSINESS_CAMPAIGN_ID" \
             --output "$W4_REPORT_DIR/campaign.json" --human "$W4_REPORT_DIR/campaign.txt"
           status=$?
+          # Scanner de confiance : valeur lue dans l'environnement, tous les fichiers (binaires compris), jamais affichée ; un fichier qui la
+          # contient est mis en quarantaine (pas déposé) et la campagne est rouge, sans rien supprimer d'autre.
+          python scripts/w5_leak_scan.py --env LLM_API_KEY --quarantine "$RUNNER_TEMP/w5-quarantine" \
+            --report "$RUNNER_TEMP/w5-leak-scan.json" "$W4_REPORT_DIR" "$COLLEGUE_HOME"
+          scan=$?
+          cp "$RUNNER_TEMP/w5-leak-scan.json" "$W4_REPORT_DIR/leak-scan.json"
           set -e
-          # Aucun dépôt d'artefact ne doit contenir la clé : un fichier qui la contient est supprimé et la campagne est rouge.
-          if [ -n "$GOOGLE_API_KEY" ] && grep -rIlF -e "$GOOGLE_API_KEY" "$W4_REPORT_DIR" "$COLLEGUE_HOME" > "$RUNNER_TEMP/leaks.txt"; then
-            xargs -r rm -f < "$RUNNER_TEMP/leaks.txt"
-            echo "::error::la clé du fournisseur figurait dans un fichier de sortie : supprimé, campagne invalidée"
-            status=1
-          fi
+          if [ "$scan" -ne 0 ]; then status=1; fi
           exit "$status"
 
       - name: Nettoyage idempotent des ressources éphémères
@@ -204,6 +212,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: w5-business-registry
-          path: ${{ env.COLLEGUE_HOME }}
+          path: ${{ env.COLLEGUE_HOME }}/*.sqlite3*
           if-no-files-found: warn
           retention-days: 30

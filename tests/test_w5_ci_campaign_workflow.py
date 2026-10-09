@@ -8,6 +8,7 @@ et rapports toujours déposés, aucune variable de prix, nightly intact.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -94,6 +95,9 @@ def test_the_envelope_models_and_transport_are_exactly_the_agreed_ones(job):
         "LLM_MODEL": "gemma-4-31b-it",
         "CODER_FALLBACK_MODELS": "gemma-4-26b-a4b-it",
         "SANDBOX_NETWORK": "none",
+        "BROKER_GLOBAL_DEADLINE_SECONDS": "900",
+        "BROKER_RUN_DIR": "/tmp/cbk",
+        "SANDBOX_IMAGE": "collegue-sandbox-broker:ci",
     }
     for name, value in expected.items():
         assert env[name].lower() == value, name
@@ -109,14 +113,19 @@ def test_the_provider_key_exists_only_in_the_campaign_step_under_one_name_and_ne
     holders = [s["name"] for s in job["steps"] if any(re.search(r"API_KEY", k) for k in s.get("env", {}))]
     assert holders == [CAMPAIGN_STEP]
     campaign = step_named(job, "Campagne réelle")
-    assert set(campaign["env"]) == {"GITHUB_TOKEN", "GOOGLE_API_KEY"}
-    assert campaign["env"]["GOOGLE_API_KEY"] == "${{ secrets.W5_GOOGLE_API_KEY }}"
+    assert set(campaign["env"]) == {"GITHUB_TOKEN", "LLM_API_KEY"}
+    assert campaign["env"]["LLM_API_KEY"] == "${{ secrets.W5_GOOGLE_API_KEY }}", (
+        "LLM_API_KEY : le seul nom lu par les réglages du produit"
+    )
     assert not any("secrets." in str(v) for v in job["env"].values()), "aucun secret au niveau du job"
     for step in job["steps"]:
         assert "secrets." not in step.get("run", ""), "les secrets passent par env:, jamais par le script"
     assert raw.count("secrets.W5_GOOGLE_API_KEY") == 1
-    for stale in ("INTEGRATION_LLM_API_KEY", "GEMINI_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for stale in ("INTEGRATION_LLM_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         assert stale not in raw, f"{stale} : l'ancienne clé du nightly ne sert pas à cette campagne"
+    assert not re.search(r"(?<!W5_)GOOGLE_API_KEY", raw), (
+        "GOOGLE_API_KEY est ignoré par les réglages du produit : le nom est LLM_API_KEY"
+    )
 
 
 def test_preflights_receive_only_the_read_token_and_run_before_anything_paid(job):
@@ -139,7 +148,17 @@ def test_the_campaign_runs_once_and_a_leaked_key_invalidates_it(job):
     run = step_named(job, "Campagne réelle")["run"]
     assert run.count("w4_business run") == 1, "une seule exécution, aucune boucle ni relance"
     assert not re.search(r"\b(while|until)\b|\bfor\b|\|\|", run.replace("--campaign-id", ""))
-    assert "grep -rIlF" in run and "$GOOGLE_API_KEY" in run and "rm -f" in run, "aucune clé dans un fichier déposé"
+    assert "python scripts/w5_leak_scan.py --env LLM_API_KEY" in run, (
+        "valeur lue dans l'environnement par le scanner, jamais dans l'argv"
+    )
+    assert "grep" not in run and "-I" not in run.split("w5_leak_scan.py", 1)[1].split("\n")[0], (
+        "ni grep (valeur dans l'argv), ni -I (binaires ignorés)"
+    )
+    assert "$LLM_API_KEY" not in run and "${LLM_API_KEY" not in run, (
+        "la valeur de la clé n'est jamais développée dans une commande"
+    )
+    assert '--quarantine "$RUNNER_TEMP/w5-quarantine"' in run and "leak-scan.json" in run
+    assert 'if [ "$scan" -ne 0 ]; then status=1; fi' in run, "toute fuite ou analyse incomplète rend la campagne rouge"
     assert run.rstrip().endswith('exit "$status"'), "le code de retour de la campagne est conservé"
 
 
@@ -151,7 +170,9 @@ def test_cleanup_always_runs_with_the_fixture_token_only_and_report_and_registry
     assert [u["with"]["name"] for u in uploads] == ["w5-business-report", "w5-business-registry"]
     assert all(u["if"] == "always()" for u in uploads)
     assert all(job["steps"].index(cleanup) < job["steps"].index(u) for u in uploads)
-    assert uploads[1]["with"]["path"] == "${{ env.COLLEGUE_HOME }}", "le registre durable (budget, échéance, identité)"
+    assert uploads[1]["with"]["path"] == "${{ env.COLLEGUE_HOME }}/*.sqlite3*", (
+        "le registre durable seul (pas les espaces de travail)"
+    )
 
 
 def test_the_campaign_id_is_validated_before_it_reaches_the_environment_file_and_the_registry_is_private(job):
@@ -190,4 +211,92 @@ def test_the_general_ci_uses_no_real_model_and_keeps_the_five_required_check_nam
     assert parsed["jobs"]["pytest"]["strategy"]["matrix"]["python-version"] == ["3.11", "3.12"]
     assert "secrets." not in text.replace("secrets.GITHUB_TOKEN", ""), (
         "aucun secret (donc aucun modèle réel) dans la CI générale"
+    )
+
+
+def test_the_campaign_uses_the_audited_broker_image_and_builds_it_before_the_full_preflight(job):
+    names = [s.get("name", "") for s in job["steps"]]
+    build = step_named(job, "Construire l'image du sandbox")
+    assert "docker/sandbox/Dockerfile.broker" in build["run"] and "Dockerfile.openhands" not in build["run"]
+    assert '-t "$SANDBOX_IMAGE"' in build["run"] and job["env"]["SANDBOX_IMAGE"].startswith("collegue-sandbox-broker:")
+    assert names.index(build["name"]) < names.index(step_named(job, "Préflight complet")["name"])
+    assert "BROKER_RUN_DIR" in step_named(job, "Initialiser les chemins")["run"], (
+        "racine COURTE des sockets créée et privée"
+    )
+    assert "chmod 700" in step_named(job, "Initialiser les chemins")["run"]
+
+
+# ── exécution RÉELLE du script bash de l'étape de campagne (le produit est remplacé par une doublure) ──────────────────────────────
+
+
+def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into):
+    import os
+    import subprocess
+    import sys
+
+    step = step_named(job, "Campagne réelle")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "python"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "collegue.pilot.w4_business" ]; then\n'
+        '  echo "{}" > "$W4_REPORT_DIR/campaign.json"; echo ok > "$W4_REPORT_DIR/campaign.txt"\n'
+        '  printf "registre" > "$COLLEGUE_HOME/camp.sqlite3"\n'
+        '  if [ -n "$FAKE_LEAK_INTO" ]; then printf "xx%s\\0yy" "$LLM_API_KEY" > "$FAKE_LEAK_INTO"; fi\n'
+        '  exit "$FAKE_RC"\n'
+        "fi\n"
+        f'exec {sys.executable} "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    report, home, temp = tmp_path / "report", tmp_path / "home", tmp_path / "temp"
+    for folder in (report, home, temp):
+        folder.mkdir()
+    key = "FAKE-" + "step-key-0123456789abcdef"
+    env = {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "RUNNER_TEMP": str(temp),
+        "W4_REPORT_DIR": str(report),
+        "COLLEGUE_HOME": str(home),
+        "W4_BUSINESS_CAMPAIGN_ID": "w5-test-001",
+        "LLM_API_KEY": key,
+        "FAKE_RC": str(campaign_rc),
+        "FAKE_LEAK_INTO": str(leak_into(report, home)) if leak_into else "",
+    }
+    done = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60
+    )
+    return done, report, home, key
+
+
+@pytest.mark.parametrize(
+    ("campaign_rc", "leak", "expected_rc", "report_kept", "registry_kept"),
+    [
+        (0, None, 0, True, True),  # campagne saine : verte, tout est déposé
+        (3, None, 3, True, True),  # validation incomplète : le code de retour de la campagne est conservé
+        (0, lambda r, h: r / "campaign.txt", 1, False, True),  # clé dans un rapport : rapport écarté, campagne rouge
+        (
+            0,
+            lambda r, h: h / "camp.sqlite3",
+            1,
+            True,
+            False,
+        ),  # clé dans le registre BINAIRE : registre écarté seulement
+        (3, lambda r, h: r / "campaign.txt", 1, False, True),  # une fuite l'emporte sur un code de retour déjà non nul
+    ],
+)
+def test_the_real_campaign_step_script_turns_a_leak_into_a_red_run_without_uploading_the_contaminated_file(
+    job, tmp_path, campaign_rc, leak, expected_rc, report_kept, registry_kept
+):
+    done, report, home, key = _run_campaign_step(job, tmp_path, campaign_rc=campaign_rc, leak_into=leak)
+    assert done.returncode == expected_rc, done.stdout + done.stderr
+    assert (report / "campaign.txt").exists() is report_kept
+    assert (home / "camp.sqlite3").exists() is registry_kept
+    assert (report / "campaign.json").exists(), "les preuves saines sont conservées"
+    scan = json.loads((report / "leak-scan.json").read_text())
+    assert scan["verdict"] == ("leak" if leak else "clean")
+    assert key not in done.stdout + done.stderr + (report / "leak-scan.json").read_text(), (
+        "la valeur n'est jamais affichée"
     )

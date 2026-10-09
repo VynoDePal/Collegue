@@ -95,6 +95,34 @@ sandbox-openhands = [
     "pip-audit>=2.9.0",
 ]
 
+# Pile métier APPROUVÉE de la fixture (FastAPI + SQLite + Alembic + PDF) : exacte, partagée par l'image du transport
+# broker (docker/sandbox/Dockerfile.broker) et par le verrou haché que le workflow « Fixture tests » installe hors du
+# code candidat (ci/requirements-approved.lock du socle) : mêmes versions de premier niveau des deux côtés.
+fixture-stack = [
+    "fastapi==0.141.1",
+    "uvicorn==0.54.0",
+    "httpx==0.28.1",
+    "sqlalchemy==2.1.4",
+    "alembic==1.20.0",
+    "pypdf==6.19.0",
+    "reportlab==5.0.1",
+    "python-multipart==0.0.32",
+    "pytest==9.1.1",
+]
+# docker/sandbox/Dockerfile.broker : transport broker (W5). SDK + outils OpenHands SEULS (le runner n'importe que
+# openhands.sdk, openhands.tools.preset.default et openhands.sdk.llm.auth.openai), pile métier approuvée (fixture-stack),
+# outils de test du gate corrigés (pytest 9.x, pytest-asyncio 1.x) ; ni l'application web legacy openhands-ai, ni
+# python-jose/ecdsa/passlib. Le patch scripts/patch_openhands_gemma4_terminal.py s'applique en mode explicite sdk-only.
+sandbox-broker = [
+    "openhands-sdk==1.19.1",
+    "openhands-tools==1.19.1",
+    # lmnr 0.7.53 a retiré observe(rollout_entrypoint=…) : même épinglage que l'image legacy, éprouvé avec ce SDK.
+    "lmnr==0.7.52",
+    "pytest-asyncio",
+    "aiosqlite",
+    "pip-audit>=2.9.0",
+]
+
 [project.scripts]
 collegue-migrate = "collegue.migrations.__main__:main"
 

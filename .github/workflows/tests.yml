@@ -120,7 +120,7 @@ jobs:
 
       # Vague 5 : état durable du courtier budgétaire (sessions, tentatives, horloge persistée, migration 0012 → 0013), rejoué sur un
       # VRAI PostgreSQL avec les mêmes scénarios que SQLite. Le fichier doit exister (``test -f`` : son absence rend le job rouge,
-      # jamais un pas sauté). Le plancher est un MINIMUM provisoire : C le fixe au nombre exact de tests collectés à l'intégration de A
+      # jamais un pas sauté). Le plancher (76) est le nombre collecté sur le SHA `d5800a8` de A : C le recale sur le nombre exact collecté à l'intégration de A
       # (checklist de docs/consolidation/w5-integration.md), puis il ne baisse plus.
       - name: PostgreSQL broker state - real durable-state proof
         shell: bash
@@ -133,7 +133,7 @@ jobs:
           expected="$(pytest tests/test_w5_broker_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
           echo "tests PostgreSQL collectés: ${expected}"
           pytest tests/test_w5_broker_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-broker.xml
-          python scripts/ci_require_junit.py pg-broker.xml --min-tests 2 --expect-tests "${expected}"
+          python scripts/ci_require_junit.py pg-broker.xml --min-tests 76 --expect-tests "${expected}"
 
       - name: Upload PostgreSQL proof report
         if: always()
@@ -205,6 +205,17 @@ jobs:
       - name: Audit locked dev dependencies (strict)
         run: pip-audit --strict --desc --no-deps --disable-pip -r locks/dev.txt
 
+      # Vague 5 : verrou de l'image du transport broker (docker/sandbox/Dockerfile.broker) et verrou de la pile métier approuvée
+      # (copié dans le socle de la fixture) : même méthode, AUCUN avis ignoré. Ces deux verrous sont résolus pour Python 3.12 ; les entrées
+      # réservées à une autre plate-forme (marqueurs ``sys_platform``) ne sont pas évaluées sur ce runner Linux. L'ancien verrou
+      # locks/sandbox-openhands.txt (image « direct » historique) N'est PAS audité ici : son audit strict est rouge (voir
+      # docs/consolidation/w5-integration.md) et il n'est pas utilisé par la campagne W5.
+      - name: Audit locked broker image dependencies (strict)
+        run: pip-audit --strict --desc --no-deps --disable-pip -r locks/sandbox-broker.txt
+
+      - name: Audit locked approved fixture stack (strict)
+        run: pip-audit --strict --desc --no-deps --disable-pip -r locks/fixture-stack.txt
+
       # Wheel construit depuis les fichiers du dépôt, installé NON éditable dans un venv vierge avec le
       # verrou runtime, puis exécuté hors checkout (ressources, migrations jusqu'à head, serveur sans LLM).
       - name: Verify the built wheel in a clean environment
@@ -268,6 +279,28 @@ jobs:
             collegue-sandbox-openhands:pr-check \
             python - < scripts/ci_w4_worker_routing.py
 
+      # Image du transport BROKER (W5) : SDK/outils seuls, pile métier approuvée, verrou audité (docker/sandbox/Dockerfile.broker).
+      - name: Build OpenHands broker sandbox image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/sandbox/Dockerfile.broker
+          push: false
+          load: true
+          tags: collegue-sandbox-broker:pr-check
+
+      - name: Verify the broker image Gemma 4 terminal contract (sdk-only)
+        run: |
+          docker run --rm --network none collegue-sandbox-broker:pr-check \
+            python -c "from openhands.tools.terminal.definition import TerminalAction; assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; assert TerminalAction.model_validate({'command': 'canonical', 'commands': 'ignored'}).command == 'canonical'"
+
+      - name: Verify OpenHands worker routing in the broker image (real SDK, no model)
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i --network none \
+            collegue-sandbox-broker:pr-check \
+            python - < scripts/ci_w4_worker_routing.py
+
       # Transport W5 SANS MODÈLE ni clé : le VRAI SDK OpenHands de l'image appelle le relais embarqué /opt/oh_broker_relay.py, qui recopie
       # vers un socket Unix tenu par un FAUX courtier (route OpenAI, jeton de session factice, usage). Conteneur SANS réseau, aucun
       # secret ni variable d'hôte, script transmis sur l'entrée standard (aucun montage). Le script prouve aussi l'isolation (seule la
@@ -278,7 +311,7 @@ jobs:
         timeout-minutes: 5
         run: |
           docker run --rm -i --network none \
-            collegue-sandbox-openhands:pr-check \
+            collegue-sandbox-broker:pr-check \
             python - < scripts/ci_w5_broker_transport.py
 
       # Preuve du VRAI vérificateur métier public (collegue.pilot.w4_business.verify_business_checkout, runner omis) dans
@@ -309,6 +342,19 @@ jobs:
         with:
           name: w4-business-verifier-proof
           path: w4-verifier-report/
+          if-no-files-found: warn
+
+      # Même preuve dans l'image que la campagne W5 utilise réellement (transport broker).
+      - name: Prove the business verifier in the broker image (public path, no model)
+        timeout-minutes: 10
+        run: python scripts/ci_w4_business_verifier.py --image collegue-sandbox-broker:pr-check --report-dir w5-broker-verifier-report
+
+      - name: Upload broker image business verifier proof report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-broker-business-verifier-proof
+          path: w5-broker-verifier-report/
           if-no-files-found: warn
 
       # Prouve que le service est PRÊT (santé + MCP initialize), pas seulement lancé :
