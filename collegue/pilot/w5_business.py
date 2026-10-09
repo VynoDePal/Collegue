@@ -23,10 +23,12 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from collegue.pilot import w4_business as business
+from collegue.pilot import w5_business_policy as fixture_policy
 from collegue.pilot.w4_business import (
     BASE_BRANCH_PREFIX,
     FIXTURE_REPOSITORY,
@@ -60,6 +62,11 @@ R05_DOC = "docs/deploiement.md"
 HEADER_DOC = "docs/export_header.md"
 SOCLE_DOCS = (R04_DOC, R05_DOC)
 INCIDENT_DOCS = (R05_DOC, HEADER_DOC)
+#: Ciblage des passes par la liste blanche de l'auto-merge de Phase 5 (réglage PRODUIT ``AUTO_MERGE_PATH_ALLOWLIST``, ici RESSERRÉ par rapport
+#: au défaut ``docs/**,**/*.md,**/*.rst`` — jamais élargi). R04 ne peut fusionner QUE le runbook cible ; R05 que les documents de l'incident.
+#: Un modèle qui sort de sa cible voit sa PR refusée par la vraie politique (non fusionnée, support d'incident préservé).
+R04_ALLOWLIST = (R04_DOC,)
+INCIDENT_ALLOWLIST = INCIDENT_DOCS
 #: Identifiants d'exemple FACTICES (AWS documentation) : motif d'une clé d'accès et d'un secret de 40 caractères.
 FAKE_CREDENTIAL_LINE = re.compile(
     r"AKIA[0-9A-Z]{16}|(?:secret[_ ]?access[_ ]?key|SECRET_ACCESS_KEY)\s*[=:]\s*\S{40}", re.I
@@ -71,11 +78,20 @@ ALLOWED_SEED_MODIFICATIONS = ("requirements.txt",)
 #: aucune implémentation métier (``app/``, ``tests/``, code Python…), aucun fichier inconnu.
 _ADDED_ALLOWED = (
     re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml"),
+    re.compile(r"\.github/CODEOWNERS"),
+    re.compile(r"ci/requirements-approved\.lock"),
     re.compile(r"docs/[A-Za-z0-9._-]+\.md"),
     re.compile(r"requirements[A-Za-z0-9._-]*\.(txt|in)"),
 )
-CHECK_PRODUCER_KEYS = frozenset({"workflow", "trigger", "job", "publishes", "head_sha_expression", "app_id"})
-HEAD_SHA_EXPRESSION = "github.event.pull_request.head.sha"
+CODEOWNERS_PATH = ".github/CODEOWNERS"
+APPROVED_LOCK_PATH = "ci/requirements-approved.lock"
+WORKFLOW_PATH = fixture_policy.CAMPAIGN_WORKFLOW_PATH
+#: Contrôles OBLIGATOIRES du socle : le workflow (déclenché par ``pull_request``, jamais ``pull_request_target`` qui s'exécute depuis la
+#: branche par défaut, sans workflow), le signal de revue des chemins protégés (CODEOWNERS, information seulement) et le verrou haché de la pile approuvée.
+REQUIRED_ADDED = (WORKFLOW_PATH, CODEOWNERS_PATH, APPROVED_LOCK_PATH)
+PROTECTED_PREFIXES = [".github/", "ci/"]
+CHECK_WORKFLOW_KEYS = frozenset({"workflow", "triggers", "job", "candidate_execution", "dependency_source"})
+CODE_OWNER = re.compile(r"@[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9._-]+)?")
 _PIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*(\[[A-Za-z0-9_,.\- ]+\])?==[A-Za-z0-9_.!+\-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -236,7 +252,60 @@ def _manifest_shape(manifest: Mapping[str, Any]) -> Tuple[str, Dict[str, str], L
     added = manifest.get("added_files")
     if added is not None and sorted(added) != sorted(set(approved) - set(modified)):
         raise RuntimeError("manifeste de bootstrap : added_files ≠ approved_files − modified_seed_files")
+    _manifest_contract(manifest, approved, modified)
     return bootstrap_sha, dict(approved), list(modified)
+
+
+def _manifest_contract(manifest: Mapping[str, Any], approved: Mapping[str, str], modified: Sequence[str]) -> None:
+    """Forme fermée des déclarations de contrôle (``check_workflow``, ``protected_prefixes``, ``code_owner``, hachages des fichiers de
+    graine modifiés). ``check_producer`` n'existe plus : ``pull_request_target`` s'exécute depuis la branche par défaut (la graine,
+    immuable et sans workflow) et ne se déclencherait donc jamais sur une base éphémère."""
+    if "check_producer" in manifest:
+        raise RuntimeError(
+            "manifeste de bootstrap : check_producer est obsolète (pull_request_target ne se déclenche pas depuis la graine) ; "
+            "le contrôle est décrit par check_workflow"
+        )
+    if manifest.get("protected_prefixes") != PROTECTED_PREFIXES:
+        raise RuntimeError(f"manifeste de bootstrap : protected_prefixes doit valoir {PROTECTED_PREFIXES} ")
+    owner = manifest.get("code_owner")
+    if not isinstance(owner, str) or not CODE_OWNER.fullmatch(owner):
+        raise RuntimeError("manifeste de bootstrap : code_owner (@propriétaire) requis")
+    missing = [path for path in REQUIRED_ADDED if path not in approved or path in modified]
+    if missing:
+        raise RuntimeError(f"manifeste de bootstrap : contrôle(s) approuvé(s) absent(s) des ajouts : {missing}")
+    hashes = manifest.get("modified_seed_hashes")
+    if not isinstance(hashes, dict) or sorted(hashes) != sorted(modified):
+        raise RuntimeError("manifeste de bootstrap : modified_seed_hashes doit décrire exactement modified_seed_files")
+    for path, pair in hashes.items():
+        if (
+            not isinstance(pair, dict)
+            or set(pair) != {"seed_sha256", "approved_sha256"}
+            or not all(isinstance(v, str) and _SHA256.fullmatch(v) for v in pair.values())
+            or pair["approved_sha256"] != approved[path]
+            or pair["seed_sha256"] == pair["approved_sha256"]
+        ):
+            raise RuntimeError(
+                f"manifeste de bootstrap : modified_seed_hashes[{path!r}] incohérent avec approved_files"
+            )
+    declared = manifest.get("check_workflow")
+    if not isinstance(declared, dict) or set(declared) != CHECK_WORKFLOW_KEYS:
+        raise RuntimeError(
+            f"manifeste de bootstrap : check_workflow : clés exactes attendues {sorted(CHECK_WORKFLOW_KEYS)}"
+        )
+    expectations = {
+        "workflow": WORKFLOW_PATH,
+        "job": REQUIRED_CHECK,
+        "dependency_source": APPROVED_LOCK_PATH,
+    }
+    for key, value in expectations.items():
+        if declared.get(key) != value:
+            raise RuntimeError(
+                f"manifeste de bootstrap : check_workflow.{key} doit valoir {value!r} (vu {declared.get(key)!r})"
+            )
+    if sorted(declared.get("triggers") or []) != ["pull_request", "push"]:
+        raise RuntimeError("manifeste de bootstrap : check_workflow.triggers doit valoir ['pull_request', 'push']")
+    if not isinstance(declared.get("candidate_execution"), str) or not declared["candidate_execution"].strip():
+        raise RuntimeError("manifeste de bootstrap : check_workflow.candidate_execution requis")
 
 
 def requirements_violations(text: str) -> List[str]:
@@ -342,6 +411,7 @@ def validate_bootstrap_manifest(
             f"manquants : {sorted(set(added) - set(extra))})"
         )
     seed_hashes: Dict[str, str] = {}
+    texts: Dict[str, str] = {}
     for path, expected in sorted(approved.items()):
         text = _file_text(clients, owner, repo, path, bootstrap_sha)
         if text is None:
@@ -349,22 +419,30 @@ def validate_bootstrap_manifest(
         if hashlib.sha256(text.encode("utf-8")).hexdigest() != expected:
             raise RuntimeError(f"octets du socle ≠ sha256 approuvé : {path}")
         previous = _file_text(clients, owner, repo, path, FIXTURE_SEED_SHA)
+        texts[path] = text
         if path in modified:
             if previous is None or hashlib.sha256(previous.encode("utf-8")).hexdigest() == expected:
                 raise RuntimeError(f"fichier de graine déclaré modifié mais identique à la graine : {path}")
             seed_hashes[path] = hashlib.sha256(previous.encode("utf-8")).hexdigest()
+            if seed_hashes[path] != manifest["modified_seed_hashes"][path]["seed_sha256"]:
+                raise RuntimeError(
+                    f"modified_seed_hashes[{path!r}] : le sha256 de la graine déclaré ne correspond pas à la graine"
+                )
             if path == "requirements.txt" and requirements_violations(text):
                 raise RuntimeError("requirements.txt du socle : " + " ; ".join(requirements_violations(text)))
         elif previous is not None:
             raise RuntimeError(f"fichier approuvé déjà présent dans la graine : {path}")
-    workflow = [path for path in approved if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))]
-    if not workflow:
-        raise RuntimeError("aucun workflow approuvé ne produit le check requis")
-    producer = manifest.get("check_producer")
-    if producer is not None:
-        produced = [_validate_check_producer(producer, manifest, approved, clients, owner, repo, bootstrap_sha)]
-    else:
-        produced = _workflow_jobs(clients, owner, repo, workflow, bootstrap_sha)
+    owner_text = str(manifest["code_owner"])
+    _validate_code_owners(texts[CODEOWNERS_PATH], owner_text)
+    lock_problems = lock_violations(texts[APPROVED_LOCK_PATH])
+    if lock_problems:
+        raise RuntimeError("verrou approuvé : " + " ; ".join(lock_problems))
+    uncovered = requirements_outside_lock(texts.get("requirements.txt", ""), texts[APPROVED_LOCK_PATH])
+    if uncovered:
+        raise RuntimeError(
+            "requirements.txt du socle demande des dépendances hors du verrou approuvé : " + ", ".join(uncovered)
+        )
+    produced = _validate_check_workflow(manifest["check_workflow"], texts[WORKFLOW_PATH])
     if REQUIRED_CHECK not in produced:
         raise RuntimeError(f"aucun workflow approuvé ne produit le check requis {REQUIRED_CHECK!r}")
     ruleset = clients.branches.get_ruleset(owner, repo, int(manifest["ruleset_id"]))
@@ -385,6 +463,8 @@ def validate_bootstrap_manifest(
             f"le check requis {REQUIRED_CHECK!r} n'est pas associé à l'application {manifest['check_app_id']} "
             f"(checks effectifs : {[(c.context, c.app_id) for c in policy.required_checks]}) ou la règle « à jour » manque"
         )
+    ruleset_facts = _validate_ruleset_rules(clients, owner, repo, probe, manifest)
+    _validate_actions_readable(clients, owner, repo)
     evidence = {
         "bootstrap_sha": bootstrap_sha,
         "bootstrap_tree": commit.tree_sha,
@@ -393,7 +473,11 @@ def validate_bootstrap_manifest(
         "modified_seed_files": sorted(modified),
         "seed_sha256_of_modified": seed_hashes,
         "approved_sha256_of_modified": {path: approved[path] for path in modified},
-        "check_producer": producer,
+        "check_workflow": manifest["check_workflow"],
+        "code_owner": owner_text,
+        **ruleset_facts,
+        "protected_prefixes": list(PROTECTED_PREFIXES),
+        "approved_stack": approved_stack(texts.get("requirements.txt", "")),
         "workflow_jobs": sorted(produced),
         "ruleset_id": ruleset.id,
         "required_check": REQUIRED_CHECK,
@@ -404,108 +488,183 @@ def validate_bootstrap_manifest(
     return evidence
 
 
-def _workflow_jobs(clients: Any, owner: str, repo: str, paths: Sequence[str], ref: str) -> List[str]:
-    """Noms des jobs (donc des checks) que produisent les workflows approuvés, dédéclenchés par ``pull_request``."""
+def _validate_code_owners(text: str, code_owner: str) -> None:
+    """CODEOWNERS attribue ``.github/`` ET ``ci/`` au propriétaire déclaré. C'est un SIGNAL de revue (information), pas une barrière :
+    la protection des contrôles est la garde de publication et de fusion du produit."""
+    rules: Dict[str, List[str]] = {}
+    for line in text.splitlines():
+        content = line.split("#", 1)[0].strip()
+        if content:
+            pattern, *owners = content.split()
+            rules[pattern] = owners
+    for prefix in ("/.github/", "/ci/"):
+        if rules.get(prefix) != [code_owner]:
+            raise RuntimeError(f"CODEOWNERS : {prefix} doit appartenir à {code_owner} (vu {rules.get(prefix)!r})")
+    if any(owners != [code_owner] for owners in rules.values()):
+        raise RuntimeError("CODEOWNERS : un chemin est attribué à un autre propriétaire que le propriétaire déclaré")
+
+
+_LOCK_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9_.\-]*)(\[[A-Za-z0-9_,.\- ]+\])?==([A-Za-z0-9_.!+\-]+)")
+
+
+def _normal(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def lock_violations(text: str) -> List[str]:
+    """Le verrou approuvé ne contient que des versions épinglées ET hachées (``--hash=sha256:``), sans source externe."""
+    problems = requirements_violations(text)
+    entries = [
+        entry.split("#", 1)[0].strip()
+        for entry in text.replace("\\\n", " ").splitlines()
+        if entry.split("#", 1)[0].strip()
+    ]
+    if not entries:
+        problems.append("verrou vide")
+    for entry in entries:
+        if "--hash=sha256:" not in entry:
+            problems.append(f"entrée non hachée : {entry.split()[0]!r}")
+    return problems
+
+
+def approved_stack(requirements: str) -> List[str]:
+    """``nom==version`` épinglés du ``requirements.txt`` approuvé (annoncés au codeur, qui travaille HORS LIGNE)."""
+    stack: List[str] = []
+    for entry in requirements.splitlines():
+        head = entry.split("#", 1)[0].strip().split(" ")[0].split(";")[0]
+        if head and _LOCK_LINE.fullmatch(head):
+            stack.append(head)
+    return stack
+
+
+def requirements_outside_lock(requirements: str, lock: str) -> List[str]:
+    """Dépendances de ``requirements.txt`` (épinglées) absentes du verrou approuvé, ou à une autre version."""
+    locked: Dict[str, str] = {}
+    for entry in lock.replace("\\\n", " ").splitlines():
+        head = entry.split("#", 1)[0].strip().split(" ")[0].split(";")[0]
+        found = _LOCK_LINE.fullmatch(head) if head else None
+        if found:
+            locked[_normal(found.group(1))] = found.group(3)
+    outside: List[str] = []
+    for entry in requirements.splitlines():
+        head = entry.split("#", 1)[0].strip().split(" ")[0].split(";")[0]
+        found = _LOCK_LINE.fullmatch(head) if head else None
+        if found and locked.get(_normal(found.group(1))) != found.group(3):
+            outside.append(head)
+    return outside
+
+
+def _validate_check_workflow(declared: Mapping[str, Any], text: str) -> List[str]:
+    """Le workflow approuvé qui produit ``Fixture tests`` est celui décrit, lu sur l'arbre réel (octets approuvés par ailleurs).
+
+    Exigences : déclencheurs EXACTEMENT ``pull_request`` (sur les bases de campagne) et ``push`` — jamais ``pull_request_target`` (il
+    s'exécute depuis la branche par défaut, ici sans workflow) ni ``workflow_run`` ; aucun secret ; permissions de lecture seule ;
+    un job ``Fixture tests`` sans condition ni ``continue-on-error`` ; extractions sans identifiants conservés. Cette lecture ne
+    suffit PAS à faire confiance au workflow d'une PR : la garde de fusion compare les arbres réels et la provenance du job."""
     import yaml
 
-    names: List[str] = []
-    for path in paths:
-        document = yaml.safe_load(_file_text(clients, owner, repo, path, ref) or "") or {}
-        triggers = document.get("on", document.get(True))  # YAML lit `on` comme un booléen
-        triggered = (
-            triggers
-            if isinstance(triggers, (list, tuple))
-            else list(triggers)
-            if isinstance(triggers, dict)
-            else [triggers]
-        )
-        if "pull_request" not in triggered:
-            continue
-        for key, job in (document.get("jobs") or {}).items():
-            names.append(str((job or {}).get("name") or key))
-    return names
-
-
-def _validate_check_producer(
-    producer: Any,
-    manifest: Mapping[str, Any],
-    approved: Mapping[str, str],
-    clients: Any,
-    owner: str,
-    repo: str,
-    ref: str,
-) -> str:
-    """Le workflow de confiance qui PUBLIE le check requis est celui décrit, lu sur l'arbre réel (octets approuvés par ailleurs).
-
-    Exigences : forme fermée ; déclencheur ``pull_request_target`` seul ; aucune référence à un secret ; permissions minimales ;
-    extractions sans identifiants conservés ; un job du nom déclaré dont une étape publie, via l'API des check-runs, le check
-    ``Fixture tests`` sur la tête exacte (``HEAD_SHA`` = ``github.event.pull_request.head.sha``). Rend le nom du check publié."""
-    import yaml
-
-    if not isinstance(producer, dict) or set(producer) != CHECK_PRODUCER_KEYS:
-        raise RuntimeError(f"check_producer : clés exactes attendues {sorted(CHECK_PRODUCER_KEYS)}")
-    expectations = {
-        "trigger": "pull_request_target",
-        "publishes": REQUIRED_CHECK,
-        "head_sha_expression": HEAD_SHA_EXPRESSION,
-        "app_id": manifest["check_app_id"],
-    }
-    for key, value in expectations.items():
-        if producer.get(key) != value:
-            raise RuntimeError(f"check_producer : {key} doit valoir {value!r} (vu {producer.get(key)!r})")
-    path = str(producer.get("workflow") or "")
-    if path not in approved or not path.startswith(".github/workflows/"):
-        raise RuntimeError("check_producer : le workflow producteur n'est pas un fichier approuvé du socle")
-    text = _file_text(clients, owner, repo, path, ref) or ""
     document = yaml.safe_load(text) or {}
     triggers = document.get("on", document.get(True))
-    if not isinstance(triggers, dict) or set(triggers) != {"pull_request_target"}:
-        raise RuntimeError("check_producer : le workflow doit n'avoir que le déclencheur pull_request_target")
+    if not isinstance(triggers, dict) or set(triggers) != {"pull_request", "push"}:
+        raise RuntimeError("check_workflow : déclencheurs exactement pull_request et push (jamais pull_request_target)")
+    branches = (triggers.get("pull_request") or {}).get("branches") or []
+    if not any(str(item).startswith(fixture_policy.CAMPAIGN_BASE_PREFIX) for item in branches):
+        raise RuntimeError("check_workflow : pull_request doit cibler les bases de campagne (collegue-business/…)")
     if "secrets." in text:
-        raise RuntimeError("check_producer : le workflow référence un secret")
-    permissions = document.get("permissions") or {}
-    if permissions != {"contents": "read", "pull-requests": "read", "checks": "write"}:
-        raise RuntimeError(f"check_producer : permissions non minimales ({permissions})")
-    job = next((j for j in (document.get("jobs") or {}).values() if (j or {}).get("name") == producer["job"]), None)
-    if job is None:
-        raise RuntimeError(f"check_producer : aucun job nommé {producer['job']!r}")
-    if (job.get("env") or {}).get("HEAD_SHA") != "${{ " + HEAD_SHA_EXPRESSION + " }}":
-        raise RuntimeError("check_producer : HEAD_SHA doit valoir la tête exacte de la PR")
+        raise RuntimeError("check_workflow : le workflow référence un secret")
+    if document.get("permissions") != {"contents": "read"}:
+        raise RuntimeError(f"check_workflow : permissions non minimales ({document.get('permissions')!r})")
+    jobs = [
+        job
+        for job in (document.get("jobs") or {}).values()
+        if isinstance(job, dict) and job.get("name") == REQUIRED_CHECK
+    ]
+    if len(jobs) != 1:
+        raise RuntimeError(f"check_workflow : exactement un job nommé {REQUIRED_CHECK!r} (vu {len(jobs)})")
+    job = jobs[0]
+    if any(
+        key in job for key in ("if", "continue-on-error", "permissions")
+    ):  # `if: false` est un booléen FAUX : tester la clé
+        raise RuntimeError(
+            "check_workflow : le job porte une condition, un continue-on-error ou des permissions propres"
+        )
     for step in job.get("steps") or []:
+        if "continue-on-error" in step or "if" in step:
+            raise RuntimeError("check_workflow : une étape porte une condition ou continue-on-error")
         if (
             str(step.get("uses", "")).startswith("actions/checkout")
             and (step.get("with") or {}).get("persist-credentials") is not False
         ):
-            raise RuntimeError("check_producer : une extraction conserve ses identifiants")
-    publishing = [
-        str(step.get("run", ""))
-        for step in job.get("steps") or []
-        if "check-runs" in str(step.get("run", ""))
-        and f'name="{REQUIRED_CHECK}"' in str(step.get("run", ""))
-        and 'head_sha="$HEAD_SHA"' in str(step.get("run", ""))
-    ]
-    if not publishing:
-        raise RuntimeError(f"check_producer : aucune étape ne publie le check {REQUIRED_CHECK!r} sur la tête exacte")
-    return REQUIRED_CHECK
+            raise RuntimeError("check_workflow : une extraction conserve ses identifiants")
+    return [REQUIRED_CHECK]
+
+
+def _validate_ruleset_rules(
+    clients: Any, owner: str, repo: str, branch: str, manifest: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Règles du ruleset applicable à une base de campagne.
+
+    * BLOQUANT : le check requis n'est pas exempté à la création (``do_not_enforce_on_create`` faux) — observé : une base créée depuis la
+      graine, sans check, est refusée par le serveur ;
+    * INFORMATIF seulement : ``require_code_owner_review``. Observé en C47 : avec 0 approbation requise, GitHub a FUSIONNÉ des PR qui
+      modifiaient le workflow, CODEOWNERS et le verrou. Le drapeau n'est donc PAS une protection et n'est jamais compté comme telle ; la
+      protection est la garde du produit (publication et fusion). Sa valeur est consignée, sans conclusion de sécurité."""
+    getter = getattr(clients.branches, "get_branch_rules", None)
+    if not callable(getter):
+        raise IncompleteValidation("lecture des règles de branche impossible : règles du ruleset non établies")
+    try:
+        rules = list(getter(owner, repo, branch))
+    except Exception as exc:  # noqa: BLE001
+        raise IncompleteValidation(f"règles de branche illisibles ({type(exc).__name__})") from exc
+    own = [r for r in rules if getattr(r, "ruleset_id", None) == manifest["ruleset_id"]]
+    statuses = [r for r in own if r.type == "required_status_checks"]
+    if not statuses or any((r.parameters or {}).get("do_not_enforce_on_create") is not False for r in statuses):
+        raise RuntimeError("ruleset : le check requis est exempté à la création (do_not_enforce_on_create)")
+    reviews = [r for r in own if r.type == "pull_request"]
+    return {
+        "code_owner_review_flag": bool(reviews)
+        and all((r.parameters or {}).get("require_code_owner_review") is True for r in reviews),
+        "code_owner_review_is_a_protection": False,
+    }
+
+
+def _validate_actions_readable(clients: Any, owner: str, repo: str) -> None:
+    """Le jeton lit les jobs et exécutions Actions : sans cela la provenance du check requis ne peut être établie et toute fusion de
+    la campagne serait refusée (fail-closed) APRÈS les dépenses de planification. Lecture seule, avant tout lancement."""
+    reader = getattr(getattr(clients, "prs", None), "list_workflow_runs", None)
+    if not callable(reader):
+        raise IncompleteValidation("lecture des exécutions Actions non disponible : provenance du check non vérifiable")
+    try:
+        reader(owner, repo, limit=1)
+    except Exception as exc:  # noqa: BLE001
+        raise IncompleteValidation(
+            f"le jeton ne lit pas les exécutions Actions ({type(exc).__name__}) : la provenance du check requis ne pourra pas "
+            "être établie (permission « Actions : lecture » requise)"
+        ) from exc
 
 
 def verify_fixture_controls_intact(
     clients: Any, manifest: Mapping[str, Any], ref: str, *, label: str
 ) -> Dict[str, str]:
-    """Les contrôles de la fixture (workflows approuvés) sont INCHANGÉS sur ``ref`` : un BUILD ou une amélioration ne peut pas
-    réécrire le check qui le juge. Échec ⇒ ``RuntimeError`` (jamais une réussite)."""
+    """Les contrôles de la fixture (``.github/`` et ``ci/``) sont INCHANGÉS sur ``ref`` par rapport au commit de socle : un BUILD
+    ou une amélioration ne peut pas réécrire le check qui le juge. Comparaison des objets Git réels (arbres), jamais des fichiers
+    d'une liste. Échec ⇒ ``RuntimeError`` ; lecture impossible ⇒ validation incomplète (jamais une réussite)."""
     owner, _, repo = FIXTURE_REPOSITORY.partition("/")
-    _bootstrap, approved, _modified = _manifest_shape(manifest)
-    seen: Dict[str, str] = {}
-    for path, expected in sorted(approved.items()):
-        if not path.startswith(".github/"):
-            continue
-        text = _file_text(clients, owner, repo, path, ref)
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else "absent"
-        seen[path] = digest
-        if digest != expected:
-            raise RuntimeError(f"contrôle de la fixture altéré ({label}) : {path} ({digest[:12]} ≠ {expected[:12]})")
-    return seen
+    bootstrap_sha, _approved, _modified = _manifest_shape(manifest)
+    branches = clients.branches
+    try:
+        tip = ref if _SHA.fullmatch(ref or "") else str(branches.get_branch_sha(owner, repo, ref)).lower()
+        trusted_tree = branches.get_git_commit(owner, repo, bootstrap_sha).tree_sha
+        head_tree = branches.get_git_commit(owner, repo, tip).tree_sha
+    except Exception as exc:  # noqa: BLE001
+        raise IncompleteValidation(f"arbres de contrôle illisibles ({label}) : {type(exc).__name__}") from exc
+    try:
+        fixture_policy.assert_controls_untouched(branches, owner, repo, base_tree=trusted_tree, head_tree=head_tree)
+    except fixture_policy.PolicyRefusal as refused:
+        if refused.kind == "unavailable":
+            raise IncompleteValidation(f"contrôles de la fixture illisibles ({label}) : {refused.reason}") from refused
+        raise RuntimeError(f"contrôle de la fixture altéré ({label}) : {refused.reason}") from refused
+    return fixture_policy.protected_objects(branches, owner, repo, head_tree)
 
 
 # ── identité de campagne consommée ────────────────────────────────────────────────────────────────────────────────────────
@@ -571,20 +730,121 @@ def revalidate_and_claim(clients: Any, env: Mapping[str, str], campaign_id: str,
 # ── activation : scope durable de la campagne puis qualification des deux modèles ───────────────────────────────────────────
 
 
-def broker_qualifier() -> Callable[..., Any]:
-    """API publique de qualification des deux modèles du lot A (``BrokerService.qualify_models`` ou équivalent publié).
+QUALIFICATION_CAPABILITIES = ("text", "json", "tools")
+#: Rôle de chaque identité officielle dans la qualification d'A : le 31B sert tous les rôles par défaut, le 26B le codeur seul.
+QUALIFICATION_ROLES = {MODEL_PRIMARY: "default", MODEL_CODER_FALLBACK: "coder"}
+GOOGLE_DESTINATION = OFFICIAL_GOOGLE_HOST + "/v1beta"
+#: Marge de dérive d'horloge entre le registre (échéance absolue durable) et ce processus.
+DEADLINE_SKEW_SECONDS = 5.0
 
-    Contrat attendu (voir ``reports/w5-b-interfaces.md``) : ``qualify(settings, *, ledger, scope_key) -> mapping`` (ou awaitable),
-    qui joue le VRAI pipeline normalisation → countTokens complet → réservation → émission → usage sur le scope donné et rend
-    ``{"accepted": True, "models": [...], "remaining_seconds": float?}``. Absente ⇒ validation incomplète explicite."""
+
+def broker_qualifier() -> Callable[..., Any]:
+    """API publique de qualification des deux modèles du lot A : ``await collegue.broker.qualify_models(settings, ledger, scope_key)``
+    (équivalent de ``BrokerService.qualify_models(scope_key)``), qui rend un ``QualificationReport``.
+
+    Absente ⇒ validation incomplète explicite : aucun canari réel, aucune estimation de remplacement, aucun lancement."""
     try:
         from collegue.broker import qualify_models  # type: ignore[attr-defined]
     except ImportError as exc:
         raise IncompleteValidation(
-            "API publique de qualification des deux modèles (collegue.broker.qualify_models, lot A) absente : aucune canari "
+            "API publique de qualification des deux modèles (collegue.broker.qualify_models, lot A) absente : aucun canari "
             "réel, aucune estimation de remplacement, aucun lancement"
         ) from exc
     return qualify_models
+
+
+def _qualification_facts(report: Any) -> Dict[str, Any]:
+    """Détails de CHAQUE capacité de CHAQUE modèle (réussis ou refusés), sans secret, pour le rapport de campagne."""
+    to_dict = getattr(report, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return dict(to_dict())
+        except Exception:  # noqa: BLE001 - on retombe sur la lecture directe des champs
+            pass
+    return {
+        "scope_key": getattr(report, "scope_key", None),
+        "ok": getattr(report, "ok", None),
+        "reason": getattr(report, "reason", None),
+        "models": [
+            {
+                "model": getattr(m, "model", None),
+                "role": getattr(m, "role", None),
+                "ok": getattr(m, "ok", None),
+                "capabilities": [
+                    {
+                        "capability": getattr(c, "capability", None),
+                        "ok": getattr(c, "ok", None),
+                        "detail": getattr(c, "detail", None),
+                        "request_id": getattr(c, "request_id", None),
+                        "tokens": getattr(c, "tokens", None),
+                    }
+                    for c in getattr(m, "capabilities", ()) or ()
+                ],
+            }
+            for m in getattr(report, "models", ()) or ()
+        ],
+    }
+
+
+def _qualification_problems(report: Any, scope_key: str, *, now: datetime) -> Tuple[List[str], Optional[float]]:
+    """Contrôle EXPLICITE du contrat final d'A (``QualificationReport``) : jamais « un mapping accepté » qui n'établit rien.
+
+    Retourne ``(problèmes, secondes restantes de l'échéance absolue durable)``."""
+    problems: List[str] = []
+    if isinstance(report, Mapping) or not all(
+        hasattr(report, name)
+        for name in ("ok", "models", "deadline_at", "scope_key", "consumed_tokens", "blocked", "destination")
+    ):
+        return [f"rapport de qualification inattendu ({type(report).__name__} : QualificationReport d'A requis)"], None
+    if report.scope_key != scope_key:
+        problems.append(f"scope qualifié {report.scope_key!r} ≠ {scope_key!r}")
+    if report.ok is not True:
+        problems.append(f"qualification non réussie : {getattr(report, 'reason', '') or 'raison absente'}")
+    if report.blocked:
+        problems.append("scope bloqué par le registre (usage inconnu)")
+    if (
+        not isinstance(report.consumed_tokens, int)
+        or isinstance(report.consumed_tokens, bool)
+        or report.consumed_tokens <= 0
+    ):
+        problems.append("aucune consommation établie par le registre : les canaris n'ont pas traversé le pipeline réel")
+    if GOOGLE_DESTINATION not in str(report.destination) and OFFICIAL_GOOGLE_HOST not in str(report.destination):
+        problems.append(f"destination non native Google ({report.destination!r})")
+    by_model = {m.model: m for m in report.models}
+    if sorted(by_model) != sorted(QUALIFICATION_ROLES) or len(report.models) != len(QUALIFICATION_ROLES):
+        problems.append(f"identités qualifiées {sorted(by_model)} ≠ {sorted(QUALIFICATION_ROLES)}")
+    for model, role in QUALIFICATION_ROLES.items():
+        qualified = by_model.get(model)
+        if qualified is None:
+            continue
+        if qualified.role != role:
+            problems.append(f"{model} qualifié pour le rôle {qualified.role!r} (attendu {role!r})")
+        if qualified.ok is not True:
+            problems.append(f"{model} non qualifié")
+        capabilities = {c.capability: c for c in qualified.capabilities}
+        if sorted(capabilities) != sorted(QUALIFICATION_CAPABILITIES) or len(qualified.capabilities) != len(
+            QUALIFICATION_CAPABILITIES
+        ):
+            problems.append(f"{model} : capacités {sorted(capabilities)} ≠ {sorted(QUALIFICATION_CAPABILITIES)}")
+        for name, capability in capabilities.items():
+            if capability.ok is not True:
+                problems.append(f"{model}/{name} refusé : {capability.detail}")
+            if capability.request_id != f"qualify:{scope_key}:{model}:{name}":
+                problems.append(f"{model}/{name} : identité durable inattendue {capability.request_id!r}")
+    remaining: Optional[float] = None
+    deadline = report.deadline_at
+    if not isinstance(deadline, datetime) or deadline.tzinfo is None:
+        problems.append("échéance absolue durable absente ou sans fuseau : fenêtre de 900 s non établie")
+    else:
+        remaining = (deadline - now).total_seconds()
+        ceiling = float(business.CAMPAIGN_BOUNDS.max_seconds) + DEADLINE_SKEW_SECONDS
+        if remaining <= 0:
+            problems.append("échéance globale déjà dépassée à la fin de la qualification")
+        elif remaining > ceiling:
+            problems.append(
+                f"échéance durable à {remaining:.0f} s, au-delà de la fenêtre de la campagne ({ceiling:.0f} s)"
+            )
+    return problems, remaining
 
 
 def activate_budget(
@@ -595,10 +855,16 @@ def activate_budget(
     qualify: Optional[Callable[..., Any]] = None,
     manager_factory: Optional[Callable[[], Any]] = None,
     on_remaining: Optional[Callable[[float], None]] = None,
+    now: Optional[Callable[[], datetime]] = None,
 ) -> None:
     """Ouvre le scope DURABLE ``planning:cycle:<campagne>`` (2 USD / 250 000 tokens, strict) puis qualifie les deux Gemma sur CE scope
     — avant toute création distante et toute planification. Le brouillon public reprend ensuite ce même cycle (``--cycle-id``) :
-    même ligne, même solde, même horloge. Un refus ou une ambiguïté arrête la campagne (aucun repli estimé, aucun nouvel essai)."""
+    même ligne, même solde, même horloge. Un refus ou une ambiguïté arrête la campagne (aucun repli estimé, aucun nouvel essai).
+
+    Contrat d'A consommé explicitement (``await qualify_models(settings, ledger, scope_key) -> QualificationReport``) : les DEUX
+    identités, leurs trois capacités (texte, JSON, outils), la destination native, la consommation, l'absence de blocage et
+    l'ÉCHÉANCE ABSOLUE durable sont contrôlées ; les détails de chaque capacité sont conservés dans le rapport, y compris en refus.
+    La spec d'un canari relancé ne réémet pas (identités durables d'A) : un nouvel essai exige un nouvel identifiant de campagne."""
     from collegue.state.budget_ledger import BudgetRefused
 
     bounds = business.CAMPAIGN_BOUNDS
@@ -610,32 +876,47 @@ def activate_budget(
     context = report.facts.setdefault("launch", {})
     context["scope_key"] = scope_key  # lisible dès maintenant, même si aucun projet n'aboutit
     settings = business.effective_settings(env)
+
+    def _capture_registry() -> None:
+        """Dépense et blocage lisibles par scope dès les canaris, que la qualification réussisse ou non."""
+        try:
+            snapshot = ledger.snapshot(scope_key)
+            report.facts["qualification_registry"] = {
+                "scope": scope_key,
+                "consumed_tokens": snapshot.consumed_tokens,
+                "reserved_tokens": snapshot.reserved_tokens,
+                "unknown_tokens": snapshot.unknown_tokens,
+                "blocked_reason": snapshot.blocked_reason,
+            }
+        except Exception as exc:  # noqa: BLE001 - lecture impossible : consignée, jamais un zéro inventé
+            report.facts["qualification_registry"] = {"unreadable": f"{type(exc).__name__} : dépense non établie"}
+
     try:
-        result = (qualify or broker_qualifier())(settings, ledger=ledger, scope_key=scope_key)
+        result = (qualify or broker_qualifier())(settings, ledger, scope_key)
         if asyncio.iscoroutine(result):
             result = asyncio.run(result)
     except BudgetRefused as refusal:
+        _capture_registry()
         raise BudgetStop(f"qualification des modèles refusée par le registre ({refusal.code}) : {refusal}") from refusal
     except IncompleteValidation:
         raise
     except Exception as exc:  # noqa: BLE001 - refus / ambiguïté du transport : aucun repli estimé, aucun nouvel essai
+        _capture_registry()
         raise IncompleteValidation(f"qualification des modèles impossible ({type(exc).__name__}) : {exc}") from exc
-    outcome = dict(result or {})
-    models = sorted(str(m) for m in outcome.get("models") or [])
-    if (
-        outcome.get("accepted") is not True
-        or models != sorted({MODEL_PRIMARY, MODEL_CODER_FALLBACK})
-        or outcome.get("estimated")
-    ):
-        raise IncompleteValidation(
-            "qualification des deux modèles non établie par le pipeline réel "
-            f"(accepted={outcome.get('accepted')!r}, modèles={models}, estimation={bool(outcome.get('estimated'))}) : "
-            f"{outcome.get('reason') or 'aucune estimation de remplacement'}"
+    _capture_registry()
+    report.facts["qualification"] = _qualification_facts(result) if not isinstance(result, Mapping) else dict(result)
+    problems, remaining = _qualification_problems(
+        result, scope_key, now=(now or (lambda: datetime.now(timezone.utc)))()
+    )
+    if problems:
+        blocked = bool(getattr(result, "blocked", False))
+        message = (
+            "qualification des deux modèles non établie par le pipeline réel : "
+            + " ; ".join(problems)
+            + " (aucune estimation de remplacement, aucun nouvel essai)"
         )
-    report.facts["qualification"] = {
-        key: value for key, value in outcome.items() if "key" not in key.lower() and "secret" not in key.lower()
-    }
-    remaining = outcome.get("remaining_seconds")
+        raise (BudgetStop(message) if blocked else IncompleteValidation(message))
+    report.facts["qualification"]["remaining_seconds"] = remaining
     if remaining is not None and on_remaining is not None:
         on_remaining(float(remaining))
         context["global_deadline_remaining_s"] = float(remaining)
@@ -699,7 +980,9 @@ class PhaseServices:
     """Dépendances des phases. En production : l'entrée publique du produit et les vrais clients GitHub ; en test : les mêmes
     fonctions avec un faux fournisseur et des clients de test (jamais un verdict injecté)."""
 
-    run_pass: Callable[..., Awaitable[Any]]  # (context, *, improve, agent) -> ProjectRunResult (entrée publique)
+    run_pass: Callable[
+        ..., Awaitable[Any]
+    ]  # (context, *, improve, agent, path_allowlist) -> ProjectRunResult (entrée publique)
     clients: Any
     manager: Callable[[], Any]
     resume_incident: Callable[
@@ -772,9 +1055,10 @@ def run_improvement_phase(report: CampaignReport, context: Dict[str, Any], servi
     step = report.step("R04-improvement")
     _check_controls(services, context, "avant R04")
     tip_before, tree_before = _tip_and_tree(services, context)
-    result = _drive(services, services.run_pass(context, improve=True, agent=None), "R04")
+    result = _drive(services, services.run_pass(context, improve=True, agent=None, path_allowlist=R04_ALLOWLIST), "R04")
     improvement = getattr(result, "improvement", None)
-    step.evidence.update(entry="run_project_from_settings(improve=True)", stop_reason=getattr(result, "stop_reason", None),
+    step.evidence.update(entry="run_project_from_settings(improve=True)", auto_merge_path_allowlist=list(R04_ALLOWLIST),
+                         stop_reason=getattr(result, "stop_reason", None),
                          project_status=getattr(result, "project_status", None), tip_before=tip_before)  # fmt: skip
     if improvement is None:
         raise IncompleteValidation(
@@ -835,7 +1119,10 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
     step.evidence["injection"] = {"deterministic": True, "agent": type(agent).__name__, "model_calls": 0, "files": list(INCIDENT_DOCS),
                                   "note": getattr(agent, "announced", "")}  # fmt: skip
     manager, project_id = services.manager(), context["project_id"]
-    tip0, tree0 = _tip_and_tree(services, context)
+    entry_tip, entry_tree = _tip_and_tree(
+        services, context
+    )  # à la reprise : la base contient DÉJÀ l'incident, pas la préimage
+    tip0, tree0 = entry_tip, entry_tree
     pending = manager.get_phase5_incident(project_id)
     resumed = pending is not None
     improvement, promoted = None, []
@@ -851,7 +1138,9 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
             }
         step.evidence["incident_state_at_entry"] = pending.state
     else:
-        result = _drive(services, services.run_pass(context, improve=True, agent=agent), "R05")
+        result = _drive(
+            services, services.run_pass(context, improve=True, agent=agent, path_allowlist=INCIDENT_ALLOWLIST), "R05"
+        )
         improvement = getattr(result, "improvement", None)
         step.evidence.update(stop_reason=getattr(result, "stop_reason", None), tip_before=tip0, tree_before=tree0)
         if improvement is None:
@@ -898,6 +1187,21 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
     tree0 = branches.get_git_commit(owner, repo, tip0).tree_sha
     merge_commit = branches.get_git_commit(owner, repo, merge_sha)
     tip_commit = branches.get_git_commit(owner, repo, tip1)
+    # Le checkpoint SAIN n'est jamais lu sur la base courante (qui contient déjà l'incident à la reprise) : trois témoins
+    # indépendants doivent désigner le même commit — l'ancre durable de Phase 5, le premier parent de la fusion de l'incident
+    # et la base livrée par R04. Un désaccord ne se tranche pas : une préimage erronée ne prouverait aucune restauration.
+    delivered = (context.get("r04") or {}).get("tip")
+    witnesses = {
+        "ancre durable de Phase 5": tip0,
+        "premier parent de la fusion de l'incident": (
+            str(merge_commit.parents[0]).lower() if merge_commit.parents else None
+        ),
+        "base livrée par R04": str(delivered).lower() if delivered else None,
+    }
+    if len(set(witnesses.values())) != 1 or None in witnesses.values():
+        raise AssertionError(f"checkpoint sain incohérent entre ses témoins durables : {witnesses}")
+    if (context.get("r04") or {}).get("tree") not in (None, tree0):
+        raise AssertionError("l'arbre du checkpoint sain diffère de l'arbre livré par R04")
     if merge_commit.tree_sha == tree0:
         raise AssertionError("la fusion de l'incident n'a rien changé (aucune régression observable)")
     if tip1 == tip0 or tip1 == merge_sha or tree1 != tree0 or list(tip_commit.parents) != [merge_sha]:
@@ -945,7 +1249,7 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
     context["r05"] = {"incident_pr": incident.source_pr_number, "merge_sha": merge_sha, "revert_pr": revert_pr.number}
     step.evidence.update(
         incident_state="recovered", incident_pr=incident.source_pr_number, merge_sha=merge_sha, revert_pr=revert_pr.number,
-        revert_pr_merge_sha=revert_pr.merge_commit_sha, revert_checks=states, tip_before=tip0, tip_after=tip1, tree_before=tree0,
+        revert_pr_merge_sha=revert_pr.merge_commit_sha, revert_checks=states, healthy_checkpoint=witnesses, tip_at_entry=entry_tip, tip_before=tip0, tip_after=tip1, tree_before=tree0,
         tree_after=tree1, tree_at_incident=merge_commit.tree_sha, health_command_is_independent_probe=True,
         health_after=observation.status, acknowledged_revision=incident.revision, cas_stale_rejected=not stale,
         replay_rejected=not again, recovery_found=recovery.found, recovery_continue=recovery.continue_loop, resumed=resumed,
@@ -1035,14 +1339,29 @@ PHASE5_PENDING_STOPS = frozenset(
 )  # fmt: skip
 
 
-def production_run_pass(*, owner: str, repo: str) -> Callable[..., Awaitable[Any]]:
+def production_run_pass(
+    *, owner: str, repo: str, env: Optional[Mapping[str, str]] = None
+) -> Callable[..., Awaitable[Any]]:
     """Entrée PUBLIQUE du produit pour R04/R05 : aucune injection de client, de sandbox, de relecteur ni de mesure — tout vient de
-    la configuration effective (relais budgétaire, vrai GitHub). Seul ``agent`` (R05) est fourni, et il est signalé."""
+    la configuration effective (relais budgétaire, vrai GitHub). Seul ``agent`` (R05) est fourni, et il est signalé.
 
-    async def run(context: Mapping[str, Any], *, improve: bool, agent: Optional[Any] = None) -> Any:
+    ``path_allowlist`` CIBLE la passe sans toucher à la politique : le réglage produit ``AUTO_MERGE_PATH_ALLOWLIST`` est resserré à
+    la cible de la phase (jamais élargi), via un ``Settings`` construit depuis l'environnement validé + cette seule différence."""
+
+    async def run(
+        context: Mapping[str, Any], *, improve: bool, agent: Optional[Any] = None, path_allowlist: Sequence[str] = ()
+    ) -> Any:
         from collegue.pilot import run_project_from_settings
 
         kwargs: Dict[str, Any] = {"agent": agent} if agent is not None else {}
+        if path_allowlist:
+            if env is None:
+                raise IncompleteValidation(
+                    "environnement validé absent : le ciblage de la passe ne peut pas être appliqué"
+                )
+            kwargs["settings_obj"] = business.effective_settings(
+                {**env, "AUTO_MERGE_PATH_ALLOWLIST": ",".join(path_allowlist)}
+            )
         return await run_project_from_settings(
             int(context["project_id"]), str(context["operator_checkout"]), owner=owner, repo=repo,
             base=str(context["base_branch"]), dry_run=False, max_iterations=None, improve=improve, **kwargs,
@@ -1066,11 +1385,11 @@ def production_services(
 
     owner, _, repo = FIXTURE_REPOSITORY.partition("/")
     manager = default_manager_factory(env)
-    run_pass = production_run_pass(owner=owner, repo=repo)
+    run_pass = production_run_pass(owner=owner, repo=repo, env=env)
 
     async def resume(context: Mapping[str, Any]) -> ResumeOutcome:
         # Reprise PUBLIQUE sans génération : ``improve=False`` ne lance rien ; la barrière Phase 5 du produit réconcilie l'incident.
-        result = await run_pass(context, improve=False, agent=None)
+        result = await run_pass(context, improve=False, agent=None, path_allowlist=INCIDENT_ALLOWLIST)
         incident = manager().get_phase5_incident(int(context["project_id"]))
         stop = str(getattr(result, "stop_reason", "") or "")
         pending = incident is not None or stop in PHASE5_PENDING_STOPS

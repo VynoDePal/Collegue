@@ -108,6 +108,7 @@ def test_the_registry_is_reread_after_every_phase_and_at_exit_without_any_reset(
         "after-R02-business",
         "after-R04-improvement",
         "after-R05-incident-rollback",
+        "final",
         "exit",
     ]
     assert {c["project_id"] for c in rec.registry_reads} == {9}, (
@@ -258,9 +259,9 @@ def test_a_deadline_already_expired_before_the_build_forbids_the_launch_itself(t
 @pytest.mark.parametrize(
     "overrides, needle",
     [
-        ({"unknown_micro_usd": 100}, "usage inconnu"),
-        ({"unknown_tokens": 5}, "usage inconnu"),
-        ({"blocked_reason": "usage inconnu en mode strict"}, "usage inconnu"),
+        ({"unknown_micro_usd": 100}, "inconnu"),
+        ({"unknown_tokens": 5}, "inconnu"),
+        ({"blocked_reason": "usage inconnu en mode strict"}, "inconnu"),
         ({"consumed_tokens": 250_000}, "enveloppe atteinte"),
         ({"consumed_micro_usd": 2_000_000}, "enveloppe atteinte"),
     ],
@@ -278,7 +279,7 @@ def test_an_unknown_usage_or_a_reached_envelope_blocks_the_next_emitting_phase(t
     assert report.verdict() in {"budget_stop", "failed"} and rec.events.count("cleanup") == 1
 
 
-def test_an_unreadable_registry_keeps_the_exit_snapshot_honest_and_never_invents_a_zero(tmp_path):
+def test_an_unreadable_registry_closes_the_next_emission_and_never_invents_a_zero(tmp_path):
     rec = Recorder(tmp_path)
     rec.counters = OSError("base illisible")
 
@@ -287,9 +288,13 @@ def test_an_unreadable_registry_keeps_the_exit_snapshot_honest_and_never_invents
     exit_snapshot = report.facts["registry"]["exit"]
     assert "unreadable" in exit_snapshot and "dépense non établie" in exit_snapshot["unreadable"]
     assert "registry_final" not in report.facts and report.step("R03-registry").state == STEP_INCOMPLETE
-    assert report.step("R04-improvement").state == STEP_SUCCEEDED, (
-        "une lecture manquante ne bloque pas, elle est déclarée"
+    refused = report.step("R04-improvement")
+    assert refused.state == STEP_INCOMPLETE and "R04" not in rec.events, (
+        "une lecture obligatoire manquante ferme les émissions"
     )
+    assert "base illisible" in refused.detail and "after-R01-run" in refused.detail, "la cause d'origine reste lisible"
+    assert report.step("R05-incident-rollback").state == STEP_NOT_EXECUTED
+    assert report.verdict() == "incomplete_validation" and rec.events.count("cleanup") == 1
 
 
 # ── revendication durable de l'identifiant de campagne ──────────────────────────────────────────────────────────────────────

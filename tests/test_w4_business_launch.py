@@ -68,7 +68,10 @@ class FakeAdapter:
         self._maybe_fail(verb)
         if verb == "draft":
             assert "--nightly-exact-task-count" in args and args[args.index("--nightly-exact-task-count") + 1] == "3"
-            assert business.BUSINESS_PROBLEM in args
+            problem = args[args.index("--problem") + 1]
+            assert problem.startswith(
+                business.BUSINESS_PROBLEM
+            )  # + éventuellement la pile approuvée, sans quatrième tâche
             return {"action": "draft", "project_id": 9, "plan_hash": "f" * 64, "task_count": self.tasks}
         if verb == "approve":
             return {"action": "approve", "project_id": 9, "plan_hash": "f" * 64, "task_count": 3}

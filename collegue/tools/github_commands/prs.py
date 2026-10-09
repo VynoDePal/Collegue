@@ -12,6 +12,11 @@ from ..base import ToolExecutionError
 from ..clients import GitHubClient
 from ._helpers import validate_ref
 
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 _MERGE_METHODS = ("merge", "squash", "rebase")
 
 
@@ -109,6 +114,31 @@ class CheckObservation(BaseModel):
     state: str
     app_id: Optional[int] = None
     kind: str = "check_run"  # "check_run" | "status"
+    check_run_id: Optional[int] = None  # identifiant du check-run (== identifiant du job Actions pour un vrai job)
+
+
+class WorkflowJobInfo(BaseModel):
+    """Job d'une exécution de workflow Actions (``GET /actions/jobs/{id}``), réduit aux invariants de provenance."""
+
+    id: int
+    run_id: int
+    name: str
+    head_sha: str
+    status: str
+    conclusion: Optional[str] = None
+
+
+class WorkflowRunInfo(BaseModel):
+    """Exécution de workflow Actions (``GET /actions/runs/{id}``), réduite aux invariants de provenance."""
+
+    id: int
+    path: str
+    event: str
+    head_sha: str
+    status: str
+    conclusion: Optional[str] = None
+    repository: str
+    head_repository: Optional[str] = None
 
 
 class CommitCheckDetails(BaseModel):
@@ -455,6 +485,7 @@ class PRCommands(GitHubClient):
                         state=conclusion if status == "completed" and conclusion else "pending",
                         app_id=app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None,
                         kind="check_run",
+                        check_run_id=check.get("id") if _is_int(check.get("id")) else None,
                     )
                 )
             seen_runs += len(batch)
@@ -496,6 +527,56 @@ class PRCommands(GitHubClient):
                 break
 
         return CommitCheckDetails(checks=checks, complete=bool(checks_complete and statuses_complete))
+
+    def list_workflow_runs(self, owner: str, repo: str, limit: int = 1) -> int:
+        """Nombre d'exécutions Actions visibles (lecture seule, ``total_count``). Sert à établir AVANT toute dépense que le jeton lit
+        les jobs et exécutions dont dépend la provenance du check requis (sinon toute fusion serait refusée, fail-closed)."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        data = self._api_get(f"/repos/{owner}/{repo}/actions/runs", {"per_page": max(1, min(int(limit), 100))})
+        if not isinstance(data, dict) or not _is_int(data.get("total_count")):
+            raise ToolExecutionError("liste des exécutions Actions malformée")
+        return int(data["total_count"])
+
+    def get_workflow_job(self, owner: str, repo: str, job_id: int) -> WorkflowJobInfo:
+        """Job Actions ``job_id`` (lecture seule). Un identifiant qui n'est PAS un job (check-run publié par l'API des checks)
+        répond 404 : l'exception de l'API est propagée (``status_code``), jamais convertie en réussite."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        if not _is_int(job_id) or job_id <= 0:
+            raise ToolExecutionError(f"identifiant de job invalide: {job_id!r}")
+        data = self._api_get(f"/repos/{owner}/{repo}/actions/jobs/{job_id}")
+        if not isinstance(data, dict) or not _is_int(data.get("id")) or not _is_int(data.get("run_id")):
+            raise ToolExecutionError("job Actions malformé")
+        return WorkflowJobInfo(
+            id=data["id"],
+            run_id=data["run_id"],
+            name=str(data.get("name") or ""),
+            head_sha=str(data.get("head_sha") or "").lower(),
+            status=str(data.get("status") or "").strip().lower(),
+            conclusion=str(data["conclusion"]).strip().lower() if data.get("conclusion") else None,
+        )
+
+    def get_workflow_run(self, owner: str, repo: str, run_id: int) -> WorkflowRunInfo:
+        """Exécution Actions ``run_id`` (lecture seule) : chemin du workflow, événement, tête et dépôts d'origine."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        if not _is_int(run_id) or run_id <= 0:
+            raise ToolExecutionError(f"identifiant d'exécution invalide: {run_id!r}")
+        data = self._api_get(f"/repos/{owner}/{repo}/actions/runs/{run_id}")
+        if not isinstance(data, dict) or not _is_int(data.get("id")) or not isinstance(data.get("path"), str):
+            raise ToolExecutionError("exécution Actions malformée")
+        head = data.get("head_repository")
+        return WorkflowRunInfo(
+            id=data["id"],
+            path=data["path"],
+            event=str(data.get("event") or "").strip().lower(),
+            head_sha=str(data.get("head_sha") or "").lower(),
+            status=str(data.get("status") or "").strip().lower(),
+            conclusion=str(data["conclusion"]).strip().lower() if data.get("conclusion") else None,
+            repository=str((data.get("repository") or {}).get("full_name") or "").lower(),
+            head_repository=str(head.get("full_name") or "").lower() if isinstance(head, dict) else None,
+        )
 
     def get_pr_comments(self, owner: str, repo: str, pr_number: int, limit: int = 100) -> List[Comment]:
         """Get comments on a pull request."""

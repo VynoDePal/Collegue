@@ -81,8 +81,10 @@ class SimpleBoundary:
         self.server, self.docker_calls, self.real_run = server, docker_calls, real_run
 
 
-def invoke(monkeypatch, tmp_path, action, *arguments, drop=(), **extra):
+def invoke(monkeypatch, tmp_path, action, *arguments, drop=(), keep_role_key=False, **extra):
     env = cli_environment(tmp_path, **extra)
+    if action == "run" and not keep_role_key:
+        env.pop("LLM_API_KEY_CODER")  # contrat de clé W5 : l'étape réelle ne porte QUE LLM_API_KEY
     for name in drop:
         env.pop(name)
     output = tmp_path / f"{action}.json"
@@ -103,7 +105,7 @@ def test_run_validates_the_effective_configuration_with_the_legitimate_key_inste
     code, report, steps = invoke(monkeypatch, tmp_path, "run")
 
     assert steps["P03-secret-scope"]["state"] == "succeeded", steps["P03-secret-scope"]
-    assert steps["P03-secret-scope"]["evidence"]["llm_secret_names_present"] == ["LLM_API_KEY", "LLM_API_KEY_CODER"]
+    assert steps["P03-secret-scope"]["evidence"]["llm_secret_names_present"] == ["LLM_API_KEY"]
     assert steps["P05-role-routes"]["state"] == "succeeded"
     assert steps["P05-role-routes"]["evidence"]["credential_required"] is True, (
         "la clé est exigée à l'étape de lancement"
@@ -117,6 +119,16 @@ def test_run_validates_the_effective_configuration_with_the_legitimate_key_inste
     assert code == 3 and report["verdict"] == "incomplete_validation"
     assert report["facts"]["billable_actions_emitted"] == 0 and report["facts"]["stop_point"] == "preflight"
     assert steps["R01-run"]["state"] == "not_executed"
+
+
+def test_run_refuses_a_per_role_key_that_is_not_part_of_the_key_contract(monkeypatch, tmp_path, boundary):
+    code, report, steps = invoke(monkeypatch, tmp_path, "run", keep_role_key=True)
+
+    assert steps["P03-secret-scope"]["state"] == "failed" and "hors contrat" in steps["P03-secret-scope"]["detail"]
+    assert "LLM_API_KEY_CODER" in steps["P03-secret-scope"]["detail"]
+    assert (
+        code == 1 and report["facts"]["billable_actions_emitted"] == 0 and steps["R01-run"]["state"] == "not_executed"
+    )
 
 
 def test_the_keyless_preflight_action_still_rejects_the_same_keys(monkeypatch, tmp_path, boundary):

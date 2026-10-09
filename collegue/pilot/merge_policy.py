@@ -17,11 +17,14 @@ Ce qui est vérifié, dans l'ordre (tout échec ou toute vérification inaccessi
 5. **Checks requis** : découverts dans les protections classiques ET les rulesets applicables (avec ``app_id`` /
    ``integration_id`` quand présent), tous présents et ``success`` sur la tête exacte ; check absent, en attente,
    failed/cancelled/skipped/neutral, liste incomplète ou erreur de lecture => pas de fusion.
-6. **Intégrité des contrôles** (barrière indépendante du check) : le sous-arbre ``.github/`` du tree distant de la tête est
-   IDENTIQUE à celui de la base de confiance (ajout, modification, suppression ou renommage d'un contrôle ⇒ refus), même si un
-   check vert de la bonne application et de la bonne tête a été fabriqué par la contribution elle-même. La comparaison porte sur
-   les objets Git réels (SHA de sous-arbre, qui couvre tout le contenu), jamais sur une liste de fichiers qui peut être
-   incomplète ; une lecture impossible refuse.
+6. **Fixture de campagne** (seulement dépôt fixture + base ``collegue-business/*`` : voir ``w5_business_policy``, aucune
+   variable ne la désactive ; hors campagne, rien ne change) : (a) *intégrité des contrôles* — les entrées racine ``.github/``
+   ET ``ci/`` du tree distant de la tête sont IDENTIQUES (type + SHA de sous-arbre) à celles de la base de confiance (ajout,
+   modification, suppression ou renommage ⇒ refus), même si la contribution a fabriqué un check vert de la bonne application et
+   de la bonne tête ; (b) *provenance du check* — ``Fixture tests`` doit être un job RÉEL du workflow approuvé exécuté pour la
+   tête (check-run → ``actions/jobs`` → ``actions/runs`` : dépôt, tête, chemin, événement, succès) ; un check publié par l'API des
+   checks, y compris sur une autre tête, n'est pas un job. Lecture impossible ou API indisponible ⇒ refus. Le check requis
+   doit exister dans les protections serveur (sinon refus : la politique n'est pas « ignorée »).
 7. **Précondition serveur contre la course sur la base** : au moins une protection « branche à jour avant fusion »
    (``strict``) EFFECTIVEMENT applicable à l'acteur du jeton (ruleset actif non contournable par lui, ou protection
    classique appliquée aux administrateurs / acteur non administrateur). L'API de fusion ne prend qu'un ``sha`` de tête :
@@ -40,6 +43,8 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple
+
+from collegue.pilot import w5_business_policy as fixture_policy
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PROOF_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -63,8 +68,7 @@ CODE_API = "api_error"
 CODE_ALREADY_MERGED = "already_merged"
 CODE_STATE = "state"
 CODE_CONTROLS = "controls_altered"
-#: Répertoire des contrôles de la fixture : jamais modifiable par une contribution jugée par ces mêmes contrôles.
-CONTROLS_DIRECTORY = ".github"
+CODE_PROVENANCE = "check_provenance"
 RETRYABLE_CODES = frozenset({CODE_PENDING, CODE_MISSING_CHECK})
 
 
@@ -364,35 +368,44 @@ def evaluate_checks(
 # ── validation complète d'un candidat ──────────────────────────────────────────────────────
 
 
-def _controls_object(branches: Any, owner: str, repo: str, tree_sha: str) -> Optional[str]:
-    """``type:sha`` de l'entrée ``.github`` à la racine du tree (``None`` si absente). Lecture impossible ⇒ refus."""
-    try:
-        getter = getattr(branches, "get_git_tree", None)
-        if callable(getter):
-            data = getter(owner, repo, tree_sha)
-        else:  # route REST en lecture seule (besoin publié : méthode publique du client de branches)
-            data = branches._api_get(f"/repos/{owner}/{repo}/git/trees/{tree_sha}", {})
-        entries = data["tree"]
-        if data.get("truncated") or not isinstance(entries, list):
-            raise ValueError("arbre tronqué ou malformé")
-        for entry in entries:
-            if entry.get("path") == CONTROLS_DIRECTORY:
-                return f"{entry.get('type')}:{str(entry.get('sha')).lower()}"
-        return None
-    except Exception as exc:  # noqa: BLE001 - un arbre illisible ne prouve rien : fail-closed
-        raise MergeRefused(f"arbre Git {str(tree_sha)[:12]} illisible: {exc}", code=CODE_API) from exc
+def _refusal_from_policy(refused: "fixture_policy.PolicyRefusal") -> MergeRefused:
+    codes = {
+        "controls": CODE_CONTROLS,
+        "provenance": CODE_PROVENANCE,
+        "unavailable": CODE_API,
+        "transient": CODE_API,
+        "pending": CODE_PENDING,
+        "missing": CODE_MISSING_CHECK,
+    }
+    return MergeRefused(refused.reason, code=codes.get(refused.kind, CODE_POLICY))
 
 
 def assert_controls_untouched(branches: Any, owner: str, repo: str, *, base_tree: str, head_tree: str) -> None:
-    """Refuse toute contribution dont le sous-arbre ``.github/`` diffère de celui de la base de confiance."""
-    trusted = _controls_object(branches, owner, repo, base_tree)
-    proposed = _controls_object(branches, owner, repo, head_tree)
-    if trusted != proposed:
+    """Refuse toute contribution dont ``.github/`` ou ``ci/`` diffère de la base de confiance (arbres Git réels, fail-closed)."""
+    try:
+        fixture_policy.assert_controls_untouched(branches, owner, repo, base_tree=base_tree, head_tree=head_tree)
+    except fixture_policy.PolicyRefusal as refused:
+        raise _refusal_from_policy(refused) from refused
+
+
+def _campaign_check_required(policy: "ServerPolicy") -> None:
+    """Pour la campagne, le check requis de l'application Actions DOIT figurer dans les protections serveur effectives."""
+    if not any(
+        c.context == fixture_policy.CAMPAIGN_CHECK and c.app_id == fixture_policy.CAMPAIGN_CHECK_APP_ID
+        for c in policy.required_checks
+    ):
         raise MergeRefused(
-            "la contribution modifie les contrôles de la fixture (.github/) par rapport à la base de confiance "
-            f"({trusted or 'absent'} → {proposed or 'absent'}) : un contrôle ne se juge pas lui-même",
-            code=CODE_CONTROLS,
+            f"fixture de campagne : le check {fixture_policy.CAMPAIGN_CHECK!r} (application "
+            f"{fixture_policy.CAMPAIGN_CHECK_APP_ID}) n'est pas exigé par les protections serveur de la base",
+            code=CODE_POLICY,
         )
+
+
+def _campaign_provenance(prs: Any, owner: str, repo: str, head_sha: str, observations: Sequence[Any]) -> None:
+    try:
+        fixture_policy.verify_check_provenance(prs, owner, repo, head_sha, observations)
+    except fixture_policy.PolicyRefusal as refused:
+        raise _refusal_from_policy(refused) from refused
 
 
 def _read_pr(prs: Any, owner: str, repo: str, number: int) -> Any:
@@ -493,7 +506,10 @@ def verify_merge_candidate(
         base_tree = str(branches.get_git_commit(owner, repo, proof_base).tree_sha).lower()
     except Exception as exc:  # noqa: BLE001
         raise MergeRefused(f"tree de la base de confiance illisible: {exc}", code=CODE_API) from exc
-    assert_controls_untouched(branches, owner, repo, base_tree=base_tree, head_tree=proof_tree)
+    campaign = fixture_policy.applies(owner, repo, base)
+    if campaign:
+        _campaign_check_required(policy)
+        assert_controls_untouched(branches, owner, repo, base_tree=base_tree, head_tree=proof_tree)
 
     try:
         details = prs.get_commit_check_details(owner, repo, head_sha)
@@ -502,6 +518,8 @@ def verify_merge_candidate(
     if not bool(getattr(details, "complete", False)):
         raise MergeRefused("liste des checks incomplète — fail-closed", code=CODE_API)
     evaluate_checks(policy.required_checks, list(details.checks), require_all_green=require_all_green)
+    if campaign:
+        _campaign_provenance(prs, owner, repo, head_sha, details.checks)
 
     # Stabilité finale : la PR et la base n'ont pas bougé pendant toutes ces lectures.
     again = _read_pr(prs, owner, repo, pr_number)
@@ -551,6 +569,23 @@ def verify_required_checks(
         raise MergeRefused("client GitHub des PR absent — checks invérifiables", code=CODE_API)
     policy = discover_server_policy(clients, owner, repo, base)
     head = _full_sha(head_sha, "SHA de tête")
+    campaign = fixture_policy.applies(owner, repo, base)
+    if campaign:
+        # Le revert ne porte pas de preuve de livraison : la base de confiance est le sommet courant de la base (déjà passé par
+        # la barrière à sa fusion) ; ses contrôles protégés doivent rester identiques dans la tête du revert.
+        _campaign_check_required(policy)
+        branches = getattr(clients, "branches", None)
+        if branches is None:
+            raise MergeRefused("client GitHub des branches absent — contrôles invérifiables", code=CODE_API)
+        try:
+            tip = _full_sha(branches.get_branch_sha(owner, repo, base), "sommet de la base")
+            base_tree = str(branches.get_git_commit(owner, repo, tip).tree_sha).lower()
+            head_tree = str(branches.get_git_commit(owner, repo, head).tree_sha).lower()
+        except MergeRefused:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise MergeRefused(f"arbres du revert illisibles: {exc}", code=CODE_API) from exc
+        assert_controls_untouched(branches, owner, repo, base_tree=base_tree, head_tree=head_tree)
     try:
         details = prs.get_commit_check_details(owner, repo, head)
     except Exception as exc:  # noqa: BLE001
@@ -558,6 +593,8 @@ def verify_required_checks(
     if not bool(getattr(details, "complete", False)):
         raise MergeRefused("liste des checks incomplète — fail-closed", code=CODE_API)
     evaluate_checks(policy.required_checks, list(details.checks), require_all_green=require_all_green)
+    if campaign:
+        _campaign_provenance(prs, owner, repo, head, details.checks)
     return policy
 
 

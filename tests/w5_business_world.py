@@ -71,20 +71,24 @@ def services_for(
 ) -> w5.PhaseServices:
     """Services de phase sur les ENTRÉES PUBLIQUES (``run_project_from_settings``) et les vrais clients du pont Git."""
     model = model or ModelStandIn()
+    calls: list = []
     overrides = {"AUTO_REVERT_HEALTH_COMMAND": business.health_command(), **(settings_overrides or {})}
 
-    async def run_pass(context: Any, *, improve: bool, agent: Any = None) -> Any:
+    async def run_pass(context: Any, *, improve: bool, agent: Any = None, path_allowlist: Any = ()) -> Any:
+        targeted = {**overrides, **({"AUTO_MERGE_PATH_ALLOWLIST": ",".join(path_allowlist)} if path_allowlist else {})}
+        calls.append({"improve": improve, "path_allowlist": tuple(path_allowlist)})
         return await harness.improvement_pass(
             world,
             agent or model,
             measure_fn=measure_fn,
-            settings_overrides=overrides,
+            settings_overrides=targeted,
             reviewer=reviewer,
             improve=improve,
         )
 
     async def resume(context: Any) -> Any:
-        _promotion, recovery, _budget = harness.phase5_hooks(world, harness.improvement_settings(world, **overrides))
+        targeted = {**overrides, "AUTO_MERGE_PATH_ALLOWLIST": ",".join(w5.INCIDENT_ALLOWLIST)}
+        _promotion, recovery, _budget = harness.phase5_hooks(world, harness.improvement_settings(world, **targeted))
         return await recovery()
 
     def verify_tip(context: Any, sha: str) -> Any:
@@ -94,7 +98,7 @@ def services_for(
             world.source, python=sys.executable, runner=business.trusted_local_runner
         )
 
-    return w5.PhaseServices(
+    services = w5.PhaseServices(
         run_pass=run_pass,
         clients=world.bridge.clients(),
         manager=world.manager,
@@ -107,6 +111,8 @@ def services_for(
         manifest=manifest,
         required_checks=tuple(harness_checks()),
     )
+    services.pass_calls = calls  # type: ignore[attr-defined] - journal des ciblages demandés aux passes publiques
+    return services
 
 
 def harness_checks():

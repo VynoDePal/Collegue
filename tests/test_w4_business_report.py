@@ -201,11 +201,11 @@ def test_llm_keys_may_not_reach_the_keyless_preflight_stages():
 def test_the_launch_stage_legitimately_holds_the_key_of_the_chosen_transport_and_records_only_names():
     report = CampaignReport("preflight", "unit", secrets=[SECRET])
     step = report.declare("P03", "secrets")
-    env = {**GOOD_ENV, "LLM_API_KEY": SECRET, "LLM_API_KEY_CODER": SECRET + "-coder"}
+    env = {**GOOD_ENV, "LLM_API_KEY": SECRET}
 
     business.check_secret_scope(env, report, step, stage="launch")
 
-    assert step.evidence["llm_secret_names_present"] == ["LLM_API_KEY", "LLM_API_KEY_CODER"]
+    assert step.evidence["llm_secret_names_present"] == ["LLM_API_KEY"]
     assert SECRET not in report.to_json() and SECRET not in report.to_human()
 
 

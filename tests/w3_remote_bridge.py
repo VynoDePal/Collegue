@@ -113,6 +113,7 @@ class BridgeServer(FakeGitHubServer):
         self.auto_green = True  # CI simulée : les cinq checks passent dès l'ouverture de la PR
         self.on_write: Optional[Callable[["BridgeServer", str], None]] = None
         self.published_calls: List[tuple] = []
+        self.truncate_trees = False  # réponses d'arbre « tronquées » (la lecture ne prouve alors rien)
 
     # ── objets Git réels ───────────────────────────────────────────────────────
     def commit(self, parents: List[str], *, tree: str, message: str = "c") -> str:
@@ -157,7 +158,8 @@ class BridgeServer(FakeGitHubServer):
         if m:  # arbre Git RÉEL de premier niveau (barrière d'intégrité des contrôles ``.github/``)
             self.calls.append(("GET", path, dict(params)))
             self._maybe_fail("GET", path)
-            rows = self.remote._git("ls-tree", "-z", m.group(1), strip=False).split("\0")
+            recursive = ["-r"] if str(params.get("recursive", "")).lower() in {"1", "true"} else []
+            rows = self.remote._git("ls-tree", "-z", *recursive, m.group(1), strip=False).split("\0")
             entries = []
             for row in rows:
                 if not row:
@@ -165,7 +167,7 @@ class BridgeServer(FakeGitHubServer):
                 meta, _, name = row.partition("\t")
                 mode, kind, sha = meta.split(" ")
                 entries.append({"path": name, "mode": mode, "type": kind, "sha": sha})
-            return {"tree": entries, "truncated": False}
+            return {"tree": entries, "truncated": bool(getattr(self, "truncate_trees", False))}
         if path == _PREFIX:
             self.calls.append(("GET", path, dict(params)))
             return {"default_branch": self.base_branch}

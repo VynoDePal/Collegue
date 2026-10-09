@@ -150,3 +150,72 @@ def test_a_longer_durable_window_never_extends_the_campaign_deadline(wired, monk
 
     verify_kwargs = next(e[1] for e in wired.events if isinstance(e, tuple) and e[0] == "verify")
     assert verify_kwargs["deadline_monotonic"] <= started + business.CAMPAIGN_BOUNDS.max_seconds + 2.0
+
+
+def test_collection_and_cleanup_continue_after_the_generation_deadline_without_generating(wired, monkeypatch):
+    """Le nettoyage ne génère rien : son exécuteur de commandes a SA fenêtre, il n'hérite pas de l'échéance de 900 s expirée."""
+    runners = []
+    monkeypatch.setattr(
+        business, "NightlyAdapter", lambda config, clients, runner: (runners.append(runner), wired.adapter)[1]
+    )
+    monkeypatch.setattr(w5, "activate_budget", lambda env, campaign_id, report, **kwargs: kwargs["on_remaining"](0.0))
+
+    run_main(wired.tmp)
+
+    generation_runner, cleanup_runner = runners[0], runners[-1]
+    assert generation_runner is not cleanup_runner, "le nettoyage a son propre exécuteur"
+    with pytest.raises(business.BudgetStop, match="échéance globale"):
+        generation_runner(["true"])
+    assert cleanup_runner(["true"]).returncode == 0, "le nettoyage et la collecte continuent après l'échéance"
+
+
+# ── ciblage des passes publiques : réglage produit resserré, jamais élargi ───────────────────────────────────────────────────
+
+
+async def test_the_production_pass_narrows_the_product_allowlist_to_the_phase_target_and_changes_nothing_else(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    async def fake_entry(project_id, repo_source, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(stop_reason="done")
+
+    import collegue.pilot as pilot
+
+    monkeypatch.setattr(pilot, "run_project_from_settings", fake_entry)
+    env = business.campaign_environment("tg", str(tmp_path))
+    run = w5.production_run_pass(owner="o", repo="r", env=env)
+    context = {"project_id": 3, "operator_checkout": str(tmp_path), "base_branch": "collegue-business/x"}
+
+    await run(context, improve=True, agent=None, path_allowlist=w5.R04_ALLOWLIST)
+    await run(context, improve=True, agent="incident", path_allowlist=w5.INCIDENT_ALLOWLIST)
+    await run(context, improve=False)
+
+    narrowed, incident, plain = calls
+    assert narrowed["settings_obj"].AUTO_MERGE_PATH_ALLOWLIST == w5.R04_DOC, (
+        "R04 ne peut fusionner que le runbook cible"
+    )
+    assert (
+        incident["settings_obj"].AUTO_MERGE_PATH_ALLOWLIST == ",".join(w5.INCIDENT_DOCS)
+        and incident["agent"] == "incident"
+    )
+    assert "settings_obj" not in plain and "agent" not in plain, (
+        "sans ciblage : réglages du processus, aucun agent injecté"
+    )
+    for kwargs in (narrowed, incident):
+        settings = kwargs["settings_obj"]  # le reste de la politique est celui de l'environnement validé, non élargi
+        assert settings.AUTO_MERGE_ENABLED is True and settings.AUTO_REVERT_ENABLED is True
+        assert settings.AUTO_MERGE_MAX_LOC == 50 and settings.AUTO_MERGE_METHOD == "squash"
+        assert settings.BUDGET_MODE == "strict"  # (LLM_TRANSPORT : réglage du lot A, absent de cette branche)
+    assert all(kwargs["dry_run"] is False and kwargs["owner"] == "o" for kwargs in calls)
+
+
+async def test_a_targeted_pass_without_the_validated_environment_is_refused_not_run_untargeted():
+    run = w5.production_run_pass(owner="o", repo="r")
+    with pytest.raises(w5.IncompleteValidation, match="ciblage de la passe"):
+        await run(
+            {"project_id": 1, "operator_checkout": "/x", "base_branch": "b"},
+            improve=True,
+            path_allowlist=w5.R04_ALLOWLIST,
+        )

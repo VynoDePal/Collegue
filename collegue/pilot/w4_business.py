@@ -275,6 +275,20 @@ BUSINESS_PROBLEM = (
 )
 
 
+def business_problem(stack: Sequence[str] = ()) -> str:
+    """Problème de la campagne. ``stack`` = les ``nom==version`` du ``requirements.txt`` APPROUVÉ du socle (relu par l'API) : le
+    codeur travaille HORS LIGNE sur cette pile et la reçoit dans son problème, qui ne contient ni ne crée aucune quatrième tâche."""
+    if not stack:
+        return BUSINESS_PROBLEM
+    return (
+        BUSINESS_PROBLEM
+        + " Contrainte d'environnement (travail HORS LIGNE, ce n'est pas une tâche supplémentaire) : seule la pile approuvée du dépôt "
+        "est installable, déjà listée dans `requirements.txt` — "
+        + ", ".join(stack)
+        + ". N'utilise aucune autre dépendance ni aucune autre version : une dépendance hors de cette liste fait échouer la vérification."
+    )
+
+
 def campaign_environment(campaign_id: str, home: str, bounds: CampaignBounds = CAMPAIGN_BOUNDS) -> Dict[str, str]:
     """Variables d'environnement de l'invocation réelle : bornes globales et registre durable propre à la campagne."""
     state_db = os.path.join(home, f"{campaign_id}.sqlite3")
@@ -384,6 +398,18 @@ def check_secret_scope(
         step.evidence["scope"] = (
             "lancement : les clés ne sont lues que par l'étape qui les consomme, valeurs jamais affichées"
         )
+        # Contrat de clé W5 : le secret temporaire de la campagne est lié à ``LLM_API_KEY`` (le SEUL nom que lisent les réglages du
+        # produit et le service de confiance du courtier). Toute autre variable de clé est hors contrat : un nom par rôle pourrait
+        # détourner un rôle vers une autre clé, ``GOOGLE_API_KEY`` & co sont ignorés par le produit mais restent des fuites possibles.
+        if "LLM_API_KEY" not in present:
+            raise IncompleteValidation(
+                "clé du fournisseur absente à l'étape réelle : LLM_API_KEY (lue par le seul service de confiance)"
+            )
+        foreign = [name for name in present if name != "LLM_API_KEY"]
+        if foreign:
+            raise RuntimeError(
+                f"variable(s) de clé hors contrat à l'étape réelle : {', '.join(foreign)} (seule LLM_API_KEY est lue)"
+            )
         return
     if present:
         raise RuntimeError(f"clé(s) de modèle exposée(s) à l'étape de préflight : {', '.join(present)}")
@@ -1352,10 +1378,109 @@ def registry_counters(
     }
 
 
+def usage_defect(counters: Mapping[str, Any]) -> Optional[str]:
+    """Une consommation inconnue ou un scope bloqué interdit tout verdict complet, quelle que soit la lecture qui le révèle."""
+    if counters.get("blocked_reason"):
+        return f"scope budgétaire bloqué ({counters.get('blocked_reason')}) : usage inconnu, aucune validation complète"
+    unknown_usd, unknown_tokens = counters.get("unknown_micro_usd") or 0, counters.get("unknown_tokens") or 0
+    if unknown_usd or unknown_tokens:
+        return f"consommation inconnue au registre ({unknown_usd} µ$ / {unknown_tokens} tokens) : aucune validation complète"
+    return None
+
+
+_MONOTONE = ("consumed_micro_usd", "consumed_tokens", "unknown_micro_usd", "unknown_tokens", "revision")
+
+
+class RegistryProof:
+    """Preuve de budget de la campagne : l'historique des lectures OBLIGATOIRES du registre durable.
+
+    Une lecture est obligatoire après chaque phase qui a tourné et à la sortie. Règles (aucune ne dépend d'un simple compteur final) :
+
+    * toute lecture qui révèle une consommation inconnue, un blocage ou un dépassement est un défaut PERMANENT de la campagne,
+      même si une lecture plus tardive n'en dit rien (les compteurs sont cumulatifs) ;
+    * une lecture obligatoire manquante est une *lacune* : elle ferme définitivement les nouvelles émissions (``emission_refusal``)
+      et laisse la preuve incomplète, avec sa cause d'origine ;
+    * une lacune ne peut être RÉPARÉE que par la PREMIÈRE lecture ultérieure, et seulement si elle, cumulativement : (a) arrive avant toute nouvelle
+      émission (la fermeture des émissions l'impose, ``emitted_since_gap`` le vérifie), (b) porte sur le même scope et ne
+      régresse sur aucun compteur monotone par rapport à la dernière lecture valide, (c) ne révèle ni inconnue, ni blocage, ni
+      dépassement. La réparation couvre la preuve de dépense (elle est consignée avec sa cause), jamais les phases refusées entre
+      temps : elles restent non jouées et le verdict reste incomplet.
+    """
+
+    def __init__(self) -> None:
+        self.reads: List[Dict[str, Any]] = []
+        self.gaps: List[Dict[str, Any]] = []
+        self._last_good: Optional[Mapping[str, Any]] = None
+        self.emitted_since_gap = 0
+
+    def note_emission(self) -> None:
+        if any(gap["repaired_by"] is None for gap in self.gaps):
+            self.emitted_since_gap += 1
+
+    def record_gap(self, label: str, cause: str) -> None:
+        self.gaps.append({"label": label, "cause": cause, "repaired_by": None})
+
+    def record(self, label: str, counters: Mapping[str, Any]) -> Optional[str]:
+        """Enregistre une lecture ; retourne le défaut d'usage qu'elle révèle (jamais effacé)."""
+        defect = usage_defect(counters) or self._regression(counters)
+        self.reads.append({"label": label, "defect": defect})
+        pending = [gap for gap in self.gaps if gap["repaired_by"] is None and not gap.get("closed")]
+        if defect:
+            for gap in pending:
+                gap["closed"] = True  # la PREMIÈRE lecture qui suit une lacune est la seule à pouvoir la réparer
+            return defect
+        repair = bool(pending) and self._may_repair(counters)
+        for gap in pending:
+            if repair:
+                gap["repaired_by"] = label
+            else:
+                gap["closed"] = True
+        self._last_good = dict(counters)
+        return None
+
+    def _regression(self, counters: Mapping[str, Any]) -> Optional[str]:
+        """Les compteurs cumulatifs d'un même scope ne reculent jamais : un recul rend le registre non fiable (défaut permanent)."""
+        previous = self._last_good
+        if previous is None or previous.get("scope") != counters.get("scope"):
+            return None
+        fallen = [key for key in _MONOTONE if (counters.get(key) or 0) < (previous.get(key) or 0)]
+        return f"compteurs cumulatifs en recul ({', '.join(fallen)}) : registre non fiable" if fallen else None
+
+    def _may_repair(self, counters: Mapping[str, Any]) -> bool:
+        if self.emitted_since_gap:
+            return False
+        previous = self._last_good
+        return previous is None or previous.get("scope") == counters.get("scope")
+
+    @property
+    def open_gaps(self) -> List[Dict[str, Any]]:
+        return [gap for gap in self.gaps if gap["repaired_by"] is None]
+
+    @property
+    def usage_defects(self) -> List[str]:
+        return [f"{read['label']} : {read['defect']}" for read in self.reads if read["defect"]]
+
+    def emission_refusal(self) -> Optional[str]:
+        """Pourquoi aucune nouvelle émission ne peut démarrer à cause d'une lacune (même réparée côté preuve)."""
+        if not self.gaps:
+            return None
+        first = self.gaps[0]
+        return (
+            f"lecture obligatoire du registre manquante après {first['label']} ({first['cause']}) : "
+            "preuve de dépense incomplète, aucune nouvelle émission"
+        )
+
+    def to_fact(self) -> Dict[str, Any]:
+        return {"reads": list(self.reads), "gaps": [dict(gap) for gap in self.gaps]}
+
+
 def assert_registry_within_bounds(counters: Mapping[str, Any], bounds: CampaignBounds = CAMPAIGN_BOUNDS) -> None:
     """Le registre porte bien l'enveloppe de la campagne (plafonds ≤ bornes, strict) et ne l'a pas dépassée."""
     if counters.get("scope") is None:
         raise IncompleteValidation("aucun scope budgétaire durable pour le projet")
+    defect = usage_defect(counters)
+    if defect:
+        raise BudgetStop(defect)
     if not counters.get("strict"):
         raise RuntimeError("le registre n'est pas en mode strict")
     cap_usd, cap_tokens = counters.get("cap_usd"), counters.get("cap_tokens")
@@ -1474,6 +1599,8 @@ def bounded_command_runner(
 
 
 BUILD_STOP_BUDGET = {"paused_budget", "deadline_reached"}
+#: Fenêtre du nettoyage (sans génération), indépendante de l'échéance de génération de 900 s.
+CLEANUP_WINDOW_SECONDS = 600
 
 
 def launch_campaign(
@@ -1511,10 +1638,12 @@ def launch_campaign(
         claim(report)
     if activate is not None:
         activate(report)
+    # Pile approuvée relue par l'API juste avant (socle revalidé) : annoncée au codeur, qui travaille hors ligne.
+    approved_stack = tuple((report.facts.get("bootstrap_revalidated") or {}).get("approved_stack") or ())
     base_sha = adapter.create_base(manifest)
     context["base_sha"] = base_sha
     draft = adapter.product(
-        "plan", "draft", "--name", f"W4 {cfg.tag}", "--problem", BUSINESS_PROBLEM, "--owner", cfg.owner,
+        "plan", "draft", "--name", f"W4 {cfg.tag}", "--problem", business_problem(approved_stack), "--owner", cfg.owner,
         "--repo", cfg.repo, "--base", cfg.base_branch, "--labels", cfg.issue_label, "--milestone", "",
         "--spec-filename", "SPEC.md", "--deadline-hours", "0.25", "--nightly-exact-task-count", "3",
         *(["--cycle-id", cycle_id] if cycle_id else []), "--format", "json",
@@ -1643,28 +1772,36 @@ def run_campaign(
 
     now = clock or time.monotonic
     context: Dict[str, Any] = {}
-    gate: Dict[str, Optional[str]] = {"block": None}
+    proof = RegistryProof()
+    gate: Dict[str, Optional[str]] = {"budget": None}
 
     def _sync_context() -> None:
         context.update(report.facts.get("launch") or {})
 
-    def _snapshot(label: str) -> None:
-        """Relit le MÊME registre après une phase ou un arrêt ; ne masque jamais la cause d'origine."""
+    def _snapshot(label: str) -> Optional[Dict[str, Any]]:
+        """Relit le MÊME registre après une phase ou un arrêt ; ne masque jamais la cause d'origine.
+
+        Lecture impossible = lacune de preuve (``RegistryProof``) : les émissions se ferment, aucun zéro n'est inventé."""
         _sync_context()
         slot = report.facts.setdefault("registry", {})
         if read_registry is None or not (context.get("project_id") or context.get("scope_key")):
-            slot[label] = {"unreadable": "aucun projet ni scope créé ou registre non lisible : dépense non établie"}
-            return
+            cause = "aucun projet ni scope créé ou registre non lisible : dépense non établie"
+            slot[label] = {"unreadable": cause}
+            proof.record_gap(label, cause)
+            return None
         try:
             counters = dict(read_registry(context))
         except Exception as exc:  # noqa: BLE001 - illisible = preuve manquante, jamais un zéro inventé
-            slot[label] = {"unreadable": f"{type(exc).__name__} : dépense non établie"}
-            return
+            cause = f"{type(exc).__name__} : {str(exc)[:200]} (dépense non établie)"
+            slot[label] = {"unreadable": cause}
+            proof.record_gap(label, cause)
+            return None
         slot[label] = counters
         report.facts["registry_final"] = counters
-        if counters.get("blocked_reason") or counters.get("unknown_micro_usd") or counters.get("unknown_tokens"):
-            gate["block"] = "usage inconnu : le scope est bloqué, aucune nouvelle émission"
-            return
+        defect = proof.record(label, counters)
+        if defect:
+            gate["budget"] = defect
+            return counters
         used_usd = (
             counters.get("consumed_micro_usd", 0)
             + counters.get("reserved_micro_usd", 0)
@@ -1677,21 +1814,19 @@ def run_campaign(
         if (cap_usd is not None and used_usd >= cap_usd - 1e-9) or (
             cap_tokens is not None and used_tokens >= cap_tokens
         ):
-            gate["block"] = f"enveloppe atteinte ({used_usd:.6f} $ / {used_tokens} tokens) : aucune nouvelle émission"
-            return
-        try:
-            assert_registry_within_bounds(counters)
-        except BudgetStop as exc:
-            gate["block"] = str(exc)
-        except Exception:  # noqa: BLE001 - une enveloppe incohérente est jugée par R03, pas masquée ici
-            pass
+            gate["budget"] = f"enveloppe atteinte ({used_usd:.6f} $ / {used_tokens} tokens) : aucune nouvelle émission"
+        return counters
 
     def _before_emission(step: Step) -> None:
         deadline = _deadline_of(deadline_monotonic)
         if deadline is not None and deadline - now() <= 0:
             raise BudgetStop(f"échéance globale atteinte avant {step.id} : aucune nouvelle génération")
-        if gate["block"]:
-            raise BudgetStop(f"{gate['block']} (avant {step.id})")
+        if gate["budget"]:
+            raise BudgetStop(f"{gate['budget']} (avant {step.id})")
+        refusal = proof.emission_refusal()
+        if refusal:
+            raise IncompleteValidation(f"{refusal} (avant {step.id})")
+        proof.note_emission()
 
     def _phase(step_id: str, fn: Callable[[Step], Any]) -> bool:
         def guarded(step: Step) -> None:
@@ -1714,6 +1849,17 @@ def run_campaign(
             raise IncompleteValidation("aucune vérification métier fournie")
         verify(report, context)
 
+    def _judge_proof() -> None:
+        """Jugement de la preuve de dépense sur TOUT l'historique des lectures (et pas seulement la dernière)."""
+        if proof.usage_defects:
+            raise BudgetStop("; ".join(proof.usage_defects))
+        if proof.open_gaps:
+            gap = proof.open_gaps[0]
+            raise IncompleteValidation(
+                f"lecture obligatoire du registre manquante après {gap['label']} ({gap['cause']}) et non réparée : "
+                "dépense non établie (aucun zéro n'est inventé)"
+            )
+
     def _registry(step: Step) -> None:
         if read_registry is None:
             raise IncompleteValidation("registre durable illisible")
@@ -1721,17 +1867,12 @@ def run_campaign(
             raise IncompleteValidation(
                 "aucun projet ni scope créé avant l'arrêt : la dépense éventuelle n'est pas établie (aucun zéro n'est inventé)"
             )
-        try:
-            counters = dict(read_registry(context))
-        except (IncompleteValidation, BudgetStop):
-            raise
-        except Exception as exc:  # noqa: BLE001 - illisible = preuve manquante, jamais un échec qui masquerait l'arrêt d'origine
-            raise IncompleteValidation(
-                f"registre durable du projet {context.get('project_id')} (scope {context.get('scope_key')}) illisible ({type(exc).__name__}) : "
-                "dépense non établie (aucun zéro n'est inventé)"
-            ) from exc
+        counters = _snapshot("final")
+        step.evidence["registry_proof"] = proof.to_fact()
+        _judge_proof()
+        if counters is None:
+            raise IncompleteValidation("relecture finale du registre impossible : dépense non établie")
         step.evidence["counters"] = counters
-        report.facts["registry_final"] = counters
         assert_registry_within_bounds(counters)
 
     def _not_wired(step: Step) -> None:
@@ -1753,6 +1894,17 @@ def run_campaign(
         report.halted = halted_before or report.halted
     finally:
         _snapshot("exit")
+        report.facts["registry_proof"] = proof.to_fact()
+        # Une lecture de SORTIE qui révèle une inconnue, un blocage ou une lacune non réparée retire le succès déjà accordé à
+        # R03 : aucun verdict complet si le défaut n'apparaît qu'à la dernière lecture.
+        registry_step = report.step("R03-registry")
+        if registry_step.state == STEP_SUCCEEDED:
+            try:
+                _judge_proof()
+            except BudgetStop as exc:
+                registry_step.state, registry_step.detail = STEP_BUDGET_STOP, f"lecture de sortie : {exc}"
+            except IncompleteValidation as exc:
+                registry_step.state, registry_step.detail = STEP_INCOMPLETE, f"lecture de sortie : {exc}"
         cleanup_step = report.step("R06-cleanup")
         cleanup_step.required = False  # le verdict « avant nettoyage » ne dépend pas du nettoyage lui-même
         report.facts["verdict_before_cleanup"] = report.verdict()
@@ -1943,7 +2095,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             read_registry=registry_reader(env),
             improve=lambda r, ctx: w5.run_improvement_phase(r, ctx, services()),
             incident=lambda r, ctx: w5.run_incident_phase(r, ctx, services()),
-            cleanup=lambda r: cleanup_campaign(r, adapter),
+            # Collecte et nettoyage ne GÉNÈRENT rien : ils continuent après l'échéance de génération (fenêtre propre, jamais celle du 900 s).
+            cleanup=lambda r: cleanup_campaign(
+                r,
+                NightlyAdapter(config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)),
+            ),
             deadline_monotonic=deadline,
         )
     if args.output:

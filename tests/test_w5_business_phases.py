@@ -85,6 +85,18 @@ def story(tmp_path_factory):
     out["r04_broken_contract"] = run(world, world_support.services_for(world, model=breaker), r04, step4, context)
     out["tip_after_refusals"] = world_support.git_tip(world)
     out["prs_after_refusals"] = sorted(world.bridge.prs)
+    # 3b. R04 HORS CIBLE : le « modèle » retire les exemples du runbook ET du support d'incident → la VRAIE politique de faible risque,
+    #     resserrée à la cible de la phase (AUTO_MERGE_PATH_ALLOWLIST, jamais élargie), refuse la fusion : rien n'est livré
+    clean_deploy = "".join(
+        line for line in fixture.SOCLE_DEPLOY_DOC.splitlines(keepends=True) if not w5.FAKE_CREDENTIAL_LINE.search(line)
+    )
+    overreach = world_support.services_for(
+        world, model=world_support.ModelStandIn({w5.R04_DOC: fixture.CLEAN_RUNBOOK_DOC, w5.R05_DOC: clean_deploy})
+    )
+    out["r04_overreach"] = run(world, overreach, r04, step4, context)
+    out["overreach_calls"] = overreach.pass_calls
+    out["tip_after_overreach"] = world_support.git_tip(world)
+    out["deploy_after_overreach"] = world.bridge.remote.files_at(out["tip_after_overreach"])[w5.R05_DOC]
     # 4. R04 réussie : identifiants d'exemple retirés du runbook (gain mesuré par le vrai scan), fusionnée par Phase 5
     out["r04"] = run(world, world_support.services_for(world), r04, step4, context)
     out["context_after_r04"] = dict(context)
@@ -125,6 +137,12 @@ def story(tmp_path_factory):
         session.execute(
             update(Phase5Incident).values(revert_claim_expires_at=datetime.now(timezone.utc) - timedelta(seconds=5))
         )
+    # 6d. reprise avec un « checkpoint sain » ERRONÉ (la base courante, qui contient déjà l'incident) : refusée, jamais restaurée
+    #     contre une mauvaise préimage ; la réconciliation du produit, elle, a bien eu lieu (incident récupéré, non acquitté)
+    wrong = dict(context)
+    wrong["r04"] = {**context["r04"], "tip": world.bridge.branches["main"]}
+    out["r05_wrong_checkpoint"] = run(world, world_support.services_for(world), r05, step5, wrong)
+    out["incident_after_wrong_checkpoint"] = world.manager().get_phase5_incident(world.project_id)
     # 7. R05 : REPRISE — l'incident durable est réconcilié, rollback prouvé, acquittement CAS, reprise libre
     out["r05_resumed"] = run(world, world_support.services_for(world), r05, step5, context)
     out["incident_after_ack"] = world.manager().get_phase5_incident(world.project_id)
@@ -221,6 +239,40 @@ def test_r05_resumes_the_durable_incident_and_proves_the_real_rollback(story):
     assert evidence["cas_stale_rejected"] and evidence["replay_rejected"], "acquittement CAS : périmé et rejeu refusés"
     assert evidence["recovery_found"] is False and evidence["recovery_continue"] is True
     assert story["incident_after_ack"] is None and story["tip_final"] == evidence["tip_after"]
+
+
+def test_the_resumed_rollback_is_judged_against_the_durable_healthy_checkpoint_not_the_incident_tip(story):
+    evidence = story["r05_resumed"]["evidence"]
+    healthy = story["tip_after_r04"]
+    assert evidence["tip_before"] == healthy != evidence["tip_at_entry"], "préimage = base saine livrée par R04"
+    assert set(evidence["healthy_checkpoint"].values()) == {healthy}, evidence["healthy_checkpoint"]
+    assert evidence["tree_before"] == story["context_after_r04"]["r04"]["tree"]
+    assert evidence["tree_after"] == story["context_after_r04"]["r04"]["tree"]
+
+
+def test_a_wrong_healthy_checkpoint_is_refused_and_never_restored_against(story):
+    outcome = story["r05_wrong_checkpoint"]
+    assert outcome["state"] == "failed" and "checkpoint sain incohérent" in outcome["detail"], outcome
+    assert story["incident_after_wrong_checkpoint"].state == "recovered", (
+        "la réconciliation du produit a eu lieu ; l'incident n'est pas acquitté tant que la preuve n'est pas faite"
+    )
+
+
+def test_a_model_that_leaves_its_target_is_refused_by_the_real_policy_and_the_incident_support_is_preserved(story):
+    outcome = story["r04_overreach"]
+    assert outcome["state"] == "incomplete_validation", outcome
+    assert outcome["evidence"]["auto_merge_path_allowlist"] == [w5.R04_DOC]
+    assert story["overreach_calls"] == [{"improve": True, "path_allowlist": (w5.R04_DOC,)}], story["overreach_calls"]
+    assert story["tip_after_overreach"] == story["tip_after_refusals"], "rien n'a été fusionné"
+    assert story["deploy_after_overreach"] == fixture.SOCLE_DEPLOY_DOC, "le support d'incident garde ses exemples"
+
+
+def test_each_phase_asks_the_public_entry_for_its_own_narrowed_target(story):
+    assert w5.R04_ALLOWLIST == (w5.R04_DOC,) and set(w5.INCIDENT_ALLOWLIST) == set(w5.INCIDENT_DOCS)
+    assert not set(w5.R04_ALLOWLIST) & set(w5.INCIDENT_ALLOWLIST), (
+        "cibles disjointes : R04 ne peut pas consommer l'incident"
+    )
+    assert story["r05_resumed"]["evidence"]["injection"]["files"] == list(w5.INCIDENT_DOCS)
 
 
 def test_the_independent_health_probe_really_saw_the_pdf_regression_and_then_the_restoration(story):
