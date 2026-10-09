@@ -155,10 +155,11 @@ collegue = [
 testpaths = ["tests"]
 norecursedirs = ["stress", "prompts", "__pycache__"]
 asyncio_mode = "auto"
-addopts = "-q -m 'not integration'"
+addopts = "-q -m 'not integration and not w5_image'"
 markers = [
     "slow: tests exceeding ~1s (rate-limit reset windows, soak scenarios)",
     "integration: live runs requiring real credentials (Sentry, GitHub, LLM, Postgres, K8s) — skipped in CI",
+    "w5_image: preuve composée W5 en conteneur réel (Docker + image broker) — exclue de la suite générale, SÉLECTIONNÉE et sans saut par le job « Docker build »",
 ]
 
 [tool.coverage.run]

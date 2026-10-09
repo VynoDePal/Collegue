@@ -550,6 +550,9 @@ def render_probe_markdown(plan: Mapping[str, Any]) -> str:
         )
     out += [
         "",
+        "* **Garde de fusion de confiance** (tous les scénarios) : `protected_tree_violations` est évalué sur l'arbre Git RÉEL de la tête et DOIT refuser exactement les "
+        "têtes qui touchent `.github/` ou `ci/`, ajoutent un lien ou partent de la graine (jamais `green`, `red-test`, `unapproved-dependency`) : un check vert falsifié n'est pas "
+        "une réussite si le garde ne refuse pas la tête altérée.",
         "* `green` : le workflow SE DÉCLENCHE sur une PR (`pull_request`) vers une base éphémère, le check est un job réel de l'application 15368 sur la "
         "tête exacte (`check_provenance` : job, exécution, chemin du workflow, arbre protégé intact), la fusion est ACCEPTÉE. Absence de check dans le délai "
         "= échec (jamais un succès présumé).",
@@ -1018,7 +1021,7 @@ def probe_scenarios(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
     protégés peut alors expliquer le refus (isolation de la protection indépendante du workflow)."""
     files = plan["files"]
     green = {"tests/test_probe.py": PROBE_TEST_GREEN}
-    return [
+    scenarios = [
         {"id": "green", "files": green, "check": "success", "merge": "accepted", "provenance": True},
         {
             "id": "red-test",
@@ -1067,6 +1070,15 @@ def probe_scenarios(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "creation": "refused",
         },
     ]
+    for scenario in scenarios:
+        # Le garde de fusion de confiance (arbre Git réel de la tête) doit REFUSER toute tête qui touche un chemin protégé ou ajoute un lien,
+        # même quand le check est vert (workflow altéré qui s'est lui-même validé) ; il ne doit rien refuser d'autre.
+        scenario["guard_refuses"] = (
+            bool(scenario.get("symlink"))
+            or scenario.get("base") == "seed"  # une base issue de la graine n'a pas les contrôles du socle
+            or any(path.startswith(tuple(PROTECTED_PREFIXES)) for path in scenario["files"])
+        )
+    return scenarios
 
 
 def _attempt_spoof(api: Api, head_sha: str, before: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -1229,6 +1241,11 @@ def run_probe(
             )
             if scenario.get("spoof"):
                 outcome["spoof"] = _attempt_spoof(api, head_sha, runs)
+            # garde de fusion de confiance sur l'arbre Git RÉEL de la tête, pour chaque scénario
+            tree = api("GET", f"/repos/{REPOSITORY}/git/trees/{head_sha}?recursive=1", None)
+            violations = ["arbre tronqué : contenu protégé non établi"] if tree.get("truncated") else []
+            violations += protected_tree_violations(tree.get("tree", []), plan)
+            outcome["guard"] = {"refuses": bool(violations), "violations": violations[:5]}
             if scenario.get("provenance"):
                 ok, why = check_provenance(api, head_sha, plan)
                 outcome["provenance"] = {"ok": ok, "reason": why}
@@ -1240,6 +1257,7 @@ def run_probe(
                 and merged_as_expected
                 and outcome.get("spoof", {}).get("counted", False) is False
                 and outcome.get("provenance", {"ok": True})["ok"] is True
+                and outcome["guard"]["refuses"] is scenario["guard_refuses"]
             )
         except ApiError as exc:
             outcome.update(ok=False, error=str(exc)[:300])

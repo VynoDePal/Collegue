@@ -283,3 +283,65 @@ def test_the_patch_script_has_two_explicit_modes_and_refuses_the_legacy_app_in_s
         module.locate_target("legacy")
     with pytest.raises(module.PatchError, match="unknown mode"):
         module.locate_target("autre")
+
+
+def test_the_composed_image_proof_is_selected_collected_and_never_skipped_in_the_docker_job(workflow):
+    job = workflow["jobs"]["docker-build"]
+    names = [item.get("name", "") for item in job["steps"]]
+    proof = step(job, "Prove the real SDK through the real broker service")
+    run = proof["run"]
+    assert (
+        "-m w5_image" in run and "tests/test_w5_integration_image.py" in run and "--junitxml=w5-image-proof.xml" in run
+    )
+    assert (
+        "--collect-only" in run
+        and "ci_require_junit.py w5-image-proof.xml" in run
+        and '--expect-tests "${expected}"' in run
+    )
+    floor = int(re.search(r"--min-tests (\d+)", run).group(1))
+    assert "continue-on-error" not in proof and "|| true" not in run and "if" not in proof, "étape inconditionnelle"
+    assert (
+        proof["env"]["W5_BROKER_IMAGE"] == "collegue-sandbox-broker:pr-check"
+        and proof["env"]["PYTHONPATH"] == ".:tests"
+    )
+    assert names.index(step(job, "Build OpenHands broker sandbox image")["name"]) < names.index(proof["name"])
+    assert names.index(step(job, "Install locked test dependencies")["name"]) < names.index(proof["name"]), (
+        "dépendances hôte verrouillées d'abord"
+    )
+    # le plancher est EXACTEMENT le nombre de tests du fichier (aucune perte silencieuse) ; tous portent le marqueur ; aucun n'est sauté ni xfail
+    text = (ROOT / "tests" / "test_w5_integration_image.py").read_text(encoding="utf-8")
+    assert "pytestmark = pytest.mark.w5_image" in text and "skip" not in text.replace("sans saut", "").replace(
+        "jamais un saut", ""
+    )
+    assert "xfail" not in text
+    import ast
+
+    tree = ast.parse(text)
+    declared = 0
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            params = [
+                len(arg.elts)
+                for deco in node.decorator_list
+                if isinstance(deco, ast.Call) and getattr(deco.func, "attr", "") == "parametrize"
+                for arg in deco.args[1:2]
+                if isinstance(arg, ast.List)
+            ]
+            declared += params[0] if params else 1
+    assert declared == floor == 7
+
+
+def test_the_general_pytest_run_excludes_the_image_proof_but_the_marker_is_registered():
+    import tomllib
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    assert "not w5_image" in config["addopts"] and "not integration" in config["addopts"]
+    assert any(marker.startswith("w5_image:") for marker in config["markers"])
+
+
+def test_the_composed_proof_depends_only_on_the_published_interface_of_the_broker():
+    text = (ROOT / "tests" / "w5_integration_harness.py").read_text(encoding="utf-8")
+    assert "INTERFACE_CONTRACT" in text and "DockerUnavailable" in text
+    # la preuve ne parle JAMAIS directement au SDK avec un faux serveur de succès : le fournisseur simulé n'est branché que derrière le service
+    assert "BrokerRuntime(" in text and "upstream=upstream" in text and "http.server" not in text
+    assert "docker_bin" not in text, "le vrai binaire docker : aucun docker simulé dans la preuve distante"

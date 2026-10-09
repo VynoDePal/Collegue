@@ -107,7 +107,7 @@ jobs:
             exit 1
           fi
           root="$RUNNER_TEMP/w5-business"
-          mkdir -p "$root/home" "$root/report" "$root/pip-cache" "$BROKER_RUN_DIR"
+          mkdir -p "$root/home" "$root/report" "$root/pip-cache" "$root/diagnostic" "$BROKER_RUN_DIR"
           chmod 700 "$BROKER_RUN_DIR"
           # Manifeste du socle de la fixture (variable d'environnement GitHub, non secrète) : le préflight le relit par l'API,
           # il n'est jamais une preuve à lui seul.
@@ -119,6 +119,9 @@ jobs:
             printf 'SANDBOX_PIP_CACHE_DIR=%s/pip-cache\n' "$root"
             printf 'W4_REPORT_DIR=%s/report\n' "$root"
             printf 'W5_BOOTSTRAP_MANIFEST=%s/bootstrap-manifest.json\n' "$root"
+            printf 'W5_PUBLISH=%s/publish\n' "$root"
+            printf 'W5_DIAG=%s/diagnostic\n' "$root"
+            printf 'W5_QUARANTINE=%s/quarantine\n' "$root"
           } >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
@@ -181,12 +184,12 @@ jobs:
             --campaign-id "$W4_BUSINESS_CAMPAIGN_ID" \
             --output "$W4_REPORT_DIR/campaign.json" --human "$W4_REPORT_DIR/campaign.txt"
           status=$?
-          # Scanner de confiance : valeur lue dans l'environnement, tous les fichiers (binaires compris), jamais affichée ; un fichier qui la
-          # contient est mis en quarantaine (pas déposé) et la campagne est rouge, sans rien supprimer d'autre.
-          python scripts/w5_leak_scan.py --env LLM_API_KEY --quarantine "$RUNNER_TEMP/w5-quarantine" \
-            --report "$RUNNER_TEMP/w5-leak-scan.json" "$W4_REPORT_DIR" "$COLLEGUE_HOME"
+          # Scanner de confiance : valeur lue dans l'environnement, tout le contenu ET les noms, binaires compris, jamais affichée. Il construit
+          # le SEUL ensemble publiable ($W5_PUBLISH) : un fichier n'y entre qu'après avoir été lu, vérifié et copié dans le même passage.
+          python scripts/w5_leak_scan.py --env LLM_API_KEY --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
+            --report "$W5_DIAG/leak-scan.json" \
+            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*"
           scan=$?
-          cp "$RUNNER_TEMP/w5-leak-scan.json" "$W4_REPORT_DIR/leak-scan.json"
           set -e
           if [ "$scan" -ne 0 ]; then status=1; fi
           exit "$status"
@@ -198,12 +201,38 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
         run: python -m collegue.pilot.w4_business cleanup
 
+      # Campagne NON lancée (préflight refusé) : la clé n'a jamais existé dans un environnement ; mêmes règles de nature et même construction
+      # atomique de l'ensemble publiable, sans recherche de clé. Si la campagne a démarré, c'est SON étape qui a construit l'ensemble.
+      - name: Préparer les artefacts publiables (campagne non lancée, aucune clé n'a existé)
+        if: always() && steps.campaign.outcome == 'skipped'
+        shell: bash
+        run: |
+          python scripts/w5_leak_scan.py --assume-no-key --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
+            --report "$W5_DIAG/leak-scan.json" \
+            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*"
+
+      # Diagnostic minimal SÛR, jamais dérivé d'un fichier : seulement les issues des étapes (valeurs énumérées par GitHub) et des
+      # identifiants validés. Il est déposé même si le scanner a planté ou si la commande a été interrompue.
+      - name: Diagnostic minimal sûr (issues des étapes seulement)
+        if: always()
+        shell: bash
+        env:
+          OUTCOME_STATIC: ${{ steps.preflight_static.outcome }}
+          OUTCOME_FULL: ${{ steps.preflight_full.outcome }}
+          OUTCOME_CAMPAIGN: ${{ steps.campaign.outcome }}
+        run: |
+          printf '{"campaign_id":"%s","run_id":"%s","run_attempt":"%s","sha":"%s","preflight_static":"%s","preflight_full":"%s","campaign":"%s","publishable":"verified-files-only"}\n' \
+            "$W4_BUSINESS_CAMPAIGN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$OUTCOME_STATIC" "$OUTCOME_FULL" "$OUTCOME_CAMPAIGN" \
+            > "$W5_DIAG/outcomes.json"
+
+      # Seul $W5_PUBLISH est publié : ensemble de fichiers positivement vérifiés (vide si le scanner n'a pas tourné ou a planté ;
+      # jamais un répertoire source, donc jamais ce que le nettoyage ou une commande interrompue ont pu écrire après ou pendant le scan).
       - name: Déposer le rapport (machine + humain, sans secret)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: w5-business-report
-          path: ${{ env.W4_REPORT_DIR }}
+          path: ${{ env.W5_PUBLISH }}/report
           if-no-files-found: warn
           retention-days: 30
 
@@ -212,6 +241,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: w5-business-registry
-          path: ${{ env.COLLEGUE_HOME }}/*.sqlite3*
+          path: ${{ env.W5_PUBLISH }}/registry
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Déposer le diagnostic minimal sûr et le rapport du scanner (noms expurgés)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-business-diagnostic
+          path: ${{ env.W5_DIAG }}
           if-no-files-found: warn
           retention-days: 30

@@ -157,22 +157,59 @@ def test_the_campaign_runs_once_and_a_leaked_key_invalidates_it(job):
     assert "$LLM_API_KEY" not in run and "${LLM_API_KEY" not in run, (
         "la valeur de la clé n'est jamais développée dans une commande"
     )
-    assert '--quarantine "$RUNNER_TEMP/w5-quarantine"' in run and "leak-scan.json" in run
+    assert '--quarantine "$W5_QUARANTINE"' in run and '--stage "$W5_PUBLISH"' in run, (
+        "ensemble publiable construit par le scanner"
+    )
+    assert '--source "report=$W4_REPORT_DIR"' in run and '--source "registry=$COLLEGUE_HOME::*.sqlite3*"' in run
     assert 'if [ "$scan" -ne 0 ]; then status=1; fi' in run, "toute fuite ou analyse incomplète rend la campagne rouge"
     assert run.rstrip().endswith('exit "$status"'), "le code de retour de la campagne est conservé"
 
 
-def test_cleanup_always_runs_with_the_fixture_token_only_and_report_and_registry_are_always_uploaded(job):
+def test_cleanup_always_runs_with_the_fixture_token_only_and_only_the_verified_set_is_ever_uploaded(job, raw):
     cleanup = step_named(job, "Nettoyage idempotent")
     assert cleanup["if"].startswith("always()") and set(cleanup["env"]) == {"GITHUB_TOKEN"}
     assert cleanup["run"].strip() == "python -m collegue.pilot.w4_business cleanup"
     uploads = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
-    assert [u["with"]["name"] for u in uploads] == ["w5-business-report", "w5-business-registry"]
+    assert [u["with"]["name"] for u in uploads] == [
+        "w5-business-report",
+        "w5-business-registry",
+        "w5-business-diagnostic",
+    ]
     assert all(u["if"] == "always()" for u in uploads)
-    assert all(job["steps"].index(cleanup) < job["steps"].index(u) for u in uploads)
-    assert uploads[1]["with"]["path"] == "${{ env.COLLEGUE_HOME }}/*.sqlite3*", (
-        "le registre durable seul (pas les espaces de travail)"
+    paths = {u["with"]["name"]: u["with"]["path"] for u in uploads}
+    assert paths["w5-business-report"] == "${{ env.W5_PUBLISH }}/report"
+    assert paths["w5-business-registry"] == "${{ env.W5_PUBLISH }}/registry"
+    assert paths["w5-business-diagnostic"] == "${{ env.W5_DIAG }}"
+    # JAMAIS un répertoire source (rapport vivant, registre vivant) : ce que le nettoyage ou une commande interrompue écrivent n'est pas publié
+    for path in paths.values():
+        assert "W4_REPORT_DIR" not in path and "COLLEGUE_HOME" not in path
+    assert "upload-artifact" not in raw.replace("actions/upload-artifact@v4", "")
+    names = [s.get("name", "") for s in job["steps"]]
+    assert all(names.index(cleanup["name"]) < names.index(u["name"]) for u in uploads)
+
+
+def test_the_publishable_set_is_built_only_by_the_scanner_and_a_skipped_campaign_proves_the_key_never_existed(job):
+    skipped = step_named(job, "Préparer les artefacts publiables")
+    assert skipped["if"] == "always() && steps.campaign.outcome == 'skipped'", (
+        "preuve positive : l'étape qui reçoit la clé n'a pas tourné"
     )
+    assert "--assume-no-key" in skipped["run"] and "--env" not in skipped["run"] and "env" not in skipped
+    campaign = step_named(job, "Campagne réelle")
+    assert "w5_leak_scan.py --env LLM_API_KEY" in campaign["run"]
+    for step in job["steps"]:
+        if step not in (campaign, skipped) and "w5_leak_scan" in step.get("run", ""):
+            raise AssertionError("seules ces deux étapes construisent l'ensemble publiable")
+
+
+def test_the_minimal_diagnostic_is_built_from_step_outcomes_and_validated_ids_only(job):
+    diag = step_named(job, "Diagnostic minimal sûr")
+    assert diag["if"] == "always()" and set(diag["env"]) == {"OUTCOME_STATIC", "OUTCOME_FULL", "OUTCOME_CAMPAIGN"}
+    assert all(v.startswith("${{ steps.") and v.endswith(".outcome }}") for v in diag["env"].values())
+    run = diag["run"]
+    assert (
+        "$W5_REPORT" not in run and "cat " not in run and "$W4_REPORT_DIR" not in run and "$COLLEGUE_HOME" not in run
+    ), "jamais dérivé d'un fichier"
+    assert "LLM_API_KEY" not in run and "secrets." not in run
 
 
 def test_the_campaign_id_is_validated_before_it_reaches_the_environment_file_and_the_registry_is_private(job):
@@ -229,7 +266,7 @@ def test_the_campaign_uses_the_audited_broker_image_and_builds_it_before_the_ful
 # ── exécution RÉELLE du script bash de l'étape de campagne (le produit est remplacé par une doublure) ──────────────────────────────
 
 
-def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into):
+def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into, name_leak=False):
     import os
     import subprocess
     import sys
@@ -242,61 +279,138 @@ def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into):
         "#!/bin/bash\n"
         'if [ "$1" = "-m" ] && [ "$2" = "collegue.pilot.w4_business" ]; then\n'
         '  echo "{}" > "$W4_REPORT_DIR/campaign.json"; echo ok > "$W4_REPORT_DIR/campaign.txt"\n'
-        '  printf "registre" > "$COLLEGUE_HOME/camp.sqlite3"\n'
+        '  printf "registre" > "$COLLEGUE_HOME/camp.sqlite3"; printf "workspace" > "$COLLEGUE_HOME/workspace.txt"\n'
         '  if [ -n "$FAKE_LEAK_INTO" ]; then printf "xx%s\\0yy" "$LLM_API_KEY" > "$FAKE_LEAK_INTO"; fi\n'
+        '  if [ -n "$FAKE_NAME_LEAK" ]; then echo x > "$W4_REPORT_DIR/$LLM_API_KEY.log"; fi\n'
         '  exit "$FAKE_RC"\n'
         "fi\n"
         f'exec {sys.executable} "$@"\n',
         encoding="utf-8",
     )
     shim.chmod(0o755)
-    report, home, temp = tmp_path / "report", tmp_path / "home", tmp_path / "temp"
-    for folder in (report, home, temp):
-        folder.mkdir()
+    root = tmp_path / "w5"
+    report, home = root / "report", root / "home"
+    for folder in (report, home, root / "diagnostic"):
+        folder.mkdir(parents=True)
     key = "FAKE-" + "step-key-0123456789abcdef"
     env = {
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "HOME": str(tmp_path),
-        "RUNNER_TEMP": str(temp),
         "W4_REPORT_DIR": str(report),
         "COLLEGUE_HOME": str(home),
+        "W5_PUBLISH": str(root / "publish"),
+        "W5_DIAG": str(root / "diagnostic"),
+        "W5_QUARANTINE": str(root / "quarantine"),
         "W4_BUSINESS_CAMPAIGN_ID": "w5-test-001",
         "LLM_API_KEY": key,
         "FAKE_RC": str(campaign_rc),
         "FAKE_LEAK_INTO": str(leak_into(report, home)) if leak_into else "",
+        "FAKE_NAME_LEAK": "1" if name_leak else "",
     }
     done = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60
     )
-    return done, report, home, key
+    return done, root, key
+
+
+def _published(root):
+    publish = root / "publish"
+    return sorted(str(p.relative_to(publish)) for p in publish.rglob("*") if p.is_file()) if publish.exists() else []
 
 
 @pytest.mark.parametrize(
-    ("campaign_rc", "leak", "expected_rc", "report_kept", "registry_kept"),
+    ("campaign_rc", "leak", "name_leak", "expected_rc", "published"),
     [
-        (0, None, 0, True, True),  # campagne saine : verte, tout est déposé
-        (3, None, 3, True, True),  # validation incomplète : le code de retour de la campagne est conservé
-        (0, lambda r, h: r / "campaign.txt", 1, False, True),  # clé dans un rapport : rapport écarté, campagne rouge
+        (
+            0,
+            None,
+            False,
+            0,
+            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt"],
+        ),  # sain : tout est publié
+        (
+            3,
+            None,
+            False,
+            3,
+            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt"],
+        ),  # code de retour conservé
+        (
+            0,
+            lambda r, h: r / "campaign.txt",
+            False,
+            1,
+            ["registry/camp.sqlite3", "report/campaign.json"],
+        ),  # fuite dans un rapport
         (
             0,
             lambda r, h: h / "camp.sqlite3",
-            1,
-            True,
             False,
-        ),  # clé dans le registre BINAIRE : registre écarté seulement
-        (3, lambda r, h: r / "campaign.txt", 1, False, True),  # une fuite l'emporte sur un code de retour déjà non nul
+            1,
+            ["report/campaign.json", "report/campaign.txt"],
+        ),  # fuite dans le registre BINAIRE
+        (
+            3,
+            lambda r, h: r / "campaign.txt",
+            False,
+            1,
+            ["registry/camp.sqlite3", "report/campaign.json"],
+        ),  # fuite + code non nul
+        (
+            0,
+            None,
+            True,
+            1,
+            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt"],
+        ),  # fuite dans un NOM de fichier
     ],
 )
-def test_the_real_campaign_step_script_turns_a_leak_into_a_red_run_without_uploading_the_contaminated_file(
-    job, tmp_path, campaign_rc, leak, expected_rc, report_kept, registry_kept
+def test_the_real_campaign_step_script_publishes_only_verified_files_and_turns_any_leak_into_a_red_run(
+    job, tmp_path, campaign_rc, leak, name_leak, expected_rc, published
 ):
-    done, report, home, key = _run_campaign_step(job, tmp_path, campaign_rc=campaign_rc, leak_into=leak)
+    done, root, key = _run_campaign_step(job, tmp_path, campaign_rc=campaign_rc, leak_into=leak, name_leak=name_leak)
     assert done.returncode == expected_rc, done.stdout + done.stderr
-    assert (report / "campaign.txt").exists() is report_kept
-    assert (home / "camp.sqlite3").exists() is registry_kept
-    assert (report / "campaign.json").exists(), "les preuves saines sont conservées"
-    scan = json.loads((report / "leak-scan.json").read_text())
-    assert scan["verdict"] == ("leak" if leak else "clean")
-    assert key not in done.stdout + done.stderr + (report / "leak-scan.json").read_text(), (
-        "la valeur n'est jamais affichée"
+    assert _published(root) == published, (
+        "seuls des fichiers vérifiés sont publiés ; le registre ne contient pas les espaces de travail"
     )
+    scan = json.loads((root / "diagnostic" / "leak-scan.json").read_text())
+    assert scan["verdict"] == ("leak" if (leak or name_leak) else "clean")
+    everything = done.stdout + done.stderr + (root / "diagnostic" / "leak-scan.json").read_text()
+    assert key not in everything, "la valeur n'est jamais affichée ni écrite, noms de fichiers compris"
+    assert not any(key in p for p in _published(root))
+
+
+def test_a_crashing_scanner_or_a_missing_key_never_publishes_an_unverified_file(job, tmp_path):
+    import os
+    import subprocess
+
+    # scanner qui plante : la commande rend un code non nul et RIEN n'est publié (aucun fichier n'a été vérifié)
+    step = step_named(job, "Campagne réelle")
+    root = tmp_path / "w5"
+    for folder in ("report", "home", "diagnostic"):
+        (root / folder).mkdir(parents=True)
+    (root / "report" / "campaign.json").write_text("{}")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "python"
+    shim.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "-m" ]; then exit 0; fi\n'
+        'if [ "$1" = "scripts/w5_leak_scan.py" ]; then kill -9 $$; fi\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    env = {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "W4_REPORT_DIR": str(root / "report"),
+        "COLLEGUE_HOME": str(root / "home"),
+        "W5_PUBLISH": str(root / "publish"),
+        "W5_DIAG": str(root / "diagnostic"),
+        "W5_QUARANTINE": str(root / "quarantine"),
+        "W4_BUSINESS_CAMPAIGN_ID": "w5-test-001",
+        "LLM_API_KEY": "FAKE-crash-key-0123456789",
+    }
+    done = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode != 0 and _published(root) == []

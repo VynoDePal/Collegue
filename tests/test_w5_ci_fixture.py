@@ -801,6 +801,8 @@ class ProbeServer(FakeGitHub):
         self.provenance_ok = True
         self.tree_override = None
         self.symlink_commits = []
+        self.head_base = {}  # branche de tête -> SHA de départ
+        self.head_files = {}  # branche de tête -> {chemin: (mode, sha de blob)} modifiés / ajoutés
         apply(fx, plan, self)
         self.writes.clear()
 
@@ -823,11 +825,17 @@ class ProbeServer(FakeGitHub):
                 raise self.fx.ApiError(422, "Repository rule violations found: required status check")
         if method == "POST" and path == f"{repo}/git/refs" and payload["ref"].startswith("refs/heads/collegue-probe/"):
             self.heads[payload["ref"].removeprefix("refs/heads/")] = payload["sha"]
+            self.head_base[payload["ref"].removeprefix("refs/heads/")] = payload["sha"]
         if method == "PUT" and path.startswith(f"{repo}/contents/"):
             self.writes.append((method, path))
             self.counter += 1
             sha = f"{self.counter:040x}"
             self.heads[payload["branch"]] = sha
+            written = base64.b64decode(payload["content"])
+            self.head_files.setdefault(payload["branch"], {})[path.split("/contents/", 1)[1]] = (
+                "100644",
+                self.fx.git_blob_sha(written),
+            )
             return {"commit": {"sha": sha}}
         if method == "POST" and path == f"{repo}/git/blobs":
             self.writes.append((method, path))
@@ -840,6 +848,7 @@ class ProbeServer(FakeGitHub):
         ):
             self.writes.append((method, path))
             self.symlink_commits.append(payload["tree"][0]["path"])
+            self.pending_symlinks = {entry["path"]: ("120000", "9" * 40) for entry in payload["tree"]}
             return {"sha": "7" * 40}
         if method == "POST" and path == f"{repo}/git/commits" and payload["tree"] == "7" * 40:
             self.writes.append((method, path))
@@ -849,6 +858,8 @@ class ProbeServer(FakeGitHub):
         if m and method == "PATCH":
             self.writes.append((method, path))
             self.heads[m.group(1)] = payload["sha"]
+            self.head_files.setdefault(m.group(1), {}).update(getattr(self, "pending_symlinks", {}))
+            self.pending_symlinks = {}
             return {"object": {"sha": payload["sha"]}}
         if method == "POST" and path == f"{repo}/pulls":
             self.writes.append((method, path))
@@ -894,11 +905,15 @@ class ProbeServer(FakeGitHub):
         if m:
             if self.tree_override is not None:
                 return {"truncated": False, "tree": self.tree_override}
-            entries = [
-                {"path": p, "type": "blob", "mode": "100644", "sha": self.fx.git_blob_sha(t.encode())}
-                for p, t in self.plan["files"].items()
-            ]
-            return {"truncated": False, "tree": entries}
+            branch = next((h for h, v in self.heads.items() if v == m.group(1)), None)
+            from_seed = self.head_base.get(branch) == self.fx.SEED_SHA
+            files = self.fx.load_seed() if from_seed else self.plan["files"]
+            entries = {p: ("100644", self.fx.git_blob_sha(t.encode())) for p, t in files.items()}
+            entries.update(self.head_files.get(branch, {}))
+            return {
+                "truncated": False,
+                "tree": [{"path": p, "type": "blob", "mode": mode, "sha": sha} for p, (mode, sha) in entries.items()],
+            }
         m = re.fullmatch(rf"{repo}/commits/([0-9a-f]{{40}})/check-runs", path)
         if m and m.group(1) in self.heads.values():
             sha = m.group(1)
@@ -1140,3 +1155,28 @@ def test_the_workflow_satisfies_the_job_detection_rule_b_applies_to_approved_wor
     assert "pull_request" in triggered
     names = [str((job or {}).get("name") or key) for key, job in document["jobs"].items()]
     assert fx.REQUIRED_CHECK in names
+
+
+def test_the_probe_requires_the_merge_guard_to_refuse_every_head_that_touches_a_protected_path(fx, plan):
+    """Un check vert falsifié n'est pas une réussite : le garde de fusion (arbre Git réel de la tête) doit REFUSER la tête altérée."""
+    server = ProbeServer(fx, plan, GOOD)
+    result = probe(fx, plan, server)
+    by = {r["scenario"]: r for r in result["results"]}
+    assert result["ok"] is True
+    for name in ("workflow-touch", "codeowners-touch", "lock-touch", "symlink"):
+        assert by[name]["guard"]["refuses"] is True and by[name]["guard"]["violations"], name
+    assert by["green"]["guard"] == {"refuses": False, "violations": []}
+    assert by["unapproved-dependency"]["guard"]["refuses"] is False, (
+        "requirements.txt n'est pas un chemin protégé : c'est le check qui le refuse"
+    )
+    # un garde aveugle (arbre toujours identique au socle) fait ÉCHOUER la contre-épreuve : le garde n'a pas refusé la tête altérée
+    blind = ProbeServer(fx, plan, GOOD)
+    blind.tree_override = server_tree(fx, plan)
+    failed = probe(fx, plan, blind)
+    assert failed["ok"] is False
+    assert {r["scenario"] for r in failed["results"] if not r["ok"]} >= {
+        "workflow-touch",
+        "codeowners-touch",
+        "lock-touch",
+        "symlink",
+    }
