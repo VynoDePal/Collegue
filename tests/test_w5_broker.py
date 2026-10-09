@@ -31,5 +31,5 @@ def test_create_all_and_the_migration_agree_on_the_broker_tables(tmp_path):
     migrated = inspect(create_engine(url))
     created = inspect(create_engine(f"sqlite:///{tmp_path / 'c.db'}"))
     ProjectStateManager.from_url(f"sqlite:///{tmp_path / 'c.db'}", create=True)
-    for table in ("broker_sessions", "broker_attempts", "broker_clocks"):
+    for table in ("broker_sessions", "broker_attempts", "broker_clocks", "broker_owners"):
         assert {c["name"] for c in migrated.get_columns(table)} == {c["name"] for c in created.get_columns(table)}

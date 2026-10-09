@@ -17,5 +17,15 @@ from collegue.broker.errors import (  # noqa: F401
     BrokerUpstreamAmbiguous,
     BrokerUpstreamRejected,
 )
-from collegue.broker.service import BrokerConfig, BrokerService, OpenedSession, SessionSummary  # noqa: F401
+from collegue.broker.preflight import capability_proof, preflight_broker_transport  # noqa: F401
+from collegue.broker.runtime import qualify_models  # noqa: F401
+from collegue.broker.service import (  # noqa: F401
+    BrokerConfig,
+    BrokerService,
+    CapabilityResult,
+    ModelQualification,
+    OpenedSession,
+    QualificationReport,
+    SessionSummary,
+)
 from collegue.broker.upstream import GoogleUpstream  # noqa: F401

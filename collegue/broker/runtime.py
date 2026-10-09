@@ -72,6 +72,8 @@ class AttachedWorker:
     service: BrokerService
     summary: Optional[SessionSummary] = None
     server: Optional[BrokerSocketServer] = field(default=None, repr=False)
+    # Délai effectif (secondes) du conteneur : min(allocation, échéance globale persistée − maintenant) ; ``None`` = non borné.
+    timeout_seconds: Optional[float] = None
 
 
 class BrokerRuntime:
@@ -136,9 +138,21 @@ class BrokerRuntime:
         worker a été interrompu) — exactement la sémantique de la vague 2.
         """
         service = self.service_for(ledger)
+        now = datetime.now(timezone.utc)
         deadline = None
         if getattr(allocation, "deadline_epoch", None) is not None:
             deadline = datetime.fromtimestamp(float(allocation.deadline_epoch), tz=timezone.utc)
+        # Échéance globale PERSISTÉE : ouverte ici si elle ne l'est pas encore (lancement réel du worker), jamais déplacée, et
+        # elle borne TOUJOURS la session et le délai du conteneur — quelle que soit la fenêtre locale du run en cours.
+        persisted = service.open_clock(allocation.scope_key)
+        if persisted is not None:
+            deadline = persisted if deadline is None else min(deadline, persisted)
+        timeout_seconds = None if deadline is None else (deadline - now).total_seconds()
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            from collegue.sandbox.executor import SandboxRefused
+
+            # Rien n'a été lancé : l'appelant libère la réservation parent (sémantique « worker non lancé »).
+            raise SandboxRefused("échéance globale persistée atteinte avant le lancement : worker non lancé")
         opened = service.open_session(
             parent_scope_key=allocation.scope_key,
             parent_reservation_id=allocation.reservation_id,
@@ -157,7 +171,14 @@ class BrokerRuntime:
             proof = prove_worker_transport(derived, provider_keys=self.provider_keys(), session_dir=server.directory)
             if not proof.ok:
                 raise BrokerForbidden(f"transport du worker non prouvé : {proof.failures}", code="transport_unproven")
-            attached = AttachedWorker(sandbox=derived, session=opened, proof=proof, service=service, server=server)
+            attached = AttachedWorker(
+                sandbox=derived,
+                session=opened,
+                proof=proof,
+                service=service,
+                server=server,
+                timeout_seconds=timeout_seconds,
+            )
         except BaseException:
             self._close(service, opened, consolidate=False)
             if server is not None:
@@ -269,3 +290,12 @@ def runtime_for(settings: Any) -> BrokerRuntime:
             found = BrokerRuntime.from_settings(settings)
             _RUNTIMES_BY_ID[id(settings)] = found
         return found
+
+
+async def qualify_models(settings: Any, ledger: Any, scope_key: str):
+    """Qualification des DEUX modèles sur un scope existant (voir :meth:`BrokerService.qualify_models`).
+
+    Ouvre l'échéance globale à la première émission réelle, avec le runtime de production du processus. Le rapport
+    (``QualificationReport``) ne contient aucun secret ; ``ok`` est faux au premier refus / à la première ambiguïté.
+    """
+    return await runtime_for(settings).service_for(ledger).qualify_models(scope_key)

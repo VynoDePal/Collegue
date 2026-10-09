@@ -49,15 +49,47 @@ def test_the_preflight_establishes_the_real_capacity_with_no_provider_call_and_n
     assert KEY not in json.dumps(report.to_dict())
 
 
-def test_the_preflight_works_without_any_provider_key():
+def test_the_static_and_full_preflights_succeed_without_any_key_and_inject_no_placeholder_key():
+    rt, upstream = runtime()
+    cfg = settings(LLM_API_KEY="")
+    report = preflight_broker_transport(cfg, runtime=rt)
+    assert report.ok and report.failures == []
+    key_check = next(c for c in report.checks if c.name == "trusted_service_has_a_key")
+    assert key_check.ok is False and key_check.required is False  # information : présence, pas exigence
+    assert next(c for c in report.checks if c.name == "worker_transport_proof").ok  # capacité établie sans clé
+    assert (
+        cfg.LLM_API_KEY == "" and upstream.count_calls == [] and upstream.generate_calls == []
+    )  # aucune clé factice injectée
+
+
+def test_the_key_becomes_a_requirement_only_at_launch():
     rt, _ = runtime()
-    report = preflight_broker_transport(settings(LLM_API_KEY=""), runtime=rt)
+    report = preflight_broker_transport(settings(LLM_API_KEY=""), runtime=rt, require_provider_key=True)
     assert not report.ok and report.failures == [
         "trusted_service_has_a_key: aucune clé Google chez le service de confiance (LLM_API_KEY)"
     ]
-    assert next(
-        c for c in report.checks if c.name == "worker_transport_proof"
-    ).ok  # la capacité du transport, elle, est établie
+    assert preflight_broker_transport(settings(), runtime=rt, require_provider_key=True).ok
+
+
+def test_capability_proof_is_the_public_mapping_b_consumes_and_never_leaks_a_secret():
+    from collegue.broker import capability_proof
+
+    rt, upstream = runtime()
+    proof = capability_proof(settings(LLM_API_KEY=""), runtime=rt)
+    assert proof["transport"] == "budget_broker" and proof["accepted"] is True and proof["reason"] == ""
+    assert proof["provider_key_present"] is False and proof["global_deadline_seconds"] == 900
+    assert proof["models"] == ["gemma-4-31b-it", "gemma-4-26b-a4b-it"]
+    assert upstream.count_calls == [] and KEY not in json.dumps(capability_proof(settings(), runtime=rt))
+    refused = capability_proof(settings(LLM_MODEL="gemini-2.5-flash"), runtime=rt)
+    assert refused["accepted"] is False and "configuration_contract" in refused["reason"]
+    network = capability_proof(settings(), runtime=rt, sandbox=DockerSandbox(allow_root=True, network="bridge"))
+    assert network["accepted"] is False and "worker_transport_proof" in network["reason"]
+    assert (
+        capability_proof(settings(BROKER_GLOBAL_DEADLINE_SECONDS=0), runtime=rt, require_global_deadline=True)[
+            "accepted"
+        ]
+        is False
+    )
 
 
 @pytest.mark.parametrize(

@@ -617,6 +617,9 @@ class BrokerSession(Base):
     # SHA-256 du jeton de session : le jeton lui-même n'est jamais stocké (ni une clé fournisseur).
     token_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     role: Mapped[str] = mapped_column(String(24), nullable=False)
+    owner_id: Mapped[Optional[str]] = mapped_column(
+        String(48), nullable=True
+    )  # instance de service qui a ouvert la session
     scope_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)  # scope ENFANT
     parent_scope_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     parent_reservation_id: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
@@ -653,6 +656,12 @@ class BrokerAttempt(Base):
     session_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("broker_sessions.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    # Instance de service propriétaire (``broker_owners``) : une tentative d'un propriétaire VIVANT n'est jamais réparée par
+    # un autre processus ; ``NULL`` = aucun propriétaire (orpheline, toujours réparable).
+    owner_id: Mapped[Optional[str]] = mapped_column(String(48), nullable=True, index=True)
+    # Nombre de réouvertures après libération : la réservation d'une exécution est déterministe
+    # (``broker:<attempt_id>`` puis ``broker:<attempt_id>#<runs>``), donc retrouvable après un crash.
+    runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     scope_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)  # où vit la réservation
     role: Mapped[str] = mapped_column(String(24), nullable=False)
     model: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -686,3 +695,26 @@ class BrokerClock(Base):
     seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     opened_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
     deadline_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+
+class BrokerOwner(Base):
+    """Instance de service du courtier (un processus) : sert à décider si une tentative en vol est VIVANTE ou abandonnée.
+
+    Même hôte : vivante ssi le processus existe avec la même date de démarrage (``/proc``). Autre hôte : vivante tant que le
+    battement de cœur est récent. ``ended_at`` renseigné : arrêt propre, plus aucune tentative vivante.
+    """
+
+    __tablename__ = "broker_owners"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_ticks: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)

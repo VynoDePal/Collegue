@@ -317,6 +317,14 @@ def allocate_worker(
             )
     if max_tok_setting > 0:
         alloc_tokens = min(alloc_tokens, max_tok_setting) if alloc_tokens else max_tok_setting
+    if getattr(agent, "budget_enforcement", None) == ENFORCEMENT_BROKER and alloc_tokens <= 0:
+        # Une allocation de tokens nulle n'autorise aucune génération : jamais traduite en « sans plafond » par le courtier.
+        raise BudgetRefused(
+            REFUSED_UNBOUNDED,
+            "mode courtier : allocation de tokens nulle (le scope n'a pas de plafond de tokens) — "
+            "le courtier exige un plafond de tokens explicite",
+            snapshot=snap,
+        )
 
     # Échéance : la plus proche entre le run, le timeout du sandbox et la demande explicite.
     remaining = binding.remaining_seconds()
@@ -325,6 +333,16 @@ def allocate_worker(
     runtime = timeout_seconds
     if remaining is not None:
         runtime = remaining if runtime is None else min(runtime, remaining)
+    # Échéance GLOBALE PERSISTÉE (courtier) : elle a pu commencer avant ce run (planification, canaris) et prime sur toute
+    # fenêtre locale d'un nouveau ``BudgetBinding`` — jamais de reset par phase ou par processus. Dépassée : aucun worker.
+    probe = getattr(agent, "persisted_remaining_seconds", None)
+    persisted = probe(binding) if callable(probe) else None
+    if persisted is not None:
+        if persisted <= 0:
+            raise BudgetRefused(
+                REFUSED_DEADLINE, "échéance globale persistée atteinte : aucun worker lancé", snapshot=snap
+            )
+        runtime = persisted if runtime is None else min(runtime, persisted)
     now = datetime.now(timezone.utc)
     expires = now + timedelta(seconds=(runtime if runtime is not None else 4 * 3600) + 2 * GRACE_SECONDS + 60)
     reservation = ledger.reserve(

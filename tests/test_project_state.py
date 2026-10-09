@@ -51,6 +51,7 @@ def test_metadata_declares_all_tables():
         "broker_sessions",
         "broker_attempts",
         "broker_clocks",
+        "broker_owners",
     }
 
 

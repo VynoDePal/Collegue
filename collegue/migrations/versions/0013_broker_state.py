@@ -5,8 +5,9 @@ Revises: 0012
 Create Date: 2026-10-09
 
 Migration ADDITIVE (vague 5) : crée ``broker_sessions`` (un worker = une session = un scope enfant du registre
-budgétaire), ``broker_attempts`` (préparée → émission marquée → réglée / libérée / inconnue) et ``broker_clocks``
-(échéance globale persistée à la première ouverture réelle). Aucune table ni colonne existante n'est modifiée : une
+budgétaire), ``broker_attempts`` (préparée → émission marquée → réglée / libérée / inconnue), ``broker_owners`` (instance de service
+propriétaire d'une tentative : vivante ou abandonnée) et ``broker_clocks`` (échéance globale persistée à la première ouverture
+réelle). Aucune table ni colonne existante n'est modifiée : une
 base migrée jusqu'à 0012 est compatible (tables vides = aucune session, aucune échéance ouverte). Les montants vivent
 toujours dans ``budget_scopes`` / ``budget_reservations`` : le courtier n'ajoute AUCUN compteur de dépense.
 """
@@ -30,6 +31,7 @@ def upgrade() -> None:
         sa.Column("session_id", sa.String(length=64), nullable=False),
         sa.Column("token_sha256", sa.String(length=64), nullable=False),
         sa.Column("role", sa.String(length=24), nullable=False),
+        sa.Column("owner_id", sa.String(length=48), nullable=True),
         sa.Column("scope_key", sa.String(length=128), nullable=False),
         sa.Column("parent_scope_key", sa.String(length=128), nullable=True),
         sa.Column("parent_reservation_id", sa.String(length=96), nullable=True),
@@ -57,6 +59,8 @@ def upgrade() -> None:
         sa.Column("attempt_id", sa.String(length=96), nullable=False),
         sa.Column("request_id", sa.String(length=96), nullable=True),
         sa.Column("session_id", sa.Integer(), nullable=True),
+        sa.Column("owner_id", sa.String(length=48), nullable=True),
+        sa.Column("runs", sa.Integer(), server_default="0", nullable=False),
         sa.Column("scope_key", sa.String(length=128), nullable=False),
         sa.Column("role", sa.String(length=24), nullable=False),
         sa.Column("model", sa.String(length=160), nullable=False),
@@ -88,6 +92,20 @@ def upgrade() -> None:
     )
     op.create_index("ix_broker_attempts_session_id", "broker_attempts", ["session_id"])
     op.create_index("ix_broker_attempts_scope_key", "broker_attempts", ["scope_key"])
+    op.create_index("ix_broker_attempts_owner_id", "broker_attempts", ["owner_id"])
+    op.create_table(
+        "broker_owners",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("owner_id", sa.String(length=48), nullable=False),
+        sa.Column("host", sa.String(length=255), nullable=False),
+        sa.Column("pid", sa.Integer(), nullable=False),
+        sa.Column("start_ticks", sa.BigInteger(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("heartbeat_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("owner_id"),
+    )
     op.create_table(
         "broker_clocks",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -102,6 +120,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("broker_clocks")
+    op.drop_table("broker_owners")
+    op.drop_index("ix_broker_attempts_owner_id", table_name="broker_attempts")
     op.drop_index("ix_broker_attempts_scope_key", table_name="broker_attempts")
     op.drop_index("ix_broker_attempts_session_id", table_name="broker_attempts")
     op.drop_table("broker_attempts")

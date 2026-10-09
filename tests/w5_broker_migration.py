@@ -34,7 +34,9 @@ def run_alembic_upgrade_0012_to_0013(url):
         assert "projects" not in inspect(engine).get_table_names(), "base vierge exigée : aucune table pré-créée"
         command.upgrade(cfg, "0012")
         assert version() == "0012"
-        assert not {"broker_sessions", "broker_attempts", "broker_clocks"} & set(inspect(engine).get_table_names())
+        assert not {"broker_sessions", "broker_attempts", "broker_clocks", "broker_owners"} & set(
+            inspect(engine).get_table_names()
+        )
 
         legacy = ProjectStateManager.from_url(url)  # le schéma vient d'Alembic seul
         project_id = legacy.create_project(name="préexistant", spec="spec")
@@ -49,7 +51,7 @@ def run_alembic_upgrade_0012_to_0013(url):
         command.upgrade(cfg, "0013")
         assert version() == "0013" == head_revisions()[0]
         schema = inspect(engine)
-        assert {"broker_sessions", "broker_attempts", "broker_clocks"} <= set(schema.get_table_names())
+        assert {"broker_sessions", "broker_attempts", "broker_clocks", "broker_owners"} <= set(schema.get_table_names())
         assert snapshot() == before, "la migration est additive : aucune donnée existante n'est modifiée"
         columns = {c["name"] for c in schema.get_columns("broker_sessions")}
         assert {"session_id", "token_sha256", "scope_key", "parent_reservation_id", "in_flight", "state"} <= columns
@@ -114,9 +116,12 @@ def run_alembic_upgrade_0012_to_0013(url):
             conn.execute(text("DELETE FROM broker_sessions"))
 
         command.downgrade(cfg, "0012")
-        assert version() == "0012" and not {"broker_sessions", "broker_attempts", "broker_clocks"} & set(
-            inspect(engine).get_table_names()
-        )
+        assert version() == "0012" and not {
+            "broker_sessions",
+            "broker_attempts",
+            "broker_clocks",
+            "broker_owners",
+        } & set(inspect(engine).get_table_names())
         assert snapshot() == before, "le downgrade ne touche que les tables du courtier"
 
         command.upgrade(cfg, "head")

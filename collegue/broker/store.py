@@ -18,6 +18,8 @@ PROUVABLEMENT rien émis (libérable) ; une tentative ``emitting`` ne peut jamai
 from __future__ import annotations
 
 import json
+import os
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
@@ -45,6 +47,7 @@ from collegue.state.models import (
     BUDGET_RESERVED,
     BrokerAttempt,
     BrokerClock,
+    BrokerOwner,
     BrokerSession,
     BudgetReservation,
     BudgetScope,
@@ -54,6 +57,7 @@ from collegue.state.models import (
 @dataclass(frozen=True)
 class SessionRecord:
     session_id: str
+    owner_id: Optional[str]
     role: str
     scope_key: str
     parent_scope_key: Optional[str]
@@ -72,6 +76,8 @@ class SessionRecord:
 class AttemptRecord:
     attempt_id: str
     request_id: Optional[str]
+    owner_id: Optional[str]
+    runs: int
     session_id: Optional[str]
     scope_key: str
     role: str
@@ -91,9 +97,50 @@ class AttemptRecord:
     error_detail: Optional[str]
 
 
+@dataclass(frozen=True)
+class OwnerRecord:
+    owner_id: str
+    host: str
+    pid: int
+    start_ticks: Optional[int]
+    heartbeat_at: datetime
+    ended_at: Optional[datetime]
+
+
+OWNER_REMOTE_TTL_SECONDS = 3600  # propriétaire d'un AUTRE hôte : vivant tant que son battement de cœur est plus récent
+
+
+def process_start_ticks(pid: int) -> Optional[int]:
+    """Date de démarrage du processus (champ 22 de ``/proc/<pid>/stat``) ; ``None`` si indisponible. Évite la réutilisation d'un pid."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+            data = handle.read().decode("latin-1")
+        return int(data.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def owner_is_alive(owner: Optional[OwnerRecord], now: datetime) -> bool:
+    """Un propriétaire INCONNU, terminé ou dont le processus a disparu n'a plus de tentative vivante."""
+    if owner is None or owner.ended_at is not None:
+        return False
+    if owner.host == socket.gethostname():
+        if owner.start_ticks is not None:
+            return process_start_ticks(owner.pid) == owner.start_ticks
+        try:
+            os.kill(owner.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    return (now - owner.heartbeat_at).total_seconds() < OWNER_REMOTE_TTL_SECONDS
+
+
 def _session_of(row: BrokerSession) -> SessionRecord:
     return SessionRecord(
         session_id=row.session_id,
+        owner_id=row.owner_id,
         role=row.role,
         scope_key=row.scope_key,
         parent_scope_key=row.parent_scope_key,
@@ -113,6 +160,8 @@ def _attempt_of(row: BrokerAttempt, session_id: Optional[str]) -> AttemptRecord:
     return AttemptRecord(
         attempt_id=row.attempt_id,
         request_id=row.request_id,
+        owner_id=row.owner_id,
+        runs=int(row.runs or 0),
         session_id=session_id,
         scope_key=row.scope_key,
         role=row.role,
@@ -155,6 +204,7 @@ class BrokerStore:
         allowed_models: Tuple[str, ...],
         max_output_tokens: int,
         deadline_at: Optional[datetime],
+        owner_id: Optional[str] = None,
     ) -> SessionRecord:
         """Active une session SUR une réservation parent déjà prise (``worker``, ``reserved``) — jamais avant.
 
@@ -186,18 +236,27 @@ class BrokerStore:
                 select(BrokerSession).where(BrokerSession.parent_reservation_id == parent_reservation_id)
             ):
                 raise BrokerForbidden("une session existe déjà pour cette réservation parent", code="session_exists")
+            if int(reservation.reserved_tokens) <= 0:
+                # Une allocation NULLE n'autorise aucune consommation positive : jamais traduite en « sans plafond ».
+                raise BrokerForbidden(
+                    "allocation de tokens nulle : la réservation parent n'autorise aucune génération (plafond zéro, "
+                    "jamais illimité)",
+                    code="zero_allocation",
+                )
             child = BudgetScope(
                 scope_key=child_key,
                 project_id=None,
                 kind="child",
-                cap_micro_usd=int(reservation.reserved_micro_usd) or None,
-                cap_tokens=int(reservation.reserved_tokens) or None,
+                # Plafonds EXACTS de la réservation parent (0 reste 0) : la dimension USD est indépendante des tokens.
+                cap_micro_usd=int(reservation.reserved_micro_usd),
+                cap_tokens=int(reservation.reserved_tokens),
                 strict=True,
             )
             row = BrokerSession(
                 session_id=session_id,
                 token_sha256=token_sha256,
                 role=role,
+                owner_id=owner_id,
                 scope_key=child_key,
                 parent_scope_key=parent_scope_key,
                 parent_reservation_id=parent_reservation_id,
@@ -327,6 +386,7 @@ class BrokerStore:
         model: str,
         request_sha256: str,
         output_cap: int,
+        owner_id: Optional[str] = None,
     ) -> Tuple[AttemptRecord, bool]:
         """Crée la tentative ``prepared`` ; ``(enregistrement, rejouée)``. Un ``request_id`` rejoué est le MÊME événement."""
 
@@ -357,6 +417,7 @@ class BrokerStore:
             row = BrokerAttempt(
                 attempt_id=attempt_id,
                 request_id=request_id,
+                owner_id=owner_id,
                 session_id=_session_pk(session),
                 scope_key=scope_key,
                 role=role,
@@ -425,12 +486,17 @@ class BrokerStore:
 
         return self._run(_do)
 
-    def reopen_released(self, attempt_id: str) -> bool:
-        """Rouvre une tentative ``released`` (absence d'émission ÉTABLIE) pour un renvoi du MÊME ``request_id`` (CAS)."""
+    def reopen_released(self, attempt_id: str, *, owner_id: Optional[str] = None) -> bool:
+        """Rouvre une tentative ``released`` (absence d'émission ÉTABLIE) pour un renvoi du MÊME ``request_id`` (CAS).
+
+        ``runs`` augmente : la réservation de la nouvelle exécution a un identifiant distinct de celle, libérée, de la précédente.
+        """
         return self._transition(
             attempt_id,
             (BROKER_ATTEMPT_RELEASED,),
             state=BROKER_ATTEMPT_PREPARED,
+            runs=BrokerAttempt.runs + 1,
+            owner_id=owner_id,
             reservation_id=None,
             counted_tokens=None,
             reserved_tokens=0,
@@ -453,6 +519,73 @@ class BrokerStore:
     def mark_emitting(self, attempt_id: str, now: datetime) -> bool:
         """Écrit ``emitting`` AVANT l'envoi. ``False`` si la tentative n'est plus ``prepared`` : ne PAS émettre."""
         return self._transition(attempt_id, (BROKER_ATTEMPT_PREPARED,), state=BROKER_ATTEMPT_EMITTING, emitted_at=now)
+
+    def admit_emission(
+        self,
+        attempt_id: str,
+        now: datetime,
+        *,
+        session_id: Optional[str],
+        scope_keys: Tuple[str, ...],
+        parent_reservation_id: Optional[str],
+    ) -> Tuple[bool, str]:
+        """Admission TRANSACTIONNELLE à l'émission : ``prepared`` → ``emitting`` si, DANS LA MÊME transaction, tout est encore valide.
+
+        Revérifie, sous verrou de ligne (``FOR UPDATE`` sur PostgreSQL ; sérialisation d'écriture de SQLite, avec nouvelle
+        tentative sur conflit), au point exact de l'émission : aucun scope concerné (enfant, parent / racine) n'est bloqué, la
+        session est toujours ``open``, sans inconnue et dans son échéance, la réservation parent est toujours ``reserved``, la
+        réservation de la tentative existe (``reserved``). Un blocage / une fermeture qui précèdent cette transaction l'emportent ;
+        ceux qui la suivent trouvent une émission déjà marquée (en vol, donc légitime). ``(False, motif)`` ⇒ ne RIEN émettre.
+        """
+
+        def _do(session: Session):
+            scopes = session.scalars(
+                select(BudgetScope)
+                .where(BudgetScope.scope_key.in_(scope_keys))
+                .order_by(BudgetScope.id)
+                .with_for_update()
+            ).all()
+            for scope in scopes:
+                if scope.strict and scope.blocked_reason:
+                    return (
+                        False,
+                        f"scope {scope.scope_key} bloqué (usage inconnu, mode strict) : {scope.blocked_reason}",
+                    )
+            if session_id is not None:
+                row = session.scalar(
+                    select(BrokerSession).where(BrokerSession.session_id == session_id).with_for_update()
+                )
+                if row is None or row.state != BROKER_SESSION_OPEN:
+                    return False, f"session {'inconnue' if row is None else row.state} : aucune nouvelle génération"
+                if row.unknown_reason:
+                    return False, f"session bloquée : {row.unknown_reason}"
+                if row.deadline_at is not None and now >= row.deadline_at:
+                    return False, "échéance de la session atteinte"
+            if parent_reservation_id is not None:
+                parent = session.scalar(
+                    select(BudgetReservation).where(BudgetReservation.reservation_id == parent_reservation_id)
+                )
+                if parent is None or parent.state != BUDGET_RESERVED:
+                    return (
+                        False,
+                        f"réservation parent {'absente' if parent is None else parent.state} : aucune émission",
+                    )
+            attempt = session.scalar(select(BrokerAttempt).where(BrokerAttempt.attempt_id == attempt_id))
+            if attempt is None or attempt.reservation_id is None:
+                return False, "tentative sans réservation"
+            reservation = session.scalar(
+                select(BudgetReservation).where(BudgetReservation.reservation_id == attempt.reservation_id)
+            )
+            if reservation is None or reservation.state != BUDGET_RESERVED:
+                return False, "réservation de la tentative absente ou déjà réglée"
+            done = session.execute(
+                update(BrokerAttempt)
+                .where(BrokerAttempt.attempt_id == attempt_id, BrokerAttempt.state == BROKER_ATTEMPT_PREPARED)
+                .values(state=BROKER_ATTEMPT_EMITTING, emitted_at=now)
+            )
+            return (True, "") if done.rowcount == 1 else (False, "tentative reprise par une autre exécution")
+
+        return self._run(_do)
 
     def settle(
         self,
@@ -499,9 +632,13 @@ class BrokerStore:
         )
 
     def pending_attempts(
-        self, *, scope_key: Optional[str] = None, session_id: Optional[str] = None
+        self,
+        *,
+        scope_key: Optional[str] = None,
+        session_id: Optional[str] = None,
+        scope_keys: Optional[Tuple[str, ...]] = None,
     ) -> List[AttemptRecord]:
-        """Tentatives ``prepared`` / ``emitting`` (travail interrompu ou en vol)."""
+        """Tentatives ``prepared`` / ``emitting`` (travail interrompu ou en vol), de tous les producteurs ; filtrables par scope(s)."""
 
         def _do(session: Session):
             query = select(BrokerAttempt).where(
@@ -509,10 +646,29 @@ class BrokerStore:
             )
             if scope_key is not None:
                 query = query.where(BrokerAttempt.scope_key == scope_key)
+            if scope_keys is not None:
+                query = query.where(BrokerAttempt.scope_key.in_(scope_keys))
             if session_id is not None:
                 pk = session.scalar(select(BrokerSession.id).where(BrokerSession.session_id == session_id))
                 query = query.where(BrokerAttempt.session_id == pk)
-            return [_attempt_of(r, session_id) for r in session.scalars(query.order_by(BrokerAttempt.id)).all()]
+            rows = session.scalars(query.order_by(BrokerAttempt.id)).all()
+            sessions = {
+                r.id: sid
+                for r, sid in (
+                    (r, session.scalar(select(BrokerSession.session_id).where(BrokerSession.id == r.session_id)))
+                    for r in rows
+                    if r.session_id
+                )
+            }
+            return [_attempt_of(r, session_id or sessions.get(r.id)) for r in rows]
+
+        return self._run(_do)
+
+    def scope_keys_with_attempts(self) -> List[str]:
+        """Scopes portant au moins une tentative (parcours de réparation globale au démarrage)."""
+
+        def _do(session: Session):
+            return sorted(set(session.scalars(select(BrokerAttempt.scope_key)).all()))
 
         return self._run(_do)
 
@@ -555,5 +711,53 @@ class BrokerStore:
         def _do(session: Session):
             row = session.scalar(select(BrokerClock).where(BrokerClock.scope_key == scope_key))
             return None if row is None else row.deadline_at
+
+        return self._run(_do)
+
+    # ── propriétaires (instances de service) ─────────────────────────────────────────────────────────────
+
+    def register_owner(self, owner_id: str, now: datetime) -> None:
+        """Déclare cette instance (processus) comme propriétaire de ses tentatives ; idempotent."""
+        host, pid = socket.gethostname(), os.getpid()
+        ticks = process_start_ticks(pid)
+
+        def _do(session: Session):
+            if session.scalar(select(BrokerOwner.id).where(BrokerOwner.owner_id == owner_id)) is None:
+                session.add(
+                    BrokerOwner(
+                        owner_id=owner_id, host=host, pid=pid, start_ticks=ticks, created_at=now, heartbeat_at=now
+                    )
+                )
+
+        try:
+            self._run(_do)
+        except IntegrityError:
+            pass  # enregistrée par un appel concurrent de la même instance
+
+    def heartbeat(self, owner_id: str, now: datetime) -> None:
+        def _do(session: Session):
+            session.execute(update(BrokerOwner).where(BrokerOwner.owner_id == owner_id).values(heartbeat_at=now))
+
+        self._run(_do)
+
+    def end_owner(self, owner_id: str, now: datetime) -> None:
+        def _do(session: Session):
+            session.execute(
+                update(BrokerOwner)
+                .where(BrokerOwner.owner_id == owner_id, BrokerOwner.ended_at.is_(None))
+                .values(ended_at=now)
+            )
+
+        self._run(_do)
+
+    def get_owner(self, owner_id: Optional[str]) -> Optional[OwnerRecord]:
+        if owner_id is None:
+            return None
+
+        def _do(session: Session):
+            row = session.scalar(select(BrokerOwner).where(BrokerOwner.owner_id == owner_id))
+            if row is None:
+                return None
+            return OwnerRecord(row.owner_id, row.host, int(row.pid), row.start_ticks, row.heartbeat_at, row.ended_at)
 
         return self._run(_do)

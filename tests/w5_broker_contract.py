@@ -525,12 +525,9 @@ async def _interrupt_at(manager, state):
         request_sha256="0" * 64,
         output_cap=64,
     )
-    ledger.reserve(
-        session.scope_key, micro_usd=0, tokens=500, kind="call", transport="broker", reservation_id="broker:crash"
-    )
-    service.store.attach_reservation(
-        attempt.attempt_id, reservation_id="broker:crash", counted_tokens=436, reserved_tokens=500
-    )
+    rid = f"broker:{attempt.attempt_id}"  # identifiant DÉTERMINISTE de la réservation de la tentative
+    ledger.reserve(session.scope_key, micro_usd=0, tokens=500, kind="call", transport="broker", reservation_id=rid)
+    service.store.attach_reservation(attempt.attempt_id, reservation_id=rid, counted_tokens=436, reserved_tokens=500)
     if state == "emitting":
         assert service.store.mark_emitting(attempt.attempt_id, datetime.now(timezone.utc))
     return service, upstream, ledger, scope_key, parent_rid, session

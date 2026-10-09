@@ -4,23 +4,28 @@
 
 1. le contrat de configuration (Google, deux Gemma officiels, repli = le 26B du codeur, aucun mode de substitution) ;
 2. la cohérence locale des routes de tous les rôles (aucune requête) ;
-3. la présence — sans jamais l'afficher — de la clé chez le service de confiance (jamais requise pour établir la capacité) ;
+3. le prix 0 attesté des deux identités sur l'endpoint officiel (grille de prix du produit) ;
 4. la PREUVE de transport du worker (réseau none, socket unique en lecture seule, aucune clé / proxy / passthrough) ;
 5. (si un registre est fourni) la présence des tables du courtier (migration 0013) ;
-6. (si demandé) l'échéance globale ;
-7. (si fournie) une sonde du fournisseur — c'est l'APPELANT qui la fournit (faux fournisseur ou compteur) ; le préflight n'émet
-   jamais de génération et n'appelle jamais Google de lui-même.
+6. l'échéance globale (exigée ou informative) ;
+7. la PRÉSENCE de la clé chez le service de confiance : **information** par défaut (``required=False`` : les préflights statique
+   et complet réussissent SANS clé, aucune clé factice n'est injectée) ; **exigence au lancement** avec ``require_provider_key``.
+
+Le préflight n'émet JAMAIS de génération et n'appelle jamais Google. La qualification effective des DEUX modèles (texte, JSON, outils)
+est une étape distincte, réelle et obligatoire : :meth:`collegue.broker.BrokerService.qualify_models`.
 
 ``build_preflight_agent`` fabrique le VRAI ``OHSdkAgent`` du produit (sandbox réel du pilote, runtime du courtier) : appeler
 ``allocate_worker`` dessus sur un registre temporaire évalue exactement le transport qui serait utilisé.
+``capability_proof`` est l'interface consommée par B (``collegue.broker.capability_proof``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Tuple
 
 from collegue.broker.capability import TransportCheck, TransportProof
+from collegue.broker.policy import OFFICIAL_MODELS
 from collegue.broker.runtime import BrokerConfigurationError, BrokerRuntime, validate_broker_settings
 
 
@@ -32,13 +37,13 @@ class PreflightReport:
 
     @property
     def failures(self) -> List[str]:
-        return [f"{c.name}: {c.detail}" if c.detail else c.name for c in self.checks if not c.ok]
+        return [f"{c.name}: {c.detail}" if c.detail else c.name for c in self.checks if c.required and not c.ok]
 
     def to_dict(self) -> dict:
         return {
             "transport": self.transport,
             "ok": self.ok,
-            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks],
+            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail, "required": c.required} for c in self.checks],
         }
 
 
@@ -53,6 +58,12 @@ def build_preflight_agent(settings: Any, *, sandbox: Optional[Any] = None, runti
     return OHSdkAgent(box, settings_obj=settings, broker=runtime or BrokerRuntime.from_settings(settings))
 
 
+def _key_present(settings: Any) -> bool:
+    key = getattr(settings, "LLM_API_KEY", "")
+    reveal = getattr(key, "get_secret_value", None)
+    return bool(reveal() if callable(reveal) else key)
+
+
 def preflight_broker_transport(
     settings: Any,
     *,
@@ -60,12 +71,13 @@ def preflight_broker_transport(
     ledger: Optional[Any] = None,
     runtime: Optional[BrokerRuntime] = None,
     require_global_deadline: bool = False,
+    require_provider_key: bool = False,
     provider_probe: Optional[Callable[[], Any]] = None,
 ) -> PreflightReport:
     checks: List[TransportCheck] = []
 
-    def add(name: str, ok: bool, detail: str = "") -> bool:
-        checks.append(TransportCheck(name, bool(ok), "" if ok else detail))
+    def add(name: str, ok: bool, detail: str = "", *, required: bool = True) -> bool:
+        checks.append(TransportCheck(name, bool(ok), "" if ok else detail, required))
         return bool(ok)
 
     try:
@@ -76,14 +88,24 @@ def preflight_broker_transport(
         return PreflightReport(False, tuple(checks))
 
     from collegue.core.llm.roles import check_role_routes
+    from collegue.monitoring.pricing import is_explicitly_free
 
     report = check_role_routes(settings)
     invalid = {role: item["error"] for role, item in report.items() if item["status"] == "invalid"}
     add("role_routes_coherent", not invalid, f"routes incohérentes : {invalid}")
-    key = getattr(settings, "LLM_API_KEY", "")
-    reveal = getattr(key, "get_secret_value", None)
-    present = bool(reveal() if callable(reveal) else key)
-    add("trusted_service_has_a_key", present, "aucune clé Google chez le service de confiance (LLM_API_KEY)")
+    add(
+        "models_explicitly_free_on_official_endpoint",
+        all(is_explicitly_free(model, provider="gemini") for model in OFFICIAL_MODELS),
+        "identité absente de la grille gratuite",
+    )
+    present = _key_present(settings)
+    # Information par défaut : la capacité du transport ne dépend pas de la clé (aucune clé factice n'est jamais injectée).
+    add(
+        "trusted_service_has_a_key",
+        present,
+        "aucune clé Google chez le service de confiance (LLM_API_KEY)",
+        required=bool(require_provider_key),
+    )
 
     try:
         agent = build_preflight_agent(settings, sandbox=sandbox, runtime=runtime)
@@ -102,17 +124,55 @@ def preflight_broker_transport(
 
         try:
             tables = set(inspect(ledger._session_factory.kw["bind"]).get_table_names())
-            missing = sorted({"broker_sessions", "broker_attempts", "broker_clocks"} - tables)
+            missing = sorted({"broker_sessions", "broker_attempts", "broker_clocks", "broker_owners"} - tables)
             add("broker_tables_present", not missing, f"migration 0013 absente : {missing}")
         except Exception as exc:  # noqa: BLE001
             add("broker_tables_present", False, f"{type(exc).__name__}")
     seconds = int(getattr(settings, "BROKER_GLOBAL_DEADLINE_SECONDS", 0) or 0)
-    if require_global_deadline:
-        add("global_deadline_configured", seconds > 0, "BROKER_GLOBAL_DEADLINE_SECONDS non configuré")
+    add(
+        "global_deadline_configured",
+        seconds > 0,
+        "BROKER_GLOBAL_DEADLINE_SECONDS non configuré",
+        required=bool(require_global_deadline),
+    )
     if provider_probe is not None:
         try:
             provider_probe()
             add("provider_probe", True)
         except Exception as exc:  # noqa: BLE001
             add("provider_probe", False, f"{type(exc).__name__}")
-    return PreflightReport(all(c.ok for c in checks), tuple(checks))
+    return PreflightReport(all(c.ok for c in checks if c.required), tuple(checks))
+
+
+def capability_proof(
+    settings: Any,
+    *,
+    sandbox: Optional[Any] = None,
+    ledger: Optional[Any] = None,
+    runtime: Optional[BrokerRuntime] = None,
+    require_global_deadline: bool = False,
+    require_provider_key: bool = False,
+) -> Mapping[str, Any]:
+    """Interface PUBLIQUE de capacité (consommée par B) : ``{"transport": "budget_broker", "accepted": bool, "reason": str, …}``.
+
+    ``accepted`` est ``True`` seulement si TOUTES les vérifications requises passent sur le transport réellement instancié
+    (sandbox du produit, runtime du courtier). Sans clé : acceptée si le transport est prouvé (``provider_key_present`` n'est
+    qu'une information). Aucun champ ne contient de secret.
+    """
+    report = preflight_broker_transport(
+        settings,
+        sandbox=sandbox,
+        ledger=ledger,
+        runtime=runtime,
+        require_global_deadline=require_global_deadline,
+        require_provider_key=require_provider_key,
+    )
+    return {
+        "transport": "budget_broker",
+        "accepted": bool(report.ok),
+        "reason": "; ".join(report.failures),
+        "provider_key_present": _key_present(settings),
+        "global_deadline_seconds": int(getattr(settings, "BROKER_GLOBAL_DEADLINE_SECONDS", 0) or 0),
+        "models": list(OFFICIAL_MODELS),
+        "checks": report.to_dict()["checks"],
+    }

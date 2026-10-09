@@ -47,12 +47,14 @@ from collegue.broker.errors import (
 )
 from collegue.broker.policy import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    FALLBACK_MODEL,
     MAX_OUTPUT_TOKENS_CEILING,
     MAX_REQUEST_BYTES,
+    OFFICIAL_MODELS,
     ROLES,
     models_for_role,
 )
-from collegue.broker.store import AttemptRecord, BrokerStore, SessionRecord
+from collegue.broker.store import AttemptRecord, BrokerStore, SessionRecord, owner_is_alive
 from collegue.broker.translate import (
     NormalizedRequest,
     canonical_json,
@@ -157,9 +159,25 @@ class BrokerService:
         self._upstream = upstream
         self.config = config or BrokerConfig()
         self._clock = clock or _utcnow
+        # Identité de CETTE instance (processus) : propriétaire de ses tentatives en vol. Une tentative d'un propriétaire
+        # vivant n'est jamais réparée par un autre ; celle d'un propriétaire disparu (ou sans propriétaire) l'est.
+        self.owner_id = "own_" + uuid.uuid4().hex[:24]
+        self._owner_registered = False
+        self._local_inflight = 0
 
     def _now(self) -> datetime:
         return self._clock()
+
+    def _ensure_owner(self) -> str:
+        if not self._owner_registered:
+            self.store.register_owner(self.owner_id, self._now())
+            self._owner_registered = True
+        return self.owner_id
+
+    def shutdown(self) -> None:
+        """Arrêt propre : cette instance n'a plus aucune tentative vivante (ses éventuels restes sont réparables)."""
+        if self._owner_registered:
+            self.store.end_owner(self.owner_id, self._now())
 
     # ── sessions ─────────────────────────────────────────────────────────────────────────────────────────
 
@@ -191,6 +209,7 @@ class BrokerService:
                 allowed_models=models_for_role(name),
                 max_output_tokens=cap,
                 deadline_at=deadline,
+                owner_id=self._ensure_owner(),
             )
         except BudgetRefused as exc:  # BaseException du registre : traduit en erreur du courtier, jamais propagé nu
             if exc.code == REFUSED_BLOCKED:
@@ -299,11 +318,16 @@ class BrokerService:
     ) -> dict:
         nr = self._normalize(body, allowed_models, max_output_tokens)
         now = self._now()
+        self._ensure_owner()
+        # Les restes d'un processus disparu (tentative en vol, réserve orpheline) sont réparés — et leurs inconnues bloquent —
+        # AVANT toute nouvelle émission sur ces scopes.
+        self.repair(scope_keys=tuple(dict.fromkeys((scope_key, root_scope_key))), sweep=False)
         self._check_global_deadline(root_scope_key, now)
         admitted = False
         if session is not None:
             self.store.begin_call(session.session_id, now)
             admitted = True
+        self._local_inflight += 1
         try:
             return await self._generate(
                 nr,
@@ -314,6 +338,7 @@ class BrokerService:
                 request_id=request_id,
             )
         finally:
+            self._local_inflight -= 1
             if admitted:
                 self.store.end_call(session.session_id)
 
@@ -345,7 +370,7 @@ class BrokerService:
         self._refuse_if_blocked(scope_key, session, root_scope_key)
         if reopened is not None:
             # Libérée = absence d'émission ÉTABLIE : le renvoi du même request_id est une NOUVELLE exécution légitime.
-            if not self.store.reopen_released(reopened.attempt_id):
+            if not self.store.reopen_released(reopened.attempt_id, owner_id=self.owner_id):
                 return self._replay(self.store.get_attempt(reopened.attempt_id))
         attempt_id = f"{session.session_id if session else 'direct'}:{uuid.uuid4().hex[:16]}"
         if reopened is not None:
@@ -360,6 +385,7 @@ class BrokerService:
                 model=nr.model,
                 request_sha256=nr.sha256,
                 output_cap=nr.output_cap,
+                owner_id=self.owner_id,
             )
             if replayed:
                 return self._replay(attempt)
@@ -380,9 +406,17 @@ class BrokerService:
 
         # 5. réservation ATOMIQUE dans le scope concerné (CAS du registre) — refus ⇒ rien n'est émis.
         reserve_tokens = counted + nr.output_cap
-        reservation_id = (
-            f"broker:{attempt_id}:{uuid.uuid4().hex[:8]}"  # une réservation par EXÉCUTION (renvoi après libération)
-        )
+        reservation_id = self._rid(
+            attempt
+        )  # déterministe : retrouvable par la réparation même si on meurt avant la suite
+        # L'identifiant est ÉCRIT dans la tentative AVANT de réserver : un crash entre la réservation et la suite laisse une
+        # tentative qui désigne sa réserve (jamais une réserve orpheline). Un échec du CAS = la tentative a changé d'état
+        # (fermeture, réparation, autre exécution) : on ne réserve rien.
+        if not self.store.attach_reservation(
+            attempt_id, reservation_id=reservation_id, counted_tokens=counted, reserved_tokens=reserve_tokens
+        ):
+            raise BrokerBlocked("tentative reprise par une autre exécution : aucune réservation", code="attempt_taken")
+        attempt = self.store.get_attempt(attempt_id)
         try:
             self.ledger.reserve(
                 scope_key,
@@ -403,25 +437,30 @@ class BrokerService:
         except BudgetLedgerError as exc:
             self._release(attempt, "ledger_error", str(exc), reserved=False)
             raise BrokerBudgetRefused(f"registre budgétaire indisponible : {exc}", code="ledger_unavailable") from None
-        self.store.attach_reservation(
-            attempt_id, reservation_id=reservation_id, counted_tokens=counted, reserved_tokens=reserve_tokens
-        )
-        attempt = self.store.get_attempt(attempt_id)
 
-        # 6. échéances revérifiées (la latence de countTokens a pu les franchir), puis émission MARQUÉE avant l'envoi.
+        # 6. échéances revérifiées (la latence de countTokens a pu les franchir), puis ADMISSION TRANSACTIONNELLE : au point exact
+        # de l'émission, scopes (enfant et parent), session et réservations sont revalidés dans la MÊME transaction que le
+        # marquage ``emitting`` — un blocage survenu pendant countTokens (autre rôle, autre processus) interdit l'émission.
         now = self._now()
         try:
             self._check_global_deadline(root_scope_key, now)
-            if session is not None and session.deadline_at is not None and now >= session.deadline_at:
-                raise BrokerForbidden(
-                    "échéance de la session atteinte : aucune nouvelle génération", code="session_expired"
-                )
         except BrokerForbidden as exc:
             self._release(attempt, exc.code, str(exc))
             raise
-        if not self.store.mark_emitting(attempt_id, now):
-            # Une autre exécution (rejeu concurrent, fermeture) a repris la tentative : ne RIEN émettre.
-            raise BrokerBlocked("tentative reprise par une autre exécution : aucune émission", code="attempt_taken")
+        admitted_ok, why = self.store.admit_emission(
+            attempt_id,
+            now,
+            session_id=session.session_id if session else None,
+            scope_keys=tuple(dict.fromkeys((scope_key, root_scope_key))),
+            parent_reservation_id=session.parent_reservation_id if session else None,
+        )
+        if not admitted_ok:
+            self._release(attempt, "admission_refused", why)
+            if "échéance" in why:
+                raise BrokerForbidden(why, code="session_expired")
+            if "session" in why and "bloquée" not in why:
+                raise BrokerForbidden(why, code="session_closed")
+            raise BrokerBlocked(why, code="admission_refused")
 
         # 7. émission — tout ce qui n'est pas un rejet démontré laisse la réserve en place.
         try:
@@ -505,6 +544,11 @@ class BrokerService:
             code="replay_refused",
         )
 
+    @staticmethod
+    def _rid(attempt: AttemptRecord) -> str:
+        """Identifiant DÉTERMINISTE de la réservation de l'exécution courante de la tentative."""
+        return f"broker:{attempt.attempt_id}" + (f"#{attempt.runs}" if attempt.runs else "")
+
     # ── règlements (état durable PUIS registre ; réparables) ─────────────────────────────────────────────
 
     def _release(self, attempt: AttemptRecord, code: str, detail: str, *, reserved: bool = True) -> None:
@@ -522,13 +566,30 @@ class BrokerService:
             self._block_parent(session, f"enfant {session.session_id} : {code} — {detail}")
 
     def _block_parent(self, session: SessionRecord, reason: str) -> None:
-        """L'inconnue d'un enfant bloque IMMÉDIATEMENT le projet : la réservation parent passe ``unknown`` (borne haute)."""
+        """L'inconnue d'un enfant bloque IMMÉDIATEMENT le projet : la réservation parent passe ``unknown`` (borne haute).
+
+        Une erreur du registre n'est JAMAIS prise pour « le parent est forcément inconnu » : seul un parent réellement
+        ``unknown`` rend l'échec acceptable ; un parent déjà réglé est bloqué au niveau du scope ; toute autre erreur se propage.
+        """
         if not session.parent_reservation_id:
             return
         try:
             self.ledger.mark_unknown(session.parent_reservation_id, reason=reason[:300])
+            return
         except BudgetLedgerError:
-            pass  # déjà réglée / déjà inconnue : le scope parent porte alors déjà sa cause
+            parent = self.ledger.get_reservation(session.parent_reservation_id)
+            if parent is not None and parent.state == "unknown":
+                return  # déjà inconnu (même cause ou autre) : le scope parent porte sa cause
+            if parent is not None and session.parent_scope_key:
+                # Réglée (committed / released) : la réserve ne peut plus porter l'inconnue, le scope porte le blocage.
+                self.ledger.block(
+                    session.parent_scope_key,
+                    reason=f"broker enfant {session.session_id}: {reason}"[:300],
+                    kind=BLOCK_BOUND_VIOLATION,
+                    event_key=f"broker-child-unknown:{session.session_id}",
+                )
+                return
+            raise
 
     def _signal_violation(self, scope_key: str, session: Optional[SessionRecord], reason: str) -> None:
         """Borne démentie MAIS consommation mesurée : elle est engagée telle quelle, puis scope(s) bloqué(s) et signalé(s)."""
@@ -550,9 +611,11 @@ class BrokerService:
 
     def _apply_ledger(self, attempt: Optional[AttemptRecord]) -> None:
         """Dérive l'opération du registre de l'ÉTAT DURABLE de la tentative (idempotente : clés d'événement déterministes)."""
-        if attempt is None or not attempt.reservation_id:
+        if attempt is None:
             return
-        rid = attempt.reservation_id
+        rid = attempt.reservation_id or self._rid(attempt)
+        if self.ledger.get_reservation(rid) is None:
+            return  # rien n'a été réservé (échec avant le registre) : rien à régler
         try:
             if attempt.state == BROKER_ATTEMPT_SETTLED:
                 self.ledger.commit(rid, micro_usd=0, tokens=int(attempt.usage_total or 0))
@@ -579,7 +642,8 @@ class BrokerService:
         """Ferme la session (plus aucune génération), attend les appels en vol, consolide dans la réservation parent.
 
         Concurrent-sûr : ``open → closing`` est un CAS, les appels en vol se terminent (et libèrent ou règlent) AVANT la
-        consolidation ; ceux qui dépassent l'attente sont déclarés INCONNUS (le projet est bloqué). Idempotent.
+        consolidation ; ceux qui dépassent l'attente sont déclarés INCONNUS (le projet est bloqué). Idempotent. Une session
+        close ne laisse AUCUNE réservation enfant non consolidée : une réserve sans état durable est inconnue (jamais libérée).
         """
         record = self.store.begin_close(session_id, reason)
         if record.state == BROKER_SESSION_CLOSED:
@@ -594,21 +658,34 @@ class BrokerService:
                     self._block_unknown(
                         pending, record.scope_key, record, "closed_in_flight", "fermeture avant la fin de l'appel"
                     )
-        self.repair(session_id=session_id)
+        self.repair(session_id=session_id, include_own=True, sweep=True)
         return self._consolidate(session_id, consolidate_parent=consolidate_parent)
 
     def _consolidate(self, session_id: str, *, consolidate_parent: bool = True) -> SessionSummary:
         record = self.store.get_session(session_id)
         child = self.ledger.snapshot(record.scope_key)
+        unsettled = child.reserved_micro_usd > 0 or child.reserved_tokens > 0
         unknown = (
-            child.unknown_micro_usd > 0 or child.unknown_tokens > 0 or child.blocked_reason or record.unknown_reason
+            child.unknown_micro_usd > 0
+            or child.unknown_tokens > 0
+            or unsettled  # filet : une réserve enfant encore ouverte ne s'engage jamais comme une consommation établie
+            or child.blocked_reason
+            or record.unknown_reason
         )
         settlement = "none"
         if record.parent_reservation_id and consolidate_parent:
             parent = self.ledger.get_reservation(record.parent_reservation_id)
             if parent is not None and parent.state == "reserved":
                 if unknown:
-                    reason = record.unknown_reason or child.blocked_reason or "consommation de l'enfant non établie"
+                    reason = (
+                        record.unknown_reason
+                        or child.blocked_reason
+                        or (
+                            "réserve enfant non réglée à la fermeture"
+                            if unsettled
+                            else "consommation de l'enfant non établie"
+                        )
+                    )
                     self.ledger.mark_unknown(
                         record.parent_reservation_id,
                         reason=f"enfant {session_id}: {reason}"[:300],
@@ -631,7 +708,11 @@ class BrokerService:
     def _summary(self, record: SessionRecord, *, child=None, settlement: Optional[str] = None) -> SessionSummary:
         child = child or self.ledger.snapshot(record.scope_key)
         unknown = bool(
-            child.unknown_micro_usd > 0 or child.unknown_tokens > 0 or child.blocked_reason or record.unknown_reason
+            child.unknown_micro_usd > 0
+            or child.unknown_tokens > 0
+            or child.reserved_tokens > 0
+            or child.blocked_reason
+            or record.unknown_reason
         )
         if settlement is None:
             parent = self.ledger.get_reservation(record.parent_reservation_id) if record.parent_reservation_id else None
@@ -657,17 +738,41 @@ class BrokerService:
 
     # ── réparation après arrêt / crash ───────────────────────────────────────────────────────────────────
 
-    def repair(self, *, session_id: Optional[str] = None, scope_key: Optional[str] = None) -> int:
-        """Répare les tentatives interrompues. À appeler au démarrage et par ``close_session``.
+    def _is_abandoned(self, attempt: AttemptRecord, *, include_own: bool, now: datetime) -> bool:
+        """Contrat de PROPRIÉTÉ : une tentative est réparable si son propriétaire est introuvable / terminé / disparu.
 
-        ``prepared`` : l'émission n'a PAS été marquée ⇒ rien n'est parti : réservation libérée. ``emitting`` : l'envoi a pu
-        partir ⇒ usage INCONNU (conservé, bloquant), jamais rejoué. ``settled``/``released``/``unknown`` dont le registre
-        n'a pas suivi : l'opération du registre manquante est rejouée (idempotente).
+        Celle d'un propriétaire VIVANT (un autre processus) n'est jamais touchée ; celle de cette instance ne l'est que sur
+        demande explicite (``include_own``, instance au repos : démarrage du processus ou fermeture de session).
+        """
+        if attempt.owner_id is None:
+            return True
+        if attempt.owner_id == self.owner_id:
+            return include_own
+        return not owner_is_alive(self.store.get_owner(attempt.owner_id), now)
+
+    def repair(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        scope_key: Optional[str] = None,
+        scope_keys: Optional[Tuple[str, ...]] = None,
+        include_own: bool = False,
+        sweep: bool = True,
+    ) -> int:
+        """Répare les tentatives ABANDONNÉES (tous producteurs : workers, planner, QA, reviewer…), sans jamais émettre.
+
+        ``prepared`` : l'émission n'a PAS été marquée ⇒ rien n'est parti : réservation libérée (même si l'identifiant n'a pas été
+        écrit dans la tentative : il est déterministe). ``emitting`` : l'envoi a pu partir ⇒ usage INCONNU (conservé, bloquant),
+        jamais rejoué. ``sweep`` : rejoue aussi l'opération du registre qui aurait pris du retard sur l'état durable, puis traite
+        toute réserve ``broker`` encore ouverte SANS tentative vivante : sans état durable elle est inconnue — jamais libérée.
         """
         repaired = 0
         session = self.store.get_session(session_id) if session_id else None
         scope = session.scope_key if session else scope_key
-        for attempt in self.store.pending_attempts(scope_key=scope):
+        now = self._now()
+        for attempt in self.store.pending_attempts(scope_key=scope, scope_keys=scope_keys):
+            if not self._is_abandoned(attempt, include_own=include_own, now=now):
+                continue
             owner = session
             if owner is None and attempt.session_id:
                 owner = self.store.get_session(attempt.session_id)
@@ -678,15 +783,285 @@ class BrokerService:
                     attempt, attempt.scope_key, owner, "interrupted", "arrêt ou crash après le marquage d'émission"
                 )
             repaired += 1
-        for attempt in self.store.attempts(scope_key=scope) if scope else []:
-            if attempt.state in (BROKER_ATTEMPT_SETTLED, BROKER_ATTEMPT_RELEASED, BROKER_ATTEMPT_UNKNOWN):
-                self._apply_ledger(attempt)
+        if sweep:
+            scopes = (scope,) if scope else tuple(self.store.scope_keys_with_attempts())
+            for key in scopes:
+                for attempt in self.store.attempts(scope_key=key):
+                    if attempt.state in (BROKER_ATTEMPT_SETTLED, BROKER_ATTEMPT_RELEASED, BROKER_ATTEMPT_UNKNOWN):
+                        self._apply_ledger(attempt)
+                repaired += self._sweep_orphan_reservations(key, include_own=include_own, session=session)
         return repaired
 
-    async def recover_all(self) -> int:
-        """Au démarrage du processus : répare chaque session non close puis la ferme (consolidation incluse)."""
-        total = 0
+    def _sweep_orphan_reservations(self, scope_key: str, *, include_own: bool, session: Optional[SessionRecord]) -> int:
+        """Réserve ``broker`` ouverte dans ``scope_key`` sans tentative qui la porte : consommation INCONNUE, jamais libérée."""
+        swept = 0
+        now = self._now()
+        for reservation in self.ledger.reservations(scope_key, states=("reserved",)):
+            if not reservation.reservation_id.startswith("broker:"):
+                continue
+            base = reservation.reservation_id[len("broker:") :].split("#", 1)[0]
+            attempt = self.store.get_attempt(base)
+            if attempt is not None:
+                if attempt.state in (BROKER_ATTEMPT_PREPARED, BROKER_ATTEMPT_EMITTING) and not self._is_abandoned(
+                    attempt, include_own=include_own, now=now
+                ):
+                    continue  # tentative vivante : sa réserve est légitime
+                if self._rid(attempt) == reservation.reservation_id and attempt.state != BROKER_ATTEMPT_RELEASED:
+                    continue  # portée par une tentative (réparée plus haut ou réglée)
+                if self._rid(attempt) == reservation.reservation_id:
+                    self._apply_ledger(attempt)  # libérée durablement, registre en retard : on rejoue la libération
+                    swept += 1
+                    continue
+            # Aucune tentative ne porte cette réserve : on ne sait pas si elle a servi ⇒ inconnue (conservée), jamais libérée.
+            self.ledger.mark_unknown(
+                reservation.reservation_id, reason="réserve du courtier sans état durable (orpheline) : usage inconnu"
+            )
+            owner = session or self._session_of_scope(scope_key)
+            if owner is not None:
+                self.store.note_session_unknown(owner.session_id, "réserve orpheline")
+                self._block_parent(owner, f"enfant {owner.session_id} : réserve orpheline")
+            swept += 1
+        return swept
+
+    def _session_of_scope(self, scope_key: str) -> Optional[SessionRecord]:
         for record in self.store.open_sessions():
-            total += self.repair(session_id=record.session_id)
+            if record.scope_key == scope_key:
+                return record
+        return None
+
+    async def recover_all(self, *, include_own: bool = True) -> int:
+        """Au DÉMARRAGE du processus, avant tout appel : répare les tentatives de TOUS les producteurs et ferme les sessions orphelines.
+
+        Contrat de propriété : les tentatives et sessions d'un propriétaire VIVANT (un autre processus) ne sont jamais touchées.
+        Les restes d'un processus disparu, ceux sans propriétaire, et — ``include_own`` — ceux de CETTE instance le sont ; appeler
+        avec ``include_own`` pendant que cette instance a des appels en vol est refusé.
+        """
+        if include_own and self._local_inflight:
+            raise BrokerForbidden(
+                "recover_all(include_own) refusé : cette instance a des appels en vol", code="recovery_while_busy"
+            )
+        self._ensure_owner()
+        total = self.repair(include_own=include_own, sweep=True)
+        now = self._now()
+        for record in self.store.open_sessions():
+            own = record.owner_id == self.owner_id
+            abandoned = record.owner_id is None or (
+                not own and not owner_is_alive(self.store.get_owner(record.owner_id), now)
+            )
+            if not (abandoned or (own and include_own)):
+                continue
+            total += self.repair(session_id=record.session_id, include_own=True, sweep=True)
             await self.close_session(record.session_id, reason="recovery")
         return total
+
+    # ── échéance persistée ───────────────────────────────────────────────────────────────────────────────
+
+    def persisted_deadline(self, scope_key: str) -> Optional[datetime]:
+        """Échéance GLOBALE persistée du scope (ouverte à la première ouverture réelle du fournisseur), ou ``None`` si pas encore ouverte."""
+        return self.store.clock_deadline(scope_key)
+
+    def remaining_seconds(self, scope_key: str) -> Optional[float]:
+        """Secondes restantes avant l'échéance persistée (négatif = dépassée) ; ``None`` si l'horloge n'est pas ouverte."""
+        deadline = self.persisted_deadline(scope_key)
+        return None if deadline is None else (deadline - self._now()).total_seconds()
+
+    def open_clock(self, scope_key: str) -> Optional[datetime]:
+        """Ouvre EXPLICITEMENT l'horloge globale du scope (idempotent : l'échéance existante est rendue, jamais déplacée)."""
+        if self.config.global_deadline_seconds <= 0:
+            return None
+        return self.store.ensure_clock(scope_key, self.config.global_deadline_seconds, self._now())
+
+    # ── qualification des deux modèles (canaris) ─────────────────────────────────────────────────────────
+
+    async def qualify_models(
+        self, scope_key: str, *, models: Tuple[str, ...] = OFFICIAL_MODELS
+    ) -> "QualificationReport":
+        """Qualifie les DEUX identités officielles sur ``scope_key`` par le VRAI pipeline (normalisation → countTokens complet →
+        réservation → émission marquée → usage vérifié) : texte, JSON, appel d'outil.
+
+        Chaque canari a une identité durable (``qualify:<scope>:<modèle>:<capacité>``) : relancer ne réémet pas un canari déjà
+        réglé. Le premier refus ou la première ambiguïté ARRÊTE la qualification (rapport incomplet, aucun repli, aucune estimation,
+        aucun renvoi). L'échéance globale est ouverte ICI si elle ne l'est pas (premier accès réel au fournisseur).
+        """
+        results = []
+        failure: Optional[str] = None
+        self.open_clock(scope_key)
+        for model in models:
+            role = "coder" if model == FALLBACK_MODEL else "default"
+            capabilities = []
+            for capability, body, check in _canaries(model):
+                request_id = f"qualify:{scope_key}:{model}:{capability}"
+                if failure is not None:
+                    capabilities.append(
+                        CapabilityResult(capability, False, "non exécuté (qualification interrompue)", request_id)
+                    )
+                    continue
+                try:
+                    completion = await self.sampling_completion(scope_key, role, body, request_id=request_id)
+                    ok, detail = check(completion)
+                    tokens = int(completion.get("usage", {}).get("total_tokens", 0))
+                except BrokerError as exc:
+                    ok, detail, tokens = False, f"{exc.code}: {exc}", 0
+                if not ok:
+                    failure = f"{model}/{capability}: {detail}"
+                capabilities.append(CapabilityResult(capability, ok, detail, request_id, tokens))
+            results.append(
+                ModelQualification(
+                    model=model, role=role, capabilities=tuple(capabilities), ok=all(c.ok for c in capabilities)
+                )
+            )
+        snapshot = self.ledger.snapshot(scope_key)
+        deadline = self.persisted_deadline(scope_key)
+        if failure is None and self.config.global_deadline_seconds > 0 and deadline is None:
+            failure = "échéance globale non ouverte après la qualification"
+        return QualificationReport(
+            scope_key=scope_key,
+            ok=failure is None and all(m.ok for m in results),
+            reason=failure or "",
+            models=tuple(results),
+            deadline_at=deadline,
+            consumed_tokens=snapshot.consumed_tokens,
+            blocked=bool(snapshot.blocked),
+            destination="generativelanguage.googleapis.com/v1beta (natif)",
+        )
+
+
+# ── canaris de qualification ─────────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CapabilityResult:
+    capability: str
+    ok: bool
+    detail: str
+    request_id: str
+    tokens: int = 0
+
+
+@dataclass(frozen=True)
+class ModelQualification:
+    model: str
+    role: str
+    capabilities: Tuple[CapabilityResult, ...]
+    ok: bool
+
+
+@dataclass(frozen=True)
+class QualificationReport:
+    """Résultat de la qualification (sans secret). ``ok`` seulement si les DEUX modèles ont réussi TOUTES les capacités."""
+
+    scope_key: str
+    ok: bool
+    reason: str
+    models: Tuple[ModelQualification, ...]
+    deadline_at: Optional[datetime]
+    consumed_tokens: int
+    blocked: bool
+    destination: str
+
+    def to_dict(self) -> dict:
+        return {
+            "scope_key": self.scope_key,
+            "ok": self.ok,
+            "reason": self.reason,
+            "destination": self.destination,
+            "deadline_at": None if self.deadline_at is None else self.deadline_at.isoformat(),
+            "consumed_tokens": self.consumed_tokens,
+            "blocked": self.blocked,
+            "models": [
+                {
+                    "model": m.model,
+                    "role": m.role,
+                    "ok": m.ok,
+                    "capabilities": [
+                        {
+                            "capability": c.capability,
+                            "ok": c.ok,
+                            "detail": c.detail,
+                            "request_id": c.request_id,
+                            "tokens": c.tokens,
+                        }
+                        for c in m.capabilities
+                    ],
+                }
+                for m in self.models
+            ],
+        }
+
+
+def _canaries(model: str):
+    """``(capacité, corps Chat Completions, vérification)`` — les trois capacités RÉELLEMENT utilisées par la campagne."""
+
+    def text_check(completion):
+        choice = completion["choices"][0]
+        content = choice["message"].get("content")
+        ok = isinstance(content, str) and bool(content.strip()) and choice["finish_reason"] in ("stop", "length")
+        return ok, "texte reçu" if ok else f"réponse texte inexploitable (finish={choice['finish_reason']!r})"
+
+    def json_check(completion):
+        content = completion["choices"][0]["message"].get("content")
+        try:
+            value = json.loads(content or "")
+        except ValueError:
+            return False, "la réponse n'est pas du JSON"
+        ok = isinstance(value, dict)
+        return ok, "objet JSON reçu" if ok else "la réponse JSON n'est pas un objet"
+
+    def tool_check(completion):
+        message = completion["choices"][0]["message"]
+        calls = message.get("tool_calls") or []
+        if len(calls) != 1 or calls[0]["function"]["name"] != "report_status":
+            return False, "aucun appel de l'outil demandé"
+        try:
+            arguments = json.loads(calls[0]["function"]["arguments"])
+        except ValueError:
+            return False, "arguments d'outil illisibles"
+        ok = isinstance(arguments, dict) and "status" in arguments
+        return ok, "appel d'outil reçu" if ok else "arguments d'outil sans 'status'"
+
+    common = {"model": model, "max_tokens": 256}
+    return (
+        (
+            "text",
+            {
+                **common,
+                "messages": [
+                    {"role": "system", "content": "Réponds en un mot."},
+                    {"role": "user", "content": "Dis OK."},
+                ],
+            },
+            text_check,
+        ),
+        (
+            "json",
+            {
+                **common,
+                "messages": [{"role": "user", "content": 'Réponds uniquement avec l\'objet JSON {"ok": true}.'}],
+                "response_format": {"type": "json_object"},
+            },
+            json_check,
+        ),
+        (
+            "tools",
+            {
+                **common,
+                "messages": [{"role": "user", "content": "Appelle l'outil report_status avec status=ok."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "report_status",
+                            "description": "Rapporte l'état.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"status": {"type": "string"}},
+                                "required": ["status"],
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+            tool_check,
+        ),
+    )

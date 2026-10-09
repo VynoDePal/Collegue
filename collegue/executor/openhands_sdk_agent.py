@@ -88,6 +88,12 @@ class OHSdkAgent:
             )
         return prove_worker_transport(self._sandbox, provider_keys=self._broker.provider_keys())
 
+    def persisted_remaining_seconds(self, binding) -> Optional[float]:
+        """Secondes restantes de l'échéance GLOBALE PERSISTÉE du scope (courtier), ``None`` si l'horloge n'est pas ouverte / hors courtier."""
+        if self._broker is None:
+            return None
+        return self._broker.service_for(binding.ledger).remaining_seconds(binding.scope_key)
+
     def runner_model_chain(self) -> List[str]:
         """Modèles tels que le RUNNER les nomme (LiteLLM). Courtier : ``openai/<identité>`` — format Chat Completions du relais ;
         la destination sémantique reste Google (``model_chain`` / route restent ``gemini``)."""
@@ -242,12 +248,15 @@ class OHSdkAgent:
             raise BudgetRefused(
                 REFUSED_UNBOUNDED, "mode courtier : aucune allocation ni registre lié au contexte — worker non lancé"
             )
-        run_kwargs = {}
-        if alloc.runtime_seconds is not None and _accepts_timeout(self._sandbox):
-            run_kwargs["timeout"] = alloc.runtime_seconds
         with self._broker.attach_worker(
             ledger=binding.ledger, allocation=alloc, role=self._role.value, sandbox=self._sandbox
         ) as attached:
+            # Le délai du CONTENEUR est borné par l'échéance persistée : le processus de travail est ARRÊTÉ à cette échéance
+            # (auto-limite coreutils dans le conteneur + kill par nom côté hôte), même s'il dort ou calcule sans appeler le
+            # courtier. ``attached.timeout_seconds`` = min(allocation, échéance persistée − maintenant), calculé au lancement.
+            run_kwargs = {}
+            if attached.timeout_seconds is not None and _accepts_timeout(self._sandbox):
+                run_kwargs["timeout"] = attached.timeout_seconds
             result = attached.sandbox.run_command(self.build_command(issue), workspace, **run_kwargs)
         summary = attached.summary
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()

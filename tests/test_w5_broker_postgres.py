@@ -32,7 +32,9 @@ def test_the_broker_tables_exist_with_their_constraints_on_postgresql(manager, p
     engine = create_engine(pg_url)
     try:
         inspector = inspect(engine)
-        assert {"broker_sessions", "broker_attempts", "broker_clocks"} <= set(inspector.get_table_names())
+        assert {"broker_sessions", "broker_attempts", "broker_clocks", "broker_owners"} <= set(
+            inspector.get_table_names()
+        )
         uniques = {tuple(u["column_names"]) for u in inspector.get_unique_constraints("broker_attempts")}
         assert ("scope_key", "request_id") in uniques
     finally:

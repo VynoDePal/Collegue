@@ -30,9 +30,12 @@ _FORBIDDEN_NAMESPACES = ("--pid", "--ipc", "--uts", "--userns")
 
 @dataclass(frozen=True)
 class TransportCheck:
+    """Une vérification. ``required=False`` : information (ex. présence d'une clé), qui n'entre pas dans ``ok``."""
+
     name: str
     ok: bool
     detail: str = ""
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -44,17 +47,17 @@ class TransportProof:
 
     @property
     def ok(self) -> bool:
-        return bool(self.checks) and all(check.ok for check in self.checks)
+        return bool(self.checks) and all(check.ok for check in self.checks if check.required)
 
     @property
     def failures(self) -> List[str]:
-        return [f"{c.name}: {c.detail}" if c.detail else c.name for c in self.checks if not c.ok]
+        return [f"{c.name}: {c.detail}" if c.detail else c.name for c in self.checks if c.required and not c.ok]
 
     def to_dict(self) -> dict:
         return {
             "transport": self.transport,
             "ok": self.ok,
-            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in self.checks],
+            "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail, "required": c.required} for c in self.checks],
         }
 
 
