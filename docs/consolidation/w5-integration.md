@@ -83,26 +83,22 @@ immuable sans workflow il ne peut jamais partir. Le workflow du socle utilise do
 **Observé en C47** : le `push` du commit du socle sur `collegue-business/bootstrap-w5` a déclenché le workflow (hors branche par défaut) et le check `Fixture tests` de l'application 15368 a réussi sur ce commit ; chaque PR de sonde vers une base jetable a déclenché le workflow `pull_request` et produit un check de l'application 15368 sur la TÊTE de la PR (job réel, `head_sha` = tête, exécution `path` = workflow approuvé). Les workflows d'une PR créée
 par le jeton de campagne (PAT) ne demandent pas d'approbation ; une PR en conflit de fusion ne déclenche rien.
 
-### 4.2 Protection INDÉPENDANTE contre la substitution du workflow
+### 4.2 Ce qui protège réellement les contrôles — garantie CORRIGÉE (C47/C48)
 
-Avec `pull_request`, le fichier appliqué est celui du commit de fusion : une PR peut le modifier, donc un check de même nom et de la même application ne prouve pas son contenu.
-Couches, de la plus forte à la plus faible :
-1. **Serveur** (CODEOWNERS `/.github/` et `/ci/` + `require_code_owner_review`) : **OBSERVÉ INEFFICACE** (sonde distante C47, 2026-10-09) : avec 0 approbation requise, une PR de l'auteur-propriétaire qui modifie le
-   workflow, le CODEOWNERS ou le verrou approuvé, check VERT, a été **fusionnée** dans sa base jetable (PR #10, #11, #12 ; `mergeable` accepté, règle `pull_request` « pass » dans les rule-suites). Cette couche ne protège donc
-   rien tant que le ruleset n'est pas modifié ; elle n'a pas été modifiée (ni affaiblie ni renforcée) en C47. Un renforcement (p. ex. une approbation requise) bloquerait aussi les fusions légitimes de la campagne (un seul compte) :
-   décision du manager.
-2. **Fusionneur de confiance** (propriété de B : `collegue/pilot/merge_policy.py`, décision manager `w5-manager-fixture-check-design.md`) : avant toute fusion dans `collegue-business/*`, compare l'arbre
-   Git RÉEL de la tête à celui de la base de confiance pour **`.github/` ET `ci/`** (deux entrées racine : SHA de sous-arbre, qui couvre tout le contenu, ajout / modification / suppression /
-   renommage compris ; lecture impossible ou arbre tronqué = refus) — `ci/` porte le verrou approuvé : le laisser hors garde laisserait remplacer la pile « approuvée » sans que CODEOWNERS ne soit
-   le seul rempart. Variante de référence dans `scripts/w5_fixture_bootstrap.py` : `protected_tree_violations` (par fichier, SHA de blob) et `check_provenance` (le check est un job réel de
-   l'exécution du workflow approuvé, tête et chemin concordants ; un check publié par l'API des checks n'est pas un job). La sonde évalue ce garde sur chaque tête (`guard.refuses`).
-   **Check attendu** : pour un événement `pull_request`, le check-run `Fixture tests` (application 15368) est rattaché à la TÊTE de la PR (`commits/<tête>/check-runs`), alors que le workflow
-   s'exécute sur le commit de FUSION `refs/pull/N/merge` (base + tête) ; comme les chemins protégés de la tête sont identiques à ceux de la base, ceux du commit de fusion le sont aussi. Ce
-   rattachement n'a PAS été observé : la sonde (scénario `green`, `check_provenance`) le constate ou le contredit avant toute confiance.
-3. Le workflow lui-même (garde des liens symboliques, pile approuvée, conteneurs) est utile mais **n'est pas** une protection contre sa propre substitution.
+Avec `pull_request`, le fichier appliqué est celui du commit de fusion : une PR peut le modifier, et un check de même nom et de la même application ne prouve pas son contenu.
+**Hypothèse réfutée** (sonde C47) : la défense serveur par CODEOWNERS (`/.github/`, `/ci/` + `require_code_owner_review`) ne protège rien avec 0 approbation requise : les PR #10 (workflow), #11 (CODEOWNERS) et
+#12 (verrou approuvé), check VERT, ont été **fusionnées** par l'auteur-propriétaire (règle `pull_request` « pass », 0 revue). Cette contre-épreuve est classée **échec de l'hypothèse**, jamais sécurité établie ; elle n'est pas rejouée (le défaut est établi).
+CODEOWNERS reste présent comme **signal de revue** (information), jamais compté comme barrière ; le socle V2 corrige ses commentaires et ceux du workflow.
 
-**Limite résiduelle** : une PR qui modifie le workflow peut, pendant son propre run, demander des permissions d'écriture au jeton de ce run (PR du même dépôt). Elle ne peut pas
-fusionner (couche 1), mais pourrait tenter de publier un faux check sur une AUTRE tête ; la couche 2 (provenance) la détecte, la couche 1 ne le voit pas.
+La sécurité du **chemin Collègue** repose sur quatre garanties, toutes côté PRODUIT ou GitHub réel :
+1. contrôle COMPLET de `.github/` ET `ci/` AVANT toute publication distante (garde commun de publication, **B23**, `executor/pr.py`) : tâche qui ajoute, modifie, supprime ou renomme un contrôle ⇒ aucune écriture distante ;
+2. même intégrité vérifiée AVANT toute fusion (B, `merge_policy.py`) : arbre Git RÉEL de la tête comparé à la base de confiance pour les deux entrées racine (SHA de sous-arbre ; lecture impossible ou arbre tronqué = refus) ;
+3. check authentifié par la chaîne check-run (application 15368) → job Actions → exécution du workflow, sur la TÊTE, le DÉPÔT, le CHEMIN et l'ÉVÉNEMENT attendus (`check_provenance`, référence dans `scripts/w5_fixture_bootstrap.py`, testée maillon par maillon) ;
+4. protections GitHub réelles, prouvées par la sonde SERVEUR : PR obligatoire, check requis présent et réussi (rouge ⇒ fusion refusée), base à jour (PR périmée ⇒ refusée), création d'une base seulement depuis un commit qui a passé le check, aucun bypass.
+
+**Non couvert** : une fusion MANUELLE hors du produit d'une PR qui modifie les contrôles reste possible sur GitHub dans cette configuration (limite assumée, à citer). Le comportement du check sur la TÊTE est observé (check-run, job et exécution concordants sur la tête de la PR) ;
+le workflow s'exécute sur le commit de fusion. **Preuve de la barrière produit** : `tests/test_w5_integration_controls_guard.py` traverse la vraie entrée publique avec un faux GitHub qui compte les écritures (neuf familles d'altération, ZÉRO écriture, témoins bénins dont des
+noms voisins) ; il est `xfail` STRICT jusqu'à l'intégration de B23. Le garde de préparation de C (`protected_tree_violations`) ne la remplace pas.
 
 ### 4.3 Exécution du code candidat et dépendances
 
@@ -114,25 +110,25 @@ dépendance est REFUSÉE explicitement, rien n'est téléchargé — puis lance 
 conteneur. L'image est `python:3.12-slim` figée par condensat. **Limites** : le téléchargement des roues accède à Internet (sans secret, hachages vérifiés) ; un candidat qui commite
 une roue locale est exécuté dans le conteneur sans réseau comme tout son code ; la preuve du confinement Docker lui-même est celle de la CI de la fixture (non exécutée ici).
 
-### 4.4 Création des bases et ruleset
+### 4.4 Création des bases, ruleset et plan V2
 
-Ruleset actif sur `refs/heads/collegue-business/*`, sans bypass : PR obligatoire avec approbation du propriétaire des chemins du contrôle, check `Fixture tests` lié à l'application GitHub
-Actions (`integration_id` 15368), base à jour, **`do_not_enforce_on_create` faux** : créer une branche sous ce motif exige un commit qui a déjà passé le check. Le socle le passe de lui-même
-(workflow `push`) : `apply` crée la branche, **attend ce check réussi**, puis crée le ruleset (absent, rouge ou jamais terminé = arrêt, aucun ruleset). Les bases de campagne se créent donc
-depuis le commit du socle **sans bypass ni faux check** ; un commit sans check (la graine) ne peut pas devenir une base. Pas de règle `deletion` : le nettoyage supprime ses bases.
+Ruleset actif sur `refs/heads/collegue-business/*`, sans bypass (24793056, observé) : PR obligatoire, signal de revue du propriétaire (non compté), check `Fixture tests` lié à l'application GitHub Actions (`integration_id` 15368), base à jour,
+**`do_not_enforce_on_create` faux** : créer une branche sous ce motif exige un commit qui a déjà passé le check (observé : base depuis la graine refusée, 422). Le socle le passe de lui-même : le workflow `push` produit le check sur sa branche.
+**V1 appliquée** : commit `10750c7bd823…`, branche `collegue-business/bootstrap-w5` ; ses commentaires affirmaient à tort la protection par CODEOWNERS. **V2 préparée, NON appliquée** : commit `ad56c0fa0306…` (parent unique = graine), branche
+`collegue-business/bootstrap-w5-v2`, mêmes fichiers, commentaires corrigés, ruleset IDENTIQUE (aucune modification de protection) ; plan : `evidence/w5-c-fixture-plan-v2/` (dont `update-v2.md` : commandes exactes, et `v1-to-v2.diff`).
+**Voie de mise à jour** : le commit V2 est publié sur une branche de préparation HORS du motif (`collegue-bootstrap-staging/w5-v2`), son check est attendu (workflow `push` du commit V2), puis la branche du socle V2 est créée sous la règle de création intacte ; la V1, le
+ruleset, `main` et la graine ne sont jamais touchés. **Voie par PR vers la branche V1 : bloquée** (la fusion ajoute un commit au-dessus de la V1 ; B exige un descendant direct de la graine, `parents == [graine]`, `ahead_by == 1`) : à trancher par le manager.
 
-### 4.5 Contre-épreuves distantes (`probe`, sur ordre seulement)
+### 4.5 Contre-épreuves distantes (`probe`, sur ordre seulement) — V2
 
-Huit scénarios (`evidence/w5-c-fixture-plan/probe-plan.md`), fusions RÉELLES dans des bases jetables : `green` (déclenchement, check = job réel de l'application 15368, provenance, fusion
-acceptée), `red-test` (check rouge, fusion refusée, faux check refusé ou sans effet), `workflow-touch` / `codeowners-touch` / `lock-touch` (check vert, fusion refusée : isole la protection
-du propriétaire), `unapproved-dependency` (check rouge explicite, rien téléchargé), `symlink` (lien mode 120000 par l'API Git Data : garde rouge), `seed-base` (création d'une base depuis la
-graine refusée). Un check absent n'est jamais un succès. **Incertitudes que la sonde tranche** : déclenchement sur une PR vers une base non par défaut, code owner à 0 approbation, règle de
-création, droits du jeton, Actions activées.
+Sonde SERVEUR (`probe-plan.md`) : `green` (déclenchement, check = job réel de l'application 15368, provenance, fusion acceptée), `red-test` (check rouge, fusion refusée, faux check refusé), `unapproved-dependency` (check rouge explicite, rien téléchargé), `symlink`
+(lien mode 120000 par l'API Git Data), `seed-base` (création d'une base depuis la graine refusée), **`stale-base`** (nouveau : PR déjà verte rendue périmée par l'avancée de la base ⇒ fusion refusée ; PR en conflit ⇒ aucun workflow, check manquant, fusion refusée).
+Les têtes qui altèrent `.github/` ou `ci/` ne sont PAS rejouées. Un check absent n'est jamais un succès. **Résultats observés en C47 (V1)** : `green`, `red-test`, `unapproved-dependency`, `symlink`, `seed-base` conformes ; trois scénarios « touch » en échec (hypothèse réfutée) ; `stale-base` non encore joué.
 
-### 4.6 Ordre des mutations (aucune n'est faite dans cette passe)
+### 4.6 Ordre des mutations
 
-`inspect` → revue du manager de `evidence/w5-c-fixture-plan/` → `apply --order-token APPLIQUER-W5-FIXTURE-<12 hex>` (arbre, commit, branche ; attente du check ; ruleset) → `verify` → `probe` → manifeste
-complété par le `ruleset_id` → variable d'environnement GitHub `W5_BOOTSTRAP_MANIFEST_JSON`. Retour arrière : `cleanup` ne supprime que la branche du socle et le ruleset **de cette campagne**.
+C47 (autorisée) : `inspect` → `apply` → `verify` → `probe` (V1, rc 1). C48 : aucune mutation. À venir, sur ordre du manager après examen de `evidence/w5-c-fixture-plan-v2/` : `inspect` → `apply --order-token APPLIQUER-W5-FIXTURE-ad56c0fa0306` (V2, voie de préparation) → `verify` → `probe`
+(sonde serveur V2, dont `stale-base`) → manifeste V2 pour B. Retour arrière : `cleanup` ne supprime que les branches de la V2 (le ruleset, partagé avec la V1, seulement avec `--with-ruleset`).
 
 ## 5. Image broker, dépendances et CI générale (cinq checks inchangés : Ruff, Pytest 3.11, Pytest 3.12, Dependency audit, Docker build)
 

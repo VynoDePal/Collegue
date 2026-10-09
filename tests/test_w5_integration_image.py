@@ -92,7 +92,15 @@ def usage_of(stack):
     return snap.consumed_tokens, snap.reserved_tokens, snap.unknown_tokens, bool(snap.blocked)
 
 
-def assert_worker_life_bounded(stack, persisted, t_return, *, started_expected=True):
+def host_watchdog_margin() -> float:
+    """Marge du filet HÔTE de A27 (``DEADLINE_HOST_MARGIN``, kill du conteneur par nom à ``échéance + marge``) : elle ne s'applique QU'AU démarrage lent du
+    conteneur, où le délai interne ne peut plus tenir (le démon n'a pas encore lancé le processus) ; ailleurs le KILL interne est exact."""
+    from collegue.sandbox import executor
+
+    return float(getattr(executor, "DEADLINE_HOST_MARGIN", 2.0))
+
+
+def assert_worker_life_bounded(stack, persisted, t_return, *, started_expected=True, extra_tolerance=0.0):
     """La VIE du worker (battements) ne dépasse pas l'échéance ABSOLUE ; la collecte est mesurée à part ; le processus est réellement mort."""
     deadline = persisted.timestamp()
     beats = heartbeat_epochs(stack.workspace)
@@ -231,19 +239,38 @@ def test_the_real_sdk_may_use_the_fallback_after_an_established_refusal_and_the_
     assert_nothing_left(stack)
 
 
-@pytest.mark.parametrize("scenario", ["no_fallback_after_ambiguous_timeout", "same_model_retry_after_lost_response"])
-def test_the_real_sdk_cannot_duplicate_or_divert_an_emission_whose_response_was_lost(stacks, scenario):
+def test_the_real_sdk_cannot_divert_to_the_fallback_after_an_emission_whose_response_was_lost(stacks):
     fake = FakeGoogle()
     fake.gate = asyncio.Event()
     fake.gate_first_n = 1
-    stack = sdk_stack(stacks, fake, scenario)
+    stack = sdk_stack(stacks, fake, "no_fallback_after_ambiguous_timeout")
     facts = parse_sdk_facts(stack.run().logs)
 
-    for label, value in facts.items():
-        assert value["ok"] is False, (label, value)
-    assert fake.models_seen == [PRIMARY], f"aucune seconde émission (repli ou retry du SDK) : {fake.models_seen}"
+    assert facts["primary"]["ok"] is False and facts["fallback"]["ok"] is False, facts
+    assert fake.models_seen == [PRIMARY], (
+        f"aucune émission du 26B tant que l'issue du 31B est inconnue : {fake.models_seen}"
+    )
     consumed, _reserved, unknown, blocked = usage_of(stack)
     assert consumed == 0 and unknown > 0 and blocked, "réservation conservée et bloquante tant que l'usage est inconnu"
+    assert_nothing_left(stack, in_flight=True)
+
+
+def test_the_real_sdk_retrying_the_same_model_after_a_lost_response_is_fully_accounted(stacks):
+    """DÉCISION DE A27 (ouverte au manager) : un renvoi du MÊME modèle pendant qu'une génération est en vol est admis (génération distincte, réservée,
+    réglée et imputée à part). La preuve vérifie donc la COMPTABILITÉ, pas l'unicité ; l'unicité de l'émission est établie pour le VRAI runner, dont les
+    retries du SDK sont à zéro (test ``…never_falls_back_nor_retries…``). Si le manager sérialise les émissions par session, ce test change de forme."""
+    fake = FakeGoogle()
+    fake.gate = asyncio.Event()
+    fake.gate_first_n = 1
+    stack = sdk_stack(stacks, fake, "same_model_retry_after_lost_response")
+    facts = parse_sdk_facts(stack.run().logs)
+
+    assert set(fake.models_seen) == {PRIMARY}, f"jamais un autre modèle : {fake.models_seen}"
+    settled = len(fake.models_seen) - 1  # la première génération n'a jamais de réponse
+    consumed, _reserved, unknown, blocked = usage_of(stack)
+    assert consumed == 15 * settled, "chaque génération réglée est imputée une fois"
+    assert unknown > 0 and blocked, "la génération restée en vol reste réservée comme inconnue et bloque le projet"
+    assert (facts["primary_with_sdk_retries"]["ok"] is True) == (settled >= 1)
     assert_nothing_left(stack, in_flight=True)
 
 
@@ -308,9 +335,16 @@ def test_hostile_code_cannot_widen_its_session_reach_the_internet_or_see_a_provi
     assert facts["provider_key_header"] == 200, (
         "un en-tête de clé fourni par le client est ignoré (jamais relayé), la requête reste ordinaire"
     )
-    # le fournisseur n'a VU que les deux appels ordinaires : toute autre tentative est refusée AVANT l'émission
-    assert len(fake.generate_calls) == len(fake.count_calls) == 2
-    assert set(fake.models_seen) == {PRIMARY}
+    # le fournisseur n'a VU que les deux appels ordinaires : toute autre tentative est refusée AVANT l'émission, et le 26B sans antécédent AVANT tout appel
+    # (A27 constaté en rejeu local : le refus du repli intervient APRÈS un countTokens du 26B envoyé au fournisseur : défaut renvoyé à A, la règle de séquence
+    # est locale et doit précéder tout appel externe, sinon un code hostile fait appeler le fournisseur pour un modèle non autorisé)
+    assert len(fake.generate_calls) == 2 and set(fake.models_seen) == {PRIMARY}, (
+        "aucune génération hors des deux appels ordinaires"
+    )
+    assert [call["model"] for call in fake.count_calls if call["model"] != PRIMARY] == [], (
+        "aucun countTokens du modèle de repli sans antécédent : le refus est local, avant tout appel au fournisseur"
+    )
+    assert len(fake.count_calls) == 2
     # isolation observée DEPUIS le conteneur
     assert facts["external_connections"] == [] and facts["interfaces"] == ["lo"]
     assert facts["secret_like_env"] == ["LLM_API_KEY"] and facts["llm_api_key_is_a_session_token"] is True
@@ -406,7 +440,7 @@ def test_a_slow_container_start_does_not_extend_the_absolute_deadline(stacks, sl
     persisted = stack.service.persisted_deadline(stack.scope)
     stack.run(window=3600)
     t_return = time.time()
-    assert_worker_life_bounded(stack, persisted, t_return)
+    assert_worker_life_bounded(stack, persisted, t_return, extra_tolerance=host_watchdog_margin())
     assert_nothing_left(stack)
 
 

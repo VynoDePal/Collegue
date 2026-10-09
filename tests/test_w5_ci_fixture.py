@@ -189,6 +189,28 @@ def test_the_approved_stack_is_one_locked_source_for_the_socle_and_the_image(fx,
         assert re.search(rf"^{re.escape(name)}=={re.escape(version)}\b", lock, re.M | re.I), item
 
 
+def test_neither_the_workflow_nor_the_codeowners_claim_a_protection_the_probe_disproved(fx, plan):
+    """C47 : une PR de l'auteur-propriétaire qui modifie `.github/` ou `ci/` fusionne malgré CODEOWNERS. Aucun texte du socle ne doit l'affirmer."""
+    codeowners = plan["files"][".github/CODEOWNERS"]
+    assert "N'EST PAS une barrière" in codeowners and "observé" in codeowners and "SIGNAL" in codeowners
+    for text in (codeowners, fx.TRUSTED_WORKFLOW):
+        assert not re.search(r"aucune PR qui modifie ces chemins ne peut\s+fusionner", text)
+        assert "exige l'approbation du propriétaire" not in text
+    workflow = fx.TRUSTED_WORKFLOW
+    assert (
+        "N'est donc PAS une barrière" in workflow.replace("n'est donc PAS", "N'est donc PAS")
+        or "n'est donc PAS une barrière" in workflow.lower()
+    )
+    for guarantee in (
+        "AVANT toute\n# publication distante",
+        "AVANT toute fusion",
+        "check-run de l'application\n# Actions → job → exécution",
+        "PR obligatoire",
+    ):
+        assert guarantee in workflow, guarantee
+    assert "observé INEFFICACE" in workflow
+
+
 def test_the_codeowners_gives_the_control_paths_to_the_owner_and_nothing_else(fx, plan):
     entries = [ln.split() for ln in plan["files"][".github/CODEOWNERS"].splitlines() if ln and not ln.startswith("#")]
     assert entries == [["/.github/", "@VynoDePal"], ["/ci/", "@VynoDePal"]]
@@ -259,17 +281,24 @@ def test_write_plan_produces_every_artifact_with_consistent_sums(fx, tmp_path):
         and "app/main.py" not in diff
     )
     probes = (tmp_path / "plan" / "probe-plan.md").read_text(encoding="utf-8")
-    for scenario in (
-        "green",
-        "red-test",
-        "workflow-touch",
-        "codeowners-touch",
-        "lock-touch",
-        "unapproved-dependency",
-        "symlink",
-        "seed-base",
-    ):
+    for scenario in ("green", "red-test", "unapproved-dependency", "symlink", "seed-base", "stale-base"):
         assert f"`{scenario}`" in probes
+    for removed in ("workflow-touch", "codeowners-touch", "lock-touch"):
+        assert f"| `{removed}`" not in probes, (
+            "les têtes qui altèrent les contrôles ne sont plus rejouées (défaut établi en C47)"
+        )
+    assert "NON rejouées" in probes and "test_w5_integration_controls_guard" in probes
+    update = (tmp_path / "plan" / "update-v2.md").read_text(encoding="utf-8")
+    for needle in (
+        plan_sha := fx.build_plan()["bootstrap_sha"],
+        fx.STAGING_BRANCH,
+        fx.BOOTSTRAP_BRANCH,
+        "aucune modification de protection",
+        "BLOQUÉE",
+        "--with-ruleset",
+    ):
+        assert needle in update, needle
+    assert fx.V1_BOOTSTRAP_SHA in update and plan_sha != fx.V1_BOOTSTRAP_SHA
 
 
 # ── workflow du socle (statique) ──────────────────────────────────────────────────────────────────────────────────────────
@@ -291,7 +320,9 @@ def test_the_workflow_runs_on_pull_request_and_on_the_bootstrap_push_never_on_pu
         "pull_request_target s'exécute sur la branche par défaut (graine sans workflow)"
     )
     assert on["pull_request"]["branches"] == ["collegue-business/**"]
-    assert on["push"]["branches"] == [fx.BOOTSTRAP_BRANCH], "le commit du socle porte son propre check"
+    assert on["push"]["branches"] == [fx.BOOTSTRAP_BRANCH, fx.STAGING_BRANCH], (
+        "le commit du socle porte son propre check, y compris sur sa branche de préparation"
+    )
     assert re.search(r"^[^#\n]*pull_request_target", text, re.M) is None, (
         "jamais comme déclencheur ; seulement expliqué en commentaire"
     )
@@ -469,7 +500,7 @@ def test_integrity_flags_a_modified_removed_or_added_protected_file_only(fx, pla
 class FakeGitHub:
     """Modélise seulement ce dont le script a besoin ; chaque écriture est journalisée pour prouver ce qui n'a PAS été touché."""
 
-    def __init__(self, fx, plan, *, main_sha=None, bootstrap_check="success"):
+    def __init__(self, fx, plan, *, main_sha=None, bootstrap_check="success", v1=False):
         self.fx, self.plan = fx, plan
         self.bootstrap_check = bootstrap_check  # success | failure | None (aucun check) | pending (jamais terminé)
         self.refs = {"refs/heads/main": main_sha or fx.SEED_SHA}
@@ -491,6 +522,20 @@ class FakeGitHub:
         self.trees = {}
         self.contents_by_ref: dict = {}
         self.ruleset_created_after_check = None
+        self.branch_created_after_check = None
+        self.v1 = v1
+        self.enforce_creation_rule = True
+        if v1:  # ÉTAT RÉEL après C47 : branche V1, ruleset 24793056 (avec les défauts ajoutés par GitHub)
+            self.refs["refs/heads/" + fx.V1_BOOTSTRAP_BRANCH] = fx.V1_BOOTSTRAP_SHA
+            adopted = json.loads(json.dumps(plan["ruleset"]))
+            next(r for r in adopted["rules"] if r["type"] == "pull_request")["parameters"].update(
+                {"required_reviewers": [], "require_extra_approval_for_unattributed_changes": True}
+            )
+            self.rulesets[fx.V1_RULESET_ID] = {**adopted, "id": fx.V1_RULESET_ID}
+
+    def pushed(self, sha):
+        """Un check de socle n'existe que si le commit a été POUSSÉ sur une branche (événement ``push`` du workflow)."""
+        return any(value == sha for ref, value in self.refs.items() if ref != "refs/heads/main")
 
     def bootstrap_runs(self):
         if self.bootstrap_check is None:
@@ -508,7 +553,7 @@ class FakeGitHub:
         ]
 
     def check_runs_for(self, sha):
-        if sha == self.plan["bootstrap_sha"]:
+        if sha == self.plan["bootstrap_sha"] and self.pushed(sha):
             return self.bootstrap_runs()
         return []
 
@@ -553,6 +598,17 @@ class FakeGitHub:
         if path == f"{repo}/git/refs" and method == "POST":
             if payload["ref"] in self.refs:
                 raise self.fx.ApiError(422, "Reference already exists")
+            governed = (
+                self.enforce_creation_rule
+                and payload["ref"].startswith("refs/heads/collegue-business/")
+                and any(r.get("name") == self.fx.RULESET_NAME for r in self.rulesets.values())
+            )
+            if governed:  # règle de création (do_not_enforce_on_create = false) : un commit SANS check réussi ne peut pas devenir une base
+                runs = self.check_runs_for(payload["sha"])
+                if [r["conclusion"] for r in runs] != ["success"]:
+                    raise self.fx.ApiError(422, "Repository rule violations found: required status check")
+            if payload["ref"] == "refs/heads/" + self.fx.BOOTSTRAP_BRANCH:
+                self.branch_created_after_check = [r["conclusion"] for r in self.bootstrap_runs()] == ["success"]
             self.refs[payload["ref"]] = payload["sha"]
             return {"object": {"sha": payload["sha"]}}
         m = re.fullmatch(rf"{repo}/git/refs/(heads/.+)", path)
@@ -627,16 +683,35 @@ def test_apply_without_the_exact_order_token_writes_nothing(fx, plan, remote):
     assert remote.writes == []
 
 
-def test_apply_creates_the_branch_waits_for_its_check_then_creates_the_ruleset_and_never_touches_main_or_foreign_resources(
+def _kinds(remote):
+    return [(m, p.split("/repos/VynoDePal/collegue-e2e-fixture")[-1]) for m, p in remote.writes]
+
+
+def test_apply_publishes_on_the_staging_branch_waits_for_the_check_then_creates_the_branch_and_the_ruleset_without_any_bypass(
     fx, plan, remote
 ):
     result = apply(fx, plan, remote)
-    assert result["created"] == ["branch", "ruleset"] and result["idempotent"] is False
-    assert remote.ruleset_created_after_check is True, "le ruleset n'est créé qu'APRÈS le check réussi du socle"
-    assert remote.refs["refs/heads/collegue-business/bootstrap-w5"] == plan["bootstrap_sha"]
+    assert result["created"] == ["staging", "branch", "ruleset", "staging_removed"] and result["idempotent"] is False
+    assert _kinds(remote) == [
+        ("POST", "/git/trees"),
+        ("POST", "/git/commits"),
+        ("POST", "/git/refs"),  # branche de PRÉPARATION (hors motif du ruleset)
+        ("POST", "/git/refs"),  # branche du socle, créée APRÈS le check réussi
+        ("POST", "/rulesets"),
+        ("DELETE", f"/git/refs/heads/{fx.STAGING_BRANCH}"),
+    ]
+    assert remote.branch_created_after_check is True, (
+        "la branche du socle n'est créée qu'APRÈS le check réussi (règle de création intacte)"
+    )
+    assert remote.ruleset_created_after_check is True
+    assert remote.refs["refs/heads/" + fx.BOOTSTRAP_BRANCH] == plan["bootstrap_sha"]
+    assert "refs/heads/" + fx.STAGING_BRANCH not in remote.refs, (
+        "la branche de préparation est supprimée (ressource de ce plan)"
+    )
     assert remote.refs["refs/heads/main"] == fx.SEED_SHA
     manifest = result["manifest"]
     assert manifest["ruleset_id"] in remote.rulesets and manifest["bootstrap_sha"] == plan["bootstrap_sha"]
+    assert manifest["plan_version"] == "v2" and manifest["bootstrap_branch"] == fx.BOOTSTRAP_BRANCH
     assert all(
         "/pulls/" not in path and f"/rulesets/{fx.SEED_RULESET_ID}" not in path and "heads/main" not in path
         for _m, path in remote.writes
@@ -644,6 +719,36 @@ def test_apply_creates_the_branch_waits_for_its_check_then_creates_the_ruleset_a
     assert remote.rulesets[fx.SEED_RULESET_ID]["enforcement"] == "active"
     assert remote.pulls == {4: {"state": "closed"}, 7: {"state": "closed"}}
     assert fx.verify_remote(remote, plan)["ok"] is True
+
+
+def test_the_real_upgrade_from_v1_adopts_the_existing_ruleset_and_touches_neither_the_v1_branch_nor_any_protection(
+    fx, plan
+):
+    remote = FakeGitHub(fx, plan, v1=True)
+    before_ruleset = json.dumps(remote.rulesets[fx.V1_RULESET_ID], sort_keys=True)
+    result = apply(fx, plan, remote)
+    assert result["created"] == ["staging", "branch", "staging_removed"], (
+        "le ruleset est ADOPTÉ (identique), jamais recréé ni modifié"
+    )
+    assert not [w for w in remote.writes if "/rulesets" in w[1]], "aucune écriture sur un ruleset"
+    assert json.dumps(remote.rulesets[fx.V1_RULESET_ID], sort_keys=True) == before_ruleset
+    assert remote.refs["refs/heads/" + fx.V1_BOOTSTRAP_BRANCH] == fx.V1_BOOTSTRAP_SHA, "la V1 reste en place, intacte"
+    assert remote.refs["refs/heads/" + fx.BOOTSTRAP_BRANCH] == plan["bootstrap_sha"] != fx.V1_BOOTSTRAP_SHA
+    assert fx.verify_remote(remote, plan)["ok"] is True
+    assert result["manifest"]["ruleset_id"] == fx.V1_RULESET_ID
+
+
+def test_a_commit_without_a_passing_check_cannot_become_the_socle_branch_under_the_creation_rule(fx, plan):
+    remote = FakeGitHub(fx, plan, v1=True)
+    with pytest.raises(fx.ApiError) as caught:
+        remote(
+            "POST",
+            f"/repos/{fx.REPOSITORY}/git/refs",
+            {"ref": "refs/heads/" + fx.BOOTSTRAP_BRANCH, "sha": plan["bootstrap_sha"]},
+        )
+    assert caught.value.status == 422, (
+        "sans staging, aucun check : la règle de création refuse (c'est pourquoi la branche de préparation existe)"
+    )
 
 
 @pytest.mark.parametrize(
@@ -654,16 +759,17 @@ def test_apply_creates_the_branch_waits_for_its_check_then_creates_the_ruleset_a
         ("failure", "check du socle est rouge"),
     ],
 )
-def test_apply_never_creates_the_ruleset_without_a_green_bootstrap_check(fx, plan, state, message):
+def test_apply_never_creates_the_socle_branch_or_the_ruleset_without_a_green_check_and_keeps_its_own_staging_for_diagnosis(
+    fx, plan, state, message
+):
     remote = FakeGitHub(fx, plan, bootstrap_check=state)
     with pytest.raises(fx.FixtureError, match=message):
         apply(fx, plan, remote, check_timeout=60.0)
+    assert "refs/heads/" + fx.BOOTSTRAP_BRANCH not in remote.refs, "aucune branche du socle"
     assert not any(path.endswith("/rulesets") for _m, path in remote.writes), "aucun ruleset"
-    assert remote.refs["refs/heads/collegue-business/bootstrap-w5"] == plan["bootstrap_sha"], (
-        "état conservé pour examen"
-    )
+    assert remote.refs["refs/heads/" + fx.STAGING_BRANCH] == plan["bootstrap_sha"], "état conservé pour examen"
     assert fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"])["removed"] == [
-        "branche collegue-business/bootstrap-w5"
+        f"branche {fx.STAGING_BRANCH}"
     ]
 
 
@@ -672,6 +778,19 @@ def test_apply_is_idempotent_and_a_second_run_writes_nothing(fx, plan, remote):
     writes = len(remote.writes)
     again = apply(fx, plan, remote)
     assert again["created"] == [] and again["idempotent"] is True and len(remote.writes) == writes
+
+
+def test_apply_resumes_after_an_interruption_between_staging_and_the_socle_branch_without_duplicating(fx, plan, remote):
+    with pytest.raises(fx.FixtureError):
+        remote.bootstrap_check = None
+        apply(fx, plan, remote, check_timeout=30.0)
+    remote.bootstrap_check = "success"
+    before = len(remote.writes)
+    result = apply(fx, plan, remote)
+    assert result["created"] == ["branch", "ruleset", "staging_removed"], (
+        "la préparation déjà publiée est réutilisée, pas recréée"
+    )
+    assert [w for w in remote.writes[before:] if w[1].endswith("/git/trees") or w[1].endswith("/git/commits")] == []
 
 
 def test_apply_refuses_every_collision_and_unowned_resource_without_any_write(fx, plan, remote):
@@ -688,10 +807,11 @@ def test_apply_refuses_every_collision_and_unowned_resource_without_any_write(fx
     with pytest.raises(fx.FixtureError, match="collision de ruleset"):
         apply(fx, plan, remote)
     del remote.rulesets[555]
-    remote.refs["refs/heads/collegue-business/bootstrap-w5"] = "f" * 40
-    with pytest.raises(fx.FixtureError, match="ressource non possédée"):
-        apply(fx, plan, remote)
-    del remote.refs["refs/heads/collegue-business/bootstrap-w5"]
+    for branch in (fx.BOOTSTRAP_BRANCH, fx.STAGING_BRANCH):
+        remote.refs["refs/heads/" + branch] = "f" * 40
+        with pytest.raises(fx.FixtureError, match="ressource non possédée"):
+            apply(fx, plan, remote)
+        del remote.refs["refs/heads/" + branch]
     remote.rulesets[600] = {
         **json.loads(json.dumps(plan["ruleset"])),
         "id": 600,
@@ -727,14 +847,15 @@ def test_verify_detects_a_tampered_branch_file_ruleset_or_missing_bootstrap_chec
     weakened = FakeGitHub(fx, plan)
     apply(fx, plan, weakened)
     rid = next(i for i, r in weakened.rulesets.items() if r["name"] == fx.RULESET_NAME)
-    pr_rule = next(r for r in weakened.rulesets[rid]["rules"] if r["type"] == "pull_request")
-    pr_rule["parameters"]["require_code_owner_review"] = False
+    for rule in weakened.rulesets[rid]["rules"]:
+        if rule["type"] == "required_status_checks":
+            rule["parameters"]["strict_required_status_checks_policy"] = False
     assert any("ruleset différent" in p for p in fx.verify_remote(weakened, plan)["problems"]), (
-        "code owner retiré = écart"
+        "règle « à jour » retirée = écart"
     )
     moved = FakeGitHub(fx, plan)
     apply(fx, plan, moved)
-    moved.refs["refs/heads/collegue-business/bootstrap-w5"] = "d" * 40
+    moved.refs["refs/heads/" + fx.BOOTSTRAP_BRANCH] = "d" * 40
     assert any("au lieu de" in p for p in fx.verify_remote(moved, plan)["problems"])
     nocheck = FakeGitHub(fx, plan)
     apply(fx, plan, nocheck)
@@ -743,31 +864,45 @@ def test_verify_detects_a_tampered_branch_file_ruleset_or_missing_bootstrap_chec
     assert not fx.verify_remote(FakeGitHub(fx, plan), plan)["ok"], (
         "rien d'appliqué : vérification rouge, pas verte par défaut"
     )
+    v1_only = FakeGitHub(fx, plan, v1=True)
+    assert "branche du socle absente" in fx.verify_remote(v1_only, plan)["problems"], "la V1 seule n'est pas la V2"
 
 
-def test_cleanup_removes_only_this_campaigns_bootstrap_resources(fx, plan, remote):
+def test_cleanup_removes_only_this_plans_branches_and_never_the_shared_ruleset_unless_asked(fx, plan):
+    remote = FakeGitHub(fx, plan, v1=True)
     apply(fx, plan, remote)
+    remote.refs["refs/heads/" + fx.STAGING_BRANCH] = plan["bootstrap_sha"]  # reliquat éventuel
     remote.refs["refs/heads/collegue-business/run-etranger"] = "e" * 40
     remote.writes.clear()
     with pytest.raises(fx.FixtureError, match="jeton d'ordre"):
         fx.cleanup_bootstrap(remote, plan, order_token="nope")
     assert remote.writes == []
     removed = fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"])["removed"]
-    assert len(removed) == 2
-    assert "refs/heads/collegue-business/bootstrap-w5" not in remote.refs
+    assert removed == [f"branche {fx.BOOTSTRAP_BRANCH}", f"branche {fx.STAGING_BRANCH}"], (
+        "ni le ruleset (partagé avec la V1), ni la V1"
+    )
+    assert remote.refs["refs/heads/" + fx.V1_BOOTSTRAP_BRANCH] == fx.V1_BOOTSTRAP_SHA
+    assert fx.V1_RULESET_ID in remote.rulesets and fx.SEED_RULESET_ID in remote.rulesets
     assert remote.refs["refs/heads/collegue-business/run-etranger"] == "e" * 40, "ressource non possédée conservée"
-    assert remote.refs["refs/heads/main"] == fx.SEED_SHA and fx.SEED_RULESET_ID in remote.rulesets
+    assert remote.refs["refs/heads/main"] == fx.SEED_SHA
     assert all(f"rulesets/{fx.SEED_RULESET_ID}" not in path for _m, path in remote.writes)
     assert fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"])["removed"] == []
+    only_ruleset = fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"], with_ruleset=True)["removed"]
+    assert only_ruleset == [f"ruleset {fx.V1_RULESET_ID}"] and fx.SEED_RULESET_ID in remote.rulesets
 
 
 def test_cleanup_refuses_a_foreign_branch_or_ruleset_under_our_names(fx, plan, remote):
     apply(fx, plan, remote)
-    remote.refs["refs/heads/collegue-business/bootstrap-w5"] = "9" * 40
+    remote.refs["refs/heads/" + fx.BOOTSTRAP_BRANCH] = "9" * 40
     remote.writes.clear()
     with pytest.raises(fx.FixtureError, match="non possédée"):
         fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"])
     assert not any(m == "DELETE" and "git/refs" in p for m, p in remote.writes)
+    remote.refs["refs/heads/" + fx.BOOTSTRAP_BRANCH] = plan["bootstrap_sha"]
+    rid = next(i for i, r in remote.rulesets.items() if r["name"] == fx.RULESET_NAME)
+    remote.rulesets[rid]["bypass_actors"] = [{"actor_id": 1, "actor_type": "RepositoryRole"}]
+    with pytest.raises(fx.FixtureError, match="contenu inattendu"):
+        fx.cleanup_bootstrap(remote, plan, order_token=plan["order_token"], with_ruleset=True)
 
 
 # ── probe : contre-épreuves (simulées) ────────────────────────────────────────────────────────────────────────────────────
@@ -776,9 +911,6 @@ def test_cleanup_refuses_a_foreign_branch_or_ruleset_under_our_names(fx, plan, r
 GOOD = {
     "green": ("success", "accepted"),
     "red-test": ("failure", "refused"),
-    "workflow-touch": ("success", "refused"),
-    "codeowners-touch": ("success", "refused"),
-    "lock-touch": ("success", "refused"),
     "unapproved-dependency": ("failure", "refused"),
     "symlink": ("failure", "refused"),
     "seed-base": (None, "refused"),
@@ -798,6 +930,9 @@ class ProbeServer(FakeGitHub):
         self.spoof_mode = "refused"  # refused | foreign (acceptée, autre application) | counted (acceptée, application Actions : défaut)
         self.spoofed = {}
         self.refuse_seed_base = True
+        self.stale_ignores_strict = False  # simule un ruleset SANS la règle « à jour »
+        self.stale_conflict_gets_a_check = False  # simule un workflow qui se déclencherait malgré le conflit
+        self.base_advanced = set()  # bases dans lesquelles une PR a déjà été fusionnée (règle « à jour »)
         self.provenance_ok = True
         self.tree_override = None
         self.symlink_commits = []
@@ -807,6 +942,8 @@ class ProbeServer(FakeGitHub):
         self.writes.clear()
 
     def scenario_of(self, branch):
+        if "-stale-" in branch:
+            return "stale:" + branch.rsplit("-stale-", 1)[-1]
         return self.fx.probe_scenarios(self.plan)[int(branch.rsplit("-", 1)[-1])]["id"]
 
     def head_branch(self, sha):
@@ -872,9 +1009,20 @@ class ProbeServer(FakeGitHub):
             self.writes.append((method, path))
             pr = self.prs[int(m.group(1))]
             self.merges.append((pr["head"], payload["sha"]))
-            behaviour = self.outcomes[self.scenario_of(pr["head"])][1]
+            scenario = self.scenario_of(pr["head"])
+            if scenario.startswith("stale:"):
+                variant = scenario.split(":")[1]
+                if variant == "conflict":
+                    raise self.fx.ApiError(405, "Pull Request is not mergeable")
+                if variant == "behind" and pr["base"] in self.base_advanced and not self.stale_ignores_strict:
+                    raise self.fx.ApiError(
+                        405, "Repository rule violations found: Head branch is not up to date with the base branch"
+                    )
+                self.base_advanced.add(pr["base"])
+                return {"merged": True, "message": "Pull Request successfully merged"}
+            behaviour = self.outcomes[scenario][1]
             if behaviour == "refused":
-                raise self.fx.ApiError(405, "Repository rule violations found: Waiting on code owner review")
+                raise self.fx.ApiError(405, "Repository rule violations found: Required status check is failing")
             return {"merged": True, "message": "Pull Request successfully merged"}
         if method == "POST" and path == f"{repo}/check-runs":
             self.writes.append((method, path))
@@ -911,11 +1059,20 @@ class ProbeServer(FakeGitHub):
             head = self.head_for_job(int(m.group(1)))
             if head is None or not self.provenance_ok:
                 raise self.fx.ApiError(404, "Not Found")
-            return {"head_sha": head, "run_id": int(m.group(1)) + 1}
+            return {"head_sha": head, "run_id": int(m.group(1)) + 1, "name": "Fixture tests", "conclusion": "success"}
         m = re.fullmatch(rf"{repo}/actions/runs/(\d+)", path)
         if m:
             head = self.head_for_job(int(m.group(1)) - 1)
-            return {"path": self.fx.WORKFLOW_PATH, "head_sha": head, "event": "pull_request"}
+            repo_info = {"full_name": self.fx.REPOSITORY}
+            return {
+                "id": int(m.group(1)),
+                "path": self.fx.WORKFLOW_PATH,
+                "head_sha": head,
+                "event": "pull_request",
+                "conclusion": "success",
+                "repository": repo_info,
+                "head_repository": repo_info,
+            }
         m = re.fullmatch(rf"{repo}/git/trees/([0-9a-f]{{40}})\?recursive=1", path)
         if m:
             if self.tree_override is not None:
@@ -933,7 +1090,12 @@ class ProbeServer(FakeGitHub):
         if m and m.group(1) in self.heads.values():
             sha = m.group(1)
             scenario = self.scenario_of(self.head_branch(sha))
-            conclusion = self.outcomes[scenario][0]
+            if scenario.startswith("stale:"):
+                conclusion = (
+                    None if (scenario.endswith("conflict") and not self.stale_conflict_gets_a_check) else "success"
+                )
+            else:
+                conclusion = self.outcomes[scenario][0]
             runs = list(self.spoofed.get(sha, []))
             if conclusion is not None:
                 runs.append(
@@ -953,7 +1115,7 @@ class ProbeServer(FakeGitHub):
             return {"state": pr["state"]}
         if method == "GET" and "/contents/" in path and "?ref=collegue-probe/" in path:
             target = path.split("/contents/", 1)[1].split("?ref=")[0]
-            if target == "tests/test_probe.py":
+            if target not in self.plan["files"]:
                 raise self.fx.ApiError(404, "Not Found")
             return {"content": base64.b64encode(self.plan["files"][target].encode()).decode(), "sha": "5" * 40}
         return super().__call__(method, path, payload)
@@ -982,28 +1144,34 @@ def probe(fx, plan, server, **kw):
 
 
 def test_the_probe_passes_when_each_counter_proof_behaves_and_cleans_up_everything(fx, plan):
-    server = ProbeServer(fx, plan, GOOD)
+    server = ProbeServer(fx, plan, GOOD, v1=True)
     result = probe(fx, plan, server)
     assert result["ok"] is True, result
-    assert [r["scenario"] for r in result["results"]] == list(GOOD)
+    assert [r["scenario"] for r in result["results"]] == [*GOOD, "stale-base"]
     assert not [r for r in server.refs if "probe" in r], "toutes les branches de sonde sont supprimées"
     assert all(pr["state"] == "closed" for pr in server.prs.values())
-    assert server.refs["refs/heads/collegue-business/bootstrap-w5"] == plan["bootstrap_sha"]
+    assert server.refs["refs/heads/" + fx.BOOTSTRAP_BRANCH] == plan["bootstrap_sha"]
+    assert server.refs["refs/heads/" + fx.V1_BOOTSTRAP_BRANCH] == fx.V1_BOOTSTRAP_SHA, "la V1 n'est jamais touchée"
     by = {r["scenario"]: r for r in result["results"]}
     assert by["green"]["merge"]["accepted"] is True and by["green"]["provenance"]["ok"] is True
     assert by["red-test"]["spoof"]["accepted_by_api"] is False and by["red-test"]["spoof"]["counted"] is False
-    for touched in ("workflow-touch", "codeowners-touch", "lock-touch"):
-        assert by[touched]["check_observed"] == "success" and by[touched]["merge"]["accepted"] is False, (
-            "check VERT et fusion refusée : seul le propriétaire explique le refus"
-        )
     assert by["seed-base"]["creation"] == "refused" and by["seed-base"]["ok"] is True
     assert server.symlink_commits == ["docs/lien-sonde"], (
         "le lien symbolique est poussé par l'API Git Data (mode 120000)"
     )
+    # aucune tête qui ALTÈRE `.github/` ou `ci/` n'est publiée : le défaut est établi (C47), le produit seul le couvre
+    assert all(not path.startswith((".github/", "ci/")) for _m, path in server.writes if "/contents/" in path)
+    assert not {"workflow-touch", "codeowners-touch", "lock-touch"} & set(by)
+    stale = by["stale-base"]
+    assert stale["first_merge"]["accepted"] is True and stale["behind_merge"]["accepted"] is False
+    assert stale["conflict_check"] == "missing" and stale["conflict_merge"]["accepted"] is False
+    assert "not up to date" in stale["behind_merge"]["message"]
     # chaque fusion a été tentée sur la TÊTE EXACTE observée
     assert all(
         sha == by[name]["head_sha"]
-        for (head, sha), name in zip(server.merges, [s for s in GOOD if s != "seed-base"], strict=True)
+        for (head, sha), name in zip(
+            [m for m in server.merges if "-stale-" not in m[0]], [s for s in GOOD if s != "seed-base"], strict=True
+        )
     )
 
 
@@ -1012,10 +1180,6 @@ def test_the_probe_passes_when_each_counter_proof_behaves_and_cleans_up_everythi
     [
         ("red-test", ("success", "refused")),  # un test rouge qui donnerait un check vert
         ("red-test", ("failure", "accepted")),  # check rouge mais fusion acceptée
-        ("workflow-touch", ("success", "accepted")),  # la protection du propriétaire est INEFFICACE
-        ("codeowners-touch", ("success", "accepted")),
-        ("lock-touch", ("success", "accepted")),
-        ("workflow-touch", ("failure", "refused")),  # refus mais pas isolé : le check n'était pas vert
         ("unapproved-dependency", ("success", "refused")),  # une dépendance hors pile ne rend pas le check rouge
         ("symlink", ("success", "refused")),
         ("green", ("success", "refused")),  # la voie nominale ne fusionne pas
@@ -1030,9 +1194,23 @@ def test_the_probe_fails_when_any_protection_does_not_hold(fx, plan, scenario, o
     assert not [r for r in server.refs if "probe" in r], "même en échec, rien ne reste"
 
 
+@pytest.mark.parametrize("fault", ["ruleset_without_strict_policy", "conflict_gets_a_check"])
+def test_the_probe_fails_when_the_server_side_up_to_date_or_missing_check_protection_does_not_hold(fx, plan, fault):
+    server = ProbeServer(fx, plan, GOOD)
+    if fault == "ruleset_without_strict_policy":
+        server.stale_ignores_strict = True  # la PR périmée fusionnerait : la règle « à jour » n'existe pas
+    else:
+        server.stale_conflict_gets_a_check = True  # un check apparaîtrait malgré le conflit
+    result = probe(fx, plan, server, observe_missing_seconds=1.0, timeout=3.0)
+    stale = {r["scenario"]: r for r in result["results"]}["stale-base"]
+    assert result["ok"] is False and stale["ok"] is False
+    assert not [r for r in server.refs if "probe" in r]
+
+
 def test_the_probe_fails_if_a_base_can_be_created_from_the_seed_and_a_check_appears(fx, plan):
     server = ProbeServer(fx, plan, {**GOOD, "seed-base": ("success", "refused")})
     server.refuse_seed_base = False
+    server.enforce_creation_rule = False
     result = probe(fx, plan, server, observe_missing_seconds=1.0)
     seed = {r["scenario"]: r for r in result["results"]}["seed-base"]
     assert seed["creation"] == "accepted" and seed["ok"] is False and result["ok"] is False
@@ -1041,6 +1219,7 @@ def test_the_probe_fails_if_a_base_can_be_created_from_the_seed_and_a_check_appe
 def test_the_probe_accepts_an_unrefused_seed_base_only_if_no_check_exists_and_the_merge_is_refused(fx, plan):
     server = ProbeServer(fx, plan, GOOD)
     server.refuse_seed_base = False
+    server.enforce_creation_rule = False
     result = probe(fx, plan, server, observe_missing_seconds=1.0)
     seed = {r["scenario"]: r for r in result["results"]}["seed-base"]
     assert seed["creation"] == "accepted" and "note" in seed and seed["ok"] is True
@@ -1172,29 +1351,19 @@ def test_the_workflow_satisfies_the_job_detection_rule_b_applies_to_approved_wor
     assert fx.REQUIRED_CHECK in names
 
 
-def test_the_probe_requires_the_merge_guard_to_refuse_every_head_that_touches_a_protected_path(fx, plan):
-    """Un check vert falsifié n'est pas une réussite : le garde de fusion (arbre Git réel de la tête) doit REFUSER la tête altérée."""
+def test_the_preparation_guard_refuses_only_symlink_and_seed_heads_and_a_blind_guard_fails_the_probe(fx, plan):
+    """Garde de PRÉPARATION (``protected_tree_violations``) : il ne démontre pas que le garde de PRODUCTION a été traversé (voir l'intégration)."""
     server = ProbeServer(fx, plan, GOOD)
     result = probe(fx, plan, server)
     by = {r["scenario"]: r for r in result["results"]}
     assert result["ok"] is True
-    for name in ("workflow-touch", "codeowners-touch", "lock-touch", "symlink"):
-        assert by[name]["guard"]["refuses"] is True and by[name]["guard"]["violations"], name
+    assert by["symlink"]["guard"]["refuses"] is True and by["symlink"]["guard"]["violations"]
     assert by["green"]["guard"] == {"refuses": False, "violations": []}
-    assert by["unapproved-dependency"]["guard"]["refuses"] is False, (
-        "requirements.txt n'est pas un chemin protégé : c'est le check qui le refuse"
-    )
-    # un garde aveugle (arbre toujours identique au socle) fait ÉCHOUER la contre-épreuve : le garde n'a pas refusé la tête altérée
+    assert by["unapproved-dependency"]["guard"]["refuses"] is False and by["red-test"]["guard"]["refuses"] is False
     blind = ProbeServer(fx, plan, GOOD)
     blind.tree_override = server_tree(fx, plan)
     failed = probe(fx, plan, blind)
-    assert failed["ok"] is False
-    assert {r["scenario"] for r in failed["results"] if not r["ok"]} >= {
-        "workflow-touch",
-        "codeowners-touch",
-        "lock-touch",
-        "symlink",
-    }
+    assert failed["ok"] is False and not {r["scenario"]: r["ok"] for r in failed["results"]}["symlink"]
 
 
 # ── journal append-only des identités distantes ───────────────────────────────────────────────────────────────────────────────
@@ -1279,7 +1448,13 @@ def test_the_probe_records_every_branch_pull_request_url_check_and_workflow_run_
     assert result["ok"] is True
     events = _events(path)
     prs = [e for e in events if e["event"] == "pull_request"]
-    assert [e["scenario"] for e in prs] == [name for name in GOOD if name != "seed-base"]
+    assert [e["scenario"] for e in prs] == [
+        *[name for name in GOOD if name != "seed-base"],
+        "stale-base",
+        "stale-base",
+        "stale-base",
+    ]
+    assert [e.get("variant") for e in prs[-3:]] == ["first", "behind", "conflict"]
     assert all(
         e["url"].startswith(f"https://github.com/{fx.REPOSITORY}/pull/") and isinstance(e["number"], int) for e in prs
     )
@@ -1289,9 +1464,9 @@ def test_the_probe_records_every_branch_pull_request_url_check_and_workflow_run_
     )
     assert observed["workflow_runs"][0]["html_url"].endswith("/actions/runs/7000")
     created = [e["path"] for e in events if e["event"] == "response" and e["path"].endswith("/git/refs")]
-    assert len(created) >= 14, "chaque branche de base et de tête créée est journalisée à sa création"
+    assert len(created) == 12, "chaque branche de base et de tête créée est journalisée à sa création"
     results = [e for e in events if e["event"] == "scenario_result"]
-    assert [e["scenario"] for e in results] == list(GOOD) and all(e["outcome"]["ok"] for e in results)
+    assert [e["scenario"] for e in results] == [*GOOD, "stale-base"] and all(e["outcome"]["ok"] for e in results)
     deleted = [e for e in events if e["event"] == "response" and e["method"] == "DELETE"]
     assert deleted, "le nettoyage des ressources jetables est journalisé aussi"
 
@@ -1320,3 +1495,85 @@ def test_server_added_default_parameters_are_ignored_only_when_they_have_exactly
     assert fx._normalize_ruleset(remote) != fx._normalize_ruleset(plan["ruleset"]), (
         "tout autre paramètre ajouté reste un écart"
     )
+
+
+# ── chaîne d'authenticité : check-run → job Actions → exécution (dépôt, chemin, tête, événement) ─────────────────────────────────
+
+
+def _chain(fx, plan, **overrides):
+    head = "c" * 40
+    repo = {"full_name": fx.REPOSITORY}
+    data = {
+        "check": {
+            "id": 321,
+            "name": "Fixture tests",
+            "app": {"id": 15368},
+            "head_sha": head,
+            "status": "completed",
+            "conclusion": "success",
+        },
+        "job": {"head_sha": head, "run_id": 654, "name": "Fixture tests", "conclusion": "success"},
+        "run": {
+            "id": 654,
+            "path": fx.WORKFLOW_PATH,
+            "head_sha": head,
+            "event": "pull_request",
+            "conclusion": "success",
+            "repository": repo,
+            "head_repository": repo,
+        },
+        "tree": server_tree(fx, plan),
+    }
+    for key, patch in overrides.items():
+        if patch is None:
+            data[key] = None
+        else:
+            data[key] = {**data[key], **patch} if isinstance(data[key], dict) else patch
+    base = f"/repos/{fx.REPOSITORY}"
+
+    def api(method, path, payload=None):
+        if path == f"{base}/commits/{head}/check-runs":
+            return {"check_runs": [data["check"]]}
+        if path == f"{base}/actions/jobs/321":
+            if data["job"] is None:
+                raise fx.ApiError(404, "Not Found")
+            return data["job"]
+        if path == f"{base}/actions/runs/{(data['job'] or {}).get('run_id')}":
+            if data["run"] is None:
+                raise fx.ApiError(404, "Not Found")
+            return data["run"]
+        if path == f"{base}/git/trees/{head}?recursive=1":
+            return {"truncated": False, "tree": data["tree"]}
+        raise AssertionError(f"appel non modélisé : {path}")
+
+    return api, head
+
+
+def test_the_provenance_chain_accepts_only_a_complete_consistent_check_job_run_chain(fx, plan):
+    api, head = _chain(fx, plan)
+    assert fx.check_provenance(api, head, plan) == (True, "check issu du workflow approuvé, chemins protégés intacts")
+
+
+@pytest.mark.parametrize(
+    ("override", "needle"),
+    [
+        ({"job": None}, "pas un job"),  # faux check publié par l'API des checks
+        ({"job": {"head_sha": "d" * 40}}, "pas un job"),  # job d'une autre tête
+        ({"job": {"name": "Autre job"}}, "job inattendu"),
+        ({"job": {"conclusion": "failure"}}, "job inattendu"),
+        ({"run": None}, "introuvable"),
+        ({"run": {"id": 999}}, "ne correspond pas"),  # l'exécution n'est pas celle du job
+        ({"run": {"path": ".github/workflows/autre.yml"}}, "pas celle du workflow approuvé"),  # workflow remplacé
+        ({"run": {"head_sha": "d" * 40}}, "pas celle du workflow approuvé"),
+        ({"run": {"repository": {"full_name": "autre/depot"}}}, "autre dépôt"),
+        ({"run": {"head_repository": {"full_name": "autre/depot"}}}, "autre dépôt"),
+        ({"run": {"event": "workflow_dispatch"}}, "déclencheur inattendu"),
+        ({"run": {"conclusion": "cancelled"}}, "non réussie"),
+        ({"check": {"app": {"id": 99}}}, "non réussi"),  # autre application : aucun check requis
+        ({"check": {"conclusion": "failure"}}, "non réussi"),
+    ],
+)
+def test_the_provenance_chain_refuses_every_broken_or_substituted_link(fx, plan, override, needle):
+    api, head = _chain(fx, plan, **override)
+    ok, why = fx.check_provenance(api, head, plan)
+    assert ok is False and needle in why, why

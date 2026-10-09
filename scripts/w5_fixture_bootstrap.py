@@ -2,22 +2,30 @@
 """Socle, protection et nettoyage du dépôt fixture W5 (propriété C) — plan hors ligne, application sur ordre seulement.
 
 Dépôt : ``VynoDePal/collegue-e2e-fixture`` (id 1298596453). ``main`` est la GRAINE immuable (``8e3691d8…``, ruleset 18840666
-« Immutable nightly seed ») : ce script n'y touche jamais. Le socle W5 est un commit DÉTERMINISTE au-dessus de la graine, publié sur
-la branche ``collegue-business/bootstrap-w5`` ; il ajoute le workflow « Fixture tests » (``pull_request`` + ``push`` sur sa branche), le
-CODEOWNERS des chemins du contrôle, le verrou haché de la pile approuvée, les deux runbooks FACTICES de B, et ne modifie de la graine que
-``requirements.txt`` (versions exactes de la pile approuvée, décision du manager), **sans implémenter les trois tâches métier**. Les bases éphémères des campagnes se créent depuis ce commit, sous ``collegue-business/<run>``.
+« Immutable nightly seed ») : ce script n'y touche jamais. Le socle W5 est un commit DÉTERMINISTE au-dessus de la graine ; il ajoute le
+workflow « Fixture tests » (``pull_request`` + ``push`` sur ses branches), un CODEOWNERS (signal de revue, PAS une barrière), le verrou haché de la
+pile approuvée, les deux runbooks FACTICES de B, et ne modifie de la graine que ``requirements.txt`` (versions exactes de la pile approuvée,
+décision du manager), **sans implémenter les trois tâches métier**. Les bases des campagnes se créent depuis ce commit, sous ``collegue-business/<run>``.
 
-Sous-commandes (une seule lance des écritures distantes : ``apply``, ``probe`` et ``cleanup``, sur jeton d'ordre) :
+**Version du plan : V2** (branche ``collegue-business/bootstrap-w5-v2``). La V1 (commit ``10750c7bd823…``, branche ``collegue-business/bootstrap-w5``)
+est APPLIQUÉE sur la fixture ; elle affirmait à tort (commentaires du workflow et du CODEOWNERS) que le CODEOWNERS protégeait ``.github/`` et ``ci/`` : la
+sonde de C47 a montré qu'une PR de l'auteur-propriétaire qui les modifie, check vert, FUSIONNE. La V2 corrige ces affirmations (nouveau contenu, nouveau SHA)
+et ne s'applique qu'APRÈS un nouvel examen du manager ; la V1 et le ruleset 24793056 restent en place, intacts.
+
+Sous-commandes (``apply``, ``probe`` et ``cleanup`` écrivent à distance, sur jeton d'ordre) :
 
 * ``plan DIR`` — HORS LIGNE : calcule le commit du socle (SHA identique à ``git``), les payloads REST exacts, le ruleset, le manifeste
-  ``collegue-fixture-bootstrap/1`` (squelette), les diffs et un journal ordonné des appels ; écrit ``DIR/*`` et son empreinte ;
-* ``inspect`` — LECTURE SEULE de l'état distant (identité, graine, rulesets, branche du socle, PR étrangères) ;
+  ``collegue-fixture-bootstrap/1`` (squelette), les diffs, les commandes de mise à jour V1 → V2 et un journal ordonné des appels ;
+* ``inspect`` — LECTURE SEULE de l'état distant (identité, graine, rulesets, branches du socle, PR étrangères) ;
 * ``verify`` — LECTURE SEULE : l'état distant est exactement celui du plan (arbre du socle, workflow, ruleset, ``main`` intact) ;
-* ``apply --order-token T`` — crée la branche du socle, ATTEND son check réussi (workflow ``push``), puis crée le ruleset ; idempotent,
-  refuse toute collision ou ressource non possédée ;
-* ``probe --order-token T`` — contre-épreuves (test rouge, protections des chemins du contrôle, dépendance hors pile, lien symbolique,
-  base sans check, faux check) sur PR jetables avec fusions réelles dans des bases jetables, toutes nettoyées ;
-* ``cleanup --order-token T`` — supprime UNIQUEMENT le ruleset et la branche du socle de cette campagne (identités exactes vérifiées).
+* ``apply --order-token T`` — publie le commit sur une branche de PRÉPARATION hors du motif du ruleset (``collegue-bootstrap-staging/w5-v2``), ATTEND son
+  check réussi (workflow ``push``), crée ALORS la branche du socle (la règle de création du ruleset l'exige : sans bypass ni faux check), puis crée le ruleset
+  s'il est absent (adopte l'existant s'il est identique) ; idempotent, refuse toute collision ou ressource non possédée ;
+* ``probe --order-token T`` — contre-épreuves SERVEUR (test rouge, dépendance hors pile, lien symbolique, base sans check, base périmée, conflit sans check, faux
+  check) sur PR jetables, toutes nettoyées. Les têtes qui ALTÈRENT les contrôles ne sont plus rejouées : le défaut est établi (C47) et seul le garde de fusion du
+  PRODUIT (B) peut le couvrir ;
+* ``cleanup --order-token T`` — supprime UNIQUEMENT la branche du socle de ce plan et sa branche de préparation (identités exactes vérifiées) ; le ruleset n'est
+  supprimé qu'avec ``--with-ruleset`` (il est partagé avec la V1).
 
 Aucune écriture n'est faite sans le jeton d'ordre ``APPLIQUER-W5-FIXTURE-<12 premiers caractères du SHA du socle>``. Le jeton GitHub vient de
 l'environnement (``GITHUB_TOKEN`` ou ``GH_TOKEN``), jamais d'un fichier ni de l'argv.
@@ -50,7 +58,12 @@ SEED_TREE_SHA = "c8bffa32325a836d68e14bff24f40c4d7b29266c"
 SEED_RULESET_ID = 18840666  # « Immutable nightly seed » : jamais modifié
 FOREIGN_PULLS = (4, 7)  # PR étrangères à la campagne : jamais touchées
 
-BOOTSTRAP_BRANCH = "collegue-business/bootstrap-w5"
+PLAN_VERSION = "v2"
+BOOTSTRAP_BRANCH = "collegue-business/bootstrap-w5-v2"
+STAGING_BRANCH = "collegue-bootstrap-staging/w5-v2"  # HORS du motif du ruleset : le check du socle s'y produit avant la création de la branche du socle
+V1_BOOTSTRAP_BRANCH = "collegue-business/bootstrap-w5"  # appliquée en C47 ; jamais touchée par la V2
+V1_BOOTSTRAP_SHA = "10750c7bd823298651246573652154ed23044e17"
+V1_RULESET_ID = 24793056  # ruleset des bases éphémères, partagé V1/V2 (même contenu)
 BRANCH_PATTERN = "refs/heads/collegue-business/*"
 RULESET_NAME = "collegue-business ephemeral bases (W5)"
 REQUIRED_CHECK = "Fixture tests"
@@ -59,9 +72,11 @@ WORKFLOW_PATH = ".github/workflows/fixture-tests.yml"
 PROTECTED_PREFIXES = (
     ".github/",
     "ci/",
-)  # chemins qui définissent le contrôle : modifiés seulement avec l'approbation du propriétaire
+)  # chemins qui définissent le contrôle : toute tête qui les altère doit être refusée par le garde de fusion du PRODUIT
 CODEOWNERS_PATH = ".github/CODEOWNERS"
-CODE_OWNER = "@VynoDePal"  # propriétaire du dépôt fixture ; l'auteur d'une PR ne peut pas approuver la sienne
+CODE_OWNER = (
+    "@VynoDePal"  # propriétaire du dépôt fixture : SIGNAL de revue (information), jamais une barrière (observé C47)
+)
 APPROVED_LOCK_PATH = "ci/requirements-approved.lock"
 REQUIREMENTS_PATH = "requirements.txt"
 PY_IMAGE = "python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f"  # index de l'étiquette le 2026-10-09
@@ -69,9 +84,7 @@ PY_IMAGE = "python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857
 AUTHOR = {"name": "Collegue W5 bootstrap", "email": "w5-bootstrap@users.noreply.github.com"}
 COMMIT_EPOCH = 1791547200  # 2026-10-09T12:00:00Z, fixé : le SHA du socle est déterministe
 COMMIT_DATE = "2026-10-09T12:00:00Z"
-COMMIT_MESSAGE = (
-    "Socle W5 : workflow de confiance « Fixture tests » et documents de scénario (aucune implémentation métier)\n"
-)
+COMMIT_MESSAGE = "Socle W5 v2 : workflow « Fixture tests », pile approuvée et documents de scénario (aucune implémentation métier ; CODEOWNERS = signal, pas barrière)\n"
 
 # Les huit fichiers de la graine (octet pour octet, lus dans la fixture de test) : l'arbre calculé doit être SEED_TREE_SHA.
 SEED_PATHS = (
@@ -93,6 +106,7 @@ PLAN_FILES = (
     "tree.json",
     "api-calls.md",
     "probe-plan.md",
+    "update-v2.md",
     "bootstrap.diff",
     "workflow-fixture-tests.yml",
     "SHA256SUMS",
@@ -110,14 +124,16 @@ TRUSTED_WORKFLOW = r"""# Workflow du socle de la fixture « Fixture tests » (W5
 # DÉCLENCHEMENT. La graine ``main`` (branche par défaut) est immuable et n'a AUCUN workflow : ``pull_request_target`` (qui s'exécute
 # dans le contexte de la branche par défaut) ne peut donc pas servir. ``pull_request`` s'exécute dans le contexte du commit de
 # fusion de la PR (``refs/pull/N/merge``), sans exiger de workflow sur la branche par défaut : la PR vers une base éphémère
-# ``collegue-business/<run>`` (issue du socle, qui porte ce fichier) déclenche ce workflow. ``push`` sur la branche du socle produit le
-# check sur le commit du socle lui-même (une base ne peut être créée que depuis un commit qui a déjà passé le check requis).
+# ``collegue-business/<run>`` (issue du socle, qui porte ce fichier) déclenche ce workflow (observé). ``push`` sur la branche du socle ou sa branche de
+# préparation produit le check sur le commit du socle lui-même (une base ne peut être créée que depuis un commit qui a déjà passé le check requis).
 #
-# CONFIANCE. Avec ``pull_request`` le fichier appliqué est celui du commit de fusion : une PR qui le modifie en change donc la version
-# exécutée. Le contrôle n'est PAS fiable par lui-même ; il l'est parce que le ruleset des bases exige l'approbation du propriétaire
-# des chemins ``.github/`` et ``ci/`` (CODEOWNERS du socle, ``require_code_owner_review``) : aucune PR qui modifie ces chemins ne peut
-# fusionner, quel que soit son check. Le fusionneur de confiance vérifie en plus l'arbre de la tête et la provenance du check
-# (``check_provenance`` de scripts/w5_fixture_bootstrap.py) avant de fusionner.
+# CONFIANCE (corrigée en V2). Avec ``pull_request`` le fichier appliqué est celui du commit de fusion : une PR qui le modifie en change la version
+# exécutée, et un check vert de même nom et de la même application ne prouve PAS le contenu de ce fichier. Ce workflow n'est donc PAS une barrière
+# contre sa propre substitution, ni le CODEOWNERS (observé INEFFICACE en C47 : une PR de l'auteur-propriétaire qui modifie ``.github/`` ou ``ci/``,
+# check vert, a fusionné). La garantie vient du chemin PRODUIT de Collègue : (1) contrôle complet de ``.github/`` ET ``ci/`` AVANT toute
+# publication distante ; (2) même intégrité (arbre Git réel de la tête) AVANT toute fusion ; (3) check authentifié : check-run de l'application
+# Actions → job → exécution du workflow attendu, sur la tête, le dépôt et le chemin attendus ; (4) protections GitHub réelles : PR obligatoire, check requis
+# présent et réussi, base à jour, aucun bypass. Une fusion manuelle hors du produit n'est pas couverte par (1) à (3).
 #
 # CODE CANDIDAT. Il ne s'exécute jamais sur l'hôte : (1) téléchargement des roues du verrou APPROUVÉ du socle (``ci/requirements-approved.lock``,
 # haché, jamais un fichier dicté par le candidat) dans un conteneur sans privilège ni secret ; (2) installation de ces roues, vérification
@@ -132,7 +148,8 @@ on:
       - "collegue-business/**"
   push:
     branches:
-      - "collegue-business/bootstrap-w5"
+      - "collegue-business/bootstrap-w5-v2"
+      - "collegue-bootstrap-staging/w5-v2"
 
 permissions:
   contents: read
@@ -205,8 +222,9 @@ DEPLOY_DOC = "# Déploiement\n\nL'export lit le fichier `docs/export_header.md`.
 
 
 CODEOWNERS_TEXT = (
-    "# Propriétaire des chemins qui DÉFINISSENT le contrôle (workflow, propriétaires, pile approuvée). Le ruleset des bases\n"
-    "# éphémères exige l'approbation du propriétaire pour toute PR qui les modifie ; l'auteur d'une PR ne peut pas approuver la sienne.\n"
+    "# SIGNAL de revue (information) pour les chemins qui DÉFINISSENT le contrôle (workflow, propriétaires, pile approuvée).\n"
+    "# Ce fichier N'EST PAS une barrière : avec 0 approbation requise, une PR de l'auteur-propriétaire qui modifie ces chemins fusionne (observé, C47).\n"
+    "# La protection est le garde de fusion du produit (arbre Git réel de .github/ et ci/) et la provenance du check, pas ce fichier.\n"
     f"/.github/ {CODE_OWNER}\n"
     f"/ci/ {CODE_OWNER}\n"
 )
@@ -368,13 +386,12 @@ def build_plan(seed: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
 
 
 def ruleset_payload() -> Dict[str, Any]:
-    """Ruleset ACTIF des bases éphémères : PR obligatoire, approbation du propriétaire des chemins du contrôle, check « Fixture tests »
-    de l'application Actions, base à jour, aucun bypass.
+    """Ruleset ACTIF des bases éphémères : PR obligatoire, signal de revue du propriétaire, check « Fixture tests » de l'application Actions, base à jour,
+    aucun bypass. Contenu IDENTIQUE à celui déjà appliqué (ruleset 24793056) : la V2 n'exige aucune modification du ruleset.
 
-    * ``require_code_owner_review`` : le workflow s'exécute depuis le commit de FUSION de la PR (``pull_request``), donc une PR peut en
-      changer la version ; le CODEOWNERS du socle attribue ``.github/`` et ``ci/`` au propriétaire, que l'auteur de la PR ne peut pas
-      remplacer : toute PR qui touche ces chemins est bloquée, quel que soit son check (protection serveur indépendante du workflow).
-      Le comportement avec 0 approbation requise est établi par la sonde distante, pas supposé.
+    * ``require_code_owner_review`` est conservé comme SIGNAL de revue (information) : observé INEFFICACE en C47 (0 approbation requise : une PR de
+      l'auteur-propriétaire qui modifie ``.github/`` ou ``ci/``, check vert, fusionne). Il n'est PAS compté comme barrière : la protection des
+      contrôles est le garde de fusion du produit (arbre Git réel de ``.github/`` et ``ci/``) et la provenance du check (check-run → job → exécution).
     * ``do_not_enforce_on_create`` est FAUX : créer une branche sous ce motif exige un commit qui a déjà passé le check requis. Le socle
       le passe de lui-même (workflow ``push`` sur sa branche, ``apply`` attend ce check avant de créer le ruleset) : les bases de campagne
       se créent depuis ce commit, sans bypass ni faux check ; un commit sans check (la graine) ne peut pas devenir une base.
@@ -419,6 +436,7 @@ def manifest_skeleton(plan: Mapping[str, Any]) -> Dict[str, Any]:
         "seed_sha": SEED_SHA,
         "bootstrap_sha": plan["bootstrap_sha"],
         "bootstrap_branch": plan["bootstrap_branch"],
+        "plan_version": PLAN_VERSION,
         "approved_files": plan["approved_files"],
         "required_check": REQUIRED_CHECK,
         "check_app_id": ACTIONS_APP_ID,
@@ -452,6 +470,7 @@ def api_call_log(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return [
         {
             "n": 1,
+            "name": "tree",
             "method": "POST",
             "path": f"/repos/{REPOSITORY}/git/trees",
             "payload": {"base_tree": SEED_TREE_SHA, "tree": sorted(tree_entries, key=lambda e: e["path"])},
@@ -459,6 +478,7 @@ def api_call_log(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
         },
         {
             "n": 2,
+            "name": "commit",
             "method": "POST",
             "path": f"/repos/{REPOSITORY}/git/commits",
             "payload": {
@@ -472,17 +492,36 @@ def api_call_log(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
         },
         {
             "n": 3,
+            "name": "staging_ref",
+            "method": "POST",
+            "path": f"/repos/{REPOSITORY}/git/refs",
+            "payload": {"ref": f"refs/heads/{STAGING_BRANCH}", "sha": plan["bootstrap_sha"]},
+            "expect": {"object.sha": plan["bootstrap_sha"]},
+        },
+        {
+            "n": 4,
+            "name": "branch_ref",
             "method": "POST",
             "path": f"/repos/{REPOSITORY}/git/refs",
             "payload": {"ref": f"refs/heads/{BOOTSTRAP_BRANCH}", "sha": plan["bootstrap_sha"]},
             "expect": {"object.sha": plan["bootstrap_sha"]},
         },
         {
-            "n": 4,
+            "n": 5,
+            "name": "ruleset",
             "method": "POST",
             "path": f"/repos/{REPOSITORY}/rulesets",
             "payload": plan["ruleset"],
             "expect": {"enforcement": "active", "bypass_actors": []},
+            "only_if": "le ruleset des bases éphémères est ABSENT (sinon il est ADOPTÉ s'il est identique au payload ; différent = refus)",
+        },
+        {
+            "n": 6,
+            "name": "staging_delete",
+            "method": "DELETE",
+            "path": f"/repos/{REPOSITORY}/git/refs/heads/{STAGING_BRANCH}",
+            "payload": {},
+            "expect": {"gone": True},
         },
     ]
 
@@ -500,17 +539,20 @@ def render_calls_markdown(plan: Mapping[str, Any]) -> str:
         f"2. `GET /repos/{REPOSITORY}/git/ref/heads/main` : SHA `{SEED_SHA}` ; `GET /git/commits/{SEED_SHA}` : arbre `{SEED_TREE_SHA}`.",
         f"3. `GET /repos/{REPOSITORY}/rulesets` : aucun ruleset de nom `{RULESET_NAME}` ni ciblant `{BRANCH_PATTERN}` (collision = refus) ; "
         f"ruleset {SEED_RULESET_ID} inchangé.",
-        f"4. `GET /repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}` : absent, ou déjà au SHA `{plan['bootstrap_sha']}` (idempotence) ; autre SHA = refus.",
+        f"4. `GET /repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}` : absent, ou déjà au SHA `{plan['bootstrap_sha']}` (idempotence) ; autre SHA = refus ; "
+        f"idem pour la branche de préparation `{STAGING_BRANCH}`. La branche de la V1 (`{V1_BOOTSTRAP_BRANCH}` @ `{V1_BOOTSTRAP_SHA[:12]}…`) n'est ni lue pour être modifiée ni touchée.",
         "5. `GET /apps/github-actions` : `id == 15368`.",
-        "6. Avant l'écriture 4 : `GET /commits/<bootstrap_sha>/check-runs` doit montrer `Fixture tests` (application 15368) terminé en succès — "
-        "produit par le workflow `push` de la branche du socle. Absent, en attente au-delà du délai ou rouge : arrêt, AUCUN ruleset créé.",
+        "6. Entre les écritures 3 et 4 : `GET /commits/<bootstrap_sha>/check-runs` doit montrer `Fixture tests` (application 15368) terminé en succès — "
+        "produit par le workflow `push` de la branche de PRÉPARATION (hors du motif du ruleset : aucune protection n'est contournée, la règle de création "
+        "du ruleset exige ce check à l'écriture 4). Absent, en attente au-delà du délai ou rouge : arrêt, AUCUNE branche du socle créée.",
         "",
         "## Écritures",
         "",
     ]
     for call in api_call_log(plan):
         out += [
-            f"### {call['n']}. `{call['method']} {call['path']}`",
+            f"### {call['n']}. `{call['method']} {call['path']}`"
+            + (f" — seulement si {call['only_if']}" if call.get("only_if") else ""),
             "",
             "```json",
             json.dumps(call["payload"], ensure_ascii=False, indent=2, sort_keys=True),
@@ -550,28 +592,78 @@ def render_probe_markdown(plan: Mapping[str, Any]) -> str:
             f"| {index} | `{scenario['id']}`{base} | {', '.join(touched) or '—'} | `{scenario['check']}` | {scenario['merge']} |"
         )
     out += [
+        "| S | `stale-base` (variantes `first`, `behind`, `conflict`) | fichiers `docs/probe-stale-*.md` | `success` puis périmée / aucun | `first` acceptée, `behind` refusée, `conflict` refusée |",
         "",
-        "* **Garde de fusion de confiance** (tous les scénarios) : `protected_tree_violations` est évalué sur l'arbre Git RÉEL de la tête et DOIT refuser exactement les "
-        "têtes qui touchent `.github/` ou `ci/`, ajoutent un lien ou partent de la graine (jamais `green`, `red-test`, `unapproved-dependency`) : un check vert falsifié n'est pas "
-        "une réussite si le garde ne refuse pas la tête altérée.",
+        "* **Têtes qui ALTÈRENT `.github/` ou `ci/` : NON rejouées.** Le défaut est établi (C47 : PR #10, #11, #12 fusionnées malgré CODEOWNERS et 0 approbation) ; en publier "
+        "de nouvelles n'apprendrait rien. Leur refus est de la responsabilité du chemin PRODUIT (garde de publication et de fusion de B, `.github/` ET `ci/`), "
+        "démontré à l'intégration par la VRAIE entrée publique avec un faux GitHub qui vérifie ZÉRO écriture (`tests/test_w5_integration_controls_guard.py`).",
+        "* **Garde de préparation** (tous les scénarios) : `protected_tree_violations` est évalué sur l'arbre Git RÉEL de la tête et ne doit refuser que les têtes avec lien "
+        "symbolique ou issues de la graine (jamais `green`, `red-test`, `unapproved-dependency`). Il ne démontre PAS que le garde de PRODUCTION a été traversé.",
         "* `green` : le workflow SE DÉCLENCHE sur une PR (`pull_request`) vers une base éphémère, le check est un job réel de l'application 15368 sur la "
-        "tête exacte (`check_provenance` : job, exécution, chemin du workflow, arbre protégé intact), la fusion est ACCEPTÉE. Absence de check dans le délai "
-        "= échec (jamais un succès présumé).",
+        "tête exacte (`check_provenance` : check-run → job → exécution, dépôt, chemin, tête, événement ; arbre protégé intact), la fusion est ACCEPTÉE. Absence de check "
+        "dans le délai = échec (jamais un succès présumé).",
         "* `red-test` : un vrai échec `pytest` donne un check ROUGE et une fusion refusée. Tentative de faux check `Fixture tests` vert avec le jeton de "
         "campagne : refus de l'API (nominal) ou check d'une autre application, qui ne compte jamais.",
-        "* `workflow-touch`, `codeowners-touch`, `lock-touch` : la tête modifie un chemin PROTÉGÉ par un simple commentaire ; le check est VERT (le workflow "
-        "exécuté est celui de la fusion) mais la fusion doit être REFUSÉE : seule l'approbation du propriétaire (CODEOWNERS, `require_code_owner_review`) "
-        "l'explique. C'est la preuve que la protection ne dépend pas du workflow lui-même. Si la fusion est acceptée, la protection est inefficace "
-        "(notamment avec 0 approbation requise) : arrêt et décision du manager.",
         "* `unapproved-dependency` : `requirements.txt` demande `requests` : check ROUGE explicite (aucun téléchargement), fusion refusée.",
         "* `symlink` : un lien symbolique (mode 120000) poussé par l'API Git Data : garde du workflow rouge, fusion refusée.",
-        "* `seed-base` : la règle de création refuse une base pointant la GRAINE (commit sans check) ; si elle l'acceptait, aucun check n'apparaît et la fusion reste refusée.",
+        "* `seed-base` : la règle de création refuse une base pointant la GRAINE (commit sans check).",
+        "* `stale-base` : preuve SERVEUR de la règle « base à jour » (une PR déjà verte devient périmée quand la base avance : fusion refusée) et du check manquant "
+        "(une PR en conflit ne déclenche aucun workflow : check absent, fusion refusée).",
         "",
-        "Permissions nécessaires du jeton de campagne (à confirmer par le manager avant `apply`) : contenu en écriture (branches, fichiers, objets Git), pull "
-        "requests en écriture, et le droit de déclencher des workflows ; les Actions de la fixture doivent être activées. Aucune PR étrangère (#4, #7) n'est touchée.",
+        "Permissions nécessaires du jeton de campagne : contenu en écriture (branches, fichiers, objets Git), pull requests en écriture, droit de déclencher des "
+        "workflows ; les Actions de la fixture doivent être activées (observé en C47). Aucune PR étrangère (#4, #7) n'est touchée.",
         "",
     ]
     return "\n".join(out) + "\n"
+
+
+def render_update_markdown(plan: Mapping[str, Any]) -> str:
+    """Commandes EXACTES de mise à jour V1 → V2 du socle : voie normale sans protection désactivée, blocage de la voie par PR, retour arrière."""
+    token, sha = plan["order_token"], plan["bootstrap_sha"]
+    cli = "python scripts/w5_fixture_bootstrap.py"
+    return f"""# Mise à jour du socle W5 : V1 → V2 (à n'exécuter QUE sur ordre du manager, après examen de ce plan)
+
+**Pourquoi.** La V1 (`{V1_BOOTSTRAP_SHA}`, branche `{V1_BOOTSTRAP_BRANCH}`) contient des commentaires faux : le workflow et le CODEOWNERS affirment que le CODEOWNERS
+protège `.github/` et `ci/`. La sonde de C47 a montré le contraire (PR #10, #11, #12 fusionnées, check vert, 0 approbation). La V2 (`{sha}`, parent unique = graine,
+branche `{BOOTSTRAP_BRANCH}`) corrige ces affirmations ; son ruleset est IDENTIQUE à celui déjà appliqué (24793056) : **aucune modification de protection**.
+Un changement de contenu change le SHA : rien n'est appliqué silencieusement ; jeton d'ordre `{token}`.
+
+**État qui reste en place pendant et après la mise à jour** : `main` = graine, ruleset 18840666, ruleset 24793056 (actif, sans bypass), la branche et le commit V1 (inchangés,
+jamais touchés par ce script), PR #4 et #7, PR #8 à #14 (historique de la sonde).
+
+## Voie retenue (sans désactiver ni contourner aucune protection)
+
+La règle de création du ruleset (`do_not_enforce_on_create: false`) n'autorise une branche `collegue-business/*` que sur un commit qui a DÉJÀ un check réussi. Le commit V2 est donc
+d'abord publié sur une branche de PRÉPARATION hors du motif (`{STAGING_BRANCH}`), où le workflow `push` du commit V2 produit le check ; la branche du socle V2 est ensuite créée
+sur ce commit, sous la règle de création intacte. Commandes (jeton GitHub dans l'environnement du processus, jamais en argv) :
+
+```
+{cli} inspect
+{cli} apply --order-token {token} --manifest-out <evidence>/w5-c48-v2-manifest.json --events <evidence>/w5-c48-v2-events.jsonl
+{cli} verify
+{cli} probe --order-token {token} --probe-id <identifiant neuf> --events <evidence>/w5-c48-v2-events.jsonl
+```
+
+`apply` : lectures de contrôle (identité du dépôt, graine, ruleset 18840666, ruleset des bases identique au payload, branches `{BOOTSTRAP_BRANCH}` / `{STAGING_BRANCH}` absentes ou déjà
+au SHA du plan) → arbre → commit → branche de préparation → ATTENTE du check réussi de l'application 15368 sur le commit → branche du socle V2 → (ruleset adopté tel quel) → suppression de
+la branche de préparation. Un check absent, rouge ou jamais terminé arrête tout (aucune branche du socle créée). `probe` rejoue les contre-épreuves SERVEUR (voir `probe-plan.md`) sur des PR jetables ;
+les têtes qui altèrent les contrôles ne sont pas rejouées. Le manifeste V2 remplace le manifeste V1 pour B (`bootstrap_sha`, `bootstrap_branch`, `plan_version`).
+
+## Voie par PR vers la branche V1 : BLOQUÉE (à trancher par le manager)
+
+Mettre à jour `{V1_BOOTSTRAP_BRANCH}` par une PR (squelette : tête hors motif → PR → check réussi sur la tête → fusion) est possible avec les protections actuelles, MAIS la fusion ajoute un commit
+(fusion ou « squash ») AU-DESSUS du commit V1 : le tip n'a plus pour parent unique la graine. Le validateur de B (`validate_bootstrap_manifest`) exige un descendant DIRECT de la graine
+(`parents == [graine]`, `ahead_by == 1`, arbre = graine + fichiers approuvés) : la voie par PR violerait ce contrat. Elle n'est utilisable que si le manager l'assouplit explicitement (par exemple « arbre approuvé identique,
+ascendance libre ») ; sinon la voie retenue ci-dessus est la seule à respecter à la fois les protections et le contrat.
+
+## Retour arrière et limites
+
+* `{cli} cleanup --order-token {token} --events <evidence>/w5-c48-v2-events.jsonl` supprime UNIQUEMENT `{BOOTSTRAP_BRANCH}` et `{STAGING_BRANCH}` (identités exactes vérifiées). Le ruleset est PARTAGÉ avec la V1 :
+  il n'est supprimé qu'avec `--with-ruleset` (jamais par défaut). La V1 n'est jamais touchée.
+* Les bases de campagne se créent depuis `bootstrap_sha` du manifeste : V1 jusqu'à l'application de la V2, V2 ensuite.
+* Ce que le plan ne prouve pas : le déclenchement du workflow `push` sur la branche de préparation et la création de la branche V2 sous la règle de création sont des comportements de GitHub observés
+  seulement à l'exécution (la V1 a prouvé le même mécanisme sur sa propre branche).
+"""
 
 
 def render_diff(plan: Mapping[str, Any], seed: Mapping[str, str]) -> str:
@@ -594,7 +686,9 @@ def render_diff(plan: Mapping[str, Any], seed: Mapping[str, str]) -> str:
     return "".join(chunks)
 
 
-def write_plan(directory: Path, seed: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+def write_plan(
+    directory: Path, seed: Optional[Mapping[str, str]] = None, previous: Optional[Path] = None
+) -> Dict[str, Any]:
     seed = dict(seed) if seed is not None else load_seed()
     plan = build_plan(seed)
     directory.mkdir(parents=True, exist_ok=True)
@@ -616,10 +710,29 @@ def write_plan(directory: Path, seed: Optional[Mapping[str, str]] = None) -> Dic
     )
     (directory / "api-calls.md").write_text(render_calls_markdown(plan), encoding="utf-8")
     (directory / "probe-plan.md").write_text(render_probe_markdown(plan), encoding="utf-8")
+    (directory / "update-v2.md").write_text(render_update_markdown(plan), encoding="utf-8")
     (directory / "bootstrap.diff").write_text(render_diff(plan, seed), encoding="utf-8")
     (directory / "workflow-fixture-tests.yml").write_text(TRUSTED_WORKFLOW, encoding="utf-8")
+    names = list(PLAN_FILES)
+    if previous is not None:
+        # différence entre le socle DÉJÀ appliqué (plan précédent examiné) et le socle de ce plan : ce que la mise à jour change, octet pour octet
+        before = json.loads(previous.read_text(encoding="utf-8"))["files"]
+        chunks: List[str] = []
+        for path in sorted(set(before) | set(plan["files"])):
+            if before.get(path) == plan["files"].get(path):
+                continue
+            chunks.extend(
+                difflib.unified_diff(
+                    before.get(path, "").splitlines(keepends=True),
+                    plan["files"].get(path, "").splitlines(keepends=True),
+                    fromfile=f"v1/{path}",
+                    tofile=f"v2/{path}",
+                )
+            )
+        (directory / "v1-to-v2.diff").write_text("".join(chunks), encoding="utf-8")
+        names.append("v1-to-v2.diff")
     sums = []
-    for name in PLAN_FILES:
+    for name in names:
         if name == "SHA256SUMS":
             continue
         sums.append(f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}  {name}")
@@ -723,14 +836,24 @@ def check_provenance(api: Api, head_sha: str, plan: Mapping[str, Any]) -> Tuple[
         r for r in runs if r.get("name") == REQUIRED_CHECK and (r.get("app") or {}).get("id") == ACTIONS_APP_ID
     ]
     for run in candidates:
+        # check-run (application Actions) → JOB réel → EXÉCUTION du workflow : chaque maillon doit concorder (tête, dépôt, chemin, événement)
         job = _get(api, f"/repos/{REPOSITORY}/actions/jobs/{run.get('id')}", missing_ok=True)
         if not job or job.get("head_sha") != head_sha:
             return False, "le check n'est pas un job d'une exécution de workflow (publié par l'API des checks ?)"
+        if job.get("name") != REQUIRED_CHECK or job.get("conclusion") != "success":
+            return False, f"job inattendu : nom {job.get('name')!r}, conclusion {job.get('conclusion')!r}"
         execution = _get(api, f"/repos/{REPOSITORY}/actions/runs/{job.get('run_id')}", missing_ok=True)
-        if not execution or execution.get("path") != WORKFLOW_PATH or execution.get("head_sha") != head_sha:
+        if not execution or execution.get("id") != job.get("run_id"):
+            return False, "l'exécution du job est introuvable ou ne correspond pas à son identifiant"
+        if execution.get("path") != WORKFLOW_PATH or execution.get("head_sha") != head_sha:
             return False, "l'exécution du job n'est pas celle du workflow approuvé sur cette tête"
+        for field in ("repository", "head_repository"):
+            if str((execution.get(field) or {}).get("full_name", "")).lower() != REPOSITORY.lower():
+                return False, f"exécution issue d'un autre dépôt ({field})"
         if execution.get("event") not in ("pull_request", "push"):
             return False, f"déclencheur inattendu : {execution.get('event')}"
+        if execution.get("conclusion") != "success":
+            return False, f"exécution non réussie : {execution.get('conclusion')}"
     tree = _get(api, f"/repos/{REPOSITORY}/git/trees/{head_sha}?recursive=1")
     if tree.get("truncated"):
         return False, "arbre tronqué : contenu protégé non établi"
@@ -1042,53 +1165,77 @@ def apply_plan(
         # AVANT toute écriture : un ruleset homonyme au contenu différent n'est pas possédé (aucun état partiel).
         raise FixtureError(f"le ruleset {RULESET_NAME!r} existe avec un autre contenu : ressource non possédée")
     boot = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}", missing_ok=True)
+    staging = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{STAGING_BRANCH}", missing_ok=True)
     created: List[str] = []
-    if boot is not None and boot["object"]["sha"] != plan["bootstrap_sha"]:
-        raise FixtureError(
-            f"la branche {BOOTSTRAP_BRANCH} existe à un autre SHA ({boot['object']['sha']}) : ressource non possédée"
-        )
+    for label, ref in ((BOOTSTRAP_BRANCH, boot), (STAGING_BRANCH, staging)):
+        if ref is not None and ref["object"]["sha"] != plan["bootstrap_sha"]:
+            raise FixtureError(
+                f"la branche {label} existe à un autre SHA ({ref['object']['sha']}) : ressource non possédée"
+            )
+    calls = {call["name"]: call for call in api_call_log(plan)}
+
+    def send(name: str) -> Any:
+        return api(calls[name]["method"], calls[name]["path"], calls[name]["payload"])
+
     if boot is None:
-        calls = api_call_log(plan)
-        tree = api(calls[0]["method"], calls[0]["path"], calls[0]["payload"])
-        if tree.get("sha") != plan["bootstrap_tree_sha"]:
-            raise FixtureError("l'arbre créé n'est pas celui du plan : arrêt avant tout commit")
-        commit = api(calls[1]["method"], calls[1]["path"], calls[1]["payload"])
-        if commit.get("sha") != plan["bootstrap_sha"]:
-            raise FixtureError("le commit créé n'est pas celui du plan : arrêt avant toute branche")
-        ref = api(calls[2]["method"], calls[2]["path"], calls[2]["payload"])
+        if staging is None:
+            tree = send("tree")
+            if tree.get("sha") != plan["bootstrap_tree_sha"]:
+                raise FixtureError("l'arbre créé n'est pas celui du plan : arrêt avant tout commit")
+            commit = send("commit")
+            if commit.get("sha") != plan["bootstrap_sha"]:
+                raise FixtureError("le commit créé n'est pas celui du plan : arrêt avant toute branche")
+            ref = send("staging_ref")
+            if (ref.get("object") or {}).get("sha") != plan["bootstrap_sha"]:
+                raise FixtureError("la branche de préparation ne pointe pas sur le commit du plan")
+            staging = ref
+            created.append("staging")
+        # La règle de création du ruleset exige un commit qui a DÉJÀ passé le check : on l'attend sur la branche de préparation (hors motif).
+        wait_for_bootstrap_check(api, plan, sleep=sleep, clock=clock, timeout=check_timeout)
+        ref = send("branch_ref")
         if (ref.get("object") or {}).get("sha") != plan["bootstrap_sha"]:
             raise FixtureError("la branche créée ne pointe pas sur le commit du plan")
         created.append("branch")
     if ours is None:
         wait_for_bootstrap_check(api, plan, sleep=sleep, clock=clock, timeout=check_timeout)
-        call = api_call_log(plan)[3]
-        made = api(call["method"], call["path"], call["payload"])
+        made = send("ruleset")
         if made.get("enforcement") != "active" or made.get("bypass_actors"):
             raise FixtureError("le ruleset créé n'est pas actif sans bypass : à corriger avant toute campagne")
         ours = made
         created.append("ruleset")
+    if staging is not None:
+        send(
+            "staging_delete"
+        )  # ressource PRÉPARATOIRE de ce plan, identité vérifiée : n'a plus d'utilité une fois la branche du socle créée
+        created.append("staging_removed")
     manifest = manifest_skeleton(plan)
     manifest["ruleset_id"] = ours.get("id")
-    return {"created": created, "manifest": manifest, "idempotent": not created}
+    return {"created": created, "manifest": manifest, "idempotent": not [c for c in created if c != "staging_removed"]}
 
 
-def cleanup_bootstrap(api: Api, plan: Mapping[str, Any], *, order_token: Optional[str]) -> Dict[str, Any]:
-    """Supprime UNIQUEMENT le ruleset des bases éphémères et la branche du socle de CETTE campagne (identités exactes vérifiées)."""
+def cleanup_bootstrap(
+    api: Api, plan: Mapping[str, Any], *, order_token: Optional[str], with_ruleset: bool = False
+) -> Dict[str, Any]:
+    """Supprime UNIQUEMENT la branche du socle de CE plan et sa branche de préparation (identités exactes vérifiées).
+
+    Le ruleset des bases éphémères est PARTAGÉ avec la V1 : il n'est supprimé qu'avec ``with_ruleset`` (jamais par défaut), contenu vérifié."""
     _require_order(plan, order_token)
     _check_identity(api)
     removed: List[str] = []
-    ours, _ = _ruleset_collisions(_find_rulesets(api))
-    if ours is not None:
-        if _normalize_ruleset(ours) != _normalize_ruleset(plan["ruleset"]):
-            raise FixtureError("le ruleset a un contenu inattendu : non possédé, non supprimé")
-        api("DELETE", f"/repos/{REPOSITORY}/rulesets/{ours['id']}", None)
-        removed.append(f"ruleset {ours['id']}")
-    boot = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}", missing_ok=True)
-    if boot is not None:
-        if boot["object"]["sha"] != plan["bootstrap_sha"]:
-            raise FixtureError("la branche du socle a un autre SHA : non possédée, non supprimée")
-        api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{BOOTSTRAP_BRANCH}", None)
-        removed.append(f"branche {BOOTSTRAP_BRANCH}")
+    if with_ruleset:
+        ours, _ = _ruleset_collisions(_find_rulesets(api))
+        if ours is not None:
+            if _normalize_ruleset(ours) != _normalize_ruleset(plan["ruleset"]):
+                raise FixtureError("le ruleset a un contenu inattendu : non possédé, non supprimé")
+            api("DELETE", f"/repos/{REPOSITORY}/rulesets/{ours['id']}", None)
+            removed.append(f"ruleset {ours['id']}")
+    for label in (BOOTSTRAP_BRANCH, STAGING_BRANCH):
+        ref = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{label}", missing_ok=True)
+        if ref is not None:
+            if ref["object"]["sha"] != plan["bootstrap_sha"]:
+                raise FixtureError(f"la branche {label} a un autre SHA : non possédée, non supprimée")
+            api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{label}", None)
+            removed.append(f"branche {label}")
     return {"removed": removed}
 
 
@@ -1096,14 +1243,14 @@ def cleanup_bootstrap(api: Api, plan: Mapping[str, Any], *, order_token: Optiona
 
 PROBE_TEST_GREEN = "def test_probe_green() -> None:\n    assert True\n"
 PROBE_TEST_RED = "def test_probe_red() -> None:\n    assert False, 'rouge volontaire (contre-épreuve du check)'\n"
-PROBE_TOUCH = "\n# sonde : modification de test, sans effet fonctionnel\n"
 PROBE_SYMLINK_PATH = "docs/lien-sonde"
 
 
 def probe_scenarios(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """Scénarios des contre-épreuves. ``check`` : verdict attendu du check requis ; ``merge`` : ``accepted`` ou ``refused`` (tentative RÉELLE
-    de fusion dans la base jetable, sur la tête exacte). Les trois scénarios « touch » ont un check VERT : seul le propriétaire des chemins
-    protégés peut alors expliquer le refus (isolation de la protection indépendante du workflow)."""
+    """Scénarios SERVEUR des contre-épreuves. ``check`` : verdict attendu du check requis ; ``merge`` : ``accepted`` ou ``refused`` (tentative RÉELLE
+    de fusion dans la base jetable, sur la tête exacte). Les têtes qui ALTÈRENT ``.github/`` ou ``ci/`` ne sont PAS rejouées : le défaut est établi (C47 :
+    PR #10, #11, #12 fusionnées, CODEOWNERS inefficace à 0 approbation) et seul le garde de fusion du PRODUIT peut le couvrir (preuve d'intégration, faux GitHub
+    à zéro écriture) ; le scénario « base périmée / conflit » (``run_stale_base``) complète ces scénarios."""
     files = plan["files"]
     green = {"tests/test_probe.py": PROBE_TEST_GREEN}
     scenarios = [
@@ -1114,24 +1261,6 @@ def probe_scenarios(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "check": "failure",
             "merge": "refused",
             "spoof": True,
-        },
-        {
-            "id": "workflow-touch",
-            "files": {**green, WORKFLOW_PATH: files[WORKFLOW_PATH] + PROBE_TOUCH},
-            "check": "success",
-            "merge": "refused",
-        },
-        {
-            "id": "codeowners-touch",
-            "files": {**green, CODEOWNERS_PATH: files[CODEOWNERS_PATH] + PROBE_TOUCH},
-            "check": "success",
-            "merge": "refused",
-        },
-        {
-            "id": "lock-touch",
-            "files": {**green, APPROVED_LOCK_PATH: files[APPROVED_LOCK_PATH] + PROBE_TOUCH},
-            "check": "success",
-            "merge": "refused",
         },
         {
             "id": "unapproved-dependency",
@@ -1255,6 +1384,107 @@ def _workflow_runs(api: Api, head_sha: str) -> List[Dict[str, Any]]:
         {key: run.get(key) for key in ("id", "event", "path", "head_sha", "status", "conclusion", "html_url")}
         for run in listing.get("workflow_runs", [])
     ]
+
+
+def run_stale_base(
+    api: Api,
+    plan: Mapping[str, Any],
+    *,
+    probe_id: str,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+    timeout: float,
+    observe_missing_seconds: float,
+    log: Optional[EventLog] = None,
+) -> Dict[str, Any]:
+    """Protections SERVEUR « base à jour » et « check manquant » : la base avance, une PR déjà verte devient périmée (fusion refusée par la règle
+    « à jour »), une PR qui entre en conflit ne déclenche aucun workflow (check manquant, fusion refusée). Toutes les ressources sont supprimées."""
+    base = f"collegue-business/probe-{probe_id}-stale"
+    heads = {name: f"collegue-probe/{probe_id}-stale-{name}" for name in ("first", "behind", "conflict")}
+    files = {
+        "first": {"docs/probe-stale-a.md": "# A\n", "tests/test_probe.py": PROBE_TEST_GREEN},
+        "behind": {"docs/probe-stale-c.md": "# C\n", "tests/test_probe_behind.py": PROBE_TEST_GREEN},
+        "conflict": {"docs/probe-stale-a.md": "# B (conflit)\n"},
+    }
+    outcome: Dict[str, Any] = {
+        "scenario": "stale-base",
+        "check_expected": "success puis périmée / conflit sans check",
+        "merge_expected": "first accepted, behind refused, conflict refused",
+    }
+    owned: List[str] = []
+    prs: Dict[str, int] = {}
+    head_shas: Dict[str, str] = {}
+    note = (lambda **kw: log.record(probe_id=probe_id, scenario="stale-base", **kw)) if log else (lambda **kw: None)
+
+    def open_pr(name: str) -> int:
+        pr = api(
+            "POST",
+            f"/repos/{REPOSITORY}/pulls",
+            {"title": f"sonde W5 stale-{name}", "head": heads[name], "base": base, "body": "Contre-épreuve (jetable)."},
+        )
+        prs[name] = pr["number"]
+        note(event="pull_request", variant=name, number=pr["number"], url=pr.get("html_url"))
+        return pr["number"]
+
+    def wait_state(name: str, *, expect_missing: bool = False) -> str:
+        started = clock()
+        while True:
+            runs = api("GET", f"/repos/{REPOSITORY}/commits/{head_shas[name]}/check-runs", None).get("check_runs", [])
+            state, _reason = evaluate_check(runs, head_sha=head_shas[name])
+            elapsed = clock() - started
+            if expect_missing:
+                if state != "missing" or elapsed >= observe_missing_seconds:
+                    return state
+            elif state in ("success", "failure") or elapsed >= timeout:
+                return state
+            sleep(10)
+
+    try:
+        api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{base}", "sha": plan["bootstrap_sha"]})
+        owned.append(base)
+        for name, ref in heads.items():
+            api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{ref}", "sha": plan["bootstrap_sha"]})
+            owned.append(ref)
+            head_shas[name] = _put_files(api, ref, files[name], f"sonde stale-{name}")
+        open_pr("first")
+        open_pr("behind")
+        states = {name: wait_state(name) for name in ("first", "behind")}
+        first_merge = _try_merge(api, prs["first"], head_shas["first"])
+        # la base AVANCE : la PR « behind », verte sur l'ancienne base, est périmée → la règle « à jour avant fusion » doit refuser
+        behind_merge = _try_merge(api, prs["behind"], head_shas["behind"])
+        open_pr("conflict")  # entre en conflit avec la base avancée : GitHub ne lance AUCUN workflow pull_request
+        conflict_state = wait_state("conflict", expect_missing=True)
+        conflict_merge = _try_merge(api, prs["conflict"], head_shas["conflict"])
+        outcome.update(
+            pull_requests=prs,
+            states=states,
+            first_merge=first_merge,
+            behind_merge=behind_merge,
+            conflict_check=conflict_state,
+            conflict_merge=conflict_merge,
+        )
+        outcome["ok"] = (
+            states == {"first": "success", "behind": "success"}
+            and first_merge["accepted"] is True
+            and behind_merge["accepted"] is False
+            and conflict_state == "missing"
+            and conflict_merge["accepted"] is False
+        )
+    except ApiError as exc:
+        outcome.update(ok=False, error=str(exc)[:300])
+    finally:
+        for number in prs.values():
+            try:
+                api("PATCH", f"/repos/{REPOSITORY}/pulls/{number}", {"state": "closed"})
+            except ApiError:
+                pass
+        for ref in reversed(owned):
+            try:
+                api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
+            except ApiError:
+                outcome.setdefault("cleanup_errors", []).append(ref)
+        note(event="scenario_result", outcome=json.loads(json.dumps(outcome, default=str)))
+    return outcome
 
 
 def run_probe(
@@ -1401,6 +1631,18 @@ def run_probe(
                 except ApiError:
                     outcome.setdefault("cleanup_errors", []).append(ref)
             results.append(outcome)
+    results.append(
+        run_stale_base(
+            api,
+            plan,
+            probe_id=probe_id,
+            sleep=sleep,
+            clock=clock,
+            timeout=timeout,
+            observe_missing_seconds=observe_missing_seconds,
+            log=log,
+        )
+    )
     return {"ok": all(r.get("ok") for r in results), "results": results}
 
 
@@ -1417,6 +1659,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     plan_cmd = sub.add_parser("plan", help="plan HORS LIGNE (aucun accès réseau)")
     plan_cmd.add_argument("directory", type=Path)
+    plan_cmd.add_argument("--previous", type=Path, help="plan.json du socle DÉJÀ appliqué : écrit v1-to-v2.diff")
     for name in ("inspect", "verify"):
         sub.add_parser(name, help="lecture seule")
     for name in ("apply", "probe", "cleanup"):
@@ -1429,10 +1672,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cmd.add_argument("--probe-id", required=True)
         if name == "apply":
             cmd.add_argument("--manifest-out", type=Path, required=True)
+        if name == "cleanup":
+            cmd.add_argument(
+                "--with-ruleset", action="store_true", help="supprime AUSSI le ruleset partagé (jamais par défaut)"
+            )
     args = parser.parse_args(argv)
     try:
         if args.command == "plan":
-            plan = write_plan(args.directory)
+            plan = write_plan(args.directory, previous=args.previous)
             print(json.dumps({"bootstrap_sha": plan["bootstrap_sha"], "order_token": plan["order_token"]}, indent=1))
             return 0
         plan = build_plan()
@@ -1459,7 +1706,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = run_probe(api, plan, order_token=args.order_token, probe_id=args.probe_id, log=log)
             print(json.dumps(result, indent=1, sort_keys=True))
             return 0 if result["ok"] else 1
-        result = cleanup_bootstrap(api, plan, order_token=args.order_token)
+        result = cleanup_bootstrap(api, plan, order_token=args.order_token, with_ruleset=args.with_ruleset)
         print(json.dumps(result, indent=1))
         return 0
     except (FixtureError, ApiError) as exc:
