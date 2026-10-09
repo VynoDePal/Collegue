@@ -37,7 +37,7 @@ class Run:
         self.report_path = tmp_path / "diag" / "leak-scan.json"
         self.report_path.parent.mkdir()
 
-    def __call__(self, scan, monkeypatch, capsys, sources, *, key=KEY, no_key=False, chunk=None):
+    def __call__(self, scan, monkeypatch, capsys, sources, *, key=KEY, no_key=False, chunk=None, states=()):
         if key is None:
             monkeypatch.delenv("W5_TEST_KEY", raising=False)
         else:
@@ -46,6 +46,8 @@ class Run:
         argv += ["--assume-no-key"] if no_key else ["--env", "W5_TEST_KEY"]
         for spec in sources:
             argv += ["--source", spec]
+        for spec in states:
+            argv += ["--state-file", spec]
         if chunk:
             argv += ["--chunk-size", str(chunk)]
         code = scan.main(argv)
@@ -387,3 +389,169 @@ def test_the_script_takes_the_value_from_the_environment_only(scan):
     text = SCRIPT.read_text(encoding="utf-8")
     assert "os.environ.get(args.env" in text and "--value" not in text and "--key" not in text
     assert "print(key" not in text and 'print(f"{key' not in text
+
+
+# ── fichiers d'ÉTAT de ressources (--state-file) : le fichier et ses frères `fichier.*`, non récursif, lus sans être déplacés ──────────────────────
+
+
+def _state(tmp_path):
+    folder = tmp_path / "w5"
+    folder.mkdir()
+    (folder / "report").mkdir()
+    (folder / "report" / "campaign.json").write_text("{}")
+    (folder / "manifest.json").write_text('{"project_id": 77}')
+    (folder / "manifest.json.spec.json").write_text('{"spec_pr": 42}')
+    return folder
+
+
+def test_a_state_file_and_its_dotted_siblings_are_staged_and_nothing_else_from_their_directory(
+    scan, run, monkeypatch, capsys, tmp_path
+):
+    folder = _state(tmp_path)
+    (folder / "manifest.jsonx").write_text("pas un frère")
+    (folder / "autre.json").write_text("{}")
+    (folder / "pip-cache").mkdir()
+    (folder / "pip-cache" / "manifest.json").write_text("sous-dossier : jamais parcouru")
+    (folder / "manifest.json.owned.json").write_text("{}")
+    code, report, _ = run(
+        scan, monkeypatch, capsys, [f"report={folder / 'report'}"], states=[f"resources={folder / 'manifest.json'}"]
+    )
+    assert code == 0 and report["verdict"] == "clean"
+    assert run.published() == [
+        "report/campaign.json",
+        "resources/manifest.json",
+        "resources/manifest.json.owned.json",
+        "resources/manifest.json.spec.json",
+    ]
+    assert report["state_files"] == {"resources": 3} and report["snapshot_utc"]
+    assert (folder / "manifest.json").exists() and not run.quarantine.exists(), "lus seulement : jamais déplacés"
+
+
+@pytest.mark.parametrize("where", ["content", "name"])
+def test_a_key_in_a_state_file_content_or_name_is_excluded_reported_and_the_source_is_left_untouched(
+    scan, run, monkeypatch, capsys, tmp_path, where
+):
+    folder = _state(tmp_path)
+    key = KEY if where == "content" else FLAT
+    if where == "content":
+        (folder / "manifest.json").write_text("avant " + key + " après")
+    else:
+        (folder / f"manifest.json.{key}").write_text("{}")
+    sources = [f"report={folder / 'report'}"]
+    code, report, output = run(
+        scan, monkeypatch, capsys, sources, states=[f"resources={folder / 'manifest.json'}"], key=key
+    )
+    assert code == 1 and report["verdict"] == "leak" and report["leaks"][0]["where"] == where
+    expected = (
+        ["resources/manifest.json.spec.json"]
+        if where == "content"
+        else ["resources/manifest.json", "resources/manifest.json.spec.json"]
+    )
+    assert [p for p in run.published() if p.startswith("resources/")] == expected, (
+        "le fichier contaminé est exclu, les autres restent publiables"
+    )
+    for text in (output, json.dumps(report)):
+        assert key not in text, "ni valeur ni forme dans les sorties"
+    assert not any(key in p for p in run.published())
+    assert (folder / "manifest.json").exists() and not run.quarantine.exists(), (
+        "jamais déplacés : le nettoyage autonome en dépend"
+    )
+    assert any(key in p.name for p in folder.iterdir()) or where == "content"
+
+
+def test_a_link_a_directory_or_a_missing_directory_is_an_explicit_incomplete_analysis(
+    scan, run, monkeypatch, capsys, tmp_path
+):
+    folder = _state(tmp_path)
+    (folder / "manifest.json.link").symlink_to("/etc/hostname")
+    code, report, _ = run(
+        scan, monkeypatch, capsys, [f"report={folder / 'report'}"], states=[f"resources={folder / 'manifest.json'}"]
+    )
+    assert (
+        code == 2
+        and report["verdict"] == "incomplete"
+        and report["unreadable"][0]["reason"] == "lien ou objet irrégulier"
+    )
+    assert "resources/manifest.json.link" not in run.published() and (folder / "manifest.json.link").is_symlink()
+
+    (folder / "manifest.json.link").unlink()
+    (folder / "manifest.json.dir").mkdir()
+    code, report, _ = run(
+        scan, monkeypatch, capsys, [f"report={folder / 'report'}"], states=[f"resources={folder / 'manifest.json'}"]
+    )
+    assert code == 2 and "resources/manifest.json.dir" not in run.published()
+
+    code, report, _ = run(
+        scan,
+        monkeypatch,
+        capsys,
+        [f"report={folder / 'report'}"],
+        states=[f"resources={tmp_path / 'absent' / 'manifest.json'}"],
+    )
+    assert code == 2 and report["verdict"] == "incomplete", "dossier absent : jamais « clean »"
+
+
+def test_an_absent_state_file_is_recorded_as_zero_not_as_an_error_and_the_key_may_be_assumed_absent(
+    scan, run, monkeypatch, capsys, tmp_path
+):
+    folder = tmp_path / "w5"
+    (folder / "report").mkdir(parents=True)
+    (folder / "report" / "preflight.json").write_text("{}")
+    code, report, _ = run(
+        scan,
+        monkeypatch,
+        capsys,
+        [f"report={folder / 'report'}"],
+        states=[f"resources={folder / 'manifest.json'}"],
+        key=None,
+        no_key=True,
+    )
+    assert code == 0 and report["state_files"] == {"resources": 0} and run.published() == ["report/preflight.json"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [["--state-file", "resources="], ["--state-file", "=x"], ["--state-file", "pas-de-egal"]],
+    ids=["empty-path", "empty-label", "no-equal-sign"],
+)
+def test_a_malformed_state_argument_is_refused_before_any_scan(scan, tmp_path, monkeypatch, arguments):
+    monkeypatch.setenv("W5_TEST_KEY", KEY)
+    (tmp_path / "src").mkdir()
+    argv = [
+        "--quarantine",
+        str(tmp_path / "q"),
+        "--stage",
+        str(tmp_path / "pub"),
+        "--report",
+        str(tmp_path / "r.json"),
+        "--env",
+        "W5_TEST_KEY",
+    ]
+    with pytest.raises(SystemExit) as refused:
+        scan.main(argv + ["--source", f"report={tmp_path / 'src'}"] + arguments)
+    assert refused.value.code == 2 and not (tmp_path / "pub").exists()
+
+
+def test_the_stage_quarantine_and_report_may_not_collide_with_a_state_file_or_its_siblings(
+    scan, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("W5_TEST_KEY", KEY)
+    folder = _state(tmp_path)
+    base = [
+        "--env",
+        "W5_TEST_KEY",
+        "--source",
+        f"report={folder / 'report'}",
+        "--state-file",
+        f"resources={folder / 'manifest.json'}",
+    ]
+    for stage, quarantine, report in (
+        (folder / "manifest.json.stage", tmp_path / "q", tmp_path / "r.json"),
+        (tmp_path / "pub", folder / "manifest.json.q", tmp_path / "r.json"),
+        (tmp_path / "pub", tmp_path / "q", folder / "manifest.json.report.json"),
+        (folder / "manifest.json", tmp_path / "q", tmp_path / "r.json"),
+    ):
+        code = scan.main(["--stage", str(stage), "--quarantine", str(quarantine), "--report", str(report), *base])
+        assert code == 2, (stage, quarantine, report)
+        capsys.readouterr()
+    assert (folder / "manifest.json").read_text() == '{"project_id": 77}'

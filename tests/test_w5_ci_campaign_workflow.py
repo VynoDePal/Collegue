@@ -161,6 +161,9 @@ def test_the_campaign_runs_once_and_a_leaked_key_invalidates_it(job):
         "ensemble publiable construit par le scanner"
     )
     assert '--source "report=$W4_REPORT_DIR"' in run and '--source "registry=$COLLEGUE_HOME::*.sqlite3*"' in run
+    assert '--state-file "resources=$COLLEGUE_NIGHTLY_MANIFEST"' in run, (
+        "les identités de ressources passent par le MÊME scanner (manifeste nightly et frères), jamais par un téléversement direct"
+    )
     assert 'if [ "$scan" -ne 0 ]; then status=1; fi' in run, "toute fuite ou analyse incomplète rend la campagne rouge"
     assert run.rstrip().endswith('exit "$status"'), "le code de retour de la campagne est conservé"
 
@@ -173,12 +176,16 @@ def test_cleanup_always_runs_with_the_fixture_token_only_and_only_the_verified_s
     assert [u["with"]["name"] for u in uploads] == [
         "w5-business-report",
         "w5-business-registry",
+        "w5-business-resources",
         "w5-business-diagnostic",
     ]
     assert all(u["if"] == "always()" for u in uploads)
     paths = {u["with"]["name"]: u["with"]["path"] for u in uploads}
     assert paths["w5-business-report"] == "${{ env.W5_PUBLISH }}/report"
     assert paths["w5-business-registry"] == "${{ env.W5_PUBLISH }}/registry"
+    assert paths["w5-business-resources"] == "${{ env.W5_PUBLISH }}/resources", (
+        "instantané SCANNÉ des identités de ressources"
+    )
     assert paths["w5-business-diagnostic"] == "${{ env.W5_DIAG }}"
     # JAMAIS un répertoire source (rapport vivant, registre vivant) : ce que le nettoyage ou une commande interrompue écrivent n'est pas publié
     for path in paths.values():
@@ -194,6 +201,9 @@ def test_the_publishable_set_is_built_only_by_the_scanner_and_a_skipped_campaign
         "preuve positive : l'étape qui reçoit la clé n'a pas tourné"
     )
     assert "--assume-no-key" in skipped["run"] and "--env" not in skipped["run"] and "env" not in skipped
+    assert '--state-file "resources=$COLLEGUE_NIGHTLY_MANIFEST"' in skipped["run"], (
+        "même source d'état, jamais le dossier"
+    )
     campaign = step_named(job, "Campagne réelle")
     assert "w5_leak_scan.py --env LLM_API_KEY" in campaign["run"]
     for step in job["steps"]:
@@ -266,7 +276,11 @@ def test_the_campaign_uses_the_audited_broker_image_and_builds_it_before_the_ful
 # ── exécution RÉELLE du script bash de l'étape de campagne (le produit est remplacé par une doublure) ──────────────────────────────
 
 
-def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into, name_leak=False):
+STATE_FILES = {"manifest.json": '{"project_id": 77}', "manifest.json.spec.json": '{"spec_pr": 42}'}
+STATE_PUBLISHED = ["resources/manifest.json", "resources/manifest.json.spec.json"]
+
+
+def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into, name_leak=False, state_hook="", with_state=True):
     import os
     import subprocess
     import sys
@@ -282,6 +296,9 @@ def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into, name_leak=False
         '  printf "registre" > "$COLLEGUE_HOME/camp.sqlite3"; printf "workspace" > "$COLLEGUE_HOME/workspace.txt"\n'
         '  if [ -n "$FAKE_LEAK_INTO" ]; then printf "xx%s\\0yy" "$LLM_API_KEY" > "$FAKE_LEAK_INTO"; fi\n'
         '  if [ -n "$FAKE_NAME_LEAK" ]; then echo x > "$W4_REPORT_DIR/$LLM_API_KEY.log"; fi\n'
+        '  if [ -n "$FAKE_STATE" ]; then printf \'{"project_id": 77}\' > "$COLLEGUE_NIGHTLY_MANIFEST"; '
+        'printf \'{"spec_pr": 42}\' > "$COLLEGUE_NIGHTLY_MANIFEST.spec.json"; fi\n'
+        '  if [ -n "$FAKE_STATE_HOOK" ]; then eval "$FAKE_STATE_HOOK"; fi\n'
         '  exit "$FAKE_RC"\n'
         "fi\n"
         f'exec {sys.executable} "$@"\n',
@@ -302,7 +319,10 @@ def _run_campaign_step(job, tmp_path, *, campaign_rc, leak_into, name_leak=False
         "W5_DIAG": str(root / "diagnostic"),
         "W5_QUARANTINE": str(root / "quarantine"),
         "W4_BUSINESS_CAMPAIGN_ID": "w5-test-001",
+        "COLLEGUE_NIGHTLY_MANIFEST": str(root / "manifest.json"),
         "LLM_API_KEY": key,
+        "FAKE_STATE": "1" if with_state else "",
+        "FAKE_STATE_HOOK": state_hook,
         "FAKE_RC": str(campaign_rc),
         "FAKE_LEAK_INTO": str(leak_into(report, home)) if leak_into else "",
         "FAKE_NAME_LEAK": "1" if name_leak else "",
@@ -326,42 +346,42 @@ def _published(root):
             None,
             False,
             0,
-            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt"],
+            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt", *STATE_PUBLISHED],
         ),  # sain : tout est publié
         (
             3,
             None,
             False,
             3,
-            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt"],
+            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt", *STATE_PUBLISHED],
         ),  # code de retour conservé
         (
             0,
             lambda r, h: r / "campaign.txt",
             False,
             1,
-            ["registry/camp.sqlite3", "report/campaign.json"],
+            ["registry/camp.sqlite3", "report/campaign.json", *STATE_PUBLISHED],
         ),  # fuite dans un rapport
         (
             0,
             lambda r, h: h / "camp.sqlite3",
             False,
             1,
-            ["report/campaign.json", "report/campaign.txt"],
+            ["report/campaign.json", "report/campaign.txt", *STATE_PUBLISHED],
         ),  # fuite dans le registre BINAIRE
         (
             3,
             lambda r, h: r / "campaign.txt",
             False,
             1,
-            ["registry/camp.sqlite3", "report/campaign.json"],
+            ["registry/camp.sqlite3", "report/campaign.json", *STATE_PUBLISHED],
         ),  # fuite + code non nul
         (
             0,
             None,
             True,
             1,
-            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt"],
+            ["registry/camp.sqlite3", "report/campaign.json", "report/campaign.txt", *STATE_PUBLISHED],
         ),  # fuite dans un NOM de fichier
     ],
 )
@@ -408,9 +428,164 @@ def test_a_crashing_scanner_or_a_missing_key_never_publishes_an_unverified_file(
         "W5_DIAG": str(root / "diagnostic"),
         "W5_QUARANTINE": str(root / "quarantine"),
         "W4_BUSINESS_CAMPAIGN_ID": "w5-test-001",
+        "COLLEGUE_NIGHTLY_MANIFEST": str(root / "manifest.json"),
         "LLM_API_KEY": "FAKE-crash-key-0123456789",
     }
     done = subprocess.run(
         ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60
     )
     assert done.returncode != 0 and _published(root) == []
+
+
+# ── identités de ressources : conservées par le scanner de confiance (reprise du nettoyage après destruction du runner) ──────────────
+
+
+def test_the_resource_identities_are_scanned_staged_and_uploaded_while_the_source_files_stay_in_place(job, tmp_path):
+    done, root, key = _run_campaign_step(job, tmp_path, campaign_rc=0, leak_into=None)
+    assert done.returncode == 0, done.stdout + done.stderr
+    for name, content in STATE_FILES.items():
+        assert (root / "publish" / "resources" / name).read_text() == content
+        assert (root / name).read_text() == content, "lus seulement : le nettoyage autonome qui suit en a besoin"
+    scan = json.loads((root / "diagnostic" / "leak-scan.json").read_text())
+    assert scan["state_files"] == {"resources": 2} and scan["snapshot_utc"].endswith("+00:00"), (
+        "instant de l'instantané consigné, nombre de fichiers d'état consigné"
+    )
+    assert not any(name in _published(root) for name in ("home/workspace.txt",)) and "workspace.txt" not in "".join(
+        _published(root)
+    )
+
+
+def test_nothing_but_the_manifest_and_its_dotted_siblings_is_ever_published_from_the_state_directory(job, tmp_path):
+    hook = (
+        'echo x > "$(dirname "$COLLEGUE_NIGHTLY_MANIFEST")/manifest.jsonx"; '
+        'echo x > "$(dirname "$COLLEGUE_NIGHTLY_MANIFEST")/autre.json"; '
+        'mkdir -p "$(dirname "$COLLEGUE_NIGHTLY_MANIFEST")/pip-cache" && echo x > "$(dirname "$COLLEGUE_NIGHTLY_MANIFEST")/pip-cache/manifest.json"; '
+        'echo 1 > "$COLLEGUE_NIGHTLY_MANIFEST.owned.json"'
+    )
+    done, root, _ = _run_campaign_step(job, tmp_path, campaign_rc=0, leak_into=None, state_hook=hook)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert [p for p in _published(root) if p.startswith("resources/")] == [
+        "resources/manifest.json",
+        "resources/manifest.json.owned.json",
+        "resources/manifest.json.spec.json",
+    ], (
+        "le manifeste et ses frères ``manifest.json.*`` (contrat de noms de B27 : suffixes ajoutés), jamais le reste du dossier ni un sous-dossier"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hook", "published_state"),
+    [
+        ('printf "%s" "$LLM_API_KEY" > "$COLLEGUE_NIGHTLY_MANIFEST"', ["resources/manifest.json.spec.json"]),
+        (
+            'printf "xx%s\\0yy" "$LLM_API_KEY" > "$COLLEGUE_NIGHTLY_MANIFEST.spec.json"',
+            ["resources/manifest.json"],
+        ),
+        (
+            'echo x > "$COLLEGUE_NIGHTLY_MANIFEST.$LLM_API_KEY"',
+            ["resources/manifest.json", "resources/manifest.json.spec.json"],
+        ),
+    ],
+    ids=["key-in-manifest", "key-in-spec-record", "key-in-a-sibling-name"],
+)
+def test_a_key_in_a_resource_state_file_or_its_name_turns_the_run_red_and_is_never_published_nor_displayed(
+    job, tmp_path, hook, published_state
+):
+    done, root, key = _run_campaign_step(job, tmp_path, campaign_rc=0, leak_into=None, state_hook=hook)
+    assert done.returncode == 1, done.stdout + done.stderr
+    published = _published(root)
+    assert [p for p in published if p.startswith("resources/")] == published_state, (
+        "le fichier contaminé (contenu ou nom) est exclu de l'ensemble publiable ; les autres restent publiables"
+    )
+    assert key not in "".join(published) and not any(
+        key in (root / "publish" / name).read_text(errors="ignore") for name in published
+    )
+    assert key not in done.stdout + done.stderr + (root / "diagnostic" / "leak-scan.json").read_text()
+    assert (root / "manifest.json").exists() and (root / "manifest.json.spec.json").exists(), (
+        "jamais déplacés en quarantaine : le nettoyage autonome en dépend"
+    )
+    assert not (root / "quarantine").exists() or not any((root / "quarantine").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("hook", "refused"),
+    [
+        (
+            'rm "$COLLEGUE_NIGHTLY_MANIFEST.spec.json" && ln -s /etc/hostname "$COLLEGUE_NIGHTLY_MANIFEST.spec.json"',
+            "manifest.json.spec.json",
+        ),
+        ('mkdir "$COLLEGUE_NIGHTLY_MANIFEST.dir"', "manifest.json.dir"),
+        ('chmod 000 "$COLLEGUE_NIGHTLY_MANIFEST.spec.json"', "manifest.json.spec.json"),
+    ],
+    ids=["symlink", "directory", "unreadable"],
+)
+def test_a_link_a_directory_or_an_unreadable_state_file_fails_explicitly_and_is_not_published(
+    job, tmp_path, hook, refused
+):
+    import os
+
+    if os.geteuid() == 0 and "chmod" in hook:
+        pytest.skip("root lit tout : le cas illisible n'est pas éprouvable")
+    done, root, _ = _run_campaign_step(job, tmp_path, campaign_rc=0, leak_into=None, state_hook=hook)
+    assert done.returncode == 1, done.stdout + done.stderr
+    scan = json.loads((root / "diagnostic" / "leak-scan.json").read_text())
+    assert scan["verdict"] == "incomplete" and scan["unreadable"], "échec explicite, jamais « clean »"
+    assert f"resources/{refused}" not in _published(root)
+    assert os.path.lexists(root / refused), "jamais déplacé ni supprimé : le nettoyage autonome en dépend"
+
+
+def test_a_path_added_after_the_scan_is_not_in_the_artifact_and_the_snapshot_keeps_the_scanned_content(job, tmp_path):
+    done, root, _ = _run_campaign_step(job, tmp_path, campaign_rc=0, leak_into=None)
+    assert done.returncode == 0
+    before = {p: (root / "publish" / p).read_text() for p in _published(root)}
+    (root / "manifest.json").write_text('{"project_id": 77, "after": "cleanup"}')
+    (root / "manifest.json.late.json").write_text("{}")
+    assert {p: (root / "publish" / p).read_text() for p in _published(root)} == before
+    assert "resources/manifest.json.late.json" not in _published(root), (
+        "un fichier apparu après le scan n'est pas dans l'artefact"
+    )
+
+
+def test_a_campaign_that_did_not_start_admits_an_absent_state_file_only_as_no_resource_created(job, tmp_path):
+    import os
+    import subprocess
+
+    step = step_named(job, "Préparer les artefacts publiables")
+    root = tmp_path / "w5"
+    for folder in ("report", "home", "diagnostic"):
+        (root / folder).mkdir(parents=True)
+    (root / "report" / "preflight-static.json").write_text("{}")
+    env = {
+        "PATH": os.environ["PATH"],
+        "W4_REPORT_DIR": str(root / "report"),
+        "COLLEGUE_HOME": str(root / "home"),
+        "W5_PUBLISH": str(root / "publish"),
+        "W5_DIAG": str(root / "diagnostic"),
+        "W5_QUARANTINE": str(root / "quarantine"),
+        "COLLEGUE_NIGHTLY_MANIFEST": str(root / "manifest.json"),
+    }
+    done = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    scan = json.loads((root / "diagnostic" / "leak-scan.json").read_text())
+    assert scan["state_files"] == {"resources": 0} and scan["verdict"] == "clean", (
+        "absence consignée, pas une erreur : aucune ressource créée"
+    )
+    assert _published(root) == ["report/preflight-static.json"]
+    # un état présent est scanné et conservé comme dans l'étape de campagne
+    (root / "manifest.json").write_text('{"project_id": 1}')
+    done = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 0 and "resources/manifest.json" in _published(root)
+
+
+def test_a_missing_state_variable_fails_the_scan_instead_of_silently_dropping_the_resource_identities(job, tmp_path):
+    step = step_named(job, "Campagne réelle")
+    broken = step["run"].replace("$COLLEGUE_NIGHTLY_MANIFEST", "")
+    assert broken != step["run"]
+    done, root, _ = _run_campaign_step({"steps": [{**step, "run": broken}]}, tmp_path, campaign_rc=0, leak_into=None)
+    assert done.returncode != 0 and "FICHIER" in done.stderr and _published(root) == [], (
+        "paramètre vide refusé, rien de publié"
+    )

@@ -20,6 +20,14 @@ Codes de sortie : 0 = tout vérifié et publié ; 1 = fuite trouvée (fichiers c
 incomplète (clé absente ou trop courte, source absente, parcours ou lecture en erreur, quarantaine ou copie impossible). Non nul ⇒ campagne
 rouge. ``--assume-no-key`` (réservé à une campagne NON lancée : la clé n'a jamais existé dans l'environnement) ne cherche rien mais applique
 les mêmes règles de nature (fichiers réguliers seulement) et la même construction atomique.
+
+**Fichiers d'état de ressources** (``--state-file LABEL=FICHIER``) : le manifeste nightly de la campagne et ses frères ``FICHIER.*`` (enregistrement de la
+SPEC, propriété, reprise) portent les identités des ressources distantes créées ; elles sont nécessaires à un nettoyage sûr après la destruction du runner.
+Ils sont scannés et copiés comme le reste (même ensemble publiable, ``stage/<étiquette>/``) mais : le parcours est NON récursif (seulement le fichier et
+``FICHIER.*`` du même dossier, jamais le reste du dossier), ils ne sont JAMAIS déplacés ni supprimés (le nettoyage autonome qui suit les relit), et un
+fichier qui fuit (contenu ou nom), un lien, un objet irrégulier ou une lecture en erreur est exclu et rend l'analyse rouge. L'absence de tout fichier est
+consignée (``state_files: {étiquette: 0}``), pas une erreur. Le rapport porte ``snapshot_utc`` : l'instant de l'instantané, pris avant les dernières
+suppressions (un nettoyage repris doit réconcilier une ressource déjà absente).
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ import shutil
 import stat
 import sys
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -166,6 +175,7 @@ class _Scan:
             "unreadable": [],
             "irregular_removed": [],
             "quarantine_failures": [],
+            "state_files": {},
         }
 
     def shown(self, relative: str) -> str:
@@ -235,7 +245,39 @@ class _Scan:
                 continue
             self.file(label, path, anchor, relative)
 
-    def file(self, label: str, path: Path, anchor: Path, relative: str) -> None:
+    def walk_state(self, label: str, state: Path) -> None:
+        """Fichier d'état de ressources ``state`` et ses FRÈRES ``state.*`` (même dossier, JAMAIS récursif) : identités nécessaires à un nettoyage
+        après la destruction du runner. Ils sont LUS seulement : jamais déplacés ni supprimés (le nettoyage autonome qui suit en a besoin) ; un
+        fichier qui fuit, un nom qui fuit, un lien, un objet irrégulier ou une lecture en erreur est EXCLU de l'ensemble publiable et rend l'analyse
+        rouge. L'absence de tout fichier est consignée (``state_files``), pas une erreur : elle ne dit pas qu'aucune ressource n'existe."""
+        directory, base = state.parent, state.name
+        found = 0
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            self.fail(label, ".", type(exc).__name__)
+            return
+        for entry in entries:
+            if not (entry.name == base or entry.name.startswith(base + ".")):
+                continue
+            found += 1
+            path, relative = Path(entry.path), entry.name
+            if self.forms and name_leak(entry.name, self.forms):
+                self.leak(label, relative, name_leak(entry.name, self.forms), "name")
+                continue
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except OSError as exc:
+                self.fail(label, relative, type(exc).__name__)
+                continue
+            if not stat.S_ISREG(mode):
+                self.fail(label, relative, "lien ou objet irrégulier")
+                continue
+            self.file(label, path, directory, relative, move=False)
+        self.report["state_files"][label] = found
+
+    def file(self, label: str, path: Path, anchor: Path, relative: str, *, move: bool = True) -> None:
         destination = (self.stage / label / relative) if self.stage else None
         temporary = (self.temp / (opaque(label, relative) + ".part")) if self.temp else None
         try:
@@ -247,11 +289,13 @@ class _Scan:
             self.report["scanned_bytes"] += path.stat().st_size
         except OSError as exc:
             self.fail(label, relative, type(exc).__name__)
-            self.quarantine_entry(path, anchor, label, relative)
+            if move:
+                self.quarantine_entry(path, anchor, label, relative)
             return
         if found:
             self.leak(label, relative, found, "content", path.stat().st_size)
-            self.quarantine_entry(path, anchor, label, relative)
+            if move:
+                self.quarantine_entry(path, anchor, label, relative)
         elif destination is not None:
             self.report["staged_files"] += 1
 
@@ -271,8 +315,11 @@ def scan_tree(
     stage: Optional[Path] = None,
     labels: Optional[Sequence[str]] = None,
     globs: Optional[Sequence[Optional[str]]] = None,
+    states: Sequence[Tuple[str, Path]] = (),
 ) -> Tuple[Dict[str, Any], int]:
-    """Analyse ``roots`` ; avec ``stage``, construit l'ensemble publiable (``stage/<étiquette>/…``) de fichiers vérifiés et copiés."""
+    """Analyse ``roots`` ; avec ``stage``, construit l'ensemble publiable (``stage/<étiquette>/…``) de fichiers vérifiés et copiés.
+
+    ``states`` : ``(étiquette, fichier)`` d'ÉTAT de ressources (voir :meth:`_Scan.walk_state`) — le fichier et ses frères ``fichier.*``, lus sans être déplacés."""
     scan = _Scan(key, quarantine, chunk_size, stage)
     for index, root in enumerate(roots):
         label = labels[index] if labels else f"root{index}"
@@ -283,8 +330,13 @@ def scan_tree(
         if stage is not None:
             (stage / label).mkdir(parents=True, exist_ok=True)
         scan.walk(label, root, root, glob)
+    for label, state in states:
+        if stage is not None:
+            (stage / label).mkdir(parents=True, exist_ok=True)
+        scan.walk_state(label, state)
     if scan.report["quarantine_failures"]:
         scan.code = 2
+    scan.report["snapshot_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return scan.report, scan.code
 
 
@@ -294,6 +346,13 @@ def _parse_source(spec: str) -> Tuple[str, Path, Optional[str]]:
     if not label or not path or not label.replace("-", "").replace("_", "").isalnum():
         raise argparse.ArgumentTypeError("--source LABEL=DIR[::GLOB]")
     return label, Path(path), (glob or None)
+
+
+def _parse_state(spec: str) -> Tuple[str, Path]:
+    label, _, path = spec.partition("=")
+    if not label or not path or not label.replace("-", "").replace("_", "").isalnum():
+        raise argparse.ArgumentTypeError("--state-file LABEL=FICHIER")
+    return label, Path(path)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -313,6 +372,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--source", action="append", required=True, type=_parse_source, help="LABEL=DIR[::GLOB]")
+    parser.add_argument(
+        "--state-file",
+        action="append",
+        default=[],
+        type=_parse_state,
+        help="LABEL=FICHIER : fichier d'ÉTAT de ressources et ses frères FICHIER.* (même dossier, non récursif), lus sans jamais être déplacés",
+    )
     args = parser.parse_args(argv)
     if bool(args.env) == bool(args.assume_no_key):
         print("w5_leak_scan: exactement un de --env ou --assume-no-key est requis", file=sys.stderr)
@@ -339,7 +405,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
+    for _label, state in args.state_file:
+        resolved = state.resolve()
+        if any(p == resolved or resolved in p.parents or p in resolved.parents for p in (quarantine, stage)):
+            print(
+                "w5_leak_scan: quarantaine et ensemble publiable doivent être hors des fichiers d'état", file=sys.stderr
+            )
+            return 2
+        if any(
+            p.parent == resolved.parent and (p.name == resolved.name or p.name.startswith(resolved.name + "."))
+            for p in (quarantine, stage, args.report.resolve())
+        ):
+            print(
+                "w5_leak_scan: la quarantaine, l'ensemble publiable et le rapport ne peuvent pas porter le nom d'un fichier d'état",
+                file=sys.stderr,
+            )
+            return 2
     labels = [label for label, _p, _g in args.source]
+    if len(set(labels + [label for label, _s in args.state_file])) != len(labels) + len(args.state_file):
+        print("w5_leak_scan: étiquettes de sources en double", file=sys.stderr)
+        return 2
     report, code = scan_tree(
         [path for _l, path, _g in args.source],
         key,
@@ -348,6 +433,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         stage=stage,
         labels=labels,
         globs=[glob for _l, _p, glob in args.source],
+        states=args.state_file,
     )
     report["verdict"] = {0: "clean", 1: "leak", 2: "incomplete"}[code]
     report["key_proof"] = "env" if key else "no-key-assumed"

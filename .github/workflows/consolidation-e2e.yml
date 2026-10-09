@@ -195,7 +195,8 @@ jobs:
           # le SEUL ensemble publiable ($W5_PUBLISH) : un fichier n'y entre qu'après avoir été lu, vérifié et copié dans le même passage.
           python scripts/w5_leak_scan.py --env LLM_API_KEY --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
             --report "$W5_DIAG/leak-scan.json" \
-            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*"
+            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*" \
+            --state-file "resources=$COLLEGUE_NIGHTLY_MANIFEST"
           scan=$?
           set -e
           if [ "$scan" -ne 0 ]; then status=1; fi
@@ -216,7 +217,8 @@ jobs:
         run: |
           python scripts/w5_leak_scan.py --assume-no-key --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
             --report "$W5_DIAG/leak-scan.json" \
-            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*"
+            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*" \
+            --state-file "resources=$COLLEGUE_NIGHTLY_MANIFEST"
 
       # Diagnostic minimal SÛR, jamais dérivé d'un fichier : seulement les issues des étapes (valeurs énumérées par GitHub) et des
       # identifiants validés. Il est déposé même si le scanner a planté ou si la commande a été interrompue.
@@ -249,6 +251,19 @@ jobs:
         with:
           name: w5-business-registry
           path: ${{ env.W5_PUBLISH }}/registry
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Identités de ressources de CE run (manifeste nightly et frères ``manifest.json.*`` : matérialisation de la SPEC, propriété/reprise), scannées par
+      # le même scanner de confiance. INSTANTANÉ pris par l'étape de campagne, AVANT le nettoyage autonome qui la suit (date : `snapshot_utc` du rapport du scanner) : il
+      # contient les identités AVANT les dernières suppressions (un nettoyage repris doit réconcilier une ressource déjà absente) et n'affirme jamais
+      # qu'un nettoyage a réussi. Campagne non lancée : pris par l'étape de préparation (aucune ressource n'a pu être créée ; fichier absent = aucune). Jamais le dossier source.
+      - name: Déposer les identités de ressources de la campagne (instantané scanné, reprise du nettoyage)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-business-resources
+          path: ${{ env.W5_PUBLISH }}/resources
           if-no-files-found: warn
           retention-days: 30
 
