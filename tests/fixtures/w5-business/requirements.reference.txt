@@ -1,0 +1,9 @@
+fastapi==0.141.1
+uvicorn==0.54.0
+httpx==0.28.1
+sqlalchemy==2.1.4
+alembic==1.20.0
+pypdf==6.19.0
+reportlab==5.0.1
+python-multipart==0.0.32
+pytest==9.1.1

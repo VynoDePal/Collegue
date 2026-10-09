@@ -20,6 +20,12 @@ base distante (même arbre que la base testée), publie, lit l'objet commit dist
 soit exactement l'arbre testé (fichier omis, suppression en trop, mode perdu ⇒ refus), puis lie et PERSISTE la preuve
 (:mod:`collegue.executor.delivery_proof`) sur ``head_sha``. Une PR préexistante de même nom de branche n'est
 réutilisée que si sa tête a ce même arbre.
+
+**Contrôles de la fixture de campagne (W5)** : sur le dépôt fixture et ses bases ``collegue-business/*`` (identification sans drapeau, voir
+:mod:`collegue.pilot.w5_business_policy`), la publication est refusée AVANT la première écriture distante si le contenu testé, le
+payload à pousser ou la tête d'une PR préexistante touchent ``.github/`` ou ``ci/`` par rapport au socle de confiance. Une tête hostile
+publiée, même brièvement, pourrait exécuter son workflow avec un jeton Actions : la barrière avant fusion seule serait trop tardive.
+Hors campagne, aucun changement de comportement.
 """
 
 from __future__ import annotations
@@ -397,6 +403,17 @@ def open_pr(
         # AVANT toute écriture : la base distante doit avoir l'arbre de la base sur laquelle les contrôles ont tourné.
         remote_base = verify_remote_base(clients.branches, owner, repo, base, content)
 
+    # Fixture de campagne : AUCUN contrôle (.github/, ci/) ne se publie par ce chemin. Lectures seules, AVANT ensure_branch, toute
+    # écriture Git/Contents et toute création de PR ; preuve indisponible = refus. Hors campagne : sans effet.
+    controls_anchor = None
+    if verify:
+        from collegue.pilot import w5_business_policy as _policy
+
+        if _policy.applies(owner, repo, base):
+            controls_anchor = _assert_publication_controls(
+                workspace, snapshot, content, clients, owner, repo, remote_base
+            )
+
     existing = clients.prs.find_pr_by_head(owner, repo, head, base=base)
     if existing is not None:
         proof = None
@@ -419,6 +436,8 @@ def open_pr(
                 content=content,
                 remote_base_sha=remote_base.sha,
             )
+            if controls_anchor is not None:
+                _assert_remote_head_controls(clients, owner, repo, str(existing_head), controls_anchor)
             proof = seal_proof(
                 draft,
                 owner=owner,
@@ -442,14 +461,28 @@ def open_pr(
             head_sha=None if existing_head is None else str(existing_head),
         )
 
-    clients.branches.ensure_branch(owner, repo, head, from_branch=base)
+    # Campagne : une branche de tête préexistante SANS PR ouverte est examinée avant toute écriture (voir ``_inspect_destination_branch``).
+    resumed = False
+    if controls_anchor is not None:
+        resumed = _inspect_destination_branch(clients, owner, repo, head, remote_base, content, controls_anchor)
 
-    for item in snapshot.files:
-        message = f"collegue: issue #{int(issue.number)} — {item.path}"
-        if item.operation == DELIVERY_UPDATE:
-            clients.files.update_file(owner, repo, item.path, message, item.content or "", branch=head)
-        elif item.operation == DELIVERY_DELETE:
-            clients.files.delete_file(owner, repo, item.path, message, branch=head)
+    if not resumed:
+        branch_info = clients.branches.ensure_branch(owner, repo, head, from_branch=base)
+        if controls_anchor is not None:
+            # ``ensure_branch`` peut RETOURNER une branche apparue entre l'examen et la création (course) : jamais de réutilisation aveugle.
+            landed = str(getattr(branch_info, "commit_sha", "") or "").lower()
+            if landed != remote_base.sha:
+                raise DeliveryRefusedError(
+                    f"LIVRAISON REFUSÉE — la branche de tête '{head}' n'est pas sur la base validée après sa création ({landed[:12] or '?'} "
+                    f"≠ {remote_base.sha[:12]}) : branche apparue pendant la création ou base déplacée ; aucun contenu n'y est écrit."
+                )
+
+        for item in snapshot.files:
+            message = f"collegue: issue #{int(issue.number)} — {item.path}"
+            if item.operation == DELIVERY_UPDATE:
+                clients.files.update_file(owner, repo, item.path, message, item.content or "", branch=head)
+            elif item.operation == DELIVERY_DELETE:
+                clients.files.delete_file(owner, repo, item.path, message, branch=head)
 
     head_sha = None
     if verify:
@@ -460,6 +493,10 @@ def open_pr(
         verify_remote_head(
             clients.branches, owner, repo, head_sha=head_sha, content=content, remote_base_sha=remote_base.sha
         )
+        if (
+            controls_anchor is not None
+        ):  # défense en profondeur : le payload RÉELLEMENT publié, relu sur l'arbre distant
+            _assert_remote_head_controls(clients, owner, repo, head_sha, controls_anchor)
 
     pr = clients.prs.create_pr(owner, repo, title, head, base, body)
     number = getattr(pr, "number", None)
@@ -510,6 +547,116 @@ def open_pr(
         html_url=html_url,
         proof=proof,
         head_sha=head_sha,
+    )
+
+
+def _local_protected_rows(workspace: Workspace, content: TestedContent, policy) -> Tuple[dict, dict]:
+    """Objets protégés de la base testée et du contenu testé, lus dans le Git de CONTRÔLE de l'hôte (jamais le ``.git`` de l'agent)."""
+    from collegue.executor.git_boundary import TrustedGit, WorkspaceError
+
+    repo = TrustedGit.locate(workspace.path)
+    if repo is None:
+        raise policy.PolicyRefusal(
+            "workspace sans répertoire de contrôle Git : contenu testé invérifiable, publication refusée",
+            kind="unavailable",
+        )
+
+    def rows(tree: str) -> dict:
+        try:
+            out = repo.must("ls-tree", "-r", "-z", "--full-tree", tree, what="lecture de l'arbre pour les contrôles")
+        except WorkspaceError as exc:
+            raise policy.PolicyRefusal(f"arbre {tree[:12]} illisible : {exc}", kind="unavailable") from exc
+        found: dict = {}
+        for record in out.split("\0"):
+            if not record:
+                continue
+            meta, _, path = record.partition("\t")
+            mode, _kind, sha = meta.split(" ")
+            found[path] = (mode, sha.lower())
+        return policy.select_protected(found)
+
+    return rows(content.base_tree_sha), rows(content.tree_sha)
+
+
+def _assert_publication_controls(
+    workspace: Workspace,
+    snapshot: DeliverySnapshot,
+    content: TestedContent,
+    clients: PrClients,
+    owner: str,
+    repo: str,
+    remote_base,
+):
+    """Garde de publication de la fixture de campagne : à appeler AVANT toute écriture distante. Retourne l'ancre de confiance."""
+    from collegue.pilot import w5_business_policy as policy
+
+    try:
+        anchor = policy.load_trust_anchor(clients.branches, owner, repo, os.environ.get(policy.TRUST_ANCHOR_ENV))
+        remote = policy.select_protected(policy.read_remote_rows(clients.branches, owner, repo, remote_base.tree_sha))
+        local_base, tested = _local_protected_rows(workspace, content, policy)
+        policy.assert_publication_clean(
+            anchor=anchor.rows, remote_base=remote, local_base=local_base, tested=tested, payload_paths=snapshot.paths
+        )
+    except policy.PolicyRefusal as refused:
+        if refused.kind == "transient":  # panne de l'API : rien n'a été écrit, la livraison est refusée MAIS retentable
+            raise DeliveryRemoteError(
+                f"LIVRAISON REFUSÉE (contrôles de la fixture illisibles) — {refused.reason}"
+            ) from refused
+        raise DeliveryRefusedError(f"LIVRAISON REFUSÉE — {refused.reason}") from refused
+    return anchor
+
+
+def _assert_remote_head_controls(clients: PrClients, owner: str, repo: str, head_sha: str, anchor) -> None:
+    """Relit les contrôles de la tête DISTANTE (PR préexistante ou tête publiée) : une publication antérieure ne la rend pas sûre."""
+    from collegue.pilot import w5_business_policy as policy
+
+    try:
+        tree = clients.branches.get_git_commit(owner, repo, head_sha).tree_sha
+        policy.assert_remote_head_clean(clients.branches, owner, repo, head_tree_sha=tree, anchor=anchor.rows)
+    except policy.PolicyRefusal as refused:
+        if refused.kind == "transient":
+            raise DeliveryRemoteError(
+                f"LIVRAISON REFUSÉE (contrôles de la tête illisibles) — {refused.reason}"
+            ) from refused
+        raise DeliveryRefusedError(f"LIVRAISON REFUSÉE — {refused.reason}") from refused
+    except Exception as exc:  # noqa: BLE001 - tête distante illisible = refus
+        raise DeliveryRemoteError(f"contrôles de la tête distante {head_sha[:12]} illisibles: {exc}") from exc
+
+
+def _inspect_destination_branch(
+    clients: PrClients, owner: str, repo: str, head: str, remote_base, content: TestedContent, anchor
+) -> bool:
+    """Campagne : la branche de tête préexistante (sans PR OUVERTE) est examinée AVANT toute écriture, jamais réutilisée à l'aveugle.
+
+    Cas : branche ABSENTE (404 ÉTABLI, jamais une panne de lecture) ⇒ elle sera créée sur la base validée ; branche IDENTIQUE à la base
+    validée ⇒ poursuite normale ; branche portant exactement l'arbre testé (publication interrompue avant la PR, PR fermée dont la
+    branche reste) ⇒ REPRISE sans réécriture (retourne ``True``) ; contrôles altérés ⇒ refus ; toute autre branche (en avance, divergente,
+    en retard) ⇒ refus explicite SANS mutation — son contenu n'est jamais remplacé en aveugle. Panne de lecture ⇒ erreur distante
+    retentable, zéro écriture. Limite : entre cette lecture et la première écriture, un acteur externe privilégié peut encore déplacer la
+    branche (l'API Contents n'offre pas de précondition atomique sur la branche) ; la relecture APRÈS publication reste le dernier filet."""
+    try:
+        tip = str(clients.branches.get_branch_sha(owner, repo, head)).lower()
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "status_code", None) == 404:
+            return False
+        raise DeliveryRemoteError(
+            f"sommet de la branche de tête '{head}' illisible (aucune écriture n'a eu lieu): {exc}"
+        ) from exc
+    if tip == remote_base.sha:
+        return False
+    _assert_remote_head_controls(clients, owner, repo, tip, anchor)
+    try:
+        tree = clients.branches.get_git_commit(owner, repo, tip).tree_sha
+    except Exception as exc:  # noqa: BLE001
+        raise DeliveryRemoteError(f"branche de tête '{head}' ({tip[:12]}) illisible: {exc}") from exc
+    if tree == content.tree_sha:
+        verify_remote_head(
+            clients.branches, owner, repo, head_sha=tip, content=content, remote_base_sha=remote_base.sha
+        )
+        return True
+    raise DeliveryRefusedError(
+        f"LIVRAISON REFUSÉE — la branche de tête '{head}' existe déjà sans PR ouverte (sommet {tip[:12]}) : elle n'est ni la base "
+        f"validée ({remote_base.sha[:12]}) ni l'arbre testé. Elle n'est ni réutilisée ni réécrite ; supprime-la ou rends-la à la base."
     )
 
 

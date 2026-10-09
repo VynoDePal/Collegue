@@ -621,6 +621,20 @@ def test_exported_pdf_is_readable_and_carries_the_persisted_audit_data():
 """
 )
 
+# ── socle W5 : documents d'EXEMPLE (identifiants factices) fournis par la fixture, sans aucune implémentation métier ─────────
+
+from pathlib import Path as _Path  # noqa: E402
+
+_SOCLE_DIR = _Path(__file__).resolve().parent / "fixtures" / "w5-business"
+RUNBOOK_DOC = (_SOCLE_DIR / "docs" / "runbook-ops.md").read_text(encoding="utf-8")
+SOCLE_DEPLOY_DOC = (_SOCLE_DIR / "docs" / "deploiement.md").read_text(encoding="utf-8")
+SOCLE: Dict[str, str] = {"docs/runbook-ops.md": RUNBOOK_DOC, "docs/deploiement.md": SOCLE_DEPLOY_DOC}
+# Version nettoyée par R04 (le « modèle » retire les identifiants d'exemple du runbook) : même texte sans les deux lignes.
+CLEAN_RUNBOOK_DOC = "".join(line for line in RUNBOOK_DOC.splitlines(keepends=True) if "AWS_" not in line).replace(
+    "(valeurs factices publiées dans la documentation d'AWS, sans aucun accès réel) :",
+    "(fournis par le coffre de secrets) :",
+)
+
 STAGE_FILES = {1: STAGE_1, 2: STAGE_2, 3: STAGE_3}
 ORACLES = {1: ORACLE_1, 2: ORACLE_2, 3: ORACLE_3}
 TITLES = {
@@ -630,10 +644,13 @@ TITLES = {
 }
 
 
-def stage_files(stage: int, *, wrong_data: bool = False) -> Dict[str, str]:
-    """Arbre complet attendu APRÈS la tâche ``stage`` (0 = graine)."""
+def stage_files(stage: int, *, wrong_data: bool = False, socle: bool = False) -> Dict[str, str]:
+    """Arbre complet attendu APRÈS la tâche ``stage`` (0 = graine). ``socle=True`` : graine + documents d'exemple du socle W5, que
+    les tâches ne réécrivent pas (le socle ne fournit AUCUNE implémentation métier)."""
     files = dict(SEED)
+    if socle:
+        files.update(SOCLE)
     for number in range(1, stage + 1):
         source = WRONG_DATA_STAGE_3 if (wrong_data and number == 3) else STAGE_FILES[number]
-        files.update(source)
+        files.update({k: v for k, v in source.items() if not (socle and k in SOCLE)})
     return files

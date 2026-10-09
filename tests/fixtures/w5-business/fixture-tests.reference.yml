@@ -1,0 +1,93 @@
+# Workflow du socle de la fixture « Fixture tests » (W5, approuvé par empreinte dans le manifeste du socle).
+#
+# DÉCLENCHEMENT. La graine ``main`` (branche par défaut) est immuable et n'a AUCUN workflow : ``pull_request_target`` (qui s'exécute
+# dans le contexte de la branche par défaut) ne peut donc pas servir. ``pull_request`` s'exécute dans le contexte du commit de
+# fusion de la PR (``refs/pull/N/merge``), sans exiger de workflow sur la branche par défaut : la PR vers une base éphémère
+# ``collegue-business/<run>`` (issue du socle, qui porte ce fichier) déclenche ce workflow (observé). ``push`` sur la branche du socle ou sa branche de
+# préparation produit le check sur le commit du socle lui-même (une base ne peut être créée que depuis un commit qui a déjà passé le check requis).
+#
+# CONFIANCE (corrigée en V2). Avec ``pull_request`` le fichier appliqué est celui du commit de fusion : une PR qui le modifie en change la version
+# exécutée, et un check vert de même nom et de la même application ne prouve PAS le contenu de ce fichier. Ce workflow n'est donc PAS une barrière
+# contre sa propre substitution, ni le CODEOWNERS (observé INEFFICACE en C47 : une PR de l'auteur-propriétaire qui modifie ``.github/`` ou ``ci/``,
+# check vert, a fusionné). La garantie vient du chemin PRODUIT de Collègue : (1) contrôle complet de ``.github/`` ET ``ci/`` AVANT toute
+# publication distante ; (2) même intégrité (arbre Git réel de la tête) AVANT toute fusion ; (3) check authentifié : check-run de l'application
+# Actions → job → exécution du workflow attendu, sur la tête, le dépôt et le chemin attendus ; (4) protections GitHub réelles : PR obligatoire, check requis
+# présent et réussi, base à jour, aucun bypass. Une fusion manuelle hors du produit n'est pas couverte par (1) à (3).
+#
+# CODE CANDIDAT. Il ne s'exécute jamais sur l'hôte : (1) téléchargement des roues du verrou APPROUVÉ du socle (``ci/requirements-approved.lock``,
+# haché, jamais un fichier dicté par le candidat) dans un conteneur sans privilège ni secret ; (2) installation de ces roues, vérification
+# que ``requirements.txt`` est satisfait par elles (toute autre dépendance est refusée, rien n'est téléchargé) et ``pytest``, dans un second
+# conteneur SANS RÉSEAU (utilisateur 65534, capacités retirées, système de fichiers en lecture seule). Aucun secret du dépôt, aucun jeton
+# dans un conteneur, aucun socle Docker ni montage de fichier du candidat (seul le répertoire de travail, réel, est monté).
+name: Fixture tests
+
+on:
+  pull_request:
+    branches:
+      - "collegue-business/**"
+  push:
+    branches:
+      - "collegue-business/bootstrap-w5-v2"
+      - "collegue-bootstrap-staging/w5-v2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fixture-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture-tests:
+    name: Fixture tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PY_IMAGE: python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+    steps:
+      - name: Extraire le code (sans identifiants conservés)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Garde - aucun lien symbolique ni fichier de dépendances irrégulier
+        run: |
+          links="$(find "$GITHUB_WORKSPACE" -path "$GITHUB_WORKSPACE/.git" -prune -o -type l -print)"
+          if [ -n "$links" ]; then
+            echo "::error::liens symboliques interdits (un chemin source de montage ne doit jamais être détourné)"
+            echo "$links"
+            exit 1
+          fi
+          for f in requirements.txt ci/requirements-approved.lock; do
+            if [ ! -f "$GITHUB_WORKSPACE/$f" ] || [ -L "$GITHUB_WORKSPACE/$f" ]; then
+              echo "::error::$f doit être un fichier régulier"
+              exit 1
+            fi
+          done
+
+      - name: Télécharger les roues du verrou approuvé (conteneur sans privilège, sans secret)
+        run: |
+          chmod -R a+rX "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/wheels" && chmod 777 "$RUNNER_TEMP/wheels"
+          docker run --rm --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp:rw,size=256m --memory 2g --pids-limit 256 -e HOME=/tmp \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/wheels:/out:rw" \
+            "$PY_IMAGE" python -m pip download --require-hashes --only-binary=:all: --no-deps --no-input \
+            --disable-pip-version-check -r /src/ci/requirements-approved.lock -d /out
+
+      - name: Installer la pile approuvée et tester (conteneur sans réseau, sans privilège, sans secret)
+        run: |
+          docker run --rm --network none --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp:rw,exec,size=768m --memory 2g --pids-limit 512 \
+            -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/wheels:/wheels:ro" \
+            "$PY_IMAGE" bash -c 'set -euo pipefail
+              mkdir /tmp/work && cp -R --no-preserve=all /src/. /tmp/work/ && cd /tmp/work
+              python -m venv /tmp/venv
+              /tmp/venv/bin/python -m pip install --no-index --find-links /wheels --require-hashes --no-deps --no-input -r ci/requirements-approved.lock
+              if ! /tmp/venv/bin/python -m pip install --no-index --find-links /wheels --only-binary=:all: --no-input -r requirements.txt; then
+                echo "::error::requirements.txt demande une dépendance hors de la pile approuvée (aucun téléchargement : refusée)"
+                exit 1
+              fi
+              /tmp/venv/bin/python -m pytest -q -p no:cacheprovider'

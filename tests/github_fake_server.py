@@ -62,6 +62,11 @@ class FakeGitHubServer:
         self.prs: Dict[int, Dict[str, Any]] = {}
         self.check_runs: Dict[str, List[Dict[str, Any]]] = {}
         self.statuses: Dict[str, List[Dict[str, Any]]] = {}
+        self.actions_jobs: Dict[
+            int, Dict[str, Any]
+        ] = {}  # jobs Actions RÉELS (un check publié par l'API des checks n'en est pas un)
+        self.actions_runs: Dict[int, Dict[str, Any]] = {}
+        self._check_run_id = 7_000_000
         self.calls: List[tuple] = []
         self._counter = 0
         self.failures: List[tuple] = []
@@ -145,9 +150,11 @@ class FakeGitHubServer:
     def set_checks(self, sha: str, states: Dict[str, str], *, app_id: Optional[int] = GITHUB_ACTIONS_APP) -> None:
         runs = []
         for name, state in states.items():
+            self._check_run_id += 1
             if state in {"pending", "queued", "in_progress"}:
                 runs.append(
                     {
+                        "id": self._check_run_id,
                         "name": name,
                         "status": state if state != "pending" else "in_progress",
                         "conclusion": None,
@@ -155,8 +162,52 @@ class FakeGitHubServer:
                     }
                 )
             else:
-                runs.append({"name": name, "status": "completed", "conclusion": state, "app": {"id": app_id}})
+                runs.append(
+                    {
+                        "id": self._check_run_id,
+                        "name": name,
+                        "status": "completed",
+                        "conclusion": state,
+                        "app": {"id": app_id},
+                    }
+                )
         self.check_runs[sha] = runs
+
+    def register_actions_job(
+        self,
+        check_run_id: int,
+        *,
+        head_sha: str,
+        name: str,
+        run_id: int = 900,
+        workflow_path: str = ".github/workflows/fixture-tests.yml",
+        event: str = "pull_request",
+        conclusion: Optional[str] = "success",
+        run_head_sha: Optional[str] = None,
+        repository: Optional[str] = None,
+        head_repository: Optional[str] = None,
+        run_conclusion: Optional[str] = "success",
+    ) -> None:
+        """Enregistre le job Actions et l'exécution qui correspondent à un check-run (provenance d'un VRAI job)."""
+        full = f"{OWNER}/{REPO}"
+        self.actions_jobs[check_run_id] = {
+            "id": check_run_id,
+            "run_id": run_id,
+            "name": name,
+            "head_sha": head_sha,
+            "status": "completed" if conclusion else "in_progress",
+            "conclusion": conclusion,
+        }
+        self.actions_runs[run_id] = {
+            "id": run_id,
+            "path": workflow_path,
+            "event": event,
+            "head_sha": run_head_sha or head_sha,
+            "status": "completed" if run_conclusion else "in_progress",
+            "conclusion": run_conclusion,
+            "repository": {"full_name": repository or full},
+            "head_repository": {"full_name": head_repository or full},
+        }
 
     def push_to_pr_head(self, number: int, *, tree: str) -> str:
         pr = self.prs[number]
@@ -422,6 +473,9 @@ class FakeGitHubServer:
             if detail is None:
                 raise HttpError("Not Found", status_code=404)
             return detail
+        m = re.fullmatch(rf"{prefix}/git/trees/([0-9a-f]{{40}})", endpoint)
+        if m:  # arbre de premier niveau : par défaut sans ``.github`` (barrière d'intégrité des contrôles, W5) ; ``trees`` le surcharge
+            return getattr(self, "trees", {}).get(m.group(1), {"tree": [], "truncated": False})
         m = re.fullmatch(rf"{prefix}/commits/([0-9a-f]{{40}})/check-runs", endpoint)
         if m:
             runs = self.check_runs.get(m.group(1), [])
@@ -432,6 +486,18 @@ class FakeGitHubServer:
             sts = self.statuses.get(m.group(1), [])
             page, per = int(params.get("page", 1)), min(int(params.get("per_page", 30)), self.page_cap)
             return sts[(page - 1) * per : page * per]
+        m = re.fullmatch(rf"{prefix}/actions/jobs/(\d+)", endpoint)
+        if m:  # un identifiant qui n'est pas un job (check publié par l'API des checks) répond 404, comme GitHub
+            job = self.actions_jobs.get(int(m.group(1)))
+            if job is None:
+                raise HttpError("Not Found", status_code=404)
+            return job
+        m = re.fullmatch(rf"{prefix}/actions/runs/(\d+)", endpoint)
+        if m:
+            run = self.actions_runs.get(int(m.group(1)))
+            if run is None:
+                raise HttpError("Not Found", status_code=404)
+            return run
         raise AssertionError(f"route GET non simulée: {endpoint}")
 
     def api_put(self, endpoint: str, data: Dict[str, Any]) -> Any:

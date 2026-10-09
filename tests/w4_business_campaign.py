@@ -161,8 +161,11 @@ class PlanningTransport:
 class ReferenceAgent(FakeCodeAgent):
     """Codeur déterministe : écrit les fichiers de référence de la tâche et rapporte un usage fixe (réglé par le produit)."""
 
-    def __init__(self, *, wrong_data_stage_3: bool = False, usage: Optional[Dict[int, tuple]] = None):
+    def __init__(
+        self, *, wrong_data_stage_3: bool = False, usage: Optional[Dict[int, tuple]] = None, socle: bool = False
+    ):
         super().__init__()
+        self.socle = socle
         self.calls = 0
         self.tasks_seen: List[str] = []
         self.starting_files: List[List[str]] = []
@@ -185,7 +188,7 @@ class ReferenceAgent(FakeCodeAgent):
             )
         )
         source = fixture.WRONG_DATA_STAGE_3 if (self.wrong_data_stage_3 and stage == 3) else fixture.STAGE_FILES[stage]
-        self._files = dict(source)
+        self._files = {k: v for k, v in source.items() if not (self.socle and k in fixture.SOCLE)}
         result = super().implement_issue(workspace, issue)
         prompt, completion, cost = self.usage[stage]
         return dataclasses.replace(
@@ -220,6 +223,16 @@ class BusinessSandbox:
     def run_tests(self, workspace, command="pytest -q"):
         if "COLLEGUE-ORACLE" in command:
             return self.oracles.run_tests(workspace, command)
+        if command == business.health_command():
+            # Santé de PRODUCTION de la campagne réelle : la commande autonome (sonde métier indépendante) est EXÉCUTÉE telle quelle.
+            proc = subprocess.run(
+                ["sh", "-c", command], cwd=str(workspace), capture_output=True, text=True, env=self._env(), timeout=240
+            )
+            self.health_runs.append(
+                {"status": "passed" if proc.returncode == 0 else "failed", "exit_code": proc.returncode,
+                 "output": proc.stdout.strip()[-300:], "workspace": str(workspace), "independent_probe": True}
+            )  # fmt: skip
+            return SandboxResult(exit_code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
         if command == HEALTH_COMMAND:
             observation = business.verify_business_checkout(
                 str(workspace), python=sys.executable, runner=business.trusted_local_runner
@@ -282,6 +295,8 @@ class BusinessBridge(BridgeServer):
     de branche d'amélioration étant distincte de celle des tâches BUILD (``collegue/improve-…`` vs ``collegue/issue-<n>``)."""
 
     delete_head_after_merge = False
+    #: Crochet appelé AVANT la création de toute PR (un ``BaseException`` simule la mort du processus à cet instant précis).
+    before_create_pr = None
 
     def _merge(self, number: int, body: Dict[str, Any]) -> Dict[str, Any]:
         head_ref = self.prs[number]["head"]["ref"]
@@ -294,6 +309,8 @@ class BusinessBridge(BridgeServer):
         return result
 
     def _post(self, path: str, data: Dict[str, Any]) -> Any:
+        if path == f"{_PREFIX}/pulls" and self.before_create_pr is not None:
+            self.before_create_pr()
         if path == f"{_PREFIX}/git/commits":  # Git Data API : commit sur un tree EXISTANT (revert distant)
             self.calls.append(("POST", path, dict(data)))
             self._maybe_fail("POST", path)
@@ -322,10 +339,14 @@ def make_business_bridge(root: Path, source: str) -> BusinessBridge:
 
 
 def build_world(
-    root: Path, *, settings: Optional[SimpleNamespace] = None, agent: Optional[ReferenceAgent] = None
+    root: Path,
+    *,
+    settings: Optional[SimpleNamespace] = None,
+    agent: Optional[ReferenceAgent] = None,
+    socle: bool = False,
 ) -> World:
     root.mkdir(parents=True, exist_ok=True)
-    source = make_source_repo(root / "operator", dict(fixture.SEED))
+    source = make_source_repo(root / "operator", fixture.stage_files(0, socle=socle))
     bridge = make_business_bridge(root, source)
     url = f"sqlite:///{root / 'state.db'}"
     ProjectStateManager.from_url(url, create=True)
@@ -336,7 +357,7 @@ def build_world(
         url=url,
         settings=settings or campaign_settings(),
         transport=PlanningTransport(),
-        agent=agent or ReferenceAgent(),
+        agent=agent or ReferenceAgent(socle=socle),
         sandbox=BusinessSandbox(),
     )
 
@@ -619,7 +640,15 @@ def improvement_settings(world: World, **overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-async def improvement_pass(world: World, agent: ImprovementAgent, *, measure_fn=None) -> Any:
+async def improvement_pass(
+    world: World,
+    agent: ImprovementAgent,
+    *,
+    measure_fn=None,
+    settings_overrides=None,
+    reviewer=None,
+    improve: bool = True,
+) -> Any:
     """Une passe IMPROVE par l'entrée publique : handoff strict → ``run_improvement`` → Phase 5 (hook de production)."""
     import functools
 
@@ -636,10 +665,11 @@ async def improvement_pass(world: World, agent: ImprovementAgent, *, measure_fn=
     return await run_pass(
         world,
         max_iterations=None,
-        improve=True,
+        improve=improve,
         run_improvement_fn=run_imp,
         agent=agent,
-        settings_obj=improvement_settings(world),
+        settings_obj=improvement_settings(world, **(settings_overrides or {})),
+        **({"reviewer": reviewer} if reviewer is not None else {}),
     )
 
 
