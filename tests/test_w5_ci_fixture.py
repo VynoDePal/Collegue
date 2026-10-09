@@ -866,7 +866,7 @@ class ProbeServer(FakeGitHub):
             number = 100 + len(self.prs)
             self.prs[number] = {"head": payload["head"], "base": payload["base"], "state": "open"}
             self.pulls[number] = self.prs[number]
-            return {"number": number}
+            return {"number": number, "html_url": f"https://github.com/{self.fx.REPOSITORY}/pull/{number}"}
         m = re.fullmatch(rf"{repo}/pulls/(\d+)/merge", path)
         if m and method == "PUT":
             self.writes.append((method, path))
@@ -891,6 +891,21 @@ class ProbeServer(FakeGitHub):
                 }
             )
             return {"id": 1}
+        m = re.fullmatch(rf"{repo}/actions/runs\?head_sha=([0-9a-f]{{40}})", path)
+        if m:
+            return {
+                "workflow_runs": [
+                    {
+                        "id": 7000,
+                        "event": "pull_request",
+                        "path": self.fx.WORKFLOW_PATH,
+                        "head_sha": m.group(1),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "html_url": f"https://github.com/{self.fx.REPOSITORY}/actions/runs/7000",
+                    }
+                ]
+            }
         m = re.fullmatch(rf"{repo}/actions/jobs/(\d+)", path)
         if m:
             head = self.head_for_job(int(m.group(1)))
@@ -1180,3 +1195,102 @@ def test_the_probe_requires_the_merge_guard_to_refuse_every_head_that_touches_a_
         "lock-touch",
         "symlink",
     }
+
+
+# ── journal append-only des identités distantes ───────────────────────────────────────────────────────────────────────────────
+
+
+def _events(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_the_event_log_is_append_only_ordered_and_never_holds_content_or_a_token(fx, plan, tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_FAKE" + "0123456789abcdefghijklmnopqrstuvwxyz")
+    path = tmp_path / "evidence" / "events.jsonl"
+    remote = FakeGitHub(fx, plan)
+    api = fx.journaling(remote, fx.EventLog(path))
+    fx.apply_plan(api, plan, order_token=plan["order_token"], sleep=lambda _s: None, clock=Clock())
+    events = _events(path)
+    writes = [(e["method"], e["path"]) for e in events if e["event"] == "request"]
+    assert writes == [(m, p) for m, p in remote.writes], "chaque écriture est journalisée EN INTENTION, dans l'ordre"
+    kinds = [e["event"] for e in events]
+    for index, event in enumerate(events):
+        if event["event"] == "response":
+            assert events[index - 1]["event"] == "request" and events[index - 1]["path"] == event["path"], (
+                "intention AVANT réponse"
+            )
+    assert not [e for e in events if e["event"] == "error"]
+    branch = next(e for e in events if e["event"] == "response" and e["path"].endswith("/git/refs"))
+    assert branch["object.sha"] == plan["bootstrap_sha"]
+    ruleset = next(e for e in events if e["event"] == "response" and e["path"].endswith("/rulesets"))
+    assert ruleset["enforcement"] == "active" and isinstance(ruleset["id"], int)
+    text = path.read_text(encoding="utf-8")
+    assert "ghp_FAKE" not in text and '"content"' not in text
+    assert plan["files"][fx.WORKFLOW_PATH][:40] not in text, "aucun contenu de fichier dans le journal"
+    # append-only : un second journal sur le même fichier ajoute, n'écrase jamais
+    fx.EventLog(path).record(event="note", text="suite")
+    assert _events(path)[: len(events)] == events and _events(path)[-1]["event"] == "note"
+    assert kinds.count("request") == kinds.count("response")
+
+
+def test_the_event_log_records_an_error_with_status_and_reason_and_an_unanswered_intention_is_visible(
+    fx, plan, tmp_path
+):
+    path = tmp_path / "events.jsonl"
+    remote = FakeGitHub(fx, plan)
+    remote.refs["refs/heads/collegue-business/bootstrap-w5"] = "f" * 40  # collision : création refusée par 422
+    api = fx.journaling(remote, fx.EventLog(path))
+    with pytest.raises(fx.ApiError):
+        api(
+            "POST",
+            f"/repos/{fx.REPOSITORY}/git/refs",
+            {"ref": "refs/heads/collegue-business/bootstrap-w5", "sha": "1" * 40},
+        )
+    events = _events(path)
+    assert [e["event"] for e in events] == ["request", "error"] and events[1]["status"] == 422
+
+    class Crash(Exception):
+        pass
+
+    def exploding(method, path, payload):
+        raise Crash("résultat inconnu")
+
+    with pytest.raises(Crash):
+        fx.journaling(exploding, fx.EventLog(path))("POST", "/repos/x/pulls", {"title": "t"})
+    assert _events(path)[-1]["event"] == "request", (
+        "intention sans réponse : à relire avant de retenter (pas de doublon)"
+    )
+
+
+def test_the_probe_records_every_branch_pull_request_url_check_and_workflow_run_as_it_creates_them(fx, plan, tmp_path):
+    path = tmp_path / "events.jsonl"
+    server = ProbeServer(fx, plan, GOOD)
+    log = fx.EventLog(path)
+    ticks = iter(range(100_000))
+    result = fx.run_probe(
+        fx.journaling(server, log),
+        plan,
+        order_token=plan["order_token"],
+        probe_id="probe-ev",
+        sleep=no_sleep,
+        clock=lambda: float(next(ticks)) * 100,
+        log=log,
+    )
+    assert result["ok"] is True
+    events = _events(path)
+    prs = [e for e in events if e["event"] == "pull_request"]
+    assert [e["scenario"] for e in prs] == [name for name in GOOD if name != "seed-base"]
+    assert all(
+        e["url"].startswith(f"https://github.com/{fx.REPOSITORY}/pull/") and isinstance(e["number"], int) for e in prs
+    )
+    observed = next(e for e in events if e["event"] == "observed_checks" and e["scenario"] == "green")
+    assert (
+        observed["check_runs"][0]["name"] == "Fixture tests" and observed["workflow_runs"][0]["event"] == "pull_request"
+    )
+    assert observed["workflow_runs"][0]["html_url"].endswith("/actions/runs/7000")
+    created = [e["path"] for e in events if e["event"] == "response" and e["path"].endswith("/git/refs")]
+    assert len(created) >= 14, "chaque branche de base et de tête créée est journalisée à sa création"
+    results = [e for e in events if e["event"] == "scenario_result"]
+    assert [e["scenario"] for e in results] == list(GOOD) and all(e["outcome"]["ok"] for e in results)
+    deleted = [e for e in events if e["event"] == "response" and e["method"] == "DELETE"]
+    assert deleted, "le nettoyage des ressources jetables est journalisé aussi"

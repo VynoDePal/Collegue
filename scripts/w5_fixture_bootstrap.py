@@ -37,6 +37,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -748,6 +749,18 @@ class ApiError(Exception):
         self.status = status
 
 
+def _api_message(exc: "urllib.error.HTTPError") -> str:
+    """Motif renvoyé par l'API (``message`` + ``errors``), borné : utile au diagnostic (règle de dépôt refusée…), sans jamais contenir le jeton."""
+    try:
+        body = json.loads(exc.read().decode("utf-8", "replace"))
+        text = str(body.get("message", ""))
+        if body.get("errors"):
+            text += " " + json.dumps(body["errors"], ensure_ascii=False)[:300]
+        return text[:500] or str(exc.reason)
+    except Exception:  # noqa: BLE001 - un corps illisible ne masque pas le statut
+        return exc.reason if isinstance(exc.reason, str) else "erreur"
+
+
 class GitHubApi:
     """Client REST minimal (stdlib) ; le jeton vient de l'environnement et n'apparaît jamais dans un message."""
 
@@ -774,11 +787,66 @@ class GitHubApi:
             with urllib.request.urlopen(req, timeout=60) as response:  # noqa: S310 - hôte fixe https://api.github.com
                 body = response.read()
         except urllib.error.HTTPError as exc:
-            raise ApiError(exc.code, exc.reason if isinstance(exc.reason, str) else "erreur") from None
+            raise ApiError(exc.code, _api_message(exc)) from None
         return json.loads(body) if body else None
 
 
 Api = Callable[[str, str, Optional[Mapping[str, Any]]], Any]
+
+
+class EventLog:
+    """Journal APPEND-ONLY (JSON par ligne, ``fsync``) des identités distantes créées : écrit AVANT la requête (intention) puis APRÈS (réponse :
+    SHA, numéro, URL, identifiants) ou en erreur (statut + motif). Jamais de contenu de fichier, de jeton ni de charge utile : seulement
+    méthode, chemin, clés de la charge et identités renvoyées. Un résultat inconnu laisse l'intention sans réponse : relire l'identité avant de retenter."""
+
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time):
+        self.path, self._clock = path, clock
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(self, **fields: Any) -> None:
+        line = json.dumps(
+            {"ts": datetime.fromtimestamp(self._clock(), tz=timezone.utc).isoformat(timespec="seconds"), **fields},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, (line + "\n").encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+_IDENTITY_KEYS = ("id", "number", "html_url", "sha", "name", "enforcement", "merged", "state", "node_id")
+
+
+def _identity(result: Any) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    out = {key: result[key] for key in _IDENTITY_KEYS if key in result and not isinstance(result[key], (dict, list))}
+    for nested in ("object", "commit"):
+        if isinstance(result.get(nested), dict) and "sha" in result[nested]:
+            out[f"{nested}.sha"] = result[nested]["sha"]
+    return out
+
+
+def journaling(api: Api, log: EventLog) -> Api:
+    """Enveloppe ``api`` : chaque écriture (tout sauf GET) est journalisée en intention, puis en réponse ou en erreur."""
+
+    def call(method: str, path: str, payload: Optional[Mapping[str, Any]] = None) -> Any:
+        if method == "GET":
+            return api(method, path, payload)
+        keys = sorted(payload) if isinstance(payload, Mapping) else []
+        log.record(event="request", method=method, path=path, payload_keys=keys)
+        try:
+            result = api(method, path, payload)
+        except ApiError as exc:
+            log.record(event="error", method=method, path=path, status=exc.status, message=str(exc)[:300])
+            raise
+        log.record(event="response", method=method, path=path, **_identity(result))
+        return result
+
+    return call
 
 
 def _get(api: Api, path: str, *, missing_ok: bool = False) -> Any:
@@ -1160,6 +1228,18 @@ def _try_merge(api: Api, pr_number: int, head_sha: str) -> Dict[str, Any]:
     return {"accepted": bool(result.get("merged")), "status": 200, "message": str(result.get("message", ""))[:200]}
 
 
+def _workflow_runs(api: Api, head_sha: str) -> List[Dict[str, Any]]:
+    """Exécutions de workflow rattachées à la tête (identité, événement, chemin, conclusion, URL) : lecture seule, jamais bloquante."""
+    try:
+        listing = api("GET", f"/repos/{REPOSITORY}/actions/runs?head_sha={head_sha}", None) or {}
+    except ApiError as exc:
+        return [{"error": exc.status}]
+    return [
+        {key: run.get(key) for key in ("id", "event", "path", "head_sha", "status", "conclusion", "html_url")}
+        for run in listing.get("workflow_runs", [])
+    ]
+
+
 def run_probe(
     api: Api,
     plan: Mapping[str, Any],
@@ -1170,6 +1250,7 @@ def run_probe(
     clock: Callable[[], float] = time.monotonic,
     timeout: float = 600.0,
     observe_missing_seconds: float = 120.0,
+    log: Optional[EventLog] = None,
 ) -> Dict[str, Any]:
     """PR jetables vers des bases éphémères de sonde ; toutes les ressources créées sont supprimées, même sur échec."""
     _require_order(plan, order_token)
@@ -1217,6 +1298,10 @@ def run_probe(
                 {"title": f"sonde W5 {name}", "head": head, "base": base, "body": "Contre-épreuve du check (jetable)."},
             )
             pr_number = pr["number"]
+            if log:
+                log.record(
+                    event="pull_request", probe_id=probe_id, scenario=name, number=pr_number, url=pr.get("html_url")
+                )
             started = clock()
             state, reason = "missing", "non observé"
             runs: List[Mapping[str, Any]] = []
@@ -1241,6 +1326,25 @@ def run_probe(
             )
             if scenario.get("spoof"):
                 outcome["spoof"] = _attempt_spoof(api, head_sha, runs)
+            if log:
+                log.record(
+                    event="observed_checks",
+                    probe_id=probe_id,
+                    scenario=name,
+                    head_sha=head_sha,
+                    check_runs=[
+                        {
+                            "id": r.get("id"),
+                            "name": r.get("name"),
+                            "app_id": (r.get("app") or {}).get("id"),
+                            "status": r.get("status"),
+                            "conclusion": r.get("conclusion"),
+                            "url": r.get("html_url"),
+                        }
+                        for r in runs
+                    ],
+                    workflow_runs=_workflow_runs(api, head_sha),
+                )
             # garde de fusion de confiance sur l'arbre Git RÉEL de la tête, pour chaque scénario
             tree = api("GET", f"/repos/{REPOSITORY}/git/trees/{head_sha}?recursive=1", None)
             violations = ["arbre tronqué : contenu protégé non établi"] if tree.get("truncated") else []
@@ -1262,6 +1366,13 @@ def run_probe(
         except ApiError as exc:
             outcome.update(ok=False, error=str(exc)[:300])
         finally:
+            if log:
+                log.record(
+                    event="scenario_result",
+                    probe_id=probe_id,
+                    scenario=name,
+                    outcome=json.loads(json.dumps(outcome, default=str)),
+                )
             if pr_number is not None:
                 try:
                     api("PATCH", f"/repos/{REPOSITORY}/pulls/{pr_number}", {"state": "closed"})
@@ -1294,6 +1405,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for name in ("apply", "probe", "cleanup"):
         cmd = sub.add_parser(name, help="écritures distantes, sur ordre")
         cmd.add_argument("--order-token", required=True)
+        cmd.add_argument(
+            "--events", type=Path, required=True, help="journal append-only des identités distantes créées (JSONL)"
+        )
         if name == "probe":
             cmd.add_argument("--probe-id", required=True)
         if name == "apply":
@@ -1306,6 +1420,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         plan = build_plan()
         api = _api_from_env()
+        log = EventLog(args.events) if getattr(args, "events", None) else None
+        if log:
+            api = journaling(api, log)
+            log.record(event="command", command=args.command, bootstrap_sha=plan["bootstrap_sha"])
         if args.command == "inspect":
             print(json.dumps(inspect_remote(api, plan), indent=1, sort_keys=True))
             return 0
@@ -1321,7 +1439,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps({k: v for k, v in result.items() if k != "manifest"}, indent=1))
             return 0
         if args.command == "probe":
-            result = run_probe(api, plan, order_token=args.order_token, probe_id=args.probe_id)
+            result = run_probe(api, plan, order_token=args.order_token, probe_id=args.probe_id, log=log)
             print(json.dumps(result, indent=1, sort_keys=True))
             return 0 if result["ok"] else 1
         result = cleanup_bootstrap(api, plan, order_token=args.order_token)
