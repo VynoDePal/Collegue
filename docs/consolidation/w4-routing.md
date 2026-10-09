@@ -109,6 +109,19 @@ réduite ni complétée ; sans limite (appel direct) la borne par défaut est 40
 Un reviewer ou un QA en abonnement n'impose pas ce montage à un codeur par clé API ; un codeur en abonnement sans ce
 dossier est refusé avant lancement. La garde W1 (`HOME` hors `/tmp`) est inchangée.
 
+## Contrat du constructeur `openhands.sdk.LLM` (SDK 1.19.1)
+
+* `LLM` déclare `extra="ignore"` : un argument inconnu est **ignoré sans erreur**. L'ancien `service_id="coder"` n'existe pas
+  dans 1.19.1 (le champ canonique est `usage_id`, défaut `"default"`) : l'identité du coder n'était donc jamais posée. Le runner
+  passe `usage_id="coder"` et le sampler d'abonnement `usage_id="sampler"` ; `LLM_CONSTRUCTOR_KWARGS` ne contient que des champs de
+  `LLM.model_fields`.
+* Abonnement : `LLM.subscription_login(vendor, model, …, **kwargs)` transmet `kwargs` à `LLM(...)` via `create_llm`, qui fixe déjà
+  `max_output_tokens=None` (le backend Codex ne le supporte pas ; le SDK ne l'envoie jamais en mode abonnement) : le repasser lève
+  `TypeError`. Le runner et le sampler ne transmettent donc que `LLM_SUBSCRIPTION_KWARGS` (`usage_id`, `num_retries`,
+  `retry_min_wait`, `retry_max_wait`, `timeout`).
+* Conséquence budgétaire (inchangée, à décider hors de ce lot) : un LLM d'abonnement n'a pas de `max_output_tokens` local ; sous
+  allocation la garde du runner constate une sortie non bornée et REFUSE l'émission (fail-closed).
+
 ## Démarrage du serveur (`collegue/app.py`)
 
 * `validate_llm_config()` est **locale** : elle résout chaque rôle (`default`, `coder`, `qa`, `reviewer`, `planner`) avec
