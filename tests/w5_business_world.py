@@ -98,6 +98,14 @@ def services_for(
             world.source, python=sys.executable, runner=business.trusted_local_runner
         )
 
+    from collegue.pilot import w5_business_ownership as ownership
+
+    owned_manifest = str(world.root / "owned-manifest.json")
+
+    def record_owned(*, project_id: int, event: str, **fields: Any) -> None:
+        identity = ownership.identity_of(OWNER, REPO, "main", project_id=int(project_id))
+        ownership.append_event(owned_manifest, identity, event, **fields)
+
     services = w5.PhaseServices(
         run_pass=run_pass,
         clients=world.bridge.clients(),
@@ -110,7 +118,9 @@ def services_for(
         clock=clock,
         manifest=manifest,
         required_checks=tuple(harness_checks()),
+        record_owned=record_owned,
     )
+    services.owned_manifest = owned_manifest  # type: ignore[attr-defined]
     services.pass_calls = calls  # type: ignore[attr-defined] - journal des ciblages demandés aux passes publiques
     return services
 

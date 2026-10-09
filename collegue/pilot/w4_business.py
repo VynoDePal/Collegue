@@ -62,6 +62,10 @@ class BudgetStop(Exception):
     """Arrêt par budget ou échéance : l'étape se termine ``budget_stop``."""
 
 
+class BaseMovedError(RuntimeError):
+    """La base de campagne a bougé hors de ce que la campagne a vérifié : aucune poursuite (BUILD jamais lancé sur une base non prouvée)."""
+
+
 class IncompleteValidation(Exception):
     """La preuve ne peut pas être établie (prérequis, transport, protection) : l'étape se termine ``incomplete_validation``."""
 
@@ -1612,6 +1616,7 @@ def launch_campaign(
     claim: Optional[Callable[[CampaignReport], Any]] = None,
     activate: Optional[Callable[[CampaignReport], Any]] = None,
     cycle_id: Optional[str] = None,
+    materialize_spec: Optional[Callable[[CampaignReport, Dict[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """Planifie, approuve, synchronise et exécute les TROIS tâches sur la base éphémère (BUILD + fusions W3), puis rend le
     contexte nécessaire à la vérification métier.
@@ -1622,6 +1627,10 @@ def launch_campaign(
     création distante : un identifiant consommé ne donne jamais un nouvel essai gratuit. ``activate`` ouvre ensuite le scope durable
     de la campagne (2 USD / 250000 tokens) et qualifie les deux modèles AVANT toute création distante et toute planification ;
     ``cycle_id`` lie le brouillon public à ce même scope (``--cycle-id``) : même ligne, même solde, même horloge.
+
+    ``materialize_spec`` (campagne sur base PROTÉGÉE) : après l'approbation et AVANT ``plan sync --execute``, matérialise la SPEC
+    approuvée par une PR sous les protections réelles (le commit direct de ``plan sync`` y est refusé par GitHub) ; un refus est un
+    arrêt explicite avant tout BUILD.
 
     Aucun retry payant : une seule exécution du produit ; un arrêt par budget/échéance est rapporté ``budget_stop``."""
     from collegue.pilot.nightly_e2e import NightlyManifest, _write_manifest
@@ -1659,6 +1668,27 @@ def launch_campaign(
     )
     if approved.get("plan_hash") != plan_hash or int(approved.get("task_count") or 0) != 3:
         raise RuntimeError("l'approbation n'a pas scellé le hash attendu")
+    expected_tip: Optional[str] = None
+
+    def _assert_base_unmoved(where: str) -> str:
+        tip = str(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch)).lower()
+        if expected_tip is not None and tip != expected_tip:
+            raise BaseMovedError(
+                f"la base '{cfg.base_branch}' ({tip[:12]}) n'est plus le sommet vérifié ({expected_tip[:12]}) {where} : écriture "
+                "extérieure, aucun BUILD sur une base non prouvée"
+            )
+        return tip
+
+    if materialize_spec is not None:
+        outcome = materialize_spec(report, context)
+        fact = outcome.to_fact() if hasattr(outcome, "to_fact") else dict(outcome or {})
+        report.facts["spec_materialization"] = fact
+        expected_tip = str(fact.get("base_after") or "").lower() or None
+        if expected_tip is None:  # la suite exige le sommet post-fusion EXACT : sans lui, aucune base n'est prouvée
+            raise BaseMovedError(
+                "la matérialisation de la SPEC n'a pas établi le sommet exact de la base : aucun BUILD"
+            )
+        _assert_base_unmoved("juste après la matérialisation de la SPEC")
     adapter.create_label(manifest)
     synced = adapter.product("plan", "sync", "--project-id", str(project_id), "--execute", "--format", "json")
     issues = sorted(
@@ -1669,7 +1699,8 @@ def launch_campaign(
     manifest.issue_numbers = issues
     context["issue_numbers"] = issues
     _write_manifest(cfg.manifest_path, manifest)
-    source = adapter.clone(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch))
+    _assert_base_unmoved("après plan sync")
+    source = adapter.clone(_assert_base_unmoved("juste avant le clone de l'opérateur"))
     context["operator_checkout"] = (
         source  # checkout de l'opérateur : resynchronisé par le produit, réutilisé par R04 / R05
     )
@@ -1999,13 +2030,18 @@ def _real_preflight(env: Mapping[str, str], campaign_id: str, stage: str = STAGE
     )
 
 
-def cleanup_campaign(report: CampaignReport, adapter: Any) -> None:
+def cleanup_campaign(
+    report: CampaignReport, adapter: Any, *, before: Optional[Callable[[CampaignReport], Any]] = None
+) -> None:
     """Nettoyage UNIQUE, après toutes les phases : ressources distantes éphémères (idempotent) puis clone de l'opérateur local.
-    La revendication de l'identifiant de campagne n'est JAMAIS supprimée."""
+    La revendication de l'identifiant de campagne n'est JAMAIS supprimée. ``before`` (campagne W5) traite d'abord ce que le nettoyage
+    nightly ne connaît pas (PR documentaire de la SPEC, PR d'amélioration résiduelles, base avancée par les fusions)."""
     import shutil
 
     launch = report.facts.get("launch") or {}
     try:
+        if before is not None:
+            report.facts["cleanup_campaign_resources"] = before(report)
         report.facts["cleanup"] = adapter.cleanup()
     finally:
         checkout = launch.get("operator_checkout")
@@ -2038,11 +2074,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if (
         args.action == "cleanup"
     ):  # idempotent, sans clé de modèle : ferme PR/issues et supprime les branches/labels du run
+        from collegue.pilot import w5_business as w5
+
         config = business_config(env)
+        clients = _fixture_clients(config.token)
+        # Mêmes preuves DURABLES et mêmes gardes que le nettoyage du run, sans mémoire de ce run : base d'état (preuves de livraison du
+        # projet), registre d'appartenance et manifeste à côté du manifeste nightly. Une ressource inconnue n'est jamais supprimable :
+        # l'étape lève (code 1) AVANT le nettoyage nightly, qui ne tente pas de « passer » la base.
+        resources = w5.cleanup_campaign_resources(
+            CampaignReport("cleanup", args.campaign_id), clients=clients, config=config, env=env
+        )
         payload = NightlyAdapter(
-            config, _fixture_clients(config.token), bounded_command_runner(time.monotonic() + 600)
+            config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)
         ).cleanup()
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+        print(
+            json.dumps(
+                {**dict(payload), "campaign_resources": resources}, ensure_ascii=False, sort_keys=True, default=str
+            )
+        )
         return 0
     # « preflight » : contrôles SANS clé (étape choisie) ; « run » : validation EFFECTIVE juste avant lancement — l'environnement
     # reçoit légitimement la clé du transport choisi (jamais affichée), les routes sont exigées avec leur credential.
@@ -2077,6 +2126,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     manifest=manifest,
                     image=image,
                     deadline_monotonic=deadline(),
+                    config=config,
                 )
             return cache["value"]
 
@@ -2090,6 +2140,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 claim=lambda rep: w5.revalidate_and_claim(clients, env, args.campaign_id, rep),
                 activate=lambda rep: w5.activate_budget(env, args.campaign_id, rep, on_remaining=tighten),
                 cycle_id=args.campaign_id,
+                materialize_spec=lambda rep, ctx: w5.materialize_spec_for_launch(
+                    clients=clients, config=config, env=env, project_id=int(ctx["project_id"]), deadline=deadline
+                ),
             ),
             verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline()),
             read_registry=registry_reader(env),
@@ -2099,6 +2152,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             cleanup=lambda r: cleanup_campaign(
                 r,
                 NightlyAdapter(config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)),
+                before=lambda rep: w5.cleanup_campaign_resources(rep, clients=clients, config=config, env=env),
             ),
             deadline_monotonic=deadline,
         )

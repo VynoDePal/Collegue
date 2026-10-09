@@ -49,6 +49,19 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(
         w5, "activate_budget", lambda env, campaign_id, report, **kwargs: events.append(("activate", campaign_id))
     )
+    monkeypatch.setattr(
+        w5,
+        "materialize_spec_for_launch",
+        lambda **kwargs: (
+            events.append(("spec", kwargs["project_id"], kwargs["deadline"])),
+            SimpleNamespace(
+                to_fact=lambda: {"state": "merged", "base_after": "a" * 40}
+            ),  # sommet post-fusion exact (celui du faux dépôt)
+        )[1],
+    )
+    monkeypatch.setattr(
+        w5, "cleanup_campaign_resources", lambda report, **kwargs: events.append(("resources", sorted(kwargs))) or {}
+    )
     monkeypatch.setattr(w5, "run_improvement_phase", lambda report, context, svc: events.append(("R04", svc)))
     monkeypatch.setattr(w5, "run_incident_phase", lambda report, context, svc: events.append(("R05", svc)))
     env = {
@@ -75,7 +88,16 @@ def test_main_claims_the_identity_then_runs_both_phases_on_production_services_t
     kinds = [e if isinstance(e, str) else e[0] for e in wired.events]
     assert kinds.count("cleanup") == 1 and kinds[-1] == "cleanup", kinds
     assert (
-        kinds.index("claim") < kinds.index("verify") < kinds.index("R04") < kinds.index("R05") < kinds.index("cleanup")
+        kinds.index("claim")
+        < kinds.index("activate")
+        < kinds.index("spec")
+        < kinds.index("verify")
+        < kinds.index("R04")
+        < kinds.index("R05")
+        < kinds.index("resources")
+        < kinds.index("cleanup")
+    ), (
+        "la SPEC est matérialisée après l'activation et AVANT tout BUILD ; les ressources de campagne avant le nettoyage nightly"
     )
     assert ("claim", "w5-camp-001") in wired.events, "l'identifiant de la campagne est revendiqué"
     assert ("R04", wired.services) in wired.events and ("R05", wired.services) in wired.events

@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from collegue.pilot import w4_business as business
+from collegue.pilot import w5_business_ownership as ownership
 from collegue.pilot import w5_business_policy as fixture_policy
+from collegue.pilot import w5_business_spec as spec_publication
 from collegue.pilot.w4_business import (
     BASE_BRANCH_PREFIX,
     FIXTURE_REPOSITORY,
@@ -999,6 +1001,9 @@ class PhaseServices:
     #: Checks REQUIS sur la base protégée (en production : ``Fixture tests`` de l'application réelle ; en test : ceux du pont).
     required_checks: Tuple[str, ...] = (REQUIRED_CHECK,)
     controls_ref: Optional[Callable[[Mapping[str, Any]], str]] = None
+    #: Registre d'appartenance durable (voir ``w5_business_ownership``) : ``record_owned(project_id=…, event=…, **champs)``. Sans registre
+    #: (tests de phase sans nettoyage) : aucun effet.
+    record_owned: Callable[..., None] = lambda **fields: None
 
     def remaining(self) -> Optional[float]:
         import time
@@ -1097,6 +1102,10 @@ def run_improvement_phase(report: CampaignReport, context: Dict[str, Any], servi
     if relation.status not in {"ahead", "identical"} or tree_after == tree_before:
         raise AssertionError("la base ne contient pas l'amélioration fusionnée")
     _check_controls(services, context, "après R04")
+    services.record_owned(
+        project_id=context["project_id"], event="improve_pr", pr_number=item.pr_number, head_sha=item.head_sha,
+        merge_sha=info.merge_commit_sha,
+    )  # fmt: skip
     context["r04"] = {
         "pr_number": item.pr_number,
         "merge_sha": info.merge_commit_sha,
@@ -1228,6 +1237,15 @@ def run_incident_phase(report: CampaignReport, context: Dict[str, Any], services
             f"santé indépendante non rétablie sur la base restaurée ({observation.status}: {observation.failed})"
         )
     _check_controls(services, context, "après R05")
+    # Attribution durable AVANT l'acquittement (l'incident résolu est supprimé de la base d'état) : PR de l'incident, PR de revert et leurs fusions.
+    services.record_owned(
+        project_id=project_id, event="incident_pr", pr_number=incident.source_pr_number, head_sha=incident.source_head_sha,
+        merge_sha=merge_sha,
+    )  # fmt: skip
+    services.record_owned(
+        project_id=project_id, event="revert_pr", pr_number=revert_pr.number, head_sha=revert_pr.head_sha,
+        head_branch=revert_branch, merge_sha=revert_pr.merge_commit_sha,
+    )  # fmt: skip
     from collegue.state.manager import Phase5IncidentConflictError
 
     def acknowledge(revision: int) -> bool:
@@ -1379,6 +1397,7 @@ def production_services(
     image: str,
     deadline_monotonic: float,
     clock: Optional[Callable[[], float]] = None,
+    config: Any = None,
 ) -> PhaseServices:
     """Câblage RÉEL : entrée publique du produit, vrais clients GitHub, sonde métier en conteneur, état durable de la campagne."""
     import shutil
@@ -1406,13 +1425,75 @@ def production_services(
         finally:
             shutil.rmtree(os.path.dirname(checkout), ignore_errors=True)
 
+    def record_owned(*, project_id: int, event: str, **fields: Any) -> None:
+        if config is None:
+            return
+        plan = getattr(manager().get_project(int(project_id)), "approved_plan_hash", None)
+        identity = ownership.identity_of(owner, repo, config.base_branch, project_id=int(project_id), plan_hash=plan)
+        ownership.append_event(config.manifest_path, identity, event, **fields)
+
     return PhaseServices(
         run_pass=run_pass, clients=clients, manager=manager, resume_incident=resume, verify_tip=verify_tip, owner=owner,
-        repo=repo, deadline_monotonic=deadline_monotonic, clock=clock, manifest=manifest,
+        repo=repo, deadline_monotonic=deadline_monotonic, clock=clock, manifest=manifest, record_owned=record_owned,
     )  # fmt: skip
 
 
+# ── lancement sur base PROTÉGÉE : SPEC par PR, nettoyage de ce que le nightly ne connaît pas ─────────────────────────────────────
+
+
+def materialize_spec_for_launch(
+    *, clients: Any, config: Any, env: Mapping[str, str], project_id: int, deadline: Callable[[], float]
+) -> Any:
+    """Matérialise la SPEC approuvée par une PR sous les protections réelles (voir :mod:`w5_business_spec`) ; l'échéance globale
+    atteinte est un arrêt budget, tout autre refus un échec explicite AVANT les BUILD."""
+    try:
+        return spec_publication.materialize_approved_spec(
+            clients=clients, owner=config.owner, repo=config.repo, manager=default_manager_factory(env)(), project_id=project_id,
+            manifest_path=config.manifest_path, trust_manifest_path=str(env.get(fixture_policy.TRUST_ANCHOR_ENV, "") or "") or None,
+            deadline_monotonic=deadline,
+        )  # fmt: skip
+    except spec_publication.SpecDeadline as exc:
+        raise BudgetStop(str(exc)) from exc
+
+
+def cleanup_campaign_resources(
+    report: CampaignReport, *, clients: Any, config: Any, env: Mapping[str, str]
+) -> Dict[str, Any]:
+    """Avant le nettoyage nightly, SANS mémoire du run : ne traite que ce que l'état DURABLE de cette campagne désigne (preuves de livraison
+    du projet dans la base d'état, registre d'appartenance à côté du manifeste), recoupé avec GitHub. Une ressource inconnue, étrangère ou
+    ambiguë est conservée et rend le nettoyage incomplet — jamais supprimable pour obtenir un nettoyage vert."""
+    from collegue.pilot.nightly_e2e import _load_manifest
+
+    manager = None
+    if str(env.get("STATE_DATABASE_URL", "") or ""):
+        manager = default_manager_factory(env)()
+    manifest = _load_manifest(config.manifest_path)
+    project_id = getattr(manifest, "project_id", None)
+    out: Dict[str, Any] = {
+        "spec": spec_publication.cleanup_spec_resources(clients, config.owner, config.repo, config.manifest_path)
+    }
+    _events, owned = spec_publication._owned_view(
+        manager, project_id, config.owner, config.repo, config.base_branch, config.manifest_path
+    )
+    out["residual_pull_requests"] = spec_publication.close_residual_pull_requests(
+        clients, config.owner, config.repo, config.base_branch, owned
+    )
+    anchor_rows = None
+    manifest_path = str(env.get(fixture_policy.TRUST_ANCHOR_ENV, "") or "")
+    if manifest_path:
+        anchor_rows = fixture_policy.load_trust_anchor(clients.branches, config.owner, config.repo, manifest_path).rows
+    out["merged_heads"] = spec_publication.reconcile_merged_heads(
+        clients, config, manager=manager, project_id=project_id
+    )
+    out["base"] = spec_publication.advance_recorded_base(
+        clients, config, anchor_rows=anchor_rows, manager=manager, project_id=project_id
+    )
+    return out
+
+
 __all__ = [
+    "materialize_spec_for_launch",
+    "cleanup_campaign_resources",
     "DeterministicIncidentAgent",
     "PhaseServices",
     "check_gemma_models",

@@ -151,3 +151,51 @@ de C) : proposition au manager, non appliquée ici.
   (contrôles protégés et provenance) à la campagne.
 * La garde interdit, pour la campagne, toute modification de `.github/` et `ci/` : une évolution légitime du socle exige un nouveau socle et un
   nouvel identifiant de campagne.
+
+## 6. Lancement CLI sur base PROTÉGÉE (B25)
+
+Deux raccords que des faux JSON à la place de `adapter.product` ne prouvaient pas, désormais exercés par la VRAIE CLI en processus
+(`tests/test_w5_business_public_launch.py` : argparse, validations, `runtime`, `github_sync`, vrais clients GitHub derrière un vrai dépôt Git dont la
+frontière HTTP REFUSE les écritures directes sur la base, avec le texte réel GH013) :
+
+1. **`--nightly-exact-task-count 3`** : la CLI acceptait seulement `1` (smoke nightly) alors que le lanceur de la campagne émet `3` et que le
+   décomposeur accepte `[1, MAX_TASKS]`. La validation suit désormais la borne du décomposeur ; `0`, négatif, `> MAX_TASKS`, non entier restent refusés à
+   l'analyse des arguments (aucun appel de modèle) ; le témoin nightly (`1`) et l'absence de l'option sont inchangés.
+2. **SPEC sur une base protégée** : `plan sync --execute` committe `SPEC.md` par un PUT Contents DIRECT sur la base, que le ruleset (PR obligatoire,
+   check requis, base à jour, aucun bypass) refuse : la campagne se serait arrêtée à `plan sync`, planification dépensée, avant tout BUILD.
+   Parcours minimal et conforme (`pilot/w5_business_spec.py`, appelé par `launch_campaign(materialize_spec=…)` entre l'approbation et le
+   `plan sync`) : la SPEC vient du SNAPSHOT approuvé (jamais d'un argument) ; SPEC déjà identique ⇒ rien ; divergente ⇒ refus ; protections serveur,
+   socle de confiance et contrôles de la base vérifiés ; branche de tête `collegue-spec/<tag>` hors du motif protégé, créée sur le sommet de la base
+   (ou reprise si elle porte EXACTEMENT base + blob SPEC, refusée sinon, jamais réécrite) avec UN seul fichier ; tête relue sur l'arbre distant ;
+   PR documentaire (pas une tâche BUILD, aucune preuve de livraison fabriquée) ; checks REQUIS et provenance réelle (check-run → job → exécution)
+   attendus dans l'échéance globale de 900 s (temps en général d'une à deux minutes sur le workflow de la fixture, pris sur la fenêtre) ; fusion à la
+   tête et à la base exactes ; réponse de fusion perdue ⇒ relecture de la PR, jamais de seconde fusion ; commit de fusion relu (parent = base, arbre =
+   base + blob) ; SPEC distante relue identique, que `plan sync` relit alors identique (aucun PUT). Un refus à une étape est un arrêt explicite
+   (`SpecMaterializationError`, échec de R01) ; l'échéance atteinte est un arrêt budget. Aucun contournement, aucune écriture directe, aucun
+   relâchement du ruleset, aucun code métier ajouté au socle.
+3. **Propriété durable des ressources et nettoyage** (B27 ; `cleanup_campaign(before=…)` et l'action publique `cleanup` → `cleanup_campaign_resources`).
+   Un préfixe de branche, un marqueur de PR, la base commune et l'ascendance d'un commit sont PUBLICS : ils ne prouvent jamais l'appartenance. Le
+   nettoyage nightly refuse une PR ouverte non corrélée, une tête `collegue/issue-N` sans SHA consigné et une base déplacée autrement que par le commit
+   de SPEC ; la campagne traite donc d'abord ce qu'il ne connaît pas, mais SEULEMENT ce qu'un état durable de CETTE campagne désigne, recoupé avec GitHub
+   (`pilot/w5_business_ownership.py`) :
+   * **état du produit** : preuves de livraison persistées par `open_pr` pour ce projet (PR et têtes réellement ouvertes par le produit, BUILD et
+     IMPROVE, relues et validées) et cycles de fusion des tâches ;
+   * **registre d'appartenance** `<manifeste>.owned.jsonl` (append-only, fsync, identité dépôt/base/projet/plan sur chaque ligne), écrit AVANT chaque création :
+     une **intention** de branche de SPEC n'est écrite que si l'ABSENCE a été établie (404 confirmé) ; une branche déjà présente, apparue pendant la création ou
+     non consignée est ÉTRANGÈRE (`foreign_branch_seen`) : refusée, jamais reprise, jamais supprimée. Une intention n'est PAS une preuve de création : la création (`create_branch`, jamais
+     `ensure_branch`, qui adopterait une branche existante) est consignée (`spec_branch_created`) seulement après son succès ; une branche de SPEC sans création consignée est
+     ambiguë (conservée, signalée). La reprise d'une écriture interrompue exige l'intention ET la création de cette campagne, la même base et un sommet exactement égal à
+     une étape attendue (sommet créé, base + blob SPEC). Une SPEC identique déjà sur la base avec une PR consignée mais non acquittée est recoupée avec la PR relue :
+     la base doit être SON commit de fusion, sinon refus. R04 consigne l'amélioration, R05 l'incident ET le
+     revert (avant l'acquittement qui supprime l'incident de la base d'état).
+   Conséquences : PR/branche de la SPEC possédées → fermées/supprimées avec gardes de sommet ; PR d'amélioration/revert **possédées** et ouvertes → fermées (tête vivante =
+     tête consignée) ; têtes `collegue/issue-N` fusionnées **prouvées** → SHA consigné au manifeste ; têtes d'amélioration/revert fusionnées **prouvées** → supprimées ;
+     base enregistrée avancée SEULEMENT si CHAQUE commit de la chaîne de premier parent (fusions comprises) est une fusion attribuée durablement à la campagne (SPEC, cycles
+     de fusion, PR possédées fusionnées, incident, revert) et si les contrôles sont ceux du socle — sinon base et ancres conservées et nettoyage rapporté INCOMPLET.
+   Une ressource inconnue, étrangère ou ambiguë est conservée et signalée ; le registre illisible arrête le nettoyage ; sans base d'état lisible, rien de ce que
+   prouve le produit n'est touché. L'action publique `cleanup` rejoue les MÊMES preuves (base d'état, registre, manifeste) sans mémoire du run, avant le nettoyage
+   nightly, qu'elle n'appelle pas si une ressource reste non prouvée.
+4. **Base attendue jusqu'au BUILD** : le matérialiseur exige le sommet post-fusion EXACT (y compris réponse de fusion perdue : relecture de la PR, jamais de seconde
+   fusion) ; `launch_campaign` conserve ce sommet et s'arrête (`BaseMovedError`) sur tout déplacement après la SPEC, après `plan sync` et juste avant le clone.
+   Une reprise sur SPEC identique ne masque pas une base qui a bougé depuis la fusion consignée.
+Limites : le nettoyage nightly complet n'est pas simulé contre un GitHub réel (issues, labels, base) ; seules ses préconditions le sont.
