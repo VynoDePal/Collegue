@@ -424,3 +424,26 @@ def test_the_runner_script_command_carries_no_allocation_arguments_in_broker_mod
         "gemini/gemma-4-31b-it",
         "gemini/gemma-4-26b-a4b-it",
     ]  # la destination reste Google
+
+
+async def test_the_pilot_repairs_interrupted_broker_state_before_launching_and_is_a_no_op_otherwise(manager, tmp_path):
+    from collegue.broker.runtime import install_runtime_for_tests
+    from collegue.pilot.runtime import _recover_broker_state
+
+    built = Env(manager, tmp_path)
+    service = built.runtime.service_for(built.ledger)
+    parent = built.ledger.reserve(
+        built.scope, micro_usd=1, tokens=5000, kind="worker", role="coder", transport="worker"
+    )
+    session = service.open_session(
+        parent_scope_key=built.scope, parent_reservation_id=parent.reservation_id, role="coder"
+    )
+    install_runtime_for_tests(built.runtime)
+    try:
+        assert await _recover_broker_state(make_settings(LLM_TRANSPORT="direct"), manager) == 0  # hors courtier : rien
+        assert service.store.get_session(session.session_id).state == "open"
+        await _recover_broker_state(built.settings, manager)  # courtier : la session orpheline est fermée et consolidée
+    finally:
+        install_runtime_for_tests(None)
+    assert service.store.get_session(session.session_id).state == "closed"
+    assert built.ledger.get_reservation(parent.reservation_id).state == "committed"

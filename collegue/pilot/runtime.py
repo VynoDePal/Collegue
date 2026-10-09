@@ -280,6 +280,19 @@ def _build_gate_sandbox(settings_obj):  # pragma: no cover - infra réelle (inte
     )
 
 
+async def _recover_broker_state(settings_obj, manager) -> int:
+    """Mode courtier : répare les sessions / tentatives laissées par un arrêt ou un crash AVANT de lancer quoi que ce soit.
+
+    Une tentative ``prepared`` n'a prouvablement rien émis (libérée) ; une tentative ``emitting`` est d'usage inconnu (bloque le
+    projet, n'est JAMAIS rejouée) ; les sessions non closes sont fermées et consolidées. Sans effet hors mode courtier.
+    """
+    if not _broker_mode(settings_obj):
+        return 0
+    from collegue.broker.runtime import runtime_for
+
+    return await runtime_for(settings_obj).service_for(manager.budget_ledger).recover_all()
+
+
 def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (integration)
     # OpenHands 1.7 est SDK-first : ``openhands.core.main`` n'existe plus → on utilise
     # l'agent SDK (``oh_runner`` baké dans l'image), qui gère aussi l'abonnement gpt-5.5.
@@ -604,6 +617,8 @@ async def run_project_from_settings(
     sandbox_was_injected = sandbox is not None
     coder_sandbox = sandbox or _build_sandbox(settings_obj)
     agent = agent or _build_agent(coder_sandbox, settings_obj)
+    if not dry_run:
+        await _recover_broker_state(settings_obj, manager)
     if gate_sandbox is None:
         # Compatibilité : un double/custom sandbox injecté historiquement servait
         # aux deux usages. Le chemin produit, lui, construit toujours une instance
