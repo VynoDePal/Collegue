@@ -488,3 +488,196 @@ def test_an_api_failure_is_a_retryable_remote_error_while_a_truncated_tree_is_a_
     bridge.truncate_trees = True  # tronqué : une relecture ne prouverait pas davantage
     with pytest.raises(DeliveryRefusedError, match="illisible"):
         _assert_publication_controls(None, None, None, clients, "fixture", "fixture", None)
+
+
+# ── branche de tête PRÉEXISTANTE (sans PR ouverte) : examinée AVANT toute écriture, jamais réutilisée à l'aveugle (B24) ───────────
+
+HEAD_BRANCH = "collegue/issue-1"
+NOTE = {"docs/note.md": "# bénin\n"}
+
+
+def seed_branch(bridge, files=None, *, from_sha=None):
+    """Branche de tête laissée par un tiers ou une publication interrompue ; la préparation n'est pas une écriture de Collègue."""
+    bridge.branches[HEAD_BRANCH] = from_sha or bridge.base_tip
+    tip = bridge.branches[HEAD_BRANCH]
+    for path, text in (files or {}).items():
+        tip = bridge.write_remote_file(HEAD_BRANCH, path, text)
+    bridge.calls.clear()
+    bridge.remote.writes.clear()
+    return tip
+
+
+async def test_a_branch_left_at_the_validated_base_is_continued(anchored, bridge, source, state_url):
+    seed_branch(bridge)
+
+    pid = await publish(state_url, source, bridge, files=NOTE)
+
+    assert sorted(bridge.prs) == [101] and statuses(state_url, pid) == {"T0": "in_review"}
+
+
+async def test_a_clean_branch_ahead_of_the_base_with_another_content_is_refused_without_any_write(
+    anchored, bridge, source, state_url
+):
+    tip = seed_branch(bridge, {"docs/autre.md": "# un autre contenu propre\n"})
+
+    pid = await publish(state_url, source, bridge, files=NOTE)
+
+    assert mutations(bridge) == [] and bridge.prs == {}
+    reason = refused_reason(state_url, pid)
+    assert "existe déjà sans PR ouverte" in reason and HEAD_BRANCH in reason and tip[:12] in reason, reason
+    assert bridge.branches[HEAD_BRANCH] == tip, "le contenu de la branche n'est jamais remplacé en aveugle"
+
+
+async def test_a_branch_that_already_carries_exactly_the_tested_tree_is_resumed_without_rewriting(
+    anchored, bridge, source, state_url
+):
+    tip = seed_branch(bridge, NOTE)  # publication interrompue AVANT la PR : l'arbre de la branche EST l'arbre testé
+
+    pid = await publish(state_url, source, bridge, files=NOTE)
+
+    assert sorted(bridge.prs) == [101] and statuses(state_url, pid) == {"T0": "in_review"}
+    assert bridge.prs[101]["head"]["sha"] == tip, "la branche est reprise telle quelle"
+    assert [call for call in mutations(bridge) if "/contents/" in call[1] or "git/refs" in call[1]] == [], (
+        "aucune écriture de contenu ni de référence : seule la PR est créée"
+    )
+
+
+async def test_a_residual_branch_after_a_closed_pr_is_examined_not_blindly_reused(
+    anchored, bridge, source, state_url, monkeypatch
+):
+    pid = await publish(state_url, source, bridge, files=NOTE)
+    assert sorted(bridge.prs) == [101]
+    bridge.prs[101]["state"] = "closed"  # PR fermée, branche conservée
+    manager = open_manager(state_url)
+    manager.update_task_status(manager.get_tasks(pid)[0].id, "todo")
+    tip = bridge.branches[HEAD_BRANCH]
+    bridge.calls.clear()
+
+    # même contenu : la branche résiduelle EST l'arbre testé → reprise sans réécriture
+    await run_pass(
+        state_url,
+        source,
+        bridge,
+        pid,
+        agent=FilesAgent(files=NOTE),
+        settings={"BUILD_AUTO_MERGE": False, "TASK_MAX_ATTEMPTS": 1},
+    )
+    assert [c for c in mutations(bridge) if "/contents/" in c[1] or "git/refs" in c[1]] == []
+    assert bridge.branches[HEAD_BRANCH] == tip
+
+    # contenu DIFFÉRENT : la branche résiduelle n'est ni réutilisée ni réécrite
+    bridge.prs[101]["state"] = "closed"
+    for number in [n for n in bridge.prs if n != 101]:
+        bridge.prs[number]["state"] = "closed"
+    manager = open_manager(state_url)
+    manager.update_task_status(manager.get_tasks(pid)[0].id, "todo")
+    bridge.calls.clear()
+    await run_pass(
+        state_url,
+        source,
+        bridge,
+        pid,
+        agent=FilesAgent(files={"docs/autre.md": "# autre\n"}),
+        settings={"BUILD_AUTO_MERGE": False, "TASK_MAX_ATTEMPTS": 1},
+    )
+    assert [c for c in mutations(bridge) if "/contents/" in c[1] or "git/refs" in c[1]] == []
+    assert bridge.branches[HEAD_BRANCH] == tip
+    assert "existe déjà sans PR ouverte" in (open_manager(state_url).get_tasks(pid)[0].last_error or "")
+
+
+async def test_an_unreadable_branch_tip_is_a_retryable_error_never_an_absence(anchored, bridge, source, state_url):
+    bridge.fail("GET", r"/git/ref/heads/collegue/issue-1", 503, times=1)
+    pid = linear_project(state_url, 1)
+
+    await run_pass(
+        state_url,
+        source,
+        bridge,
+        pid,
+        agent=FilesAgent(files=NOTE),
+        settings={"BUILD_AUTO_MERGE": False, "TASK_MAX_ATTEMPTS": 1},
+    )
+
+    assert mutations(bridge) == [] and bridge.prs == {}, "panne de lecture ≠ branche absente : aucune écriture"
+    assert "illisible" in refused_reason(state_url, pid) or "503" in refused_reason(state_url, pid)
+
+
+async def test_a_branch_that_appears_during_the_creation_is_never_reused_blindly(anchored, bridge, source, state_url):
+    """Course : le sommet est ABSENT à l'examen, un tiers crée la branche (avec un workflow altéré) avant ``ensure_branch``."""
+    hostile = {"value": None}
+
+    def third_party(server):
+        server.branches[HEAD_BRANCH] = server.base_tip
+        hostile["value"] = server.write_remote_file(HEAD_BRANCH, WORKFLOW_PATH, "name: x\non: push\njobs: {}\n")
+
+    # 1er GET de la branche = l'examen (404) ; 2ᵉ GET = celui d'``ensure_branch`` : le tiers passe juste avant
+    bridge.on_get(r"/git/ref/heads/collegue/issue-1$", third_party, nth=2)
+    pid = await publish(state_url, source, bridge, files=NOTE)
+
+    assert hostile["value"], "le scénario de course a bien eu lieu"
+    assert [c for c in mutations(bridge) if "/contents/" in c[1]] == [], "aucun contenu écrit sur la branche apparue"
+    assert bridge.prs == {}
+    assert "n'est pas sur la base validée" in refused_reason(state_url, pid)
+    assert bridge.branches[HEAD_BRANCH] == hostile["value"]
+
+
+async def test_a_branch_that_appears_during_the_creation_at_the_validated_base_is_continued(
+    anchored, bridge, source, state_url
+):
+    bridge.on_get(
+        r"/git/ref/heads/collegue/issue-1$",
+        lambda server: server.branches.update({HEAD_BRANCH: server.base_tip}),
+        nth=2,
+    )
+
+    pid = await publish(state_url, source, bridge, files=NOTE)
+
+    assert sorted(bridge.prs) == [101] and statuses(state_url, pid) == {"T0": "in_review"}
+
+
+async def test_outside_the_campaign_an_existing_branch_is_still_reused_as_before(bridge, source, state_url):
+    """Politique hors campagne inchangée : aucune inspection préalable. Branche au niveau de la base ⇒ publiée ; branche en avance ⇒
+    réutilisée et écrite comme avant (le refus vient de la seule vérification post-publication, arbre publié ≠ arbre testé)."""
+    seed_branch(bridge)
+    pid = await publish(state_url, source, bridge, files=NOTE)
+    assert sorted(bridge.prs) == [101] and statuses(state_url, pid) == {"T0": "in_review"}
+
+
+async def test_outside_the_campaign_an_ahead_branch_is_written_into_as_before_and_refused_only_after_publication(
+    bridge, source, state_url
+):
+    seed_branch(bridge, {"docs/autre.md": "# résiduel\n"})
+
+    pid = await publish(state_url, source, bridge, files=NOTE)
+
+    assert [c for c in mutations(bridge) if "/contents/docs/note.md" in c[1]], (
+        "historique : la branche est réécrite avant le refus"
+    )
+    assert bridge.prs == {} and "arbre publié" in refused_reason(state_url, pid)
+
+
+async def test_an_improvement_branch_left_with_altered_controls_is_not_written_into(improve_world):
+    from test_improve_promotion import metrics
+    from test_w3_integration_improve import FilesFeature, improve, phase5_hook
+
+    bridge = improve_world.bridge
+    probe = await improve(
+        improve_world, [metrics(80), metrics(90)], agent=FilesFeature({"docs/gain.md": "# gain\n"}), promotion_hook=None
+    )
+    assert len(probe.promoted) == 1
+    branch = bridge.prs[probe.promoted[0].pr_number]["head"]["ref"]
+    # on repart d'un monde vierge : même branche d'amélioration, laissée avec un workflow altéré et SANS PR ouverte
+    bridge.prs.clear()
+    bridge.branches[branch] = bridge.base_tip
+    bridge.write_remote_file(branch, WORKFLOW_PATH, "name: Existing hostile\non: push\njobs: {}\n")
+    bridge.calls.clear()
+    bridge.remote.writes.clear()
+
+    result = await improve(
+        improve_world,
+        [metrics(80), metrics(90)],
+        agent=FilesFeature({"docs/gain.md": "# gain\n"}),
+        promotion_hook=phase5_hook(improve_world),
+    )
+
+    assert result.promoted == [] and mutations(bridge) == [], result.rejected

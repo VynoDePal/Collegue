@@ -461,14 +461,28 @@ def open_pr(
             head_sha=None if existing_head is None else str(existing_head),
         )
 
-    clients.branches.ensure_branch(owner, repo, head, from_branch=base)
+    # Campagne : une branche de tête préexistante SANS PR ouverte est examinée avant toute écriture (voir ``_inspect_destination_branch``).
+    resumed = False
+    if controls_anchor is not None:
+        resumed = _inspect_destination_branch(clients, owner, repo, head, remote_base, content, controls_anchor)
 
-    for item in snapshot.files:
-        message = f"collegue: issue #{int(issue.number)} — {item.path}"
-        if item.operation == DELIVERY_UPDATE:
-            clients.files.update_file(owner, repo, item.path, message, item.content or "", branch=head)
-        elif item.operation == DELIVERY_DELETE:
-            clients.files.delete_file(owner, repo, item.path, message, branch=head)
+    if not resumed:
+        branch_info = clients.branches.ensure_branch(owner, repo, head, from_branch=base)
+        if controls_anchor is not None:
+            # ``ensure_branch`` peut RETOURNER une branche apparue entre l'examen et la création (course) : jamais de réutilisation aveugle.
+            landed = str(getattr(branch_info, "commit_sha", "") or "").lower()
+            if landed != remote_base.sha:
+                raise DeliveryRefusedError(
+                    f"LIVRAISON REFUSÉE — la branche de tête '{head}' n'est pas sur la base validée après sa création ({landed[:12] or '?'} "
+                    f"≠ {remote_base.sha[:12]}) : branche apparue pendant la création ou base déplacée ; aucun contenu n'y est écrit."
+                )
+
+        for item in snapshot.files:
+            message = f"collegue: issue #{int(issue.number)} — {item.path}"
+            if item.operation == DELIVERY_UPDATE:
+                clients.files.update_file(owner, repo, item.path, message, item.content or "", branch=head)
+            elif item.operation == DELIVERY_DELETE:
+                clients.files.delete_file(owner, repo, item.path, message, branch=head)
 
     head_sha = None
     if verify:
@@ -607,6 +621,43 @@ def _assert_remote_head_controls(clients: PrClients, owner: str, repo: str, head
         raise DeliveryRefusedError(f"LIVRAISON REFUSÉE — {refused.reason}") from refused
     except Exception as exc:  # noqa: BLE001 - tête distante illisible = refus
         raise DeliveryRemoteError(f"contrôles de la tête distante {head_sha[:12]} illisibles: {exc}") from exc
+
+
+def _inspect_destination_branch(
+    clients: PrClients, owner: str, repo: str, head: str, remote_base, content: TestedContent, anchor
+) -> bool:
+    """Campagne : la branche de tête préexistante (sans PR OUVERTE) est examinée AVANT toute écriture, jamais réutilisée à l'aveugle.
+
+    Cas : branche ABSENTE (404 ÉTABLI, jamais une panne de lecture) ⇒ elle sera créée sur la base validée ; branche IDENTIQUE à la base
+    validée ⇒ poursuite normale ; branche portant exactement l'arbre testé (publication interrompue avant la PR, PR fermée dont la
+    branche reste) ⇒ REPRISE sans réécriture (retourne ``True``) ; contrôles altérés ⇒ refus ; toute autre branche (en avance, divergente,
+    en retard) ⇒ refus explicite SANS mutation — son contenu n'est jamais remplacé en aveugle. Panne de lecture ⇒ erreur distante
+    retentable, zéro écriture. Limite : entre cette lecture et la première écriture, un acteur externe privilégié peut encore déplacer la
+    branche (l'API Contents n'offre pas de précondition atomique sur la branche) ; la relecture APRÈS publication reste le dernier filet."""
+    try:
+        tip = str(clients.branches.get_branch_sha(owner, repo, head)).lower()
+    except Exception as exc:  # noqa: BLE001
+        if getattr(exc, "status_code", None) == 404:
+            return False
+        raise DeliveryRemoteError(
+            f"sommet de la branche de tête '{head}' illisible (aucune écriture n'a eu lieu): {exc}"
+        ) from exc
+    if tip == remote_base.sha:
+        return False
+    _assert_remote_head_controls(clients, owner, repo, tip, anchor)
+    try:
+        tree = clients.branches.get_git_commit(owner, repo, tip).tree_sha
+    except Exception as exc:  # noqa: BLE001
+        raise DeliveryRemoteError(f"branche de tête '{head}' ({tip[:12]}) illisible: {exc}") from exc
+    if tree == content.tree_sha:
+        verify_remote_head(
+            clients.branches, owner, repo, head_sha=tip, content=content, remote_base_sha=remote_base.sha
+        )
+        return True
+    raise DeliveryRefusedError(
+        f"LIVRAISON REFUSÉE — la branche de tête '{head}' existe déjà sans PR ouverte (sommet {tip[:12]}) : elle n'est ni la base "
+        f"validée ({remote_base.sha[:12]}) ni l'arbre testé. Elle n'est ni réutilisée ni réécrite ; supprime-la ou rends-la à la base."
+    )
 
 
 def _default_clients(token: Optional[str] = None) -> PrClients:  # pragma: no cover - chemin réel (integration)
