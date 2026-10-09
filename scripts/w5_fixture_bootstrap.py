@@ -872,6 +872,12 @@ class ApiError(Exception):
         self.status = status
 
 
+class NetworkError(Exception):
+    """Résultat INCONNU : le transport a échoué (DNS, connexion, délai) sans réponse de l'API. Volontairement distinct d'``ApiError`` : ce n'est PAS un refus
+    (une création de base « refusée » par la règle de dépôt ne doit jamais se confondre avec une coupure réseau). Une écriture n'est jamais rejouée à
+    l'aveugle : l'identité est relue (réconciliation) ; seules les lectures sont retentées."""
+
+
 def _api_message(exc: "urllib.error.HTTPError") -> str:
     """Motif renvoyé par l'API (``message`` + ``errors``), borné : utile au diagnostic (règle de dépôt refusée…), sans jamais contenir le jeton."""
     try:
@@ -906,12 +912,23 @@ class GitHubApi:
                 **({"Content-Type": "application/json"} if data is not None else {}),
             },
         )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as response:  # noqa: S310 - hôte fixe https://api.github.com
-                body = response.read()
-        except urllib.error.HTTPError as exc:
-            raise ApiError(exc.code, _api_message(exc)) from None
-        return json.loads(body) if body else None
+        attempts = 4 if method == "GET" else 1  # lecture idempotente : retentée ; écriture : jamais rejouée à l'aveugle
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as response:  # noqa: S310 - hôte fixe https://api.github.com
+                    body = response.read()
+                return json.loads(body) if body else None
+            except urllib.error.HTTPError as exc:
+                raise ApiError(exc.code, _api_message(exc)) from None
+            except (
+                urllib.error.URLError,
+                OSError,
+            ) as exc:  # DNS, connexion, délai : le message ne contient jamais le jeton
+                if attempt == attempts:
+                    reason = getattr(exc, "reason", exc)
+                    raise NetworkError(f"{method} {path} : {type(exc).__name__} ({reason})") from None
+                time.sleep(3 * 2 ** (attempt - 1))
+        raise AssertionError("inaccessible")  # pragma: no cover
 
 
 Api = Callable[[str, str, Optional[Mapping[str, Any]]], Any]
@@ -965,6 +982,9 @@ def journaling(api: Api, log: EventLog) -> Api:
             result = api(method, path, payload)
         except ApiError as exc:
             log.record(event="error", method=method, path=path, status=exc.status, message=str(exc)[:300])
+            raise
+        except NetworkError as exc:
+            log.record(event="unknown_result", method=method, path=path, message=str(exc)[:300])
             raise
         log.record(event="response", method=method, path=path, **_identity(result))
         return result
@@ -1386,6 +1406,53 @@ def _workflow_runs(api: Api, head_sha: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _reconcile_cleanup(
+    api: Api,
+    outcome: Dict[str, Any],
+    *,
+    prs: Sequence[int],
+    heads: Sequence[str],
+    refs: Sequence[str],
+    attempted: Sequence[str],
+) -> None:
+    """Nettoyage PAR IDENTITÉ exacte (noms propres à CETTE sonde) : ferme les PR connues, ferme celles dont la création a pu réussir sans réponse (lecture
+    des PR ouvertes de la tête), supprime les branches confirmées PUIS celles dont la création a pu réussir sans réponse (404 = déjà absente, sans erreur).
+    Un échec réseau est consigné (``cleanup_errors``), jamais avalé ni rejoué à l'aveugle."""
+
+    def note_error(what: str) -> None:
+        outcome.setdefault("cleanup_errors", []).append(what)
+
+    owner = REPOSITORY.split("/")[0]
+    closed = set()
+    for number in prs:
+        try:
+            api("PATCH", f"/repos/{REPOSITORY}/pulls/{number}", {"state": "closed"})
+            closed.add(number)
+        except (ApiError, NetworkError):
+            pass
+    for head in heads:
+        try:
+            for pr in api("GET", f"/repos/{REPOSITORY}/pulls?state=open&head={owner}:{head}", None) or []:
+                if pr["number"] not in closed and pr.get("head", {}).get("ref") == head:
+                    api("PATCH", f"/repos/{REPOSITORY}/pulls/{pr['number']}", {"state": "closed"})
+                    outcome.setdefault("reconciled_prs", []).append(pr["number"])
+        except (ApiError, NetworkError):
+            note_error(f"pr:{head}")
+    for ref in reversed(list(refs)):
+        try:
+            api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
+        except (ApiError, NetworkError):
+            note_error(ref)
+    for ref in reversed([r for r in attempted if r not in refs]):
+        try:
+            api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
+        except ApiError as exc:
+            if exc.status not in (404, 422):  # absente : rien à nettoyer
+                note_error(ref)
+        except NetworkError:
+            note_error(ref)
+
+
 def run_stale_base(
     api: Api,
     plan: Mapping[str, Any],
@@ -1412,6 +1479,7 @@ def run_stale_base(
         "merge_expected": "first accepted, behind refused, conflict refused",
     }
     owned: List[str] = []
+    attempted: List[str] = []
     prs: Dict[str, int] = {}
     head_shas: Dict[str, str] = {}
     note = (lambda **kw: log.record(probe_id=probe_id, scenario="stale-base", **kw)) if log else (lambda **kw: None)
@@ -1440,9 +1508,11 @@ def run_stale_base(
             sleep(10)
 
     try:
+        attempted.append(base)
         api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{base}", "sha": plan["bootstrap_sha"]})
         owned.append(base)
         for name, ref in heads.items():
+            attempted.append(ref)
             api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{ref}", "sha": plan["bootstrap_sha"]})
             owned.append(ref)
             head_shas[name] = _put_files(api, ref, files[name], f"sonde stale-{name}")
@@ -1472,17 +1542,12 @@ def run_stale_base(
         )
     except ApiError as exc:
         outcome.update(ok=False, error=str(exc)[:300])
+    except NetworkError as exc:
+        outcome.update(ok=False, error=f"résultat inconnu (réseau), réconciliation par identité : {exc}"[:300])
     finally:
-        for number in prs.values():
-            try:
-                api("PATCH", f"/repos/{REPOSITORY}/pulls/{number}", {"state": "closed"})
-            except ApiError:
-                pass
-        for ref in reversed(owned):
-            try:
-                api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
-            except ApiError:
-                outcome.setdefault("cleanup_errors", []).append(ref)
+        _reconcile_cleanup(
+            api, outcome, prs=list(prs.values()), heads=list(heads.values()), refs=owned, attempted=attempted
+        )
         note(event="scenario_result", outcome=json.loads(json.dumps(outcome, default=str)))
     return outcome
 
@@ -1498,21 +1563,30 @@ def run_probe(
     timeout: float = 600.0,
     observe_missing_seconds: float = 120.0,
     log: Optional[EventLog] = None,
+    only: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """PR jetables vers des bases éphémères de sonde ; toutes les ressources créées sont supprimées, même sur échec."""
+    """PR jetables vers des bases éphémères de sonde ; toutes les ressources créées sont supprimées, même sur échec. ``only`` : ne rejoue que ces scénarios
+    (par identifiant, ``stale-base`` compris) en conservant la NUMÉROTATION d'origine des branches : sert à terminer une sonde interrompue sans rejouer ni
+    dupliquer ce qui est déjà établi dans le journal."""
     _require_order(plan, order_token)
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,30}", probe_id):
         raise FixtureError("identifiant de sonde invalide")
     verdict = verify_remote(api, plan)
     if not verdict["ok"]:
         raise FixtureError("l'état distant n'est pas celui du plan (verify) : " + " ; ".join(verdict["problems"]))
+    known = [scenario["id"] for scenario in probe_scenarios(plan)] + ["stale-base"]
+    if only is not None and (not only or any(name not in known for name in only)):
+        raise FixtureError("scénario inconnu (attendus : " + ", ".join(known) + ")")
     results = []
     for index, scenario in enumerate(probe_scenarios(plan)):
         name = scenario["id"]
+        if only is not None and name not in only:
+            continue
         base = f"collegue-business/probe-{probe_id}-{index}"
         head = f"collegue-probe/{probe_id}-{index}"
         base_sha = SEED_SHA if scenario.get("base") == "seed" else plan["bootstrap_sha"]
         owned_refs: List[str] = []
+        attempted_refs: List[str] = []
         pr_number: Optional[int] = None
         outcome: Dict[str, Any] = {
             "scenario": name,
@@ -1521,6 +1595,7 @@ def run_probe(
         }
         try:
             try:
+                attempted_refs.append(base)
                 api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{base}", "sha": base_sha})
                 owned_refs.append(base)
                 outcome["creation"] = "accepted"
@@ -1532,6 +1607,7 @@ def run_probe(
             if scenario.get("creation") == "refused":
                 # la règle de création devait refuser une base sans check : acceptée, on observe alors la PR (le refus de fusion suffit)
                 outcome["note"] = "création acceptée : la règle de création n'a pas refusé la base issue de la graine"
+            attempted_refs.append(head)
             api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{head}", "sha": base_sha})
             owned_refs.append(head)
             head_sha = base_sha
@@ -1612,7 +1688,17 @@ def run_probe(
             )
         except ApiError as exc:
             outcome.update(ok=False, error=str(exc)[:300])
+        except NetworkError as exc:
+            outcome.update(ok=False, error=f"résultat inconnu (réseau), réconciliation par identité : {exc}"[:300])
         finally:
+            _reconcile_cleanup(
+                api,
+                outcome,
+                prs=[] if pr_number is None else [pr_number],
+                heads=[head] if head in attempted_refs else [],
+                refs=owned_refs,
+                attempted=attempted_refs,
+            )
             if log:
                 log.record(
                     event="scenario_result",
@@ -1620,29 +1706,20 @@ def run_probe(
                     scenario=name,
                     outcome=json.loads(json.dumps(outcome, default=str)),
                 )
-            if pr_number is not None:
-                try:
-                    api("PATCH", f"/repos/{REPOSITORY}/pulls/{pr_number}", {"state": "closed"})
-                except ApiError:
-                    pass
-            for ref in reversed(owned_refs):
-                try:
-                    api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
-                except ApiError:
-                    outcome.setdefault("cleanup_errors", []).append(ref)
             results.append(outcome)
-    results.append(
-        run_stale_base(
-            api,
-            plan,
-            probe_id=probe_id,
-            sleep=sleep,
-            clock=clock,
-            timeout=timeout,
-            observe_missing_seconds=observe_missing_seconds,
-            log=log,
+    if only is None or "stale-base" in only:
+        results.append(
+            run_stale_base(
+                api,
+                plan,
+                probe_id=probe_id,
+                sleep=sleep,
+                clock=clock,
+                timeout=timeout,
+                observe_missing_seconds=observe_missing_seconds,
+                log=log,
+            )
         )
-    )
     return {"ok": all(r.get("ok") for r in results), "results": results}
 
 
@@ -1670,6 +1747,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         if name == "probe":
             cmd.add_argument("--probe-id", required=True)
+            cmd.add_argument(
+                "--only",
+                help="scénarios à rejouer, séparés par des virgules (terminer une sonde interrompue ; numérotation conservée)",
+            )
         if name == "apply":
             cmd.add_argument("--manifest-out", type=Path, required=True)
         if name == "cleanup":
@@ -1703,7 +1784,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps({k: v for k, v in result.items() if k != "manifest"}, indent=1))
             return 0
         if args.command == "probe":
-            result = run_probe(api, plan, order_token=args.order_token, probe_id=args.probe_id, log=log)
+            only = [name for name in args.only.split(",") if name] if args.only else None
+            result = run_probe(api, plan, order_token=args.order_token, probe_id=args.probe_id, log=log, only=only)
             print(json.dumps(result, indent=1, sort_keys=True))
             return 0 if result["ok"] else 1
         result = cleanup_bootstrap(api, plan, order_token=args.order_token, with_ruleset=args.with_ruleset)
@@ -1711,6 +1793,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except (FixtureError, ApiError) as exc:
         print(f"REFUS: {exc}", file=sys.stderr)
+        return 1
+    except NetworkError as exc:
+        print(
+            f"RÉSULTAT INCONNU (réseau) : {exc} ; relire l'état distant (inspect) avant toute reprise", file=sys.stderr
+        )
         return 1
 
 

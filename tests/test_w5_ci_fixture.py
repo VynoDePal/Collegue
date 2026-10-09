@@ -1109,6 +1109,13 @@ class ProbeServer(FakeGitHub):
                     }
                 )
             return {"check_runs": runs}
+        m = re.fullmatch(rf"{repo}/pulls\?state=open&head=[^:]+:(.+)", path)
+        if m and method == "GET":
+            return [
+                {"number": number, "head": {"ref": pr["head"]}}
+                for number, pr in self.prs.items()
+                if pr["head"] == m.group(1) and pr["state"] == "open"
+            ]
         m = re.fullmatch(rf"{repo}/pulls/(\d+)", path)
         if m and method == "GET":
             pr = self.prs[int(m.group(1))]
@@ -1577,3 +1584,150 @@ def test_the_provenance_chain_refuses_every_broken_or_substituted_link(fx, plan,
     api, head = _chain(fx, plan, **override)
     ok, why = fx.check_provenance(api, head, plan)
     assert ok is False and needle in why, why
+
+
+# ── coupure réseau : résultat INCONNU, jamais un refus ni un verdict fabriqué (C49) ──────────────────────────────────────────
+
+
+class LostNetwork:
+    """Enveloppe un faux GitHub : à l'appel qui correspond, lève ``NetworkError`` (résultat inconnu). ``executed=True`` : l'écriture a RÉUSSI côté serveur mais la
+    réponse est perdue (cas dangereux : une ressource existe sans identité connue)."""
+
+    def __init__(self, fx, server, method, pattern, *, executed):
+        self.fx, self.server, self.method, self.pattern, self.executed = (
+            fx,
+            server,
+            method,
+            re.compile(pattern),
+            executed,
+        )
+        self.fired = 0
+
+    def __call__(self, method, path, payload):
+        described = f"{path} {json.dumps(payload)}"
+        if self.fired == 0 and method == self.method and self.pattern.search(described):
+            self.fired += 1
+            if self.executed:
+                self.server(method, path, payload)
+            raise self.fx.NetworkError(f"{method} {path} : URLError ([Errno -3] Temporary failure in name resolution)")
+        return self.server(method, path, payload)
+
+
+def test_a_lost_pull_request_creation_is_reconciled_by_identity_and_never_reported_as_a_verdict(fx, plan):
+    server = ProbeServer(fx, plan, GOOD, v1=True)
+    flaky = LostNetwork(fx, server, "POST", r"/pulls \{", executed=True)
+    ticks = iter(range(100_000))
+    result = fx.run_probe(
+        flaky,
+        plan,
+        order_token=plan["order_token"],
+        probe_id="probe-lost",
+        sleep=no_sleep,
+        clock=lambda: float(next(ticks)) * 100,
+    )
+    first = result["results"][0]
+    assert flaky.fired == 1 and first["scenario"] == "green"
+    assert first["ok"] is False and "résultat inconnu" in first["error"], (
+        "jamais un succès ni un échec fabriqué : résultat inconnu"
+    )
+    assert "merge" not in first and "check_observed" not in first
+    assert first["reconciled_prs"], "la PR créée sans réponse est retrouvée par sa tête exacte et fermée"
+    assert all(pr["state"] == "closed" for pr in server.prs.values())
+    assert not [r for r in server.refs if "probe" in r], "aucune branche ne reste"
+    assert result["ok"] is False
+    assert [r["scenario"] for r in result["results"]] == [*GOOD, "stale-base"]
+    assert all(r["ok"] for r in result["results"][1:]), "les autres scénarios sont rejoués normalement, sans doublon"
+
+
+def test_a_network_failure_on_a_base_creation_is_not_counted_as_the_creation_rule_refusing_it(fx, plan):
+    server = ProbeServer(fx, plan, GOOD, v1=True)
+    flaky = LostNetwork(fx, server, "POST", r"/git/refs .*collegue-business/probe-probe-net-4", executed=False)
+    ticks = iter(range(100_000))
+    result = fx.run_probe(
+        flaky,
+        plan,
+        order_token=plan["order_token"],
+        probe_id="probe-net",
+        sleep=no_sleep,
+        clock=lambda: float(next(ticks)) * 100,
+        only=["seed-base"],
+    )
+    seed = result["results"][0]
+    assert flaky.fired == 1 and seed["scenario"] == "seed-base"
+    assert seed["ok"] is False and seed.get("creation") != "refused", (
+        "une coupure n'est PAS un refus de la règle de création : sinon le scénario passerait faussement"
+    )
+    assert "résultat inconnu" in seed["error"]
+
+
+def test_only_replays_the_named_scenarios_with_the_original_numbering_and_rejects_unknown_names(fx, plan):
+    server = ProbeServer(fx, plan, GOOD, v1=True)
+    ticks = iter(range(100_000))
+    names = [s["id"] for s in fx.probe_scenarios(plan)]
+    result = fx.run_probe(
+        server,
+        plan,
+        order_token=plan["order_token"],
+        probe_id="probe-rest",
+        sleep=no_sleep,
+        clock=lambda: float(next(ticks)) * 100,
+        only=["symlink", "seed-base", "stale-base"],
+    )
+    assert [r["scenario"] for r in result["results"]] == ["symlink", "seed-base", "stale-base"] and result["ok"] is True
+    opened = sorted(pr["head"] for pr in server.prs.values() if "-stale-" not in pr["head"])
+    assert opened == [f"collegue-probe/probe-rest-{names.index('symlink')}"], "la numérotation d'origine est conservée"
+    without_stale = ProbeServer(fx, plan, GOOD, v1=True)
+    only_green = fx.run_probe(
+        without_stale,
+        plan,
+        order_token=plan["order_token"],
+        probe_id="probe-one",
+        sleep=no_sleep,
+        clock=lambda: float(next(ticks)) * 100,
+        only=["green"],
+    )
+    assert [r["scenario"] for r in only_green["results"]] == ["green"], "stale-base n'est joué que s'il est demandé"
+    with pytest.raises(fx.FixtureError):
+        fx.run_probe(server, plan, order_token=plan["order_token"], probe_id="probe-bad", only=["touch-workflow"])
+    with pytest.raises(fx.FixtureError):
+        fx.run_probe(server, plan, order_token=plan["order_token"], probe_id="probe-bad", only=[])
+
+
+def test_the_client_retries_reads_but_never_replays_a_write_and_never_leaks_the_token(fx, monkeypatch):
+    calls = []
+    sleeps = []
+
+    def boom(req, timeout):
+        calls.append(req.get_method())
+        raise fx.urllib.error.URLError("[Errno -3] Temporary failure in name resolution")
+
+    monkeypatch.setattr(fx.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(fx.time, "sleep", sleeps.append)
+    client = fx.GitHubApi("ghp_SECRET_TOKEN_VALUE")
+    with pytest.raises(fx.NetworkError) as read_error:
+        client.request("GET", "/repos/x/y", None)
+    assert calls == ["GET"] * 4 and sleeps == [3, 6, 12], "lecture idempotente : retentée avec attente croissante"
+    calls.clear()
+    with pytest.raises(fx.NetworkError) as write_error:
+        client.request("POST", "/repos/x/y/pulls", {"title": "t"})
+    assert calls == ["POST"], "une écriture n'est JAMAIS rejouée à l'aveugle (résultat inconnu : relire l'identité)"
+    assert not issubclass(fx.NetworkError, fx.ApiError), "une coupure n'est jamais prise pour un refus de l'API"
+    for error in (read_error.value, write_error.value):
+        assert "SECRET" not in str(error) and "ghp_" not in str(error)
+
+
+def test_an_unknown_result_is_journaled_as_such_and_the_command_reports_it_without_a_verdict(
+    fx, plan, tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "events.jsonl"
+
+    def lost(method, path_, payload):
+        raise fx.NetworkError("POST /x : URLError (coupure)")
+
+    with pytest.raises(fx.NetworkError):
+        fx.journaling(lost, fx.EventLog(path))("POST", "/repos/x/pulls", {"title": "t"})
+    assert [e["event"] for e in _events(path)] == ["request", "unknown_result"]
+    monkeypatch.setenv("GH_TOKEN", "x")
+    monkeypatch.setattr(fx, "_api_from_env", lambda: lost)
+    assert fx.main(["inspect"]) == 1
+    assert "RÉSULTAT INCONNU" in capsys.readouterr().err

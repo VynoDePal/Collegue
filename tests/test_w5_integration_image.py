@@ -93,7 +93,7 @@ def usage_of(stack):
 
 
 def host_watchdog_margin() -> float:
-    """Marge du filet HÔTE de A27 (``DEADLINE_HOST_MARGIN``, kill du conteneur par nom à ``échéance + marge``) : elle ne s'applique QU'AU démarrage lent du
+    """Marge du filet HÔTE de A27/A28 (``DEADLINE_HOST_MARGIN``, kill du conteneur par nom à ``échéance + marge``) : elle ne s'applique QU'AU démarrage lent du
     conteneur, où le délai interne ne peut plus tenir (le démon n'a pas encore lancé le processus) ; ailleurs le KILL interne est exact."""
     from collegue.sandbox import executor
 
@@ -255,22 +255,24 @@ def test_the_real_sdk_cannot_divert_to_the_fallback_after_an_emission_whose_resp
     assert_nothing_left(stack, in_flight=True)
 
 
-def test_the_real_sdk_retrying_the_same_model_after_a_lost_response_is_fully_accounted(stacks):
-    """DÉCISION DE A27 (ouverte au manager) : un renvoi du MÊME modèle pendant qu'une génération est en vol est admis (génération distincte, réservée,
-    réglée et imputée à part). La preuve vérifie donc la COMPTABILITÉ, pas l'unicité ; l'unicité de l'émission est établie pour le VRAI runner, dont les
-    retries du SDK sont à zéro (test ``…never_falls_back_nor_retries…``). Si le manager sérialise les émissions par session, ce test change de forme."""
+def test_the_real_sdk_retrying_the_same_model_after_a_lost_response_cannot_emit_a_second_generation(stacks):
+    """A28 (décision du manager) : UNE génération en vol par session worker, quel que soit le modèle. Le renvoi du même modèle (retries du SDK compris) pendant
+    qu'une génération à issue inconnue est en vol est refusé à l'admission (429 ``generation_in_flight``) : le fournisseur ne voit qu'UNE émission, la
+    réservation de la première reste inconnue et bloque le projet, aucune inconnue artificielle n'est ajoutée par les refus."""
     fake = FakeGoogle()
     fake.gate = asyncio.Event()
     fake.gate_first_n = 1
     stack = sdk_stack(stacks, fake, "same_model_retry_after_lost_response")
     facts = parse_sdk_facts(stack.run().logs)
 
-    assert set(fake.models_seen) == {PRIMARY}, f"jamais un autre modèle : {fake.models_seen}"
-    settled = len(fake.models_seen) - 1  # la première génération n'a jamais de réponse
+    assert fake.models_seen == [PRIMARY], f"une seule émission, jamais de seconde génération : {fake.models_seen}"
+    assert facts["primary_with_sdk_retries"]["ok"] is False, (
+        "aucun renvoi n'aboutit tant que l'issue de la première est inconnue"
+    )
     consumed, _reserved, unknown, blocked = usage_of(stack)
-    assert consumed == 15 * settled, "chaque génération réglée est imputée une fois"
-    assert unknown > 0 and blocked, "la génération restée en vol reste réservée comme inconnue et bloque le projet"
-    assert (facts["primary_with_sdk_retries"]["ok"] is True) == (settled >= 1)
+    assert consumed == 0 and unknown > 0 and blocked, (
+        "la génération restée en vol reste réservée comme inconnue et bloque le projet"
+    )
     assert_nothing_left(stack, in_flight=True)
 
 
@@ -336,7 +338,7 @@ def test_hostile_code_cannot_widen_its_session_reach_the_internet_or_see_a_provi
         "un en-tête de clé fourni par le client est ignoré (jamais relayé), la requête reste ordinaire"
     )
     # le fournisseur n'a VU que les deux appels ordinaires : toute autre tentative est refusée AVANT l'émission, et le 26B sans antécédent AVANT tout appel
-    # (A27 constaté en rejeu local : le refus du repli intervient APRÈS un countTokens du 26B envoyé au fournisseur : défaut renvoyé à A, la règle de séquence
+    # (A27 et A28 constatés en rejeu local : le refus du repli intervient APRÈS un countTokens du 26B envoyé au fournisseur ; A29 le corrige — la règle de séquence
     # est locale et doit précéder tout appel externe, sinon un code hostile fait appeler le fournisseur pour un modèle non autorisé)
     assert len(fake.generate_calls) == 2 and set(fake.models_seen) == {PRIMARY}, (
         "aucune génération hors des deux appels ordinaires"
