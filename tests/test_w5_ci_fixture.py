@@ -1294,3 +1294,29 @@ def test_the_probe_records_every_branch_pull_request_url_check_and_workflow_run_
     assert [e["scenario"] for e in results] == list(GOOD) and all(e["outcome"]["ok"] for e in results)
     deleted = [e for e in events if e["event"] == "response" and e["method"] == "DELETE"]
     assert deleted, "le nettoyage des ressources jetables est journalisé aussi"
+
+
+def test_server_added_default_parameters_are_ignored_only_when_they_have_exactly_the_observed_default(fx, plan):
+    """GitHub ajoute ``required_reviewers: []`` et ``require_extra_approval_for_unattributed_changes: true`` à la création (observé en C47)."""
+    remote = json.loads(json.dumps(plan["ruleset"]))
+    pr = next(r for r in remote["rules"] if r["type"] == "pull_request")["parameters"]
+    pr["required_reviewers"] = []
+    pr["require_extra_approval_for_unattributed_changes"] = True
+    assert fx._normalize_ruleset(remote) == fx._normalize_ruleset(plan["ruleset"])
+    pr["required_reviewers"] = [{"reviewer": {"id": 1, "type": "Team"}}]
+    assert fx._normalize_ruleset(remote) != fx._normalize_ruleset(plan["ruleset"]), (
+        "un réviseur ajouté n'est PAS un défaut serveur"
+    )
+    pr["required_reviewers"] = []
+    pr["require_extra_approval_for_unattributed_changes"] = False
+    assert fx._normalize_ruleset(remote) != fx._normalize_ruleset(plan["ruleset"])
+    pr["require_extra_approval_for_unattributed_changes"] = True
+    pr["require_code_owner_review"] = False
+    assert fx._normalize_ruleset(remote) != fx._normalize_ruleset(plan["ruleset"]), (
+        "un affaiblissement réel reste un écart"
+    )
+    pr["require_code_owner_review"] = True
+    pr["some_new_parameter"] = True
+    assert fx._normalize_ruleset(remote) != fx._normalize_ruleset(plan["ruleset"]), (
+        "tout autre paramètre ajouté reste un écart"
+    )

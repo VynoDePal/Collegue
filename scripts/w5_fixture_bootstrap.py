@@ -908,6 +908,20 @@ def _ruleset_collisions(rulesets: Sequence[Mapping[str, Any]]) -> Tuple[Optional
     return ours, collisions
 
 
+#: Paramètres que GitHub AJOUTE avec leur valeur par défaut à la création d'un ruleset (observés le 2026-10-09 sur ``POST /rulesets`` : le plan ne les
+#: porte pas). Ils sont ignorés SEULEMENT s'ils ont exactement cette valeur ; toute autre valeur, tout autre paramètre ajouté reste un écart.
+SERVER_DEFAULT_PARAMETERS = {
+    "pull_request": {"require_extra_approval_for_unattributed_changes": True, "required_reviewers": []},
+}
+
+
+def _normalize_parameters(rule_type: Any, parameters: Any) -> Any:
+    if not parameters:
+        return None
+    defaults = SERVER_DEFAULT_PARAMETERS.get(str(rule_type), {})
+    return {k: v for k, v in parameters.items() if not (k in defaults and v == defaults[k])}
+
+
 def _normalize_ruleset(ruleset: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "name": ruleset.get("name"),
@@ -917,7 +931,10 @@ def _normalize_ruleset(ruleset: Mapping[str, Any]) -> Dict[str, Any]:
         "include": ((ruleset.get("conditions") or {}).get("ref_name") or {}).get("include"),
         "exclude": ((ruleset.get("conditions") or {}).get("ref_name") or {}).get("exclude") or [],
         "rules": sorted(
-            [{"type": r.get("type"), "parameters": r.get("parameters") or None} for r in ruleset.get("rules") or []],
+            [
+                {"type": r.get("type"), "parameters": _normalize_parameters(r.get("type"), r.get("parameters"))}
+                for r in ruleset.get("rules") or []
+            ],
             key=lambda r: str(r["type"]),
         ),
     }
