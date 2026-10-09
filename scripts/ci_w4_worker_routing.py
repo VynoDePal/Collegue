@@ -25,7 +25,17 @@ Ce que le script établit (et ce qu'il n'établit pas) :
    Cela ne prouve PAS quelle image le gate utilise réellement : ``_build_gate_sandbox`` prend ``SANDBOX_IMAGE`` (comme le
    codeur, sans ses credentials) et ce contrôle ne lit ni cette configuration ni l'image du run de campagne.
 
-Hors périmètre : le mode abonnement (``LLM.subscription_login`` exige une session ChatGPT), les appels réseau, le budget.
+4. **identité du `LLM`** : le SDK déclare ``extra="ignore"`` — un argument inconnu (l'ancien ``service_id``) est ignoré SANS erreur.
+   Le champ canonique est ``usage_id`` : sur CHAQUE vrai ``LLM`` construit (primaire et replis, clé API et abonnement) on
+   asserte dynamiquement ``llm.usage_id == "coder"`` (``"sampler"`` pour l'échantillonneur), en plus de la garde
+   ``model_fields`` qui reste ;
+5. **abonnement** (sans login, sans connexion, sans réseau) : ``LLM.subscription_login`` n'est remplacé que par la fourniture
+   de credentials FACTICES à la VRAIE ``OpenAISubscriptionAuth.create_llm`` (et le seul assistant réseau de ``create_llm``,
+   l'extraction du compte par JWKS, est neutralisé ; le rapport le consigne). On vérifie l'identité coder/sampler,
+   ``max_output_tokens is None`` (fixé par le SDK, jamais transmis), et la contre-épreuve : un ``max_output_tokens`` passé en plus
+   lève ``TypeError`` (doublon) — ce que le runner ne fait plus.
+
+Hors périmètre : le login réel d'abonnement (session ChatGPT), les appels réseau, le budget.
 Sortie : un rapport JSON sur stdout (aucune clé) ; code 0 si tout est vérifié, 1 sinon.
 """
 
@@ -45,6 +55,11 @@ import tempfile
 import types
 
 DEFAULT_RUNNER = "/opt/oh_runner.py"
+DEFAULT_SAMPLER = "/opt/oh_sampler.py"
+CODER_USAGE_ID = "coder"
+SAMPLER_USAGE_ID = "sampler"
+SDK_DEFAULT_USAGE_ID = "default"
+ANY = object()  # « n'importe quelle valeur non nulle » dans une attente
 SECRET_LIKE = re.compile(
     r"(?i)(^LLM_|^OH_|GEMINI|OPENAI|ANTHROPIC|GOOGLE|API_KEY|TOKEN|SECRET|AUTH|PASSWORD|CREDENTIAL)"
 )
@@ -56,7 +71,17 @@ FAKE_OTHER_KEY = "w4-fake-other-key-0003"
 OPENAI_ENDPOINT = "https://llm.example.invalid/v1"
 LOCAL_ENDPOINT = "http://127.0.0.1:11434/v1"
 
-REQUIRED_RUNNER_API = ("LLM_CONSTRUCTOR_KWARGS", "llm_kwargs", "resolve_credential", "main")
+FAKE_ACCESS_TOKEN = "w4-fake-oauth-access-0004"
+FAKE_REFRESH_TOKEN = "w4-fake-oauth-refresh-0005"
+FAKE_EXPIRES_AT_MS = 4_102_444_800_000  # 2100-01-01, en millisecondes
+
+REQUIRED_RUNNER_API = (
+    "LLM_CONSTRUCTOR_KWARGS",
+    "LLM_SUBSCRIPTION_KWARGS",
+    "llm_kwargs",
+    "resolve_credential",
+    "main",
+)
 
 
 class Failures:
@@ -113,10 +138,18 @@ class _InertConversation:
 
 class Scenario:
     def __init__(
-        self, name: str, env: dict, *, expect_rc: int = 0, fail_models: tuple = (), expect: list | None = None
+        self,
+        name: str,
+        env: dict,
+        *,
+        expect_rc: int = 0,
+        fail_models: tuple = (),
+        expect: list | None = None,
+        subscription: bool = False,
     ):
         self.name = name
         self.env = env
+        self.subscription = subscription  # credentials FACTICES fournis à la vraie create_llm
         self.expect_rc = expect_rc
         self.fail_models = set(fail_models)
         # [(model, base_url ou None, clé factice attendue)] dans l'ordre de construction
@@ -184,7 +217,46 @@ def scenarios() -> list[Scenario]:
                 ("gemini/gemma-4-26b-a4b-it", None, FAKE_GEMINI_KEY),
             ],
         ),
+        Scenario(
+            "abonnement_identite_coder_et_replis",
+            {"LLM_MODEL": "gpt-5.5", "LLM_SUBSCRIPTION": "1", "OH_FALLBACK_MODELS": "gpt-5.4"},
+            fail_models=("openai/gpt-5.5",),
+            subscription=True,
+            expect=[
+                ("openai/gpt-5.5", ANY, FAKE_ACCESS_TOKEN),
+                ("openai/gpt-5.4", ANY, FAKE_ACCESS_TOKEN),
+            ],
+        ),
     ]
+
+
+@contextlib.contextmanager
+def no_jwks_fetch():
+    """Neutralise l'UNIQUE assistant réseau de ``create_llm`` (extraction du compte ChatGPT par JWKS) ; tout le reste est réel."""
+    module = importlib.import_module("openhands.sdk.llm.auth.openai")
+    original = module._extract_chatgpt_account_id
+    module._extract_chatgpt_account_id = lambda _token: None
+    try:
+        yield
+    finally:
+        module._extract_chatgpt_account_id = original
+
+
+def fake_credentials(module):
+    return module.OAuthCredentials(
+        vendor="openai", access_token=FAKE_ACCESS_TOKEN, refresh_token=FAKE_REFRESH_TOKEN, expires_at=FAKE_EXPIRES_AT_MS
+    )
+
+
+def real_create_llm(model: str, **llm_kwargs):
+    """VRAIE ``OpenAISubscriptionAuth.create_llm`` avec credentials FACTICES, magasin temporaire : aucun login, aucune connexion."""
+    module = importlib.import_module("openhands.sdk.llm.auth.openai")
+    credentials_module = importlib.import_module("openhands.sdk.llm.auth.credentials")
+    with tempfile.TemporaryDirectory(prefix="w4-oauth-") as folder, no_jwks_fetch():
+        auth = module.OpenAISubscriptionAuth(
+            credential_store=credentials_module.CredentialStore(credentials_dir=__import__("pathlib").Path(folder))
+        )
+        return auth.create_llm(model=model, credentials=fake_credentials(module), **llm_kwargs)
 
 
 def run_scenario(runner, sdk, preset, scenario: Scenario, failures: Failures) -> dict:
@@ -196,6 +268,15 @@ def run_scenario(runner, sdk, preset, scenario: Scenario, failures: Failures) ->
         instance = real_llm(*args, **kwargs)
         constructed.append(instance)
         return instance
+
+    def subscription_login(vendor="openai", model="gpt-5.2-codex", force_login=False, open_browser=True, **llm_kwargs):
+        # Seule la FOURNITURE des credentials remplace le login : la construction est celle de la vraie create_llm.
+        instance = real_create_llm(model, **llm_kwargs)
+        constructed.append(instance)
+        return instance
+
+    if scenario.subscription:
+        recording_llm.subscription_login = subscription_login
 
     # Les doublures remplacent UNIQUEMENT ce qui exécuterait un agent ; le constructeur de LLM reste le vrai.
     saved = (sdk.LLM, sdk.Conversation, preset.get_default_agent, dict(os.environ), list(sys.argv))
@@ -232,6 +313,8 @@ def run_scenario(runner, sdk, preset, scenario: Scenario, failures: Failures) ->
             getattr(llm, "model", None),
             getattr(llm, "base_url", None) or None,
             secret_value(getattr(llm, "api_key", None)),
+            getattr(llm, "usage_id", None),
+            getattr(llm, "max_output_tokens", None),
         )
         for llm in constructed
     ]
@@ -245,12 +328,27 @@ def run_scenario(runner, sdk, preset, scenario: Scenario, failures: Failures) ->
     for index, (expected, got) in enumerate(zip(scenario.expect, observed, strict=False)):
         model, base_url, key = expected
         failures.check(got[0] == model, f"[{name}#{index}] modèle {got[0]!r} != {model!r}")
-        failures.check(got[1] == base_url, f"[{name}#{index}] endpoint {got[1]!r} != {base_url!r}")
+        if base_url is ANY:
+            failures.check(
+                got[1] is not None, f"[{name}#{index}] endpoint absent (attendu : celui du backend abonnement)"
+            )
+        else:
+            failures.check(got[1] == base_url, f"[{name}#{index}] endpoint {got[1]!r} != {base_url!r}")
         failures.check(
             got[2] == key,
             f"[{name}#{index}] clé effective {fingerprint(got[2])} != clé attendue {fingerprint(key)} "
             "(fuite d'une clé vers une autre destination ?)",
         )
+    for index, got in enumerate(observed):
+        failures.check(
+            got[3] == CODER_USAGE_ID,
+            f'[{name}#{index}] usage_id {got[3]!r} != {CODER_USAGE_ID!r} (argument inconnu ignoré par extra="ignore" ? '
+            "l'identité du codeur n'est pas portée par le vrai LLM)",
+        )
+        if scenario.subscription:
+            failures.check(
+                got[4] is None, f"[{name}#{index}] max_output_tokens {got[4]!r} : jamais de borne locale en abonnement"
+            )
     foreign = {FAKE_GEMINI_KEY, FAKE_OTHER_KEY} - {e[2] for e in scenario.expect}
     for index, got in enumerate(observed):
         failures.check(
@@ -260,8 +358,14 @@ def run_scenario(runner, sdk, preset, scenario: Scenario, failures: Failures) ->
         "scenario": name,
         "rc": rc,
         "constructed": [
-            {"model": m, "base_url": b, "key": ("local" if k == "local" else f"factice:{fingerprint(k)}")}
-            for m, b, k in observed
+            {
+                "model": m,
+                "base_url": b,
+                "key": ("local" if k == "local" else f"factice:{fingerprint(k)}"),
+                "usage_id": u,
+                "max_output_tokens": t,
+            }
+            for m, b, k, u, t in observed
         ],
     }
 
@@ -269,7 +373,7 @@ def run_scenario(runner, sdk, preset, scenario: Scenario, failures: Failures) ->
 def check_allocation_kwargs(runner, sdk, failures: Failures) -> dict:
     """Le VRAI constructeur accepte et conserve les arguments d'allocation que le runner transmet sous plafond."""
     common = dict(
-        service_id="coder",
+        usage_id=CODER_USAGE_ID,
         num_retries=0,
         retry_min_wait=8,
         retry_max_wait=90,
@@ -291,10 +395,142 @@ def check_allocation_kwargs(runner, sdk, failures: Failures) -> dict:
     cap = getattr(llm, "max_output_tokens", None)  # le SDK peut plafonner plus bas, jamais perdre ni relever le plafond
     failures.check(isinstance(cap, int) and 0 < cap <= 4096, f"max_output_tokens non porté par LLM : {cap!r}")
     failures.check(getattr(llm, "num_retries", None) == 0, "num_retries non conservé par LLM")
+    failures.check(getattr(llm, "usage_id", None) == CODER_USAGE_ID, f"usage_id non porté : {llm.usage_id!r}")
     failures.check(
         secret_value(getattr(llm, "api_key", None)) == FAKE_GEMINI_KEY, "clé effective différente de la clé donnée"
     )
     report["effective"] = {"max_output_tokens": llm.max_output_tokens, "num_retries": llm.num_retries}
+    return report
+
+
+class _StopAfterConstruction(BaseException):
+    """Interrompt l'échantillonneur APRÈS la construction du LLM (aucune complétion, aucun appel) ; pas une ``Exception``."""
+
+
+SAMPLER_PAYLOADS = (
+    ("non_strict", {"system": "s", "prompt": "p"}),
+    ("strict_borne_hote", {"system": "s", "prompt": "p", "strict": True, "max_output_tokens": 512}),
+)
+
+
+def _sampler_case(module, sdk, label: str, payload: dict, failures: Failures) -> dict:
+    built: list = []
+    real_llm = sdk.LLM
+
+    def recording_llm(*args, **kwargs):  # pragma: no cover - le sampler n'instancie pas LLM directement
+        return real_llm(*args, **kwargs)
+
+    def subscription_login(vendor="openai", model="gpt-5.2-codex", force_login=False, open_browser=True, **kwargs):
+        built.append(real_create_llm(model, **kwargs))
+        raise _StopAfterConstruction
+
+    recording_llm.subscription_login = subscription_login
+    saved_stdin, saved_env, error = sys.stdin, dict(os.environ), None
+    try:
+        sdk.LLM = recording_llm
+        for key in list(os.environ):
+            if SECRET_LIKE.search(key):
+                del os.environ[key]
+        os.environ["LLM_MODEL"] = "gpt-5.4"
+        sys.stdin = io.StringIO(json.dumps(payload))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                module.main()
+            except _StopAfterConstruction:
+                pass
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+    finally:
+        sdk.LLM = real_llm
+        sys.stdin = saved_stdin
+        os.environ.clear()
+        os.environ.update(saved_env)
+    failures.check(error is None, f"[sampler:{label}] construction impossible : {error}")
+    failures.check(len(built) == 1, f"[sampler:{label}] {len(built)} LLM construit(s), 1 attendu")
+    for llm in built:
+        failures.check(
+            getattr(llm, "usage_id", None) == SAMPLER_USAGE_ID,
+            f"[sampler:{label}] usage_id {getattr(llm, 'usage_id', None)!r} != {SAMPLER_USAGE_ID!r}",
+        )
+        failures.check(
+            getattr(llm, "max_output_tokens", "absent") is None,
+            f"[sampler:{label}] max_output_tokens {getattr(llm, 'max_output_tokens', None)!r} : jamais de borne locale",
+        )
+        failures.check(bool(getattr(llm, "is_subscription", False)), f"[sampler:{label}] LLM non marqué abonnement")
+    return {
+        "payload": label,
+        "usage_id": getattr(built[0], "usage_id", None) if built else None,
+        "max_output_tokens": getattr(built[0], "max_output_tokens", "absent") if built else "absent",
+    }
+
+
+def check_sampler(sdk, sampler_path: str, failures: Failures) -> list:
+    """Exécute le VRAI ``main()`` de l'échantillonneur embarqué jusqu'à la construction de son LLM (vraie ``create_llm``)."""
+    report = []
+    try:
+        spec = importlib.util.spec_from_file_location("oh_sampler_embedded", sampler_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("illisible")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001
+        failures.check(False, f"échantillonneur embarqué non chargeable ({sampler_path}) : {type(exc).__name__}: {exc}")
+        return report
+    failures.check(callable(getattr(module, "main", None)), "échantillonneur sans main()")
+    for label, payload in SAMPLER_PAYLOADS:
+        report.append(_sampler_case(module, sdk, label, payload, failures))
+    return report
+
+
+def check_subscription_contract(runner, sdk, failures: Failures, sampler_path: str) -> dict:
+    """Contrat d'abonnement du VRAI SDK : identité, absence de borne locale, contre-épreuves (doublon, ancien nom)."""
+    report: dict = {"jwks_helper_replaced": True, "credentials": "factices", "login": False, "network": False}
+    allowed = list(getattr(runner, "LLM_SUBSCRIPTION_KWARGS", ()))
+    fields = set(sdk.LLM.model_fields)
+    failures.check(
+        "max_output_tokens" not in allowed,
+        "max_output_tokens ne doit pas être transmis au login d'abonnement (doublon)",
+    )
+    failures.check(
+        not (set(allowed) - fields),
+        f"arguments d'abonnement absents de LLM.model_fields : {sorted(set(allowed) - fields)}",
+    )
+    failures.check("usage_id" in allowed, "usage_id doit être transmis au login d'abonnement")
+    common = dict(usage_id=CODER_USAGE_ID, num_retries=0, retry_min_wait=8, retry_max_wait=90, timeout=300)
+    allocation = dict(common, max_output_tokens=4096)  # ce que le runner construit sous allocation budgétaire
+    filtered = {k: v for k, v in allocation.items() if k in allowed}
+    try:
+        llm = real_create_llm("gpt-5.2-codex", **filtered)
+    except Exception as exc:  # noqa: BLE001
+        failures.check(
+            False, f"create_llm refuse les arguments du runner sous allocation : {type(exc).__name__}: {exc}"
+        )
+        llm = None
+    if llm is not None:
+        failures.check(llm.usage_id == CODER_USAGE_ID, f"usage_id {llm.usage_id!r} != {CODER_USAGE_ID!r}")
+        failures.check(llm.max_output_tokens is None, f"max_output_tokens {llm.max_output_tokens!r} : doit rester None")
+        failures.check(bool(llm.is_subscription), "LLM non marqué abonnement")
+        report["effective"] = {"usage_id": llm.usage_id, "max_output_tokens": llm.max_output_tokens}
+    # Contre-épreuve : le doublon que l'ancien runner provoquait sous allocation lève TypeError dans le VRAI SDK.
+    try:
+        real_create_llm("gpt-5.2-codex", **allocation)
+    except TypeError as exc:
+        report["duplicate_max_output_tokens"] = "TypeError"
+        failures.check("max_output_tokens" in str(exc), f"TypeError inattendu : {exc}")
+    except Exception as exc:  # noqa: BLE001
+        failures.check(False, f"doublon : exception inattendue {type(exc).__name__}: {exc}")
+    else:
+        failures.check(
+            False, "le doublon de max_output_tokens n'a pas levé TypeError : contrat du SDK modifié, à réexaminer"
+        )
+    # Contre-épreuve : l'ancien nom est ignoré par le SDK (extra="ignore") et l'identité reste « default ».
+    legacy = real_create_llm("gpt-5.2-codex", service_id=CODER_USAGE_ID)
+    report["legacy_service_id_usage_id"] = legacy.usage_id
+    failures.check(
+        legacy.usage_id == SDK_DEFAULT_USAGE_ID,
+        f"service_id est désormais honoré (usage_id {legacy.usage_id!r}) : contrat du SDK modifié, à réexaminer",
+    )
+    report["sampler"] = check_sampler(sdk, sampler_path, failures)
     return report
 
 
@@ -336,7 +572,7 @@ def check_modules(modules: list[str], failures: Failures) -> dict:
     return report
 
 
-def run_checks(runner_path: str, modules: list[str]) -> dict:
+def run_checks(runner_path: str, modules: list[str], sampler_path: str = DEFAULT_SAMPLER) -> dict:
     failures = Failures()
     report: dict = {"runner": runner_path, "scenarios": []}
     stripped = [k for k in os.environ if SECRET_LIKE.search(k)]
@@ -367,6 +603,7 @@ def run_checks(runner_path: str, modules: list[str]) -> dict:
     for scenario in scenarios():
         report["scenarios"].append(run_scenario(runner, sdk, preset, scenario, failures))
     report["allocation"] = check_allocation_kwargs(runner, sdk, failures)
+    report["subscription"] = check_subscription_contract(runner, sdk, failures, sampler_path)
     report["modules"] = check_modules(modules, failures)
     report["failures"] = failures.items
     return report
@@ -375,10 +612,11 @@ def run_checks(runner_path: str, modules: list[str]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--runner", default=DEFAULT_RUNNER)
+    parser.add_argument("--sampler", default=DEFAULT_SAMPLER)
     parser.add_argument("--require-modules", default="pypdf", help="modules d'oracle exigés dans l'image (CSV)")
     args = parser.parse_args(argv)
     modules = [m.strip() for m in args.require_modules.split(",") if m.strip()]
-    report = run_checks(args.runner, modules)
+    report = run_checks(args.runner, modules, args.sampler)
     report["ok"] = not report["failures"]
     print(json.dumps(report, indent=1, ensure_ascii=False, sort_keys=True))
     for message in report["failures"]:

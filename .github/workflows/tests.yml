@@ -240,6 +240,9 @@ jobs:
       # sans clé et replis (modèle, base_url, clé effective). Conteneur SANS réseau, AUCUN secret ni
       # variable d'hôte, script transmis sur l'entrée standard (aucun montage). Il vérifie aussi que pypdf est
       # importable dans l'image du worker ; cela ne prouve PAS que le gate exécute ses oracles dans cette image.
+      # Identité : sur CHAQUE vrai LLM construit (primaire, replis, abonnement, échantillonneur) on asserte usage_id (« coder » /
+      # « sampler » ; le SDK ignore silencieusement un argument inconnu comme l'ancien service_id). Abonnement : vraie
+      # OpenAISubscriptionAuth.create_llm avec credentials FACTICES (aucun login, aucune connexion), max_output_tokens None.
       - name: Verify OpenHands worker routing (real SDK, no model)
         timeout-minutes: 5
         run: |
