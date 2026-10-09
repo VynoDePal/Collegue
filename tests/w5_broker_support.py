@@ -90,3 +90,32 @@ def chat_request(content: str = "bonjour", **overrides) -> dict:
     body = {"model": "gemma-4-31b-it", "messages": [{"role": "user", "content": content}], "max_tokens": 64}
     body.update(overrides)
     return body
+
+
+class CanaryUpstream(FakeUpstream):
+    """Fournisseur qui répond selon la CAPACITÉ demandée (texte, JSON, outil) ; ``override[(modèle, capacité)]`` force un résultat."""
+
+    def __init__(self, *, override=None, **kwargs):
+        super().__init__(**kwargs)
+        self.override = dict(override or {})
+
+    @staticmethod
+    def capability_of(body: dict) -> str:
+        if "tools" in body:
+            return "tools"
+        return "json" if body.get("generationConfig", {}).get("responseMimeType") else "text"
+
+    async def generate(self, request):
+        body = copy.deepcopy(request.generate_body())
+        self.generate_calls.append({"url_model": request.model, "body": body})
+        capability = self.capability_of(body)
+        forced = self.override.get((request.model, capability))
+        if isinstance(forced, BaseException):
+            raise forced
+        if forced is not None:
+            return copy.deepcopy(forced)
+        if capability == "tools":
+            return google_response(parts=[{"functionCall": {"name": "report_status", "args": {"status": "ok"}}}])
+        if capability == "json":
+            return google_response(text='{"ok": true}')
+        return google_response(text="OK")

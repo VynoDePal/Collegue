@@ -12,6 +12,7 @@ contrat W5 (fournisseur Google, deux Gemma officiels). Les tests injectent un fa
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -138,7 +139,6 @@ class BrokerRuntime:
         worker a été interrompu) — exactement la sémantique de la vague 2.
         """
         service = self.service_for(ledger)
-        now = datetime.now(timezone.utc)
         deadline = None
         if getattr(allocation, "deadline_epoch", None) is not None:
             deadline = datetime.fromtimestamp(float(allocation.deadline_epoch), tz=timezone.utc)
@@ -147,12 +147,15 @@ class BrokerRuntime:
         persisted = service.open_clock(allocation.scope_key)
         if persisted is not None:
             deadline = persisted if deadline is None else min(deadline, persisted)
-        timeout_seconds = None if deadline is None else (deadline - now).total_seconds()
-        if timeout_seconds is not None and timeout_seconds <= 0:
-            from collegue.sandbox.executor import SandboxRefused
+        timeout_seconds = None
+        if deadline is not None:
+            # Entier INFÉRIEUR : le sandbox arrondit au supérieur, le délai du conteneur ne dépasse donc jamais l'échéance.
+            timeout_seconds = float(math.floor((deadline - datetime.now(timezone.utc)).total_seconds()))
+            if timeout_seconds < 1:
+                from collegue.sandbox.executor import SandboxRefused
 
-            # Rien n'a été lancé : l'appelant libère la réservation parent (sémantique « worker non lancé »).
-            raise SandboxRefused("échéance globale persistée atteinte avant le lancement : worker non lancé")
+                # Rien n'a été lancé : l'appelant libère la réservation parent (sémantique « worker non lancé »).
+                raise SandboxRefused("échéance globale persistée atteinte avant le lancement : worker non lancé")
         opened = service.open_session(
             parent_scope_key=allocation.scope_key,
             parent_reservation_id=allocation.reservation_id,

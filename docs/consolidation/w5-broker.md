@@ -65,7 +65,9 @@ sortie max) → échéances → emitting (écrit AVANT l'envoi) → generateCont
 | usage mesuré mais borne démentie | `settled` | commit (réel) + blocage `bound_violation` | engagé tel quel, projet bloqué |
 
 L'état durable est écrit PUIS appliqué au registre (clés d'événement déterministes) : `BrokerService.repair` rejoue l'opération
-manquante après un crash. Une tentative encore `prepared` n'a PROUVABLEMENT rien émis (libérée) ; `emitting` ⇒ inconnu, jamais
+manquante après un crash. L'identifiant de la réservation est DÉTERMINISTE (`broker:<attempt_id>`, puis `…#<runs>` après une
+réouverture) et ÉCRIT dans la tentative AVANT `ledger.reserve` : un crash entre la réservation et la suite laisse une tentative qui
+désigne sa réserve, jamais une réserve orpheline. Une tentative encore `prepared` n'a PROUVABLEMENT rien émis (libérée) ; `emitting` ⇒ inconnu, jamais
 rejoué ni libéré sans preuve. Un `request_id` (en-tête `Idempotency-Key` au socket) rejoué rend le résultat stocké sans seconde
 génération ; rejoué après `released` il redémarre (absence d'émission établie) ; rejoué après `emitting`/`unknown` il est refusé.
 
@@ -122,3 +124,57 @@ autre que `api_key`, tout `LLM_BASE_URL*`.
   uniquement dans son allocation ; le contenu des prompts qu'il envoie à Google n'est pas filtré.
 * Succès du CLI sans usage : en mode courtier la consommation vient du courtier seul ; zéro tentative = zéro émission prouvée ;
   les journaux de l'agent (`[collegue-usage]`) ne font jamais autorité.
+
+
+## Revue indépendante (A26) — ce qui a changé et les contrats qui en découlent
+
+### Admission transactionnelle à l'émission
+`BrokerStore.admit_emission` fait passer `prepared → emitting` dans UNE transaction qui revérifie, sous verrou de ligne (`FOR UPDATE` sur
+PostgreSQL ; `BEGIN IMMEDIATE` explicite sur SQLite, dont le mode historique n'ouvre pas de transaction pour un `SELECT`) : aucun scope
+(enfant, parent / racine) n'est bloqué, la session est `open` sans inconnue et dans son échéance, la réservation parent est encore
+`reserved`, la réservation de la tentative existe. Un blocage / une fermeture validés avant cette transaction l'emportent (libération,
+rien n'est émis) ; ceux qui la suivent trouvent une émission déjà marquée (en vol, donc légitime). Le contrôle initial avant `countTokens`
+n'est qu'une optimisation.
+
+### Allocation nulle
+Une réservation `worker` sans tokens (`reserved_tokens = 0`) n'ouvre PAS de session (`zero_allocation`) et `allocate_worker` refuse en mode
+courtier un scope sans plafond de tokens. Le scope enfant reprend les montants EXACTS du parent (0 reste 0, jamais « sans plafond ») ;
+la dimension USD est indépendante.
+
+### Propriété des tentatives (contrat de reprise)
+Chaque instance de service a un `owner_id` (table `broker_owners` : hôte, pid, date de démarrage du processus, battement de cœur).
+Une tentative / session d'un propriétaire VIVANT — même hôte : processus existant avec la même date de démarrage ; autre hôte : battement
+de cœur de moins d'une heure — n'est JAMAIS réparée par un autre processus. Celles d'un propriétaire disparu, terminé (`shutdown()`) ou
+inconnu (`NULL`) le sont. `recover_all()` (à appeler au démarrage, avant tout appel) répare les tentatives de TOUS les producteurs
+(workers, planner, QA, reviewer…) : `prepared` ⇒ libérée (rien n'a été émis, même si la tentative n'a pas encore écrit son identifiant),
+`emitting` ⇒ inconnue, scope bloqué, jamais rejouée ; il ferme et consolide les sessions orphelines. `include_own=True` (défaut)
+revendique aussi les restes de CETTE instance et est refusé (`recovery_while_busy`) si elle a des appels en vol. Toute génération
+répare d'abord les restes abandonnés de ses scopes : leurs inconnues bloquent avant la nouvelle émission.
+
+### Aucune réservation enfant non consolidée
+La fermeture balaie les réserves `broker:*` du scope enfant : celle d'une tentative réglée / libérée dont le registre est en retard est
+rejouée ; celle SANS état durable (aucune tentative) est marquée INCONNUE (conservée, bloquante) — jamais libérée ; une réserve enfant
+encore ouverte à la consolidation fait passer le parent à `unknown`. `_block_parent` ne masque plus une erreur du registre : seul un parent
+réellement `unknown` est acceptable, un parent déjà réglé est bloqué au niveau du scope, toute autre erreur se propage.
+
+### Qualification des deux modèles (canaris)
+`BrokerService.qualify_models(scope_key)` (et `collegue.broker.qualify_models(settings, ledger, scope_key)`) exerce `gemma-4-31b-it` (rôle
+`default`) et `gemma-4-26b-a4b-it` (rôle `coder`) : texte, JSON (`response_format`), appel d'outil (`tool_choice=required`) — six générations par
+le pipeline complet. Identités durables `qualify:<scope>:<modèle>:<capacité>` (relancer ne réémet rien). Le premier refus, la première
+ambiguïté ou la première réponse inexploitable ARRÊTE la qualification (`QualificationReport.ok=False`, `reason`, capacités suivantes « non
+exécuté »), sans repli ni estimation ni renvoi. L'échéance globale est ouverte ICI (premier accès réel). Rapport sans secret (`to_dict()`).
+
+### Échéance persistée appliquée au processus
+Le délai du conteneur est `floor(min(allocation, échéance persistée − maintenant))` calculé AU LANCEMENT (`AttachedWorker.timeout_seconds`) et
+passé à `DockerSandbox.run_command(timeout=…)` : auto-limite `timeout --signal=TERM` DANS le conteneur + kill par nom côté hôte. Un nouveau
+`BudgetBinding` à fenêtre locale tardive ne l'allonge jamais ; si l'horloge n'est pas encore ouverte elle est ouverte au lancement réel ;
+échéance atteinte ⇒ `allocate_worker` refuse (`deadline`) et `attach_worker` lève `SandboxRefused` (rien n'est lancé, le parent est laissé
+à l'appelant). Un worker qui dort ou calcule après son dernier appel est arrêté ; une requête déjà émise à l'arrêt reste réservée (inconnue,
+projet bloqué). Du planning au projet : la liaison conserve la ligne de scope (`planning:cycle:<id>`), donc l'horloge.
+
+### Capacité publique et clé
+`collegue.broker.capability_proof(settings, …) -> {"transport": "budget_broker", "accepted": bool, "reason": str, …}` : acceptée ssi toutes les
+vérifications REQUISES passent sur le transport réellement instancié ; la présence de la clé est une information (`required=False`) sauf
+`require_provider_key=True` (étape réelle). Les préflights statique et complet réussissent SANS clé ; aucune clé factice n'est injectée. La clé
+reste `LLM_API_KEY` (réglages), lue seulement par le service de confiance ; C y lie son secret temporaire (`W5_GOOGLE_API_KEY → LLM_API_KEY`
+dans l'étape réelle uniquement), sans alias global.

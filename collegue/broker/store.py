@@ -182,6 +182,18 @@ def _attempt_of(row: BrokerAttempt, session_id: Optional[str]) -> AttemptRecord:
     )
 
 
+def _begin_write(session: Session) -> None:
+    """Démarre la transaction D'ÉCRITURE dès la première lecture sur SQLite.
+
+    Le mode historique de ``pysqlite`` n'ouvre pas de transaction pour un ``SELECT`` : les lectures d'une admission seraient
+    alors validées séparément de la mise à jour qui les suit (course possible avec un blocage validé entre-temps). ``BEGIN
+    IMMEDIATE`` prend le verrou d'écriture d'emblée : lectures et mise à jour sont atomiques. PostgreSQL n'en a pas besoin
+    (transaction implicite + ``FOR UPDATE``).
+    """
+    if session.get_bind().dialect.name == "sqlite":
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+
 class BrokerStore:
     """Opérations durables du courtier sur le registre budgétaire fourni."""
 
@@ -214,6 +226,7 @@ class BrokerStore:
         child_key = f"child:{session_id}"
 
         def _do(session: Session):
+            _begin_write(session)
             parent = session.scalar(select(BudgetScope).where(BudgetScope.scope_key == parent_scope_key))
             if parent is None:
                 raise BudgetRefused(REFUSED_SCOPE, f"scope parent inconnu : {parent_scope_key}")
@@ -539,6 +552,7 @@ class BrokerStore:
         """
 
         def _do(session: Session):
+            _begin_write(session)
             scopes = session.scalars(
                 select(BudgetScope)
                 .where(BudgetScope.scope_key.in_(scope_keys))

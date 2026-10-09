@@ -580,7 +580,7 @@ class BrokerService:
             parent = self.ledger.get_reservation(session.parent_reservation_id)
             if parent is not None and parent.state == "unknown":
                 return  # déjà inconnu (même cause ou autre) : le scope parent porte sa cause
-            if parent is not None and session.parent_scope_key:
+            if parent is not None and session.parent_scope_key and parent.state in ("committed", "released"):
                 # Réglée (committed / released) : la réserve ne peut plus porter l'inconnue, le scope porte le blocage.
                 self.ledger.block(
                     session.parent_scope_key,

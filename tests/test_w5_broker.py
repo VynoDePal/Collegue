@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from w5_broker_contract import *  # noqa: F401,F403  (les tests du contrat sont collectés ici)
+from w5_broker_review_contract import *  # noqa: F401,F403  (contrat de la revue indépendante)
 
 from collegue.state import ProjectStateManager
 
