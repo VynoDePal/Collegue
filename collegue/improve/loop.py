@@ -410,7 +410,9 @@ async def _run_improvement_impl(
                     # repart à 1 à chaque passe) : liée au contenu publié, jamais à ``collegue/issue-<round>``.
                     publish_workspace = replace(
                         workspace,
-                        branch=branch_for_improvement(round_num, content.base_tree_sha, content.tree_sha),
+                        branch=branch_for_improvement(
+                            round_num, content.base_sha, content.base_tree_sha, content.tree_sha
+                        ),
                     )
                     pr = open_pr(
                         publish_workspace,

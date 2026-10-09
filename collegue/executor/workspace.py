@@ -63,18 +63,22 @@ def branch_for_issue(number: int) -> str:
     return f"{BRANCH_PREFIX}{int(number)}"
 
 
-def branch_for_improvement(round_number: int, base_tree_sha: str, tree_sha: str) -> str:
+def branch_for_improvement(round_number: int, base_sha: str, base_tree_sha: str, tree_sha: str) -> str:
     """Tête de la PR d'une amélioration : ``collegue/improve-r<round>-<empreinte>``.
 
-    L'empreinte lie la branche au CONTENU publié (arbre de base + arbre testé) : une passe reprise avec le même
-    résultat retrouve la même branche (idempotence, PR et preuve réutilisées après vérification de la tête) ; une
-    nouvelle passe, un nouveau cycle, une nouvelle base ou un résultat différent obtiennent une branche
-    différente, même quand le compteur de round repart à 1. Une branche historique n'est donc jamais ré-aiguillée.
+    L'empreinte lie la branche à la RÉVISION de base (commit), à son arbre et à l'arbre testé. Les arbres seuls ne
+    suffisent pas : un commit de base peut changer en retrouvant le même arbre (commit vide, retour au contenu
+    initial après un revert) et la tête historique d'une amélioration déjà fusionnée serait alors réécrite. Une
+    reprise sur la MÊME révision avec le même résultat retrouve la même branche (idempotence : PR et preuve
+    réutilisées après vérification de la tête) ; une autre passe, un autre cycle, une autre base ou un autre résultat
+    obtiennent une autre branche, même quand le compteur de round repart à 1. Une branche historique n'est jamais
+    ré-aiguillée.
     """
-    for label, value in (("base_tree_sha", base_tree_sha), ("tree_sha", tree_sha)):
+    values = (("base_sha", base_sha), ("base_tree_sha", base_tree_sha), ("tree_sha", tree_sha))
+    for label, value in values:
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40,64}", value):
             raise ValueError(f"{label} invalide pour nommer la branche d'amélioration: {value!r}")
-    digest = hashlib.sha256(f"{base_tree_sha}:{tree_sha}".encode("ascii")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{base_sha}:{base_tree_sha}:{tree_sha}".encode("ascii")).hexdigest()[:16]
     return f"{IMPROVEMENT_BRANCH_PREFIX}r{int(round_number)}-{digest}"
 
 

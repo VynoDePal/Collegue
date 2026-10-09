@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 from github_fakes import make_source_repo
 from test_w3_integration_build import linear_project, open_manager, run_pass, statuses
-from test_w3_integration_improve import FilesFeature, improve, metrics
+from test_w3_integration_improve import FilesFeature, improve, metrics, phase5_hook
 from w3_remote_bridge import make_bridge
 
 from collegue.executor.workspace import (
@@ -25,10 +25,13 @@ from collegue.executor.workspace import (
     IMPROVEMENT_BRANCH_PREFIX,
     branch_for_improvement,
     branch_for_issue,
+    resync_repository_base,
 )
 
 TREE_A = "a" * 40
 TREE_B = "b" * 40
+REV_A = "c" * 40
+REV_B = "d" * 40
 
 
 @pytest.fixture(autouse=True)
@@ -134,14 +137,90 @@ async def test_a_historical_branch_squatting_the_old_improvement_name_is_irrelev
     assert world.bridge.branches[branch_for_issue(1)] == historical[branch_for_issue(1)]
 
 
-def test_branch_identity_is_content_bound_namespaced_and_validated():
-    one = branch_for_improvement(1, TREE_A, TREE_B)
-    assert one == branch_for_improvement(1, TREE_A, TREE_B), "déterministe : la reprise retrouve la même tête"
+def test_branch_identity_is_revision_and_content_bound_namespaced_and_validated():
+    one = branch_for_improvement(1, REV_A, TREE_A, TREE_B)
+    assert one == branch_for_improvement(1, REV_A, TREE_A, TREE_B), "déterministe : la reprise retrouve la même tête"
     assert one.startswith(IMPROVEMENT_BRANCH_PREFIX) and not one.startswith(BRANCH_PREFIX)
-    assert len({one, branch_for_improvement(2, TREE_A, TREE_B), branch_for_improvement(1, TREE_B, TREE_A)}) == 3
+    variants = {
+        one,
+        branch_for_improvement(2, REV_A, TREE_A, TREE_B),  # autre round
+        branch_for_improvement(1, REV_B, TREE_A, TREE_B),  # autre RÉVISION de base, mêmes arbres
+        branch_for_improvement(1, REV_A, TREE_B, TREE_A),
+    }
+    assert len(variants) == 4
     assert one != branch_for_issue(1)
     for bad in ("", "xyz", "A" * 40, "a" * 39, "../" + "a" * 40, None):
-        with pytest.raises(ValueError):
-            branch_for_improvement(1, bad, TREE_B)
-        with pytest.raises(ValueError):
-            branch_for_improvement(1, TREE_A, bad)
+        for position in range(3):
+            args = [REV_A, TREE_A, TREE_B]
+            args[position] = bad
+            with pytest.raises(ValueError):
+                branch_for_improvement(1, *args)
+
+
+async def _first_improvement(tmp_path, *, phase5):
+    world, build_heads, historical = await built_world(tmp_path, delete_merged_heads=False)
+    initial_base = world.bridge.branches["main"]
+    initial_tree = world.bridge.remote.tree_of(initial_base)
+    hook = phase5_hook(world) if phase5 else None
+    first = await improve(
+        world, [metrics(80), metrics(90)], agent=FilesFeature({"docs/gain.md": "# gain\n"}), promotion_hook=hook
+    )
+    assert len(first.promoted) == 1, first.rejected
+    first_head = world.bridge.prs[first.promoted[0].pr_number]["head"]["ref"]
+    return world, build_heads, historical, first, first_head, initial_base, initial_tree
+
+
+def _advance_base_with_same_tree(world, initial_tree, message):
+    tip = world.bridge.branches["main"]
+    new_base = world.bridge.commit([tip], tree=initial_tree, message=message)
+    world.bridge.branches["main"] = new_base
+    assert world.bridge.remote.tree_of(new_base) == initial_tree
+    assert resync_repository_base(world.source, "main")
+    return new_base
+
+
+async def test_a_base_advanced_by_an_empty_commit_gets_a_new_branch_and_pr_and_keeps_the_first_head_untouched(tmp_path):
+    world, build_heads, historical, first, first_head, initial_base, initial_tree = await _first_improvement(
+        tmp_path, phase5=False
+    )
+    first_sha = world.bridge.branches[first_head]
+    new_base = _advance_base_with_same_tree(world, initial_tree, "commit vide")
+    assert new_base != initial_base
+    writes_before = list(world.bridge.remote.writes)
+
+    second = await improve(world, [metrics(80), metrics(90)], agent=FilesFeature({"docs/gain.md": "# gain\n"}))
+
+    assert len(second.promoted) == 1, second.rejected  # même contenu, NOUVELLE révision : nouvelle livraison
+    assert second.promoted[0].pr_number != first.promoted[0].pr_number
+    second_head = world.bridge.prs[second.promoted[0].pr_number]["head"]["ref"]
+    assert second_head != first_head and second_head.startswith(f"{IMPROVEMENT_BRANCH_PREFIX}r1-")
+    assert world.bridge.branches[first_head] == first_sha, "la tête de la première amélioration n'a pas bougé"
+    assert {name: world.bridge.branches[name] for name in build_heads} == historical
+    touched = {path for path in world.bridge.remote.writes[len(writes_before) :]}
+    assert touched and all(path.endswith("gain.md") for path in touched)
+    assert world.bridge.prs[second.promoted[0].pr_number]["base"]["sha"] == new_base
+
+
+async def test_the_same_improvement_in_a_new_cycle_after_a_merged_one_never_rewrites_the_merged_historical_head(
+    tmp_path,
+):
+    """Phase 5 fusionne la première amélioration ; un commit distant rend ensuite l'arbre initial (état après revert)."""
+    world, build_heads, historical, first, first_head, initial_base, initial_tree = await _first_improvement(
+        tmp_path, phase5=True
+    )
+    first_pr = first.promoted[0].pr_number
+    assert world.bridge.prs[first_pr]["merged"], "la vraie Phase 5 a fusionné la première amélioration"
+    first_sha = world.bridge.branches[first_head]
+    new_base = _advance_base_with_same_tree(world, initial_tree, "retour au contenu initial")
+    assert new_base != initial_base
+    writes_before = list(world.bridge.remote.writes)
+
+    second = await improve(world, [metrics(80), metrics(90)], agent=FilesFeature({"docs/gain.md": "# gain\n"}))
+
+    assert len(second.promoted) == 1, second.rejected
+    assert second.promoted[0].pr_number != first_pr
+    second_head = world.bridge.prs[second.promoted[0].pr_number]["head"]["ref"]
+    assert second_head != first_head
+    assert world.bridge.branches[first_head] == first_sha, "tête historique déjà fusionnée : aucune écriture"
+    assert {name: world.bridge.branches[name] for name in build_heads} == historical
+    assert all(path.endswith("gain.md") for path in world.bridge.remote.writes[len(writes_before) :])
