@@ -416,19 +416,113 @@ def test_no_verification_phase_starts_after_expiry_and_a_phase_hitting_the_deadl
     assert started == [30.0], "aucune commande lancée après expiration"
 
 
-def test_a_supervisor_stop_caused_by_the_global_deadline_is_a_budget_stop_not_an_incomplete(tmp_path):
-    clock = FakeClock()
+def supervisor_runner(clock, code, *, spend):
+    """Double de la frontière d'exécution : rend ``code`` après avoir fait avancer l'horloge de ``spend`` secondes."""
 
     def runner(argv, cwd, env, limit):
-        return subprocess.CompletedProcess(argv, 124, "", "")
+        clock.now += spend(limit) if callable(spend) else spend
+        return subprocess.CompletedProcess(argv, code, "", "")
 
-    with pytest.raises(business.BudgetStop):
+    return runner
+
+
+@pytest.mark.parametrize("code", [124, 137], ids=["TERM", "TERM-ignored-then-KILL"])
+def test_a_supervisor_stop_after_the_global_limit_was_really_reached_is_a_budget_stop(tmp_path, code):
+    clock = FakeClock()
+    runner = supervisor_runner(clock, code, spend=lambda limit: limit + (3.0 if code == 137 else 0.0))
+
+    with pytest.raises(business.BudgetStop, match="échéance globale atteinte pendant la phase"):
         business.verify_business_checkout(
             str(tmp_path), runner=runner, timeout=120.0, deadline_monotonic=clock.now + 5.0, clock=clock
         )
-    # sans échéance globale restreignante, le même code reste une validation incomplète
-    observation = business.verify_business_checkout(str(tmp_path), runner=runner, timeout=120.0)
-    assert observation.status == "incomplete"
+    # sans échéance globale restreignante, la même durée atteinte reste une validation incomplète (jamais un succès)
+    clock2 = FakeClock()
+    observation = business.verify_business_checkout(
+        str(tmp_path), runner=supervisor_runner(clock2, code, spend=120.0), timeout=120.0, clock=clock2
+    )
+    assert observation.status == "incomplete" and "échéance de la vérification atteinte" in observation.detail
+
+
+@pytest.mark.parametrize("code", [124, 137], ids=["124", "137"])
+@pytest.mark.parametrize("with_global_deadline", [True, False], ids=["global-deadline-left", "no-global-deadline"])
+def test_an_early_termination_is_never_reported_as_an_expiration(tmp_path, code, with_global_deadline):
+    """Contre-épreuve du manager : 137 après ~1 s sur 19 s restantes n'est NI un dépassement NI un budget épuisé."""
+    clock = FakeClock()
+    kwargs = {"deadline_monotonic": clock.now + 20.0} if with_global_deadline else {}
+
+    observation = business.verify_business_checkout(
+        str(tmp_path), runner=supervisor_runner(clock, code, spend=1.0), timeout=120.0, clock=clock, **kwargs
+    )
+
+    assert observation.status == "incomplete", "preuve non établie : ni succès ni BudgetStop"
+    assert "interruption précoce" in observation.detail and "pas une expiration" in observation.detail
+    assert f"code {code}" in observation.detail and "cause non établie" in observation.detail
+    assert "échéance globale" not in observation.detail and "OOM" not in observation.detail, "aucune cause prétendue"
+
+
+def test_the_measured_duration_is_compared_with_the_imposed_limit_with_a_small_tolerance(tmp_path):
+    clock = FakeClock()
+    tolerance = business.DEADLINE_MEASURE_TOLERANCE
+    just_in = supervisor_runner(clock, 124, spend=lambda limit: limit - tolerance / 2)
+    with pytest.raises(business.BudgetStop):
+        business.verify_business_checkout(
+            str(tmp_path), runner=just_in, timeout=60.0, deadline_monotonic=clock.now + 10.0, clock=clock
+        )
+    clock = FakeClock()
+    too_early = supervisor_runner(clock, 124, spend=lambda limit: limit - 2 * tolerance)
+    observation = business.verify_business_checkout(
+        str(tmp_path), runner=too_early, timeout=60.0, deadline_monotonic=clock.now + 10.0, clock=clock
+    )
+    assert observation.status == "incomplete" and "interruption précoce" in observation.detail
+
+
+def test_a_fixture_killing_itself_early_through_the_public_docker_path_is_incomplete_not_a_budget_stop(
+    monkeypatch, tmp_path
+):
+    """Chemin PUBLIC et vrai ``timeout`` GNU : le code local -9 est traduit en contrat Docker 128 + signal (137)."""
+    checkout, marker = hostile_checkout(tmp_path, "import os", sleep="os.kill(os.getpid(), signal.SIGKILL)")
+    real_run = subprocess.run
+    seen = []
+
+    def boundary(argv, **options):
+        mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
+        scratch = next(value.split(":/scratch:")[0] for value in mounts if ":/scratch:" in value)
+        command = [str(a).replace("/scratch/", scratch + "/") for a in argv[argv.index(IMAGE) + 1 :]]
+        command = [sys.executable if part == "python" else part for part in command]
+        env = dict(options.get("env") or {}, PATH=str(Path(sys.executable).parent) + ":" + os.environ["PATH"])
+        result = real_run(command, cwd=checkout, env=env, capture_output=True, text=True, timeout=12)
+        raw = result.returncode
+        result.returncode = 128 - raw if raw < 0 else raw
+        seen.append((raw, result.returncode))
+        return result
+
+    monkeypatch.setattr(subprocess, "run", boundary)
+    observation = business.verify_business_checkout(
+        str(checkout), image=IMAGE, timeout=120, deadline_monotonic=time.monotonic() + 20.0
+    )
+
+    assert marker.exists() and seen == [(-9, 137)]
+    assert observation.status == "incomplete" and "interruption précoce" in observation.detail
+    assert "pas une expiration" in observation.detail
+
+
+def test_a_term_ignoring_fixture_reaching_the_global_deadline_is_a_budget_stop_via_the_kill_after(
+    monkeypatch, tmp_path
+):
+    checkout, marker = hostile_checkout(
+        tmp_path, "signal.signal(signal.SIGTERM, signal.SIG_IGN)", sleep="time.sleep(30)"
+    )
+    started = time.monotonic()
+
+    def run():
+        return run_public_docker_path_locally(
+            monkeypatch, checkout, timeout=120, deadline_monotonic=time.monotonic() + 2.0
+        )
+
+    with pytest.raises(business.BudgetStop, match="échéance globale atteinte pendant la phase"):
+        run()
+
+    assert marker.exists() and time.monotonic() - started < 9.0, "TERM ignoré : tué par KILL (code 137), durée atteinte"
 
 
 def test_docker_failures_are_incomplete_never_failed(monkeypatch, tmp_path):

@@ -882,7 +882,11 @@ class BusinessObservation:
 #: Superviseur de durée HORS de l'interpréteur non fiable : ``timeout(1)`` est le processus principal du conteneur et lance le
 #: script en enfant ; un livrable ne peut ni annuler ni remplacer un minuteur qui ne vit pas dans son propre processus.
 #: 124 = échéance atteinte (TERM), 137 = TERM ignoré puis KILL après ``WATCHDOG_KILL_AFTER`` secondes.
+#: **Ces codes seuls ne prouvent PAS une expiration** : 137 (128 + SIGKILL) est aussi ce que rend un conteneur tué tôt (mémoire,
+#: interruption externe, le processus lui-même). Une expiration n'est établie que si la durée mesurée atteint la limite imposée.
 DEADLINE_EXITS = (124, 137)
+#: Tolérance de mesure (secondes) entre la limite demandée au superviseur et la durée observée par l'hôte.
+DEADLINE_MEASURE_TOLERANCE = 0.25
 WATCHDOG_KILL_AFTER = 3
 #: Marge du client hôte au-delà du superviseur du conteneur : fenêtre de relève et de ``docker kill`` — aucun appel de modèle,
 #: aucun travail de vérification supplémentaire (ce n'est PAS une nouvelle enveloppe).
@@ -1020,6 +1024,7 @@ def _observe(
                     raise BudgetStop(f"échéance globale atteinte avant la phase « {phase} » de la vérification métier")
                 if remaining < limit:
                     limit, bounded = remaining, True
+            began = now()
             try:
                 proc = run(argv, checkout, env, limit)
             except subprocess.TimeoutExpired:
@@ -1041,15 +1046,30 @@ def _observe(
             report = _parse_report(proc.stdout)
             if report is None:
                 tail = ((proc.stderr or "") + (proc.stdout or ""))[-400:]
+                elapsed = now() - began
                 if proc.returncode in DEADLINE_EXITS:
-                    if bounded:
-                        raise BudgetStop(f"échéance globale atteinte pendant la phase « {phase} » de la vérification")
+                    if elapsed >= limit - DEADLINE_MEASURE_TOLERANCE:  # la limite imposée a RÉELLEMENT été atteinte
+                        if bounded:
+                            raise BudgetStop(
+                                f"échéance globale atteinte pendant la phase « {phase} » de la vérification"
+                            )
+                        return BusinessObservation(
+                            "incomplete",
+                            merged["checks"],
+                            merged["observations"],
+                            [],
+                            f"échéance de la vérification atteinte (code {proc.returncode} après {elapsed:.1f} s sur "
+                            f"{limit:.1f} s, superviseur hors du processus non fiable)",
+                        )
+                    # Code de terminaison sans durée écoulée : ni expiration ni budget épuisé ne sont prouvés.
                     return BusinessObservation(
                         "incomplete",
                         merged["checks"],
                         merged["observations"],
                         [],
-                        "échéance de la vérification (superviseur hors du processus non fiable)",
+                        f"interruption précoce de la vérification (code {proc.returncode} après {elapsed:.1f} s, limite "
+                        f"{limit:.1f} s non atteinte) : cause non établie (mémoire, interruption externe ou processus "
+                        f"lui-même) — ce n'est pas une expiration; {tail}".rstrip(" ;"),
                     )
                 if proc.returncode in DOCKER_UNAVAILABLE_EXITS:
                     return BusinessObservation(

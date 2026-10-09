@@ -345,3 +345,51 @@ def test_the_cli_hands_the_remaining_time_not_a_new_window_to_the_verification(m
     assert received["remaining"] == pytest.approx(100.0), (
         "il reste 100 s sur les 900 s, pas une nouvelle fenêtre de 120 s"
     )
+
+
+def test_an_early_sigkill_of_the_verifier_is_incomplete_with_the_registry_read_and_never_a_budget_stop(
+    monkeypatch, tmp_path, boundary
+):
+    """CLI composée : 137 après ~1 s sur un reste de ~890 s n'est ni une expiration ni un budget épuisé."""
+    import subprocess as sp
+
+    url = business.campaign_environment("cli", str(tmp_path))["STATE_DATABASE_URL"]
+    project_id = spend_in_registry(url)
+    clock = ControlledClock()
+    monkeypatch.setattr(business.time, "monotonic", clock)
+    monkeypatch.setattr(business, "effective_worker_capacity", accepting_capacity)
+    fake_launch(monkeypatch, tmp_path, project_id, clock, advance=10.0)
+
+    def docker_path(checkout, *, deadline_monotonic, clock, **kwargs):
+        def runner(argv, cwd, env, limit):
+            clock.now += 1.0  # le conteneur disparaît après 1 s (tué : 128 + SIGKILL)
+            return sp.CompletedProcess(argv, 137, "", "")
+
+        return business._observe(
+            checkout,
+            runner,
+            python="python",
+            require_legal_notice=True,
+            reference=None,
+            timeout=120.0,
+            database_dir="/scratch",
+            deadline_monotonic=deadline_monotonic,
+            clock=clock,
+        )
+
+    monkeypatch.setattr(
+        business,
+        "verify_business_checkout",
+        lambda checkout, **kw: docker_path(checkout, **{**kw, "clock": clock}),
+    )
+
+    code, report, steps = invoke(monkeypatch, tmp_path, "run")
+
+    assert steps["R02-business"]["state"] == "incomplete_validation"
+    assert (
+        "interruption précoce" in steps["R02-business"]["detail"]
+        and "pas une expiration" in steps["R02-business"]["detail"]
+    )
+    assert steps["R03-registry"]["state"] == "succeeded"
+    assert report["facts"]["registry_final"]["consumed_tokens"] == 750
+    assert code == 3 and report["verdict"] == "incomplete_validation" and report["verdict"] != "budget_stop"
