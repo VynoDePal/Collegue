@@ -20,8 +20,10 @@ ni un succès ni une preuve du parcours avec modèles réels.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +32,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+
+from collegue.sandbox import DEFAULT_SANDBOX_IMAGE
 
 # ── états d'étape et verdict ──────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -327,12 +331,34 @@ def check_environment(env: Mapping[str, str], report: CampaignReport, step: Step
         raise IncompleteValidation("environnement hors enveloppe : " + " ; ".join(problems))
 
 
-def check_secret_scope(env: Mapping[str, str], report: CampaignReport, step: Step) -> None:
-    """Le préflight ne reçoit aucune clé de modèle (elles ne vivent que dans l'étape qui les consomme)."""
-    present = [
-        name for name in ("LLM_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY") if env.get(name)
-    ]
+LLM_KEY_NAME = re.compile(r"^(LLM_API_KEY(_[A-Z]+)?|GEMINI_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY)$")
+STAGE_STATIC, STAGE_FULL, STAGE_LAUNCH = "static", "full", "launch"
+PREFLIGHT_STAGES = (STAGE_STATIC, STAGE_FULL, STAGE_LAUNCH)
+
+
+def secret_values(env: Mapping[str, str]) -> List[str]:
+    """Valeurs d'environnement à masquer dans tout rapport (jetons et clés, y compris par rôle) — jamais leurs noms."""
+    pattern = re.compile(r"(^|_)(KEY|TOKEN|SECRET|PASSWORD)(_|$)", re.I)  # MAX_TOKENS_BUDGET n'est PAS un secret
+    return [value for name, value in env.items() if value and len(value) >= 4 and pattern.search(name)]
+
+
+def check_secret_scope(
+    env: Mapping[str, str], report: CampaignReport, step: Step, *, stage: str = STAGE_STATIC
+) -> None:
+    """Portée des clés de modèle, DISTINCTE selon l'étape.
+
+    * ``static`` / ``full`` — contrôles SANS clé : aucune clé de modèle ne doit être exposée à cette étape (elles ne vivent que
+      dans l'étape qui les consomme) ;
+    * ``launch`` — validation effective juste avant le lancement : l'environnement reçoit LÉGITIMEMENT la clé du transport
+      choisi ; seuls les NOMS présents sont consignés, jamais une valeur (le rapport masque aussi les valeurs)."""
+    present = sorted(name for name in env if LLM_KEY_NAME.match(name) and env.get(name))
     step.evidence["llm_secret_names_present"] = present
+    step.evidence["stage"] = stage
+    if stage == STAGE_LAUNCH:
+        step.evidence["scope"] = (
+            "lancement : les clés ne sont lues que par l'étape qui les consomme, valeurs jamais affichées"
+        )
+        return
     if present:
         raise RuntimeError(f"clé(s) de modèle exposée(s) à l'étape de préflight : {', '.join(present)}")
 
@@ -419,17 +445,146 @@ def worker_capacity_matrix(bounds: CampaignBounds = CAMPAIGN_BOUNDS) -> List[Dic
     return matrix
 
 
-def check_worker_capacity(report: CampaignReport, step: Step, *, matrix: Optional[List[Dict[str, Any]]] = None) -> None:
-    """Au moins UN transport de worker doit tenir simultanément les trois plafonds, sinon refus AVANT la planification payante."""
-    rows = matrix if matrix is not None else worker_capacity_matrix()
-    step.evidence["matrix"] = rows
+class SentinelSandbox:
+    """Sandbox SENTINELLE : toute tentative d'exécution est une erreur (le préflight n'exécute rien, il interroge les règles)."""
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(f"sandbox sentinelle : {name}() interdit pendant le préflight")
+
+        return refuse
+
+
+@contextlib.contextmanager
+def _process_environment(env: Mapping[str, str]):
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update({k: str(v) for k, v in env.items()})
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def effective_settings(env: Mapping[str, str]) -> Any:
+    """Réglages EFFECTIFS du produit pour cet environnement (``collegue.config.Settings``), sans fichier ``.env`` implicite."""
+    from collegue.config import Settings
+
+    with _process_environment(env):
+        return Settings(_env_file=None)
+
+
+def gate_image(settings: Any) -> str:
+    """Image que le gate de production exécute réellement (``runtime._build_gate_sandbox`` : ``SANDBOX_IMAGE``, comme le codeur)."""
+    from collegue.sandbox import DEFAULT_SANDBOX_IMAGE
+
+    return str(getattr(settings, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE)
+
+
+ROLE_NAMES = ("PLANNER", "QA", "REVIEWER", "CODER")
+
+
+def route_validator() -> Callable[..., Mapping[str, Any]]:
+    """``validate_role_routes`` de la branche A, importé à l'appel ; absent ⇒ validation incomplète explicite (jamais un succès)."""
+    try:
+        from collegue.core.llm import LLMRole, validate_role_routes
+    except ImportError as exc:
+        raise IncompleteValidation(
+            "API publique de routage par rôle (validate_role_routes, lot A) absente de ce code : "
+            "la configuration effective ne peut pas être validée avant la campagne"
+        ) from exc
+
+    def validate(settings: Any, *, require_credential: bool) -> Mapping[str, Any]:
+        roles = [getattr(LLMRole, name) for name in ROLE_NAMES]
+        return validate_role_routes(settings, roles=roles, require_credential=require_credential)
+
+    return validate
+
+
+def check_effective_routes(
+    report: CampaignReport,
+    step: Step,
+    *,
+    settings: Any,
+    require_credential: bool,
+    validator: Optional[Callable[..., Mapping[str, Any]]] = None,
+) -> None:
+    """Destination effective de chaque rôle appelé (planificateur, QA, relecteur, codeur), AVANT toute planification payante."""
+    if settings is None:
+        raise IncompleteValidation("configuration effective illisible : routes non validables")
+    validate = validator or route_validator()
+    step.evidence["credential_required"] = require_credential
+    step.evidence["llm_calls_emitted"] = 0
+    try:
+        routes = validate(settings, require_credential=require_credential)
+    except Exception as exc:  # noqa: BLE001 - tout refus de route bloque ; le message d'A ne contient jamais de clé
+        raise IncompleteValidation(f"route de rôle refusée ({type(exc).__name__}) : {exc}") from exc
+    step.evidence["routes"] = dict(routes)
+
+
+def effective_worker_capacity(settings: Any, bounds: CampaignBounds = CAMPAIGN_BOUNDS) -> Dict[str, Any]:
+    """Décision de ``worker_budget.allocate_worker`` pour le worker RÉELLEMENT sélectionné et la configuration effective.
+
+    Registre jetable (SQLite temporaire, strict, mêmes plafonds), VRAIE instance ``OHSdkAgent`` (celle du runtime) bâtie sur un
+    sandbox sentinelle : sa chaîne de modèles et sa capacité sont celles de la production. Aucune règle recopiée, aucun appel de
+    modèle, aucune dépense — la réservation vit dans le registre jetable, pas dans celui de la campagne."""
+    from datetime import datetime, timedelta, timezone
+
+    from collegue.core.llm.budget_guard import BudgetBinding
+    from collegue.executor import OHSdkAgent
+    from collegue.executor.worker_budget import allocate_worker
+    from collegue.state import ProjectStateManager
+    from collegue.state.budget_ledger import BudgetRefused
+
+    agent = OHSdkAgent(SentinelSandbox(), settings_obj=settings)
+    with tempfile.TemporaryDirectory(prefix="w4-capacity-") as folder:
+        manager = ProjectStateManager.from_url(f"sqlite:///{folder}/capacity.db", create=True)
+        ledger = manager.budget_ledger
+        scope = ledger.create_planning_scope(
+            max_cost_usd=bounds.max_cost_usd, max_tokens=bounds.max_tokens, strict=True, scope_key="planning:capacity"
+        )
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=bounds.max_seconds)
+        binding = BudgetBinding(ledger=ledger, scope_key=scope.scope_key, settings=settings, deadline=deadline)
+        outcome: Dict[str, Any] = {"worker": type(agent).__name__, "declared_enforcement": agent.budget_enforcement}
+        try:
+            allocation = allocate_worker(binding, agent=agent, label="w4-capacity", timeout_seconds=bounds.max_seconds)
+            outcome.update(
+                accepted=True,
+                max_micro_usd=allocation.max_micro_usd,
+                max_tokens=allocation.max_tokens,
+                model_chain=agent.model_chain(),
+            )
+        except BudgetRefused as exc:
+            outcome.update(accepted=False, code=getattr(exc, "code", None), reason=str(exc)[:400])
+        return outcome
+
+
+def check_worker_capacity(
+    report: CampaignReport,
+    step: Step,
+    *,
+    settings: Any = None,
+    capacity: Optional[Callable[[Any], Mapping[str, Any]]] = None,
+    matrix: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Le worker EFFECTIVEMENT choisi tient simultanément les trois plafonds, sinon refus AVANT la planification payante.
+
+    ``matrix`` (facultative) est INFORMATIVE : elle est consignée mais ne décide jamais à la place de la configuration choisie.
+    Un refus W2 légitime reste une validation réelle incomplète, zéro appel émis."""
+    if settings is None:
+        raise IncompleteValidation("configuration effective illisible : capacité du worker non établie")
+    outcome = dict((capacity or effective_worker_capacity)(settings))
+    step.evidence["effective"] = outcome
     step.evidence["bounds"] = asdict(CAMPAIGN_BOUNDS)
     step.evidence["llm_calls_emitted"] = 0
-    if not any(row.get("accepted") for row in rows):
-        reasons = " | ".join(f"{row['transport']}: {row.get('code')}" for row in rows)
+    if matrix is not None:
+        step.evidence["matrix_informative"] = matrix
+    if not outcome.get("accepted"):
         raise IncompleteValidation(
-            "aucun transport de worker ne garantit simultanément 2 USD, 250000 tokens et 900 s en mode strict "
-            f"({reasons}) — refus avant toute planification payante, zéro appel émis"
+            f"le worker sélectionné ({outcome.get('worker')}) ne garantit pas simultanément 2 USD, 250000 tokens et 900 s "
+            f"en mode strict ({outcome.get('code')} : {outcome.get('reason')}) — refus avant toute planification payante, "
+            "zéro appel émis"
         )
 
 
@@ -473,6 +628,8 @@ def check_oracle_environment(
         "docker",
         "run",
         "--rm",
+        "--pull",
+        "never",
         "--network",
         "none",
         "--read-only",
@@ -502,54 +659,93 @@ def run_preflight(
     campaign_id: str,
     run_tag: str,
     image_runner: Callable[[Sequence[str]], "subprocess.CompletedProcess"],
+    stage: str = STAGE_FULL,
+    settings: Any = None,
+    capacity: Optional[Callable[[Any], Mapping[str, Any]]] = None,
     capacity_matrix: Optional[List[Dict[str, Any]]] = None,
-    stage: str = "full",
+    route_check: Optional[Callable[..., Mapping[str, Any]]] = None,
 ) -> CampaignReport:
-    """Préflight complet, SANS appel de modèle : l'ordre va du moins coûteux au plus dépendant d'un service externe."""
-    secrets = [env.get(name, "") for name in SECRET_ENV_NAMES]
-    report = CampaignReport("preflight", campaign_id, secrets=secrets)
+    """Préflight complet, SANS appel de modèle : l'ordre va du moins coûteux au plus dépendant d'un service externe.
+
+    ``stage`` distingue les contrôles SANS clé de la validation effective avant lancement :
+
+    * ``static`` — sans clé, sans image (construite seulement si ces contrôles passent : P08 facultative et non jouée) ;
+    * ``full`` — sans clé, image du gate incluse (verdict autorisant la construction/le lancement) ;
+    * ``launch`` — validation EFFECTIVE juste avant l'émission : la clé du transport choisi est légitimement présente (jamais
+      affichée), les routes sont exigées AVEC leur credential, l'image du gate est vérifiée. Jamais d'étape ``static`` ici."""
+    if stage not in PREFLIGHT_STAGES:
+        raise ValueError(f"étape de préflight inconnue: {stage!r}")
+    report = CampaignReport("preflight", campaign_id, secrets=secret_values(env))
     owner, _, repo = FIXTURE_REPOSITORY.partition("/")
+    launch_stage = stage == STAGE_LAUNCH
     report.declare("P01-launch-context", "Déclenchement ponctuel, première tentative, confirmation, pas de récurrence")
     report.declare("P02-environment", "Environnement dans l'enveloppe 2 USD / 250000 tokens / 900 s, registre durable")
-    report.declare("P03-secret-scope", "Aucune clé de modèle dans l'étape de préflight")
+    report.declare(
+        "P03-secret-scope",
+        "Portée des clés de modèle : légitimes à l'étape de lancement, jamais affichées"
+        if launch_stage
+        else "Aucune clé de modèle dans l'étape de préflight",
+    )
     report.declare("P04-fixture-identity", "Identité du dépôt fixture et de sa graine (lectures seules)")
     report.declare(
-        "P05-worker-capacity",
-        "Un transport de worker tient simultanément les trois plafonds (avant toute planification payante)",
+        "P05-role-routes",
+        "Destination effective de chaque rôle (planificateur, QA, relecteur, codeur) sans émission",
     )
     report.declare(
-        "P06-base-protection", "Politique de fusion W3 applicable à la base éphémère (acteur et branche réels)"
+        "P06-worker-capacity",
+        "Le worker réellement sélectionné tient simultanément les trois plafonds (avant toute planification payante)",
     )
-    # Étape « static » : tout sauf l'image du sandbox (construite seulement si ces contrôles passent) — P07 est alors
-    # facultative ET non jouée ; l'étape « full » (verdict qui autorise le lancement) l'exige.
     report.declare(
-        "P07-oracle-environment",
-        "Pile des oracles et lecteur PDF réel dans l'image du sandbox",
-        required=stage != "static",
+        "P07-base-protection", "Politique de fusion W3 applicable à la base éphémère (acteur et branche réels)"
+    )
+    # Étape « static » : tout sauf l'image du gate (construite seulement si ces contrôles passent) — P08 est alors
+    # facultative ET non jouée ; « full » et « launch » (verdicts qui autorisent le lancement) l'exigent.
+    report.declare(
+        "P08-oracle-environment",
+        "Pile des oracles et lecteur PDF réel dans l'image que le gate exécute réellement",
+        required=stage != STAGE_STATIC,
     )
     report.facts.update(
         bounds=asdict(CAMPAIGN_BOUNDS),
         fixture={"repository": FIXTURE_REPOSITORY, "id": FIXTURE_REPOSITORY_ID, "seed_sha": FIXTURE_SEED_SHA},
         llm_calls_emitted=0,
         billable_actions_emitted=0,
+        stage=stage,
     )
+    settings_error: Optional[str] = None
+    if settings is None:
+        try:
+            settings = effective_settings(env)
+        except Exception as exc:  # noqa: BLE001 - jamais le message : une validation pydantic peut citer une valeur
+            fields = [".".join(map(str, e.get("loc", ()))) for e in getattr(exc, "errors", lambda: [])()]
+            settings_error = f"{type(exc).__name__}" + (f" ({', '.join(fields)})" if fields else "")
     report.run("P01-launch-context", lambda s: check_launch_context(env, report, s))
     report.run("P02-environment", lambda s: check_environment(env, report, s))
-    report.run("P03-secret-scope", lambda s: check_secret_scope(env, report, s))
+    report.run("P03-secret-scope", lambda s: check_secret_scope(env, report, s, stage=stage))
     report.run("P04-fixture-identity", lambda s: check_fixture_identity(clients, report, s, owner=owner, repo=repo))
-    report.run("P05-worker-capacity", lambda s: check_worker_capacity(report, s, matrix=capacity_matrix))
+
+    def _routes(step: Step) -> None:
+        if settings_error:
+            raise IncompleteValidation(f"configuration effective illisible : {settings_error}")
+        check_effective_routes(report, step, settings=settings, require_credential=launch_stage, validator=route_check)
+
+    def _capacity(step: Step) -> None:
+        if settings_error:
+            raise IncompleteValidation(f"configuration effective illisible : {settings_error}")
+        check_worker_capacity(report, step, settings=settings, capacity=capacity, matrix=capacity_matrix)
+
+    report.run("P05-role-routes", _routes)
+    report.run("P06-worker-capacity", _capacity)
     report.run(
-        "P06-base-protection",
+        "P07-base-protection",
         lambda s: check_base_protection(clients, report, s, owner=owner, repo=repo, run_tag=run_tag),
     )
-    if stage == "static":
-        report.facts["stage"] = "static"
+    if stage == STAGE_STATIC:
         return report
-    report.facts["stage"] = "full"
     report.run(
-        "P07-oracle-environment",
+        "P08-oracle-environment",
         lambda s: check_oracle_environment(
-            report, s, image=str(env.get("SANDBOX_IMAGE", "") or DEFAULT_VERIFIER_IMAGE), runner=image_runner
+            report, s, image=gate_image(settings) if settings is not None else gate_image(None), runner=image_runner
         ),
     )
     return report
@@ -678,7 +874,7 @@ class BusinessObservation:
 DEADLINE_EXIT = 124
 #: ``docker run`` : 125 = démon/lancement refusé, 126/127 = commande de l'image non exécutable/introuvable.
 DOCKER_UNAVAILABLE_EXITS = (125, 126, 127)
-DEFAULT_VERIFIER_IMAGE = "collegue-sandbox-openhands:ci"
+DEFAULT_VERIFIER_IMAGE = DEFAULT_SANDBOX_IMAGE  # même défaut que le gate de production (SANDBOX_IMAGE)
 #: Variables conservées pour le code vérifié (liste BLANCHE : aucune clé, aucun jeton, rien d'hérité par accident).
 VERIFIER_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "TZ")
 #: Variables conservées pour le CLIENT docker (jamais transmises au conteneur : ``docker run`` ne propage rien sans ``-e``).
@@ -1078,10 +1274,15 @@ def launch_campaign(
 
     cfg = adapter.config
     manifest = NightlyManifest.for_config(cfg)
+    # Identité du projet/scope conservée DÈS sa création et jusqu'aux sorties d'erreur, de budget ou d'échéance : le rapport
+    # lit le MÊME registre après un arrêt, sans dépendre de la valeur de retour (absente quand l'exécution lève).
+    context: Dict[str, Any] = report.facts.setdefault("launch", {})
+    context.update(base_branch=cfg.base_branch)
     try:
         manifest.root_sha = adapter.guard_fixture()
         _write_manifest(cfg.manifest_path, manifest)
         base_sha = adapter.create_base(manifest)
+        context["base_sha"] = base_sha
         draft = adapter.product(
             "plan", "draft", "--name", f"W4 {cfg.tag}", "--problem", BUSINESS_PROBLEM, "--owner", cfg.owner,
             "--repo", cfg.repo, "--base", cfg.base_branch, "--labels", cfg.issue_label, "--milestone", "",
@@ -1092,6 +1293,7 @@ def launch_campaign(
         if draft.get("action") != "draft" or int(draft.get("task_count") or 0) != 3 or project_id <= 0:
             raise RuntimeError("contrat JSON du draft inattendu (trois tâches exigées)")
         manifest.project_id, manifest.plan_hash = project_id, plan_hash
+        context.update(project_id=project_id, plan_hash=plan_hash)
         _write_manifest(cfg.manifest_path, manifest)
         approved = adapter.product(
             "plan", "approve", "--project-id", str(project_id), "--expected-plan-hash", plan_hash, "--format", "json"
@@ -1106,6 +1308,7 @@ def launch_campaign(
         if len(issues) != 3:
             raise RuntimeError("la synchronisation doit créer exactement trois issues")
         manifest.issue_numbers = issues
+        context["issue_numbers"] = issues
         _write_manifest(cfg.manifest_path, manifest)
         source = adapter.clone(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch))
         result = adapter.product(
@@ -1113,16 +1316,10 @@ def launch_campaign(
             "--base", cfg.base_branch, "--execute", "--format", "json", accepted_codes=(0, 1, 2, 3, 4, 5),
         )  # fmt: skip
         stop = str(result.get("stop_reason") or "")
-        context = {
-            "project_id": project_id,
-            "plan_hash": plan_hash,
-            "base_branch": cfg.base_branch,
-            "base_sha": base_sha,
-            "stop_reason": stop,
-            "issue_numbers": issues,
-            "opened_prs": list(result.get("opened_prs") or []),
-        }
-        report.facts["launch"] = context
+        context.update(
+            stop_reason=stop,
+            opened_prs=list(result.get("opened_prs") or []),
+        )
         if stop in BUILD_STOP_BUDGET:
             raise BudgetStop(f"arrêt du produit : {stop} (enveloppe 2 USD / 250000 tokens / 900 s)")
         if stop != "completed":
@@ -1133,6 +1330,18 @@ def launch_campaign(
         return context
     finally:
         adapter.cleanup()
+
+
+CAMPAIGN_SCOPE_NOT_WIRED = (
+    "R04-improvement",
+    "R05-incident-rollback",
+)
+NOT_WIRED_STOP_POINT = (
+    "point d'arrêt documenté : l'invocation réelle ne câble que planification, approbation, synchronisation, BUILD des trois "
+    "tâches, vérification métier du livrable et lecture du registre ; la passe d'amélioration (handoff BUILD→IMPROVE) et "
+    "l'incident contrôlé avec rollback Phase 5 ne sont pas exécutés par ce lancement (la preuve déterministe est dans "
+    "tests/w4_business_campaign.py) — un BUILD réussi n'est pas la validation finale"
+)
 
 
 def run_campaign(
@@ -1146,8 +1355,15 @@ def run_campaign(
     """Invocation réelle : ``launch`` n'est appelé QUE si tout le préflight a réussi, et au plus UNE fois.
 
     Le rapport retourné reprend les étapes du préflight ; en cas de préflight non validé, ``launch`` n'est jamais appelé, aucune
-    action facturable n'est émise et le verdict reste celui du préflight (jamais un résultat métier inventé)."""
-    report = CampaignReport("campaign", preflight.campaign_id, secrets=[env.get(n, "") for n in SECRET_ENV_NAMES])
+    action facturable n'est émise et le verdict reste celui du préflight (jamais un résultat métier inventé).
+
+    **Portée annoncée.** Le rapport déclare TOUTES les preuves de sa portée (BUILD, métier, registre, amélioration, incident /
+    rollback). Celles que ce lancement ne câble pas restent ``not_executed`` (arrêt amont) ou ``incomplete_validation`` avec le
+    point d'arrêt exact : le verdict ne peut pas être ``validated`` tant qu'elles ne sont pas jouées.
+
+    **Identité conservée.** Le contexte (projet, scope, base, tâches) est lu dans ``report.facts['launch']``, alimenté dès sa
+    création par ``launch`` : un arrêt budget/échéance/erreur ne le perd pas et le registre lu est bien celui du projet."""
+    report = CampaignReport("campaign", preflight.campaign_id, secrets=secret_values(env))
     for item in preflight.steps:
         copy = report.declare(item.id, item.title, required=item.required)
         copy.state, copy.detail, copy.evidence = item.state, item.detail, dict(item.evidence)
@@ -1160,6 +1376,19 @@ def run_campaign(
         "R02-business", "Vérification métier du livrable fusionné (base vierge, HTTP, PDF lu par un vrai lecteur)"
     )
     report.declare("R03-registry", "Compteurs du registre durable dans l'enveloppe")
+    report.declare(
+        "R04-improvement",
+        "Passe d'amélioration par l'entrée publique : handoff BUILD→IMPROVE, mesure réelle, PR promue",
+    )
+    report.declare(
+        "R05-incident-rollback", "Incident contrôlé, rollback Phase 5, acquittement et reprise avec observations métier"
+    )
+    report.facts["scope"] = {
+        "announced": ["build", "business", "registry", "improvement", "incident_rollback"],
+        "wired": ["build", "business", "registry"],
+        "not_wired": ["improvement", "incident_rollback"],
+        "stop_point": NOT_WIRED_STOP_POINT,
+    }
     if preflight.verdict() != VERDICT_VALIDATED:
         report.halted = True
         report.facts["billable_actions_emitted"] = 0
@@ -1167,10 +1396,17 @@ def run_campaign(
         return report
     context: Dict[str, Any] = {}
 
+    def _sync_context() -> None:
+        context.update(report.facts.get("launch") or {})
+
     def _launch(step: Step) -> None:
-        context.update(launch(report) or {})
+        try:
+            context.update(launch(report) or {})
+        finally:
+            _sync_context()  # même quand l'exécution lève (budget, échéance, erreur) : l'identité du projet survit
 
     report.run("R01-run", _launch)
+    _sync_context()
 
     def _verify(step: Step) -> None:
         if verify is None:
@@ -1180,19 +1416,37 @@ def run_campaign(
     def _registry(step: Step) -> None:
         if read_registry is None:
             raise IncompleteValidation("registre durable illisible")
-        counters = dict(read_registry(context))
+        if not context.get("project_id"):
+            raise IncompleteValidation(
+                "aucun projet créé avant l'arrêt : la dépense éventuelle n'est pas établie (aucun zéro n'est inventé)"
+            )
+        try:
+            counters = dict(read_registry(context))
+        except (IncompleteValidation, BudgetStop):
+            raise
+        except Exception as exc:  # noqa: BLE001 - illisible = preuve manquante, jamais un échec qui masquerait l'arrêt d'origine
+            raise IncompleteValidation(
+                f"registre durable du projet {context.get('project_id')} illisible ({type(exc).__name__}) : "
+                "dépense non établie (aucun zéro n'est inventé)"
+            ) from exc
         step.evidence["counters"] = counters
         report.facts["registry_final"] = counters
         assert_registry_within_bounds(counters)
 
+    def _not_wired(step: Step) -> None:
+        raise IncompleteValidation(NOT_WIRED_STOP_POINT)
+
     report.run("R02-business", _verify)
-    if report.step("R01-run").state in {STEP_BUDGET_STOP, STEP_FAILED}:
-        # Même après un arrêt budget/échec, le registre est consigné (point d'arrêt) sans masquer l'état de R01.
+    if report.step("R01-run").state != STEP_SUCCEEDED:
+        # Même après un arrêt budget/échec/validation incomplète, le registre est consigné (point d'arrêt) SANS masquer
+        # l'état de R01 : une lecture impossible reste une preuve manquante, pas un nouvel échec.
         report.halted = False
         report.run("R03-registry", _registry)
         report.halted = True
     else:
         report.run("R03-registry", _registry)
+    for step_id in CAMPAIGN_SCOPE_NOT_WIRED:
+        report.run(step_id, _not_wired)  # arrêt amont ⇒ reste not_executed ; sinon validation incomplète documentée
     return report
 
 
@@ -1224,13 +1478,16 @@ def registry_reader(env: Mapping[str, str]) -> Callable[[Mapping[str, Any]], Map
     def read(context: Mapping[str, Any]) -> Mapping[str, Any]:
         from collegue.state import ProjectStateManager
 
+        if not context.get("project_id"):
+            raise IncompleteValidation("identité du projet absente : registre non lisible")
+
         manager = ProjectStateManager.from_url(str(env["STATE_DATABASE_URL"]))
         return registry_counters(manager, int(context["project_id"]))
 
     return read
 
 
-def _real_preflight(env: Mapping[str, str], campaign_id: str, stage: str = "full") -> CampaignReport:
+def _real_preflight(env: Mapping[str, str], campaign_id: str, stage: str = STAGE_FULL) -> CampaignReport:
     token = env.get("GITHUB_TOKEN", "")
     if not token:
         report = CampaignReport("preflight", campaign_id)
@@ -1256,12 +1513,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m collegue.pilot.w4_business")
     parser.add_argument("action", choices=("preflight", "run", "cleanup", "capacity"))
     parser.add_argument(
-        "--stage", choices=("static", "full"), default="full", help="préflight : « static » saute l'image"
+        "--stage",
+        choices=(STAGE_STATIC, STAGE_FULL),
+        default=STAGE_FULL,
+        help="préflight : « static » saute l'image (contrôles SANS clé) ; « run » exige toujours la validation effective complète",
     )
     parser.add_argument("--output", help="rapport machine JSON")
     parser.add_argument("--human", help="rapport humain (texte)")
     parser.add_argument("--campaign-id", default=os.environ.get("W4_BUSINESS_CAMPAIGN_ID", "w4-business"))
     args = parser.parse_args(argv)
+    if args.action == "run" and args.stage != STAGE_FULL:
+        parser.error(
+            "« run » exige la validation effective complète (image du gate incluse) : --stage static est refusé"
+        )
     if args.action == "capacity":
         matrix = worker_capacity_matrix()
         print(json.dumps(matrix, ensure_ascii=False, indent=2))
@@ -1276,7 +1540,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ).cleanup()
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
         return 0
-    preflight = _real_preflight(env, args.campaign_id, args.stage)
+    # « preflight » : contrôles SANS clé (étape choisie) ; « run » : validation EFFECTIVE juste avant lancement — l'environnement
+    # reçoit légitimement la clé du transport choisi (jamais affichée), les routes sont exigées avec leur credential.
+    preflight = _real_preflight(env, args.campaign_id, STAGE_LAUNCH if args.action == "run" else args.stage)
     if args.action == "preflight":
         report = preflight
     else:

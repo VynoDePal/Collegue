@@ -180,8 +180,15 @@ def test_a_fully_successful_campaign_validates_only_after_the_business_check_and
         read_registry=lambda ctx: GOOD_COUNTERS,
     )
 
-    assert [s.state for s in report.steps if s.id.startswith("R")] == [STEP_SUCCEEDED] * 3
-    assert report.verdict() == "validated" and report.facts["registry_final"]["consumed_tokens"] == 90_000
+    states = {s.id: s.state for s in report.steps if s.id.startswith("R")}
+    assert [states[i] for i in ("R01-run", "R02-business", "R03-registry")] == [STEP_SUCCEEDED] * 3
+    assert report.facts["registry_final"]["consumed_tokens"] == 90_000
+    # Un BUILD réussi n'est PAS la validation finale : la portée annoncée contient aussi l'amélioration et l'incident /
+    # rollback, déclarés requis, jamais joués par ce lancement et rapportés avec leur point d'arrêt exact.
+    assert states["R04-improvement"] == STEP_INCOMPLETE and states["R05-incident-rollback"] == STEP_NOT_EXECUTED
+    assert "point d'arrêt documenté" in report.step("R04-improvement").detail
+    assert report.verdict() == "incomplete_validation" and report.exit_code() == 3
+    assert report.facts["scope"]["not_wired"] == ["improvement", "incident_rollback"]
 
 
 def test_a_failed_business_check_makes_the_campaign_fail_and_leaves_the_registry_step_unexecuted(tmp_path):
@@ -221,6 +228,117 @@ def test_a_budget_stop_is_reported_as_such_and_still_records_the_registry_stop_p
         and report.facts["registry_final"]["consumed_tokens"] == 249_000
     )
     assert report.verdict() == "budget_stop" and report.exit_code() == 4
+
+
+def test_the_scope_steps_are_declared_required_and_stay_unexecuted_after_an_upstream_stop(tmp_path):
+    adapter, _ = launch(tmp_path, stop_reason="paused_budget")
+
+    report = business.run_campaign(
+        ENV,
+        preflight=validated_preflight(),
+        launch=lambda r: business.launch_campaign(r, adapter=adapter, env=ENV),
+        verify=lambda r, c: None,
+        read_registry=lambda ctx: GOOD_COUNTERS,
+    )
+
+    for step_id in ("R04-improvement", "R05-incident-rollback"):
+        assert report.step(step_id).required and report.step(step_id).state == STEP_NOT_EXECUTED
+
+
+# ── arrêt budget : l'identité du projet survit, le MÊME registre est lu (chemin composé launch + run) ─────────────────────
+
+
+class RecordingRegistry:
+    """Faux ``ProjectStateManager`` : ne répond que pour le projet demandé et journalise la lecture."""
+
+    def __init__(self):
+        self.read = []
+        registry = self
+
+        class Ledger:
+            def snapshot_for_project(self, project_id):
+                registry.read.append(project_id)
+                return SimpleNamespace(
+                    scope_key=f"project:{project_id}", strict=True, cap_micro_usd=2_000_000, cap_tokens=250_000,
+                    consumed_micro_usd=1_900_000, consumed_tokens=240_000, reserved_micro_usd=0, reserved_tokens=0,
+                    unknown_micro_usd=0, unknown_tokens=0, blocked_reason=None, revision=3,
+                )  # fmt: skip
+
+        self.budget_ledger = Ledger()
+
+
+@pytest.mark.parametrize("stop", ["paused_budget", "deadline_reached"])
+def test_a_budget_stop_keeps_the_project_identity_and_reads_the_same_registry(tmp_path, monkeypatch, stop):
+    registry = RecordingRegistry()
+    monkeypatch.setattr("collegue.state.ProjectStateManager.from_url", staticmethod(lambda url, **kw: registry))
+    adapter, _ = launch(tmp_path, stop_reason=stop)
+
+    report = business.run_campaign(
+        ENV,
+        preflight=validated_preflight(),
+        launch=lambda r: business.launch_campaign(r, adapter=adapter, env=ENV),
+        verify=lambda r, c: None,
+        read_registry=business.registry_reader(ENV),
+    )
+
+    assert registry.read == [9], "le registre lu est celui du projet créé par la planification"
+    assert report.step("R01-run").state == STEP_BUDGET_STOP
+    assert report.step("R03-registry").state == STEP_SUCCEEDED
+    assert (
+        report.facts["registry_final"]["scope"] == "project:9"
+        and report.facts["registry_final"]["consumed_tokens"] == 240_000
+    )
+    assert report.facts["launch"]["project_id"] == 9 and report.verdict() == "budget_stop" and report.exit_code() == 4
+
+
+def test_an_unreadable_registry_keeps_the_original_stop_and_states_the_missing_proof(tmp_path):
+    adapter, _ = launch(tmp_path, stop_reason="paused_budget")
+
+    def unreadable(context):
+        raise KeyError("project_id")  # n'importe quelle panne de lecture
+
+    report = business.run_campaign(
+        ENV,
+        preflight=validated_preflight(),
+        launch=lambda r: business.launch_campaign(r, adapter=adapter, env=ENV),
+        verify=lambda r, c: None,
+        read_registry=unreadable,
+    )
+
+    assert report.verdict() == "budget_stop", "l'arrêt d'origine n'est pas masqué par la panne de lecture"
+    assert report.step("R03-registry").state == STEP_INCOMPLETE
+    assert (
+        "dépense non établie" in report.step("R03-registry").detail
+        and "aucun zéro" in report.step("R03-registry").detail
+    )
+    assert "registry_final" not in report.facts, "aucun compteur inventé"
+
+
+@pytest.mark.parametrize(
+    "failing, project", [("guard", None), ("base", None), ("draft", None), ("approve", 9), ("sync", 9), ("run", 9)]
+)
+def test_an_error_exit_keeps_whatever_identity_was_created_and_never_invents_a_zero_spend(tmp_path, failing, project):
+    adapter, _ = launch(tmp_path, fail_at=failing)
+    seen = []
+
+    def registry(context):
+        seen.append(dict(context))
+        return GOOD_COUNTERS
+
+    report = business.run_campaign(
+        ENV,
+        preflight=validated_preflight(),
+        launch=lambda r: business.launch_campaign(r, adapter=adapter, env=ENV),
+        verify=lambda r, c: None,
+        read_registry=registry,
+    )
+
+    assert report.step("R01-run").state == STEP_FAILED and report.verdict() == "failed"
+    if project is None:
+        assert seen == [] and report.step("R03-registry").state == STEP_INCOMPLETE
+        assert "aucun projet créé" in report.step("R03-registry").detail and "registry_final" not in report.facts
+    else:
+        assert [c["project_id"] for c in seen] == [project] and report.step("R03-registry").state == STEP_SUCCEEDED
 
 
 def test_missing_verification_or_registry_is_an_incomplete_validation_never_a_success(tmp_path):

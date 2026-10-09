@@ -189,18 +189,37 @@ def test_the_launch_context_refuses_recurrence_reruns_and_unconfirmed_dispatches
     business.check_launch_context(GOOD_ENV, report, step)  # témoin : le contexte conforme passe
 
 
-def test_llm_keys_may_not_reach_the_preflight_step():
+def test_llm_keys_may_not_reach_the_keyless_preflight_stages():
     report = CampaignReport("preflight", "unit")
     step = report.declare("P03", "secrets")
     business.check_secret_scope(GOOD_ENV, report, step)
-    with pytest.raises(RuntimeError, match="LLM_API_KEY"):
-        business.check_secret_scope({**GOOD_ENV, "LLM_API_KEY": SECRET}, report, step)
+    for stage in ("static", "full"):
+        with pytest.raises(RuntimeError, match="LLM_API_KEY"):
+            business.check_secret_scope({**GOOD_ENV, "LLM_API_KEY": SECRET}, report, step, stage=stage)
+
+
+def test_the_launch_stage_legitimately_holds_the_key_of_the_chosen_transport_and_records_only_names():
+    report = CampaignReport("preflight", "unit", secrets=[SECRET])
+    step = report.declare("P03", "secrets")
+    env = {**GOOD_ENV, "LLM_API_KEY": SECRET, "LLM_API_KEY_CODER": SECRET + "-coder"}
+
+    business.check_secret_scope(env, report, step, stage="launch")
+
+    assert step.evidence["llm_secret_names_present"] == ["LLM_API_KEY", "LLM_API_KEY_CODER"]
+    assert SECRET not in report.to_json() and SECRET not in report.to_human()
+
+
+def test_every_secret_looking_value_of_the_environment_is_masked_including_role_keys():
+    values = business.secret_values(
+        {"GITHUB_TOKEN": "t-1234", "LLM_API_KEY_QA": "k-5678", "PATH": "/bin", "EMPTY_KEY": ""}
+    )
+    assert sorted(values) == ["k-5678", "t-1234"]
 
 
 # ── capacité du transport de worker (règles de production, aucune copie) ────────────────────────────────────────────────
 
 
-def test_no_real_worker_transport_can_hold_usd_tokens_and_deadline_together_in_strict_mode():
+def test_the_informative_matrix_documents_the_general_picture_but_never_decides():
     matrix = business.worker_capacity_matrix()
 
     assert [row["transport"] for row in matrix] == [
@@ -210,20 +229,102 @@ def test_no_real_worker_transport_can_hold_usd_tokens_and_deadline_together_in_s
     ]
     assert not any(row["accepted"] for row in matrix), matrix
     assert all(row["code"] == "unbounded_transport" for row in matrix)
-    reasons = {row["transport"]: row["reason"] for row in matrix}
-    assert "FACTURABLE" in reasons["OHSdkAgent / clé API facturable"]
-    assert "plafond de TOKENS strict" in reasons["OHSdkAgent / abonnement"]
-    assert "appels non bornables" in reasons["OpenHandsAgent (legacy) / clé API facturable"]
 
 
-def test_the_capacity_step_refuses_before_any_paid_planning_and_records_zero_calls():
+EFFECTIVE_API_KEY = {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-2.5-flash", "CODER_SUBSCRIPTION": "false"}
+EFFECTIVE_SUBSCRIPTION = {"LLM_PROVIDER": "openai", "LLM_MODEL": "gpt-5.5", "CODER_SUBSCRIPTION": "true"}
+
+
+@pytest.mark.parametrize(
+    "overrides, reason",
+    [(EFFECTIVE_API_KEY, "FACTURABLE"), (EFFECTIVE_SUBSCRIPTION, "plafond de TOKENS strict")],
+    ids=["api-key", "subscription"],
+)
+def test_the_effective_worker_is_a_real_ohsdk_agent_judged_by_the_production_rules(overrides, reason):
+    settings = business.effective_settings({**GOOD_ENV, **overrides})
+
+    outcome = business.effective_worker_capacity(settings)
+
+    assert outcome["worker"] == "OHSdkAgent" and outcome["declared_enforcement"] == "in-runner"
+    assert outcome["accepted"] is False and outcome["code"] == "unbounded_transport" and reason in outcome["reason"]
+
+
+def test_the_capacity_step_judges_the_chosen_configuration_and_the_matrix_never_decides():
     report = CampaignReport("preflight", "unit")
-    step = report.declare("P05", "capacité")
-    with pytest.raises(IncompleteValidation, match="zéro appel émis"):
-        business.check_worker_capacity(report, step)
-    assert step.evidence["llm_calls_emitted"] == 0 and len(step.evidence["matrix"]) == 3
+    step = report.declare("P06", "capacité")
+    settings = business.effective_settings({**GOOD_ENV, **EFFECTIVE_API_KEY})
     accepting = [{"transport": "futur", "accepted": True, "max_micro_usd": 1, "max_tokens": 1}]
-    business.check_worker_capacity(report, step, matrix=accepting)  # témoin : un transport capable lève le blocage
+
+    with pytest.raises(IncompleteValidation, match="zéro appel émis"):
+        business.check_worker_capacity(
+            report, step, settings=settings, matrix=accepting
+        )  # la matrice accepte, pas le choix
+
+    assert step.evidence["llm_calls_emitted"] == 0 and step.evidence["matrix_informative"] == accepting
+    assert step.evidence["effective"]["worker"] == "OHSdkAgent" and step.evidence["effective"]["accepted"] is False
+    business.check_worker_capacity(report, step, settings=settings, capacity=accepting_capacity)  # témoin : acceptation
+
+
+def test_an_unreadable_effective_configuration_is_an_incomplete_validation_never_an_assumed_default():
+    report = CampaignReport("preflight", "unit")
+    step = report.declare("P06", "capacité")
+    with pytest.raises(IncompleteValidation, match="configuration effective illisible"):
+        business.check_worker_capacity(report, step, settings=None)
+
+
+def test_the_capacity_probe_runs_nothing_and_a_sentinel_sandbox_refuses_any_execution():
+    sentinel = business.SentinelSandbox()
+    with pytest.raises(AssertionError, match="interdit pendant le préflight"):
+        sentinel.run_command(["echo"], "/tmp")
+    with pytest.raises(AssertionError):
+        sentinel.run_tests("/tmp")
+
+
+# ── routes effectives (API publique du lot A) ───────────────────────────────────────────────────────────────────────────
+
+
+def test_route_validation_uses_the_public_api_of_lot_a_and_reports_its_refusal_without_secret(monkeypatch):
+    report = CampaignReport("preflight", "unit")
+    step = report.declare("P05", "routes")
+    seen = []
+
+    def validator(settings, *, require_credential):
+        seen.append(require_credential)
+        raise ValueError("fournisseur openai contradictoire avec le modèle gemini-2.5-flash")
+
+    with pytest.raises(IncompleteValidation, match="route de rôle refusée.*contradictoire"):
+        business.check_effective_routes(report, step, settings=object(), require_credential=True, validator=validator)
+    assert seen == [True] and step.evidence["llm_calls_emitted"] == 0
+    business.check_effective_routes(report, step, settings=object(), require_credential=False, validator=ok_routes)
+    assert step.evidence["routes"]["CODER"]["model"] == "gpt-5.5"
+
+
+def test_route_validation_is_an_explicit_incomplete_validation_when_the_public_api_is_absent(monkeypatch):
+    import sys
+    import types
+
+    stub = types.ModuleType("collegue.core.llm")  # code sans l'API de routage : jamais un succès par défaut
+    monkeypatch.setitem(sys.modules, "collegue.core.llm", stub)
+
+    with pytest.raises(IncompleteValidation, match="validate_role_routes"):
+        business.route_validator()
+
+
+def test_route_validation_asks_the_four_called_roles_through_validate_role_routes(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    stub = types.ModuleType("collegue.core.llm")
+    stub.LLMRole = types.SimpleNamespace(PLANNER="planner", QA="qa", REVIEWER="reviewer", CODER="coder")
+    stub.validate_role_routes = lambda settings, roles, require_credential: (
+        calls.append((roles, require_credential)) or {}
+    )
+    monkeypatch.setitem(sys.modules, "collegue.core.llm", stub)
+
+    business.route_validator()(object(), require_credential=False)
+
+    assert calls == [(["planner", "qa", "reviewer", "coder"], False)]
 
 
 # ── protections W3 de la base éphémère ─────────────────────────────────────────────────────────────────────────────────
@@ -426,52 +527,152 @@ def full_clients(server):
     )
 
 
-def test_the_real_preflight_stops_incomplete_with_zero_billable_action_when_no_transport_holds_the_ceilings(no_llm):
+def ok_routes(settings, *, require_credential):
+    return {"CODER": {"provider": "openai", "model": "gpt-5.5", "credential_present": require_credential}}
+
+
+def accepting_capacity(settings):
+    return {"worker": "OHSdkAgent", "accepted": True, "max_micro_usd": 1, "max_tokens": 1}
+
+
+def preflight(server, env=GOOD_ENV, **kwargs):
+    kwargs.setdefault("route_check", ok_routes)
+    kwargs.setdefault("image_runner", ok_runner)
+    return business.run_preflight(env, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", **kwargs)
+
+
+def test_the_real_preflight_stops_incomplete_with_zero_billable_action_when_the_chosen_worker_holds_no_ceiling(no_llm):
     server = FixtureNamedServer()
     server.add_ruleset(1)
 
-    report = business.run_preflight(
-        {**GOOD_ENV}, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", image_runner=ok_runner
-    )
+    report = preflight(server, {**GOOD_ENV, **EFFECTIVE_API_KEY})
 
     by_id = {s.id: s.state for s in report.steps}
     assert by_id["P01-launch-context"] == by_id["P02-environment"] == by_id["P03-secret-scope"] == STEP_SUCCEEDED
-    assert by_id["P04-fixture-identity"] == STEP_SUCCEEDED
-    assert by_id["P05-worker-capacity"] == STEP_INCOMPLETE, "le transport de worker ne tient pas les trois plafonds"
-    assert by_id["P06-base-protection"] == by_id["P07-oracle-environment"] == STEP_NOT_EXECUTED
+    assert by_id["P04-fixture-identity"] == by_id["P05-role-routes"] == STEP_SUCCEEDED
+    assert by_id["P06-worker-capacity"] == STEP_INCOMPLETE, "le worker choisi ne tient pas les trois plafonds"
+    assert by_id["P07-base-protection"] == by_id["P08-oracle-environment"] == STEP_NOT_EXECUTED
     assert (report.verdict(), report.exit_code()) == ("incomplete_validation", 3)
     assert report.facts["llm_calls_emitted"] == 0 and report.facts["billable_actions_emitted"] == 0 and no_llm == []
-    assert "zéro appel émis" in report.step("P05-worker-capacity").detail
+    assert "zéro appel émis" in report.step("P06-worker-capacity").detail
     assert server.calls == [c for c in server.calls if c[0] == "GET"], "lectures seules"
 
 
-def test_with_a_capable_transport_the_preflight_still_refuses_an_unprotected_base(no_llm):
-    accepting = [{"transport": "futur", "accepted": True, "max_micro_usd": 1, "max_tokens": 1}]
+def test_with_a_capable_worker_the_preflight_still_refuses_an_unprotected_base(no_llm):
     server = FixtureNamedServer()  # aucune protection ni ruleset
 
-    report = business.run_preflight(
-        GOOD_ENV, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", image_runner=ok_runner,
-        capacity_matrix=accepting,
-    )  # fmt: skip
+    report = preflight(server, capacity=accepting_capacity)
 
-    assert report.step("P05-worker-capacity").state == STEP_SUCCEEDED
-    assert report.step("P06-base-protection").state == STEP_INCOMPLETE
+    assert report.step("P06-worker-capacity").state == STEP_SUCCEEDED
+    assert report.step("P07-base-protection").state == STEP_INCOMPLETE
     assert (
-        report.step("P07-oracle-environment").state == STEP_NOT_EXECUTED and report.verdict() == "incomplete_validation"
+        report.step("P08-oracle-environment").state == STEP_NOT_EXECUTED and report.verdict() == "incomplete_validation"
     )
 
 
 def test_with_every_prerequisite_met_the_preflight_validates_without_any_llm_call(no_llm):
-    accepting = [{"transport": "futur", "accepted": True, "max_micro_usd": 1, "max_tokens": 1}]
     server = FixtureNamedServer()
     server.add_ruleset(1)
 
-    report = business.run_preflight(
-        GOOD_ENV, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", image_runner=ok_runner,
-        capacity_matrix=accepting,
-    )  # fmt: skip
+    report = preflight(server, capacity=accepting_capacity)
 
     assert report.verdict() == "validated" and report.exit_code() == 0 and no_llm == []
+
+
+def test_a_route_refused_or_missing_api_blocks_the_preflight_before_the_worker_and_the_image(no_llm):
+    server = FixtureNamedServer()
+    server.add_ruleset(1)
+
+    def refuse(settings, *, require_credential):
+        raise ValueError("contradiction fournisseur/modèle")
+
+    report = preflight(server, capacity=accepting_capacity, route_check=refuse)
+
+    assert report.step("P05-role-routes").state == STEP_INCOMPLETE
+    assert "contradiction" in report.step("P05-role-routes").detail
+    assert report.step("P06-worker-capacity").state == STEP_NOT_EXECUTED and report.verdict() == "incomplete_validation"
+
+
+def test_the_static_and_full_stages_check_routes_without_credential_and_launch_requires_it(no_llm):
+    server = FixtureNamedServer()
+    server.add_ruleset(1)
+    required = {}
+
+    def spy(stage):
+        def route_check(settings, *, require_credential):
+            required[stage] = require_credential
+            return {}
+
+        return route_check
+
+    for stage in ("static", "full", "launch"):
+        preflight(
+            server,
+            {**GOOD_ENV, "LLM_API_KEY": SECRET} if stage == "launch" else GOOD_ENV,
+            stage=stage,
+            route_check=spy(stage),
+            capacity=accepting_capacity,
+        )
+
+    assert required == {"static": False, "full": False, "launch": True}
+
+
+def test_the_static_stage_leaves_the_image_unplayed_and_optional_but_full_and_launch_require_it(no_llm):
+    server = FixtureNamedServer()
+    server.add_ruleset(1)
+
+    static = preflight(server, stage="static", capacity=accepting_capacity)
+    full = preflight(server, stage="full", capacity=accepting_capacity)
+    launch = preflight(server, {**GOOD_ENV, "LLM_API_KEY": SECRET}, stage="launch", capacity=accepting_capacity)
+
+    assert static.step("P08-oracle-environment").required is False
+    assert static.step("P08-oracle-environment").state == STEP_NOT_EXECUTED and static.verdict() == "validated"
+    for report in (full, launch):
+        assert report.step("P08-oracle-environment").required is True
+        assert report.step("P08-oracle-environment").state == STEP_SUCCEEDED
+    assert launch.step("P03-secret-scope").state == STEP_SUCCEEDED, "clé légitime à l'étape de lancement"
+    assert (
+        preflight(server, {**GOOD_ENV, "LLM_API_KEY": SECRET}, stage="full").step("P03-secret-scope").state
+        == STEP_FAILED
+    )
+
+
+def test_the_image_checked_is_the_one_the_gate_runs_and_it_is_never_pulled(no_llm):
+    server = FixtureNamedServer()
+    server.add_ruleset(1)
+    seen = []
+
+    def runner(argv):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    preflight(server, capacity=accepting_capacity, image_runner=runner)
+    preflight(
+        server,
+        {**GOOD_ENV, "SANDBOX_IMAGE": "registry.example/oh:pinned"},
+        capacity=accepting_capacity,
+        image_runner=runner,
+    )
+
+    default_image, chosen_image = (argv[argv.index("--cap-drop") + 2] for argv in seen)
+    assert default_image == "collegue-sandbox:latest" and chosen_image == "registry.example/oh:pinned"
+    assert all("--pull" in argv and argv[argv.index("--pull") + 1] == "never" for argv in seen)
+    assert all("pypdf" in argv[-1] for argv in seen), (
+        "le lecteur PDF fait partie de la pile exigée AVANT le rouge de préimage"
+    )
+
+
+def test_an_image_without_the_oracle_stack_is_an_incomplete_validation_not_a_valid_red(no_llm):
+    server = FixtureNamedServer()
+    server.add_ruleset(1)
+
+    def missing(argv):
+        return subprocess.CompletedProcess(argv, 1, stdout="pypdf", stderr="")
+
+    report = preflight(server, capacity=accepting_capacity, image_runner=missing)
+
+    assert report.step("P08-oracle-environment").state == STEP_INCOMPLETE
+    assert "pypdf" in report.step("P08-oracle-environment").detail and report.verdict() == "incomplete_validation"
 
 
 def test_a_recurring_or_rerun_trigger_stops_at_the_first_step_and_touches_nothing(no_llm):
@@ -490,9 +691,7 @@ def test_a_recurring_or_rerun_trigger_stops_at_the_first_step_and_touches_nothin
 def test_secrets_from_the_environment_never_appear_in_the_preflight_report(no_llm):
     env = {**GOOD_ENV, "GITHUB_TOKEN": SECRET, "LLM_API_KEY": SECRET}
     server = FixtureNamedServer()
-    report = business.run_preflight(
-        env, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", image_runner=ok_runner
-    )
+    report = preflight(server, env)
     assert (
         report.step("P03-secret-scope").state == STEP_FAILED
     )  # une clé de modèle dans l'étape de préflight est un échec
@@ -582,12 +781,10 @@ def test_a_deadline_kills_the_named_container_before_propagating():
 
 def test_the_real_invocation_never_launches_when_the_preflight_is_not_validated(no_llm):
     server = FixtureNamedServer()
-    preflight = business.run_preflight(
-        GOOD_ENV, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", image_runner=ok_runner
-    )
+    checked = preflight(server)
     launched = []
 
-    report = business.run_campaign(GOOD_ENV, preflight=preflight, launch=lambda r: launched.append(r))
+    report = business.run_campaign(GOOD_ENV, preflight=checked, launch=lambda r: launched.append(r))
 
     assert (
         launched == [] and report.facts["billable_actions_emitted"] == 0 and report.facts["stop_point"] == "preflight"
@@ -597,15 +794,11 @@ def test_the_real_invocation_never_launches_when_the_preflight_is_not_validated(
 
 
 def test_the_real_invocation_launches_exactly_once_after_a_validated_preflight(no_llm):
-    accepting = [{"transport": "futur", "accepted": True, "max_micro_usd": 1, "max_tokens": 1}]
     server = FixtureNamedServer()
     server.add_ruleset(1)
-    preflight = business.run_preflight(
-        GOOD_ENV, clients=full_clients(server), campaign_id="w4-test", run_tag="4242-1", image_runner=ok_runner,
-        capacity_matrix=accepting,
-    )  # fmt: skip
+    checked = preflight(server, capacity=accepting_capacity)
     launched = []
 
-    report = business.run_campaign(GOOD_ENV, preflight=preflight, launch=lambda r: launched.append(r))
+    report = business.run_campaign(GOOD_ENV, preflight=checked, launch=lambda r: launched.append(r))
 
     assert len(launched) == 1 and report.step("R01-run").state == STEP_SUCCEEDED
