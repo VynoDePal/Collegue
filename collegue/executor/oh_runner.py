@@ -518,19 +518,33 @@ def _guard_from_args(args) -> "BudgetGuard | None":
     )
 
 
-# Arguments du constructeur ``openhands.sdk.LLM`` que ce runner utilise. ``base_url`` est un champ de ``LLM`` (SDK
-# 1.19.1, verrou ``locks/sandbox-openhands.txt``) ; le contrôle d'image ``scripts``/CI vérifie qu'ils sont tous dans
-# ``LLM.model_fields`` (voir docs/consolidation/w4-routing.md).
+# Arguments du constructeur ``openhands.sdk.LLM`` que ce runner utilise (mode clé API). ``base_url`` et ``usage_id`` sont des
+# champs de ``LLM`` (SDK 1.19.1, verrou ``locks/sandbox-openhands.txt``) ; le contrôle d'image ``scripts``/CI vérifie qu'ils
+# sont tous dans ``LLM.model_fields`` (voir docs/consolidation/w4-routing.md). ATTENTION : ``LLM`` déclare
+# ``extra="ignore"`` — un argument inconnu (ex. l'ancien ``service_id``, devenu ``usage_id``) est ignoré SANS erreur, d'où ce
+# contrôle explicite. L'identité du coder est ``usage_id="coder"`` (``llm.usage_id`` sur l'objet réel).
 LLM_CONSTRUCTOR_KWARGS = (
     "model",
     "api_key",
     "base_url",
-    "service_id",
+    "usage_id",
     "num_retries",
     "retry_min_wait",
     "retry_max_wait",
     "timeout",
     "max_output_tokens",
+)
+
+# Mode abonnement : ``LLM.subscription_login(vendor=…, model=…, open_browser=…, **kwargs)``. Les ``kwargs`` vont au
+# constructeur ``LLM`` par ``create_llm``, qui fixe DÉJÀ ``max_output_tokens=None`` (le backend Codex ne le supporte pas) :
+# le passer à nouveau lève ``TypeError`` (« multiple values »), et le SDK ne l'envoie jamais en mode abonnement. Ce sont donc
+# les seuls champs ``LLM`` transmis au login (le reste, ``vendor``/``model``/``open_browser``, sont ses paramètres).
+LLM_SUBSCRIPTION_KWARGS = (
+    "usage_id",
+    "num_retries",
+    "retry_min_wait",
+    "retry_max_wait",
+    "timeout",
 )
 
 
@@ -623,7 +637,7 @@ def main() -> int:
     def run_with(model: str) -> None:
         # Résilience 503 : on retente longtemps (le budget-temps global du run borne).
         common = dict(
-            service_id="coder",
+            usage_id="coder",
             # Sous allocation, le SDK ne retente JAMAIS en interne : la garde boucle et contrôle avant
             # chaque nouvelle émission.
             num_retries=0 if guard is not None else int(os.environ.get("OH_NUM_RETRIES", "8")),
@@ -650,7 +664,11 @@ def main() -> int:
                 pass
             # open_browser=False : headless, on réutilise les creds en cache (le
             # login interactif device_code a déjà eu lieu hors-run).
-            llm = LLM.subscription_login(vendor="openai", model=model, open_browser=False, **common)
+            # ``max_output_tokens`` n'est PAS transmis : ``create_llm`` le fixe à ``None`` (TypeError sinon) et il n'est jamais
+            # émis en mode abonnement. Sous allocation, la garde constate alors une sortie non bornée et REFUSE l'émission
+            # (fail-closed) — voir reports/w4-a-sdk-service-id.md.
+            login_kwargs = {k: v for k, v in common.items() if k in LLM_SUBSCRIPTION_KWARGS}
+            llm = LLM.subscription_login(vendor="openai", model=model, open_browser=False, **login_kwargs)
         else:
             llm = LLM(**llm_kwargs(model, api_key, base_url, common))
         if guard is not None:
