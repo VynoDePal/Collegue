@@ -99,12 +99,12 @@ def test_business_base_branch_lives_under_the_dedicated_prefix():
     assert config.repository_id == business.FIXTURE_REPOSITORY_ID and config.seed_sha == business.FIXTURE_SEED_SHA
 
 
-def test_the_launch_runs_the_public_steps_in_order_with_one_product_run_and_always_cleans_up(tmp_path):
+def test_the_launch_runs_the_public_steps_in_order_with_one_product_run_and_leaves_the_resources_alive(tmp_path):
     adapter, report = launch(tmp_path)
 
     context = business.launch_campaign(report, adapter=adapter, env=ENV)
 
-    assert adapter.calls == ["guard", "base", "draft", "approve", "label", "sync", "clone", "run", "clone", "cleanup"]
+    assert adapter.calls == ["guard", "base", "draft", "approve", "label", "sync", "clone", "run", "clone"]
     assert adapter.calls.count("run") == 1, "aucun retry payant : une seule exécution du produit"
     assert context["stop_reason"] == "completed" and context["project_id"] == 9
     assert Path(context["final_checkout"]).name == "fixture" and context["final_sha"] == "a" * 40
@@ -112,25 +112,26 @@ def test_the_launch_runs_the_public_steps_in_order_with_one_product_run_and_alwa
 
 
 @pytest.mark.parametrize("failing", ["guard", "base", "draft", "approve", "sync", "run"])
-def test_any_failure_still_cleans_up_and_never_retries(tmp_path, failing):
+def test_any_failure_never_retries_and_never_cleans_up_early(tmp_path, failing):
     adapter, report = launch(tmp_path, fail_at=failing)
 
     with pytest.raises(RuntimeError, match="panne simulée"):
         business.launch_campaign(report, adapter=adapter, env=ENV)
 
-    assert adapter.calls[-1] == "cleanup" and adapter.calls.count(failing if failing != "run" else "run") == 1
+    assert "cleanup" not in adapter.calls, "le nettoyage n'a plus lieu dans le lancement : il suit TOUTES les phases"
+    assert adapter.calls.count(failing if failing != "run" else "run") == 1
 
 
 def test_a_plan_without_exactly_three_tasks_or_issues_is_refused_before_any_paid_run(tmp_path):
     adapter, report = launch(tmp_path, tasks=2)
     with pytest.raises(RuntimeError, match="trois tâches"):
         business.launch_campaign(report, adapter=adapter, env=ENV)
-    assert "run" not in adapter.calls and adapter.calls[-1] == "cleanup"
+    assert "run" not in adapter.calls and "cleanup" not in adapter.calls
     (tmp_path / "b").mkdir()
     adapter, report = launch(tmp_path / "b", issues=2)
     with pytest.raises(RuntimeError, match="trois issues"):
         business.launch_campaign(report, adapter=adapter, env=ENV)
-    assert "run" not in adapter.calls and adapter.calls[-1] == "cleanup"
+    assert "run" not in adapter.calls and "cleanup" not in adapter.calls
 
 
 @pytest.mark.parametrize("stop", ["paused_budget", "deadline_reached"])
@@ -140,7 +141,7 @@ def test_a_budget_or_deadline_stop_of_the_product_is_a_budget_stop_not_a_failure
     with pytest.raises(BudgetStop, match=stop):
         business.launch_campaign(report, adapter=adapter, env=ENV)
 
-    assert report.facts["launch"]["stop_reason"] == stop and adapter.calls[-1] == "cleanup"
+    assert report.facts["launch"]["stop_reason"] == stop and "cleanup" not in adapter.calls
     assert adapter.calls.count("clone") == 1, "aucun clone final : rien à vérifier après un arrêt budget"
 
 
@@ -224,7 +225,12 @@ def test_a_stopped_business_check_still_reads_the_registry_of_the_project_that_s
     )
 
     assert report.step("R01-run").state == STEP_SUCCEEDED and report.step("R02-business").state == state
-    assert [c["project_id"] for c in seen] == [9], "le MÊME projet est relu, une seule fois"
+    assert {c["project_id"] for c in seen} == {9} and len(seen) >= 2, (
+        "le MÊME projet est relu après chaque phase et à la sortie"
+    )
+    assert {"after-R01-run", "after-R02-business", "exit"} <= set(report.facts["registry"]), report.facts[
+        "registry"
+    ].keys()
     assert report.step("R03-registry").state == STEP_SUCCEEDED
     assert report.facts["registry_final"]["consumed_tokens"] == 90_000
     assert report.verdict() == verdict, "le verdict d'origine est conservé"
@@ -367,7 +373,7 @@ def test_a_budget_stop_keeps_the_project_identity_and_reads_the_same_registry(tm
         read_registry=business.registry_reader(ENV),
     )
 
-    assert registry.read == [9], "le registre lu est celui du projet créé par la planification"
+    assert set(registry.read) == {9}, "le registre lu est celui du projet créé par la planification"
     assert report.step("R01-run").state == STEP_BUDGET_STOP
     assert report.step("R03-registry").state == STEP_SUCCEEDED
     assert (
@@ -424,7 +430,7 @@ def test_an_error_exit_keeps_whatever_identity_was_created_and_never_invents_a_z
         assert seen == [] and report.step("R03-registry").state == STEP_INCOMPLETE
         assert "aucun projet créé" in report.step("R03-registry").detail and "registry_final" not in report.facts
     else:
-        assert [c["project_id"] for c in seen] == [project] and report.step("R03-registry").state == STEP_SUCCEEDED
+        assert {c["project_id"] for c in seen} == {project} and report.step("R03-registry").state == STEP_SUCCEEDED
 
 
 def test_missing_verification_or_registry_is_an_incomplete_validation_never_a_success(tmp_path):

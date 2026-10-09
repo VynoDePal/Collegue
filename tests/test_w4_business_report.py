@@ -231,7 +231,7 @@ def test_the_informative_matrix_documents_the_general_picture_but_never_decides(
     assert all(row["code"] == "unbounded_transport" for row in matrix)
 
 
-EFFECTIVE_API_KEY = {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-2.5-flash", "CODER_SUBSCRIPTION": "false"}
+EFFECTIVE_API_KEY = {"CODER_SUBSCRIPTION": "false"}  # le modèle imposé (31B) reste celui de la campagne
 EFFECTIVE_SUBSCRIPTION = {"LLM_PROVIDER": "openai", "LLM_MODEL": "gpt-5.5", "CODER_SUBSCRIPTION": "true"}
 
 

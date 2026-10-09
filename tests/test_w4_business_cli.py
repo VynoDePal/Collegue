@@ -38,7 +38,7 @@ def cli_environment(root, **extra):
         "W4_BUSINESS_CONFIRM": business.LAUNCH_CONFIRMATION,
         "GITHUB_TOKEN": FAKE_GITHUB,
         "LLM_PROVIDER": "gemini",
-        "LLM_MODEL": "gemini-2.5-flash",
+        "LLM_MODEL": business.MODEL_PRIMARY,
         "LLM_API_KEY": FAKE_KEY,
         "LLM_API_KEY_CODER": FAKE_ROLE_KEY,
         "COLLEGUE_NIGHTLY_MANIFEST": str(root / "manifest.json"),
@@ -52,6 +52,8 @@ def boundary(monkeypatch, tmp_path):
 
     Le répertoire courant est un dossier vierge : un ``.env`` de développeur ne doit pas rendre la configuration ambiguë."""
     monkeypatch.chdir(tmp_path)
+    # Les contrôles W5 (socle, modèles, relais, identité) ont leurs propres tests : ces tests-ci isolent le câblage W4 de `main`.
+    monkeypatch.setattr("collegue.pilot.w5_business.w5_preflight_checks", lambda *args, **kwargs: [])
     server = FixtureNamedServer()
     server.add_ruleset(1)
     clients = full_clients(server)
