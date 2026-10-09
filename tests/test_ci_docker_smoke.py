@@ -236,7 +236,12 @@ def test_container_is_started_without_network_and_without_auto_removal(stub) -> 
     assert "--network none" in run_call
     assert "--rm" not in run_call.split()
     assert "-d" in run_call.split()
-    assert "LLM_PROVIDER=anthropic" in run_call
+    # Profil du catalogue supporté, valeurs FACTICES ; aucune clé hôte ni option qui contournerait la validation.
+    assert "-e LLM_PROVIDER=gemini" in run_call
+    assert "-e LLM_MODEL=test-model" in run_call
+    assert "-e LLM_API_KEY=test-key" in run_call
+    assert "anthropic" not in run_call.lower()
+    assert " -e LLM_API_KEY " not in run_call and "--env-file" not in run_call
     assert run_call.rstrip().endswith("collegue:ci")
 
 
@@ -416,23 +421,50 @@ def test_smoke_script_syntax_is_valid() -> None:
 # --- Prémisse : la config du smoke ne déclenche aucun appel LLM -----------------
 
 
-def test_anthropic_startup_validation_makes_no_network_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Le smoke démarre avec LLM_PROVIDER=anthropic + clé factice parce que
-    ``validate_llm_config`` n'interroge alors aucun service distant. Si cela change,
-    le smoke redeviendrait dépendant d'un LLM réel : ce test le signale."""
+def test_supported_smoke_profile_startup_validation_makes_no_remote_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Le smoke démarre avec LLM_PROVIDER=gemini + LLM_MODEL=test-model + LLM_API_KEY=test-key (factices) parce que
+    ``validate_llm_config`` valide le routage LOCALEMENT. Aucune émission réseau ni appel de SDK distant n'est toléré ;
+    c'est la VRAIE validation de l'application qui est appelée, pas une copie de sa logique. Ce n'est pas une preuve de
+    disponibilité du modèle. Si la validation redevenait distante, ce test le signalerait."""
 
     import asyncio
     import socket
+    import sys
 
     from collegue import app as collegue_app
 
     def _no_network(*args, **kwargs):
-        raise AssertionError("appel réseau interdit pendant la validation LLM du smoke")
+        raise AssertionError("émission réseau interdite pendant la validation LLM du smoke")
 
-    monkeypatch.setattr(socket.socket, "connect", _no_network)
+    for name in ("connect", "connect_ex", "sendto"):
+        monkeypatch.setattr(socket.socket, name, _no_network)
     monkeypatch.setattr(socket, "create_connection", _no_network)
-    monkeypatch.setattr(collegue_app.settings, "LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(socket, "getaddrinfo", _no_network)
+
+    # Aucun SDK distant : toute instanciation de client ou de génération est une faute.
+    imported_before = set(sys.modules)
+    for module_name, attrs in {
+        "openai": ("OpenAI", "AsyncOpenAI"),
+        "anthropic": ("Anthropic", "AsyncAnthropic"),
+        "google.genai": ("Client",),
+    }.items():
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        for attr in attrs:
+            if hasattr(module, attr):
+
+                def _forbidden(*args, _n=f"{module_name}.{attr}", **kwargs):
+                    raise AssertionError(f"SDK distant interdit pendant la validation du smoke : {_n}")
+
+                monkeypatch.setattr(module, attr, _forbidden)
+
+    for var in ("LLM_BASE_URL", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(collegue_app.settings, "LLM_PROVIDER", "gemini")
     monkeypatch.setattr(collegue_app.settings, "LLM_API_KEY", "test-key")
     monkeypatch.setattr(collegue_app.settings, "LLM_MODEL", "test-model")
 
     assert asyncio.run(collegue_app.validate_llm_config()) is True
+    # La validation ne doit pas avoir importé un SDK distant pour l'occasion.
+    assert not ({"anthropic"} & (set(sys.modules) - imported_before))
