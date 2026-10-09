@@ -8,9 +8,11 @@ from collegue.core.llm.client import (
     resolved_model_for,
 )
 from collegue.core.llm.roles import (
+    LLMMissingCredentialError,
     LLMRole,
     LLMRoute,
     LLMRoutingError,
+    check_role_routes,
     parse_route_preferences,
     resolve_role,
     resolve_route,
@@ -20,6 +22,7 @@ from collegue.core.llm.roles import (
 __all__ = [
     "LLMRole",
     "LLMRoute",
+    "LLMMissingCredentialError",
     "LLMRoutingError",
     "UsageAccountingError",
     "accounted_sample",
@@ -27,6 +30,7 @@ __all__ = [
     "parse_route_preferences",
     "resolve_role",
     "resolve_route",
+    "check_role_routes",
     "validate_role_routes",
     "model_preferences_for_role",
     "resolved_model_for",

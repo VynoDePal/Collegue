@@ -69,6 +69,14 @@ class LLMRoutingError(ValueError):
     """Routage impossible ou contradictoire : refusé avant toute émission (le message ne contient jamais de secret)."""
 
 
+class LLMMissingCredentialError(LLMRoutingError):
+    """La route est cohérente mais le rôle n'a AUCUNE clé de son fournisseur : refusée à l'appel, avant émission.
+
+    Distincte d'une contradiction (fournisseur/modèle/endpoint) : au démarrage du serveur, un rôle sans clé n'empêche pas
+    les rôles indépendamment configurés de servir, alors qu'une contradiction refuse le démarrage.
+    """
+
+
 class LLMRole(str, Enum):
     """Rôle fonctionnel d'un appel LLM, qui détermine le modèle utilisé."""
 
@@ -399,7 +407,7 @@ def resolve_route(
                 if provider != g_provider
                 else ""
             )
-            raise LLMRoutingError(f"{where} : aucune clé pour le fournisseur {provider!r} — {hint}{inherit}")
+            raise LLMMissingCredentialError(f"{where} : aucune clé pour le fournisseur {provider!r} — {hint}{inherit}")
         else:
             auth = AUTH_API_KEY
     else:
@@ -436,6 +444,33 @@ def validate_role_routes(
         _norm_role(role): resolve_route(role, settings_obj, require_credential=require_credential).describe()
         for role in selected
     }
+
+
+def check_role_routes(settings_obj: Optional[object] = None, roles: Optional[List[LLMRole | str]] = None) -> dict:
+    """Contrôle SANS émission ni exception de chaque rôle : ``{rôle: {"status", "route", "error"}}``.
+
+    ``status`` : ``ok`` (route cohérente et credential présent, ou fournisseur local / abonnement), ``missing_credential``
+    (cohérente mais sans clé de SON fournisseur : refusée à l'appel) ou ``invalid`` (contradiction fournisseur / modèle /
+    endpoint / authentification, fournisseur non supporté : refus de démarrage). ``route`` est la vue sans secret
+    (``LLMRoute.describe()``) quand elle est connue ; ``error`` ne contient jamais de secret.
+    """
+    if settings_obj is None:
+        from collegue.config import settings as settings_obj
+
+    report: dict = {}
+    for role in roles if roles is not None else [r for r in LLMRole]:
+        name = _norm_role(role)
+        try:
+            report[name] = {
+                "status": "ok",
+                "route": resolve_route(role, settings_obj, require_credential=True).describe(),
+                "error": None,
+            }
+        except LLMMissingCredentialError as exc:
+            report[name] = {"status": "missing_credential", "route": None, "error": str(exc)}
+        except LLMRoutingError as exc:
+            report[name] = {"status": "invalid", "route": None, "error": str(exc)}
+    return report
 
 
 # ── préférences de modèle porteuses du rôle ──────────────────────────────────────────────────────────

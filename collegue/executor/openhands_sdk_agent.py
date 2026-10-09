@@ -41,8 +41,11 @@ class OHSdkAgent:
     émission, retries et replis compris ; le conteneur s'auto-limite à l'échéance (``timeout``) même si
     le client Docker meurt. ``"in-runner"`` borne les appels du framework d'agent, PAS une commande du
     workspace qui contacterait librement le fournisseur avec la même clé : avec une clé facturable
-    ce n'est donc pas une barrière effective et le mode strict sous plafond le REFUSE (abonnement :
-    0 $/token, accepté ; mode ``advisory`` : disponible). Voir ``docs/consolidation/w2-budget.md``.
+    ce n'est donc pas une barrière effective et le mode strict sous plafond le REFUSE. Abonnement (0 $/token) : accepté
+    UNIQUEMENT sous un plafond USD sans plafond de tokens ; REFUSÉ sous un plafond strict de tokens (le backend ne
+    garantit pas la sortie en amont et les commandes du workspace ont les credentials montés — la campagne 2 USD /
+    250 000 tokens est donc refusée en strict). Mode ``advisory`` : disponible, sans garantie stricte.
+    Voir ``docs/consolidation/w2-budget.md`` et ``docs/consolidation/w4-routing.md``.
     """
 
     budget_enforcement = "in-runner"

@@ -100,6 +100,26 @@ réduite ni complétée ; sans limite (appel direct) la borne par défaut est 40
 Un reviewer ou un QA en abonnement n'impose pas ce montage à un codeur par clé API ; un codeur en abonnement sans ce
 dossier est refusé avant lancement. La garde W1 (`HOME` hors `/tmp`) est inchangée.
 
+## Démarrage du serveur (`collegue/app.py`)
+
+* `validate_llm_config()` est **locale** : elle résout chaque rôle (`default`, `coder`, `qa`, `reviewer`, `planner`) avec
+  `check_role_routes` et n'émet **aucune requête** (plus de `models.retrieve` OpenAI, `models.list` local ni
+  `google.genai`). Elle valide la cohérence de la configuration et **ne prouve pas** que le fournisseur est joignable ni
+  que le modèle existe : la disponibilité n'est jamais présumée, et aucune clé ne part ailleurs que par un appel routé.
+* Une configuration **contradictoire** (modèle hors famille du fournisseur, endpoint d'un autre fournisseur hébergé,
+  fournisseur hors catalogue — `anthropic` compris —, abonnement incohérent) refuse le démarrage (`ValueError`, message
+  sans secret) et aucun handler n'est attaché.
+* Un rôle **cohérent mais sans clé de son fournisseur** (rôle `default` compris) n'empêche pas les autres de servir : son
+  appel est refusé avant émission (`LLMMissingCredentialError`). Quatre clés de rôle (`LLM_API_KEY_<ROLE>`) sans
+  `LLM_API_KEY` global suffisent donc à démarrer et à servir ces quatre rôles. Si **aucun** rôle ne peut servir (aucune
+  clé nulle part, ou uniquement des routes d'abonnement que le handler serveur ne sert pas), le démarrage est refusé.
+* Le handler routé est attaché à l'application (`app.sampling_handler`) dès qu'au moins un rôle peut servir et qu'aucune
+  route n'est contradictoire.
+* OAuth (W1) est inchangé : `OAUTH_ENABLED=true` reste fail-closed, sans repli anonyme.
+* Les profils CI en `LLM_PROVIDER=anthropic` (smoke Docker `--network none`, vérification de la roue) sont désormais
+  refusés ; un profil supporté sans réseau est `LLM_PROVIDER=gemini LLM_API_KEY=test-key LLM_MODEL=test-model`
+  (la validation ne contacte rien).
+
 ## Portée exacte du sampling délégué
 
 Si le client MCP annonce la capacité de sampling, il échantillonne **lui-même** : il choisit destination et
