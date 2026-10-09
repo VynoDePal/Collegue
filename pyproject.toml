@@ -52,6 +52,10 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff==0.16.9",
     "setuptools>=68.0",
+    # Lecteur PDF des TESTS seulement (vague 4) : la référence métier extrait le texte réel du PDF exporté
+    # (jamais une recherche d'octets). Dépendance de test, pas du runtime : le wheel et l'image runtime ne l'embarquent
+    # pas. Plancher = version auditée sans avis connu ; installé depuis locks/dev.txt (haché), jamais à la volée.
+    "pypdf>=6.19.0,<7.0.0",
 ]
 
 # Groupes PEP 735 : jamais installés avec le paquet, uniquement verrouillés pour la CI / les images.
