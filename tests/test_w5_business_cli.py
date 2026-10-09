@@ -46,6 +46,9 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(
         w5, "revalidate_and_claim", lambda clients, env, campaign_id, report: events.append(("claim", campaign_id))
     )
+    monkeypatch.setattr(
+        w5, "activate_budget", lambda env, campaign_id, report, **kwargs: events.append(("activate", campaign_id))
+    )
     monkeypatch.setattr(w5, "run_improvement_phase", lambda report, context, svc: events.append(("R04", svc)))
     monkeypatch.setattr(w5, "run_incident_phase", lambda report, context, svc: events.append(("R05", svc)))
     env = {
@@ -120,3 +123,30 @@ def test_main_run_still_refuses_the_static_stage(wired):
     with pytest.raises(SystemExit) as stop, contextlib.redirect_stderr(io.StringIO()):
         business.main(["run", "--stage", "static", "--campaign-id", "w5-camp-001"])
     assert stop.value.code == 2 and Path(wired.tmp).exists()
+
+
+def test_the_durable_window_reported_by_the_activation_only_tightens_the_campaign_deadline(wired, monkeypatch):
+    import time
+
+    started = time.monotonic()
+    monkeypatch.setattr(w5, "activate_budget", lambda env, campaign_id, report, **kwargs: kwargs["on_remaining"](5.0))
+
+    run_main(wired.tmp)
+
+    verify_kwargs = next(e[1] for e in wired.events if isinstance(e, tuple) and e[0] == "verify")
+    assert verify_kwargs["deadline_monotonic"] <= started + 5.0 + 2.0, "l'échéance durable resserre la fenêtre"
+    assert wired.seen["services_kwargs"]["deadline_monotonic"] == verify_kwargs["deadline_monotonic"]
+
+
+def test_a_longer_durable_window_never_extends_the_campaign_deadline(wired, monkeypatch):
+    import time
+
+    started = time.monotonic()
+    monkeypatch.setattr(
+        w5, "activate_budget", lambda env, campaign_id, report, **kwargs: kwargs["on_remaining"](10_000.0)
+    )
+
+    run_main(wired.tmp)
+
+    verify_kwargs = next(e[1] for e in wired.events if isinstance(e, tuple) and e[0] == "verify")
+    assert verify_kwargs["deadline_monotonic"] <= started + business.CAMPAIGN_BOUNDS.max_seconds + 2.0

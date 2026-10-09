@@ -1318,10 +1318,20 @@ def _verify_in_docker(
 # ── registre W2 : les plafonds viennent du registre durable, jamais d'un compteur propre ─────────────────────────────────
 
 
-def registry_counters(manager: Any, project_id: int) -> Dict[str, Any]:
-    """Compteurs du registre durable d'un projet (consommé / réservé / inconnu / plafonds), lus sans calcul propre."""
+def registry_counters(
+    manager: Any, project_id: Optional[int] = None, scope_key: Optional[str] = None
+) -> Dict[str, Any]:
+    """Compteurs du registre durable (consommé / réservé / inconnu / plafonds), lus sans calcul propre.
+
+    Le scope du PROJET fait foi quand il existe (il contient le cycle de planification lié) ; avant la création du projet — dès
+    l'activation de la campagne —, le scope de cycle ``planning:cycle:<id>`` est lu directement : la dépense des canaris et de la
+    planification est lisible même si aucun projet n'aboutit."""
     ledger = getattr(manager, "budget_ledger", None)
-    snapshot = ledger.snapshot_for_project(int(project_id)) if ledger is not None else None
+    snapshot = None
+    if ledger is not None and project_id:
+        snapshot = ledger.snapshot_for_project(int(project_id))
+    if snapshot is None and ledger is not None and scope_key:
+        snapshot = ledger.snapshot(str(scope_key))
     if snapshot is None:
         return {"scope": None}
     return {
@@ -1427,8 +1437,13 @@ class NightlyAdapter:
         return self.inner.cleanup()
 
 
+def _deadline_of(value: Any) -> Optional[float]:
+    """Échéance globale : un nombre, ou une fonction (l'échéance peut se resserrer APRÈS l'activation, jamais s'allonger)."""
+    return value() if callable(value) else value
+
+
 def bounded_command_runner(
-    deadline_monotonic: float, *, clock: Optional[Callable[[], float]] = None
+    deadline_monotonic: Any, *, clock: Optional[Callable[[], float]] = None
 ) -> Callable[..., Any]:
     """Exécuteur de commandes BORNÉ par l'échéance globale : aucune commande n'est lancée passé 900 s, et une commande en cours
     à l'échéance est tuée IMMÉDIATEMENT avec son groupe de processus. Aucune grâce : une commande de planification ou de
@@ -1436,7 +1451,7 @@ def bounded_command_runner(
     from collegue.pilot.nightly_e2e import CommandResult
 
     def run(argv: Sequence[str], *, cwd: Optional[str] = None) -> Any:
-        remaining = deadline_monotonic - (clock or time.monotonic)()
+        remaining = float(_deadline_of(deadline_monotonic)) - (clock or time.monotonic)()
         if remaining <= 0:
             raise BudgetStop("échéance globale de 900 s atteinte avant le lancement de la commande suivante")
         process = subprocess.Popen(
@@ -1466,6 +1481,8 @@ def launch_campaign(
     env: Mapping[str, str],
     python: str = sys.executable,
     claim: Optional[Callable[[CampaignReport], Any]] = None,
+    activate: Optional[Callable[[CampaignReport], Any]] = None,
+    cycle_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Planifie, approuve, synchronise et exécute les TROIS tâches sur la base éphémère (BUILD + fusions W3), puis rend le
     contexte nécessaire à la vérification métier.
@@ -1473,7 +1490,9 @@ def launch_campaign(
     **Aucun nettoyage ici.** Les ressources distantes éphémères, le projet et le budget vivent jusqu'APRÈS les étapes
     suivantes (vérification métier, R04, R05) : le nettoyage est effectué UNE fois par :func:`run_campaign` (étape
     ``R06-cleanup``), même sur erreur. ``claim`` (facultatif) REVENDIQUE durablement l'identifiant de campagne avant toute
-    création distante : un identifiant consommé ne donne jamais un nouvel essai gratuit.
+    création distante : un identifiant consommé ne donne jamais un nouvel essai gratuit. ``activate`` ouvre ensuite le scope durable
+    de la campagne (2 USD / 250000 tokens) et qualifie les deux modèles AVANT toute création distante et toute planification ;
+    ``cycle_id`` lie le brouillon public à ce même scope (``--cycle-id``) : même ligne, même solde, même horloge.
 
     Aucun retry payant : une seule exécution du produit ; un arrêt par budget/échéance est rapporté ``budget_stop``."""
     from collegue.pilot.nightly_e2e import NightlyManifest, _write_manifest
@@ -1488,13 +1507,15 @@ def launch_campaign(
     _write_manifest(cfg.manifest_path, manifest)
     if claim is not None:
         claim(report)
+    if activate is not None:
+        activate(report)
     base_sha = adapter.create_base(manifest)
     context["base_sha"] = base_sha
     draft = adapter.product(
         "plan", "draft", "--name", f"W4 {cfg.tag}", "--problem", BUSINESS_PROBLEM, "--owner", cfg.owner,
         "--repo", cfg.repo, "--base", cfg.base_branch, "--labels", cfg.issue_label, "--milestone", "",
         "--spec-filename", "SPEC.md", "--deadline-hours", "0.25", "--nightly-exact-task-count", "3",
-        "--format", "json",
+        *(["--cycle-id", cycle_id] if cycle_id else []), "--format", "json",
     )  # fmt: skip
     project_id, plan_hash = int(draft.get("project_id") or 0), str(draft.get("plan_hash") or "")
     if draft.get("action") != "draft" or int(draft.get("task_count") or 0) != 3 or project_id <= 0:
@@ -1563,7 +1584,7 @@ def run_campaign(
     improve: Optional[Callable[[CampaignReport, Dict[str, Any]], None]] = None,
     incident: Optional[Callable[[CampaignReport, Dict[str, Any]], None]] = None,
     cleanup: Optional[Callable[[CampaignReport], Any]] = None,
-    deadline_monotonic: Optional[float] = None,
+    deadline_monotonic: Any = None,
     clock: Optional[Callable[[], float]] = None,
 ) -> CampaignReport:
     """Invocation réelle : ``launch`` n'est appelé QUE si tout le préflight a réussi, et au plus UNE fois.
@@ -1629,8 +1650,8 @@ def run_campaign(
         """Relit le MÊME registre après une phase ou un arrêt ; ne masque jamais la cause d'origine."""
         _sync_context()
         slot = report.facts.setdefault("registry", {})
-        if read_registry is None or not context.get("project_id"):
-            slot[label] = {"unreadable": "aucun projet créé ou registre non lisible : dépense non établie"}
+        if read_registry is None or not (context.get("project_id") or context.get("scope_key")):
+            slot[label] = {"unreadable": "aucun projet ni scope créé ou registre non lisible : dépense non établie"}
             return
         try:
             counters = dict(read_registry(context))
@@ -1664,7 +1685,8 @@ def run_campaign(
             pass
 
     def _before_emission(step: Step) -> None:
-        if deadline_monotonic is not None and deadline_monotonic - now() <= 0:
+        deadline = _deadline_of(deadline_monotonic)
+        if deadline is not None and deadline - now() <= 0:
             raise BudgetStop(f"échéance globale atteinte avant {step.id} : aucune nouvelle génération")
         if gate["block"]:
             raise BudgetStop(f"{gate['block']} (avant {step.id})")
@@ -1693,9 +1715,9 @@ def run_campaign(
     def _registry(step: Step) -> None:
         if read_registry is None:
             raise IncompleteValidation("registre durable illisible")
-        if not context.get("project_id"):
+        if not (context.get("project_id") or context.get("scope_key")):
             raise IncompleteValidation(
-                "aucun projet créé avant l'arrêt : la dépense éventuelle n'est pas établie (aucun zéro n'est inventé)"
+                "aucun projet ni scope créé avant l'arrêt : la dépense éventuelle n'est pas établie (aucun zéro n'est inventé)"
             )
         try:
             counters = dict(read_registry(context))
@@ -1703,7 +1725,7 @@ def run_campaign(
             raise
         except Exception as exc:  # noqa: BLE001 - illisible = preuve manquante, jamais un échec qui masquerait l'arrêt d'origine
             raise IncompleteValidation(
-                f"registre durable du projet {context.get('project_id')} illisible ({type(exc).__name__}) : "
+                f"registre durable du projet {context.get('project_id')} (scope {context.get('scope_key')}) illisible ({type(exc).__name__}) : "
                 "dépense non établie (aucun zéro n'est inventé)"
             ) from exc
         step.evidence["counters"] = counters
@@ -1781,11 +1803,12 @@ def registry_reader(env: Mapping[str, str]) -> Callable[[Mapping[str, Any]], Map
     def read(context: Mapping[str, Any]) -> Mapping[str, Any]:
         from collegue.state import ProjectStateManager
 
-        if not context.get("project_id"):
-            raise IncompleteValidation("identité du projet absente : registre non lisible")
+        if not context.get("project_id") and not context.get("scope_key"):
+            raise IncompleteValidation("identité du projet et du scope absente : registre non lisible")
 
         manager = ProjectStateManager.from_url(str(env["STATE_DATABASE_URL"]))
-        return registry_counters(manager, int(context["project_id"]))
+        project = context.get("project_id")
+        return registry_counters(manager, int(project) if project else None, context.get("scope_key"))
 
     return read
 
@@ -1875,7 +1898,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         from collegue.pilot import w5_business as w5
 
-        deadline = time.monotonic() + CAMPAIGN_BOUNDS.max_seconds
+        window = {"deadline": time.monotonic() + CAMPAIGN_BOUNDS.max_seconds}
+
+        def deadline() -> float:
+            return window["deadline"]
+
+        def tighten(remaining_seconds: float) -> None:
+            """L'échéance durable du courtier (ouverte au premier accès Google) ne s'allonge JAMAIS : on ne fait que la resserrer."""
+            window["deadline"] = min(window["deadline"], time.monotonic() + max(0.0, remaining_seconds))
+
         config = business_config(env)
         clients = _fixture_clients(config.token)
         adapter = NightlyAdapter(config, clients, bounded_command_runner(deadline))
@@ -1891,7 +1922,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     clients=clients,
                     manifest=manifest,
                     image=image,
-                    deadline_monotonic=deadline,
+                    deadline_monotonic=deadline(),
                 )
             return cache["value"]
 
@@ -1903,8 +1934,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 adapter=adapter,
                 env=env,
                 claim=lambda rep: w5.revalidate_and_claim(clients, env, args.campaign_id, rep),
+                activate=lambda rep: w5.activate_budget(env, args.campaign_id, rep, on_remaining=tighten),
+                cycle_id=args.campaign_id,
             ),
-            verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline),
+            verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline()),
             read_registry=registry_reader(env),
             improve=lambda r, ctx: w5.run_improvement_phase(r, ctx, services()),
             incident=lambda r, ctx: w5.run_incident_phase(r, ctx, services()),

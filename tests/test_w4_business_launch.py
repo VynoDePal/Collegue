@@ -428,7 +428,9 @@ def test_an_error_exit_keeps_whatever_identity_was_created_and_never_invents_a_z
     assert report.step("R01-run").state == STEP_FAILED and report.verdict() == "failed"
     if project is None:
         assert seen == [] and report.step("R03-registry").state == STEP_INCOMPLETE
-        assert "aucun projet créé" in report.step("R03-registry").detail and "registry_final" not in report.facts
+        assert (
+            "aucun projet ni scope créé" in report.step("R03-registry").detail and "registry_final" not in report.facts
+        )
     else:
         assert {c["project_id"] for c in seen} == {project} and report.step("R03-registry").state == STEP_SUCCEEDED
 

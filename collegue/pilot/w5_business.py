@@ -568,6 +568,79 @@ def revalidate_and_claim(clients: Any, env: Mapping[str, str], campaign_id: str,
     return claim_campaign_identity(clients, campaign_id, report)
 
 
+# ── activation : scope durable de la campagne puis qualification des deux modèles ───────────────────────────────────────────
+
+
+def broker_qualifier() -> Callable[..., Any]:
+    """API publique de qualification des deux modèles du lot A (``BrokerService.qualify_models`` ou équivalent publié).
+
+    Contrat attendu (voir ``reports/w5-b-interfaces.md``) : ``qualify(settings, *, ledger, scope_key) -> mapping`` (ou awaitable),
+    qui joue le VRAI pipeline normalisation → countTokens complet → réservation → émission → usage sur le scope donné et rend
+    ``{"accepted": True, "models": [...], "remaining_seconds": float?}``. Absente ⇒ validation incomplète explicite."""
+    try:
+        from collegue.broker import qualify_models  # type: ignore[attr-defined]
+    except ImportError as exc:
+        raise IncompleteValidation(
+            "API publique de qualification des deux modèles (collegue.broker.qualify_models, lot A) absente : aucune canari "
+            "réel, aucune estimation de remplacement, aucun lancement"
+        ) from exc
+    return qualify_models
+
+
+def activate_budget(
+    env: Mapping[str, str],
+    campaign_id: str,
+    report: CampaignReport,
+    *,
+    qualify: Optional[Callable[..., Any]] = None,
+    manager_factory: Optional[Callable[[], Any]] = None,
+    on_remaining: Optional[Callable[[float], None]] = None,
+) -> None:
+    """Ouvre le scope DURABLE ``planning:cycle:<campagne>`` (2 USD / 250 000 tokens, strict) puis qualifie les deux Gemma sur CE scope
+    — avant toute création distante et toute planification. Le brouillon public reprend ensuite ce même cycle (``--cycle-id``) :
+    même ligne, même solde, même horloge. Un refus ou une ambiguïté arrête la campagne (aucun repli estimé, aucun nouvel essai)."""
+    from collegue.state.budget_ledger import BudgetRefused
+
+    bounds = business.CAMPAIGN_BOUNDS
+    scope_key = f"planning:cycle:{campaign_id}"
+    ledger = (manager_factory or default_manager_factory(env))().budget_ledger
+    ledger.create_planning_scope(
+        max_cost_usd=bounds.max_cost_usd, max_tokens=bounds.max_tokens, strict=True, scope_key=scope_key
+    )
+    context = report.facts.setdefault("launch", {})
+    context["scope_key"] = scope_key  # lisible dès maintenant, même si aucun projet n'aboutit
+    settings = business.effective_settings(env)
+    try:
+        result = (qualify or broker_qualifier())(settings, ledger=ledger, scope_key=scope_key)
+        if asyncio.iscoroutine(result):
+            result = asyncio.run(result)
+    except BudgetRefused as refusal:
+        raise BudgetStop(f"qualification des modèles refusée par le registre ({refusal.code}) : {refusal}") from refusal
+    except IncompleteValidation:
+        raise
+    except Exception as exc:  # noqa: BLE001 - refus / ambiguïté du transport : aucun repli estimé, aucun nouvel essai
+        raise IncompleteValidation(f"qualification des modèles impossible ({type(exc).__name__}) : {exc}") from exc
+    outcome = dict(result or {})
+    models = sorted(str(m) for m in outcome.get("models") or [])
+    if (
+        outcome.get("accepted") is not True
+        or models != sorted({MODEL_PRIMARY, MODEL_CODER_FALLBACK})
+        or outcome.get("estimated")
+    ):
+        raise IncompleteValidation(
+            "qualification des deux modèles non établie par le pipeline réel "
+            f"(accepted={outcome.get('accepted')!r}, modèles={models}, estimation={bool(outcome.get('estimated'))}) : "
+            f"{outcome.get('reason') or 'aucune estimation de remplacement'}"
+        )
+    report.facts["qualification"] = {
+        key: value for key, value in outcome.items() if "key" not in key.lower() and "secret" not in key.lower()
+    }
+    remaining = outcome.get("remaining_seconds")
+    if remaining is not None and on_remaining is not None:
+        on_remaining(float(remaining))
+        context["global_deadline_remaining_s"] = float(remaining)
+
+
 # ── incident DÉTERMINISTE (explicitement signalé) ─────────────────────────────────────────────────────────────────────────
 
 
@@ -1026,6 +1099,8 @@ __all__ = [
     "check_gemma_models",
     "check_broker_selection",
     "claim_campaign_identity",
+    "activate_budget",
+    "broker_qualifier",
     "revalidate_and_claim",
     "check_campaign_identity_unused",
     "validate_bootstrap_manifest",
