@@ -1,0 +1,129 @@
+# Vague 4 — A : destination et authentification résolues ensemble par rôle
+
+Avant la vague 4, le modèle d'un rôle pouvait changer sans que le client, l'endpoint ni la clé changent
+(`gpt-5.4` pour le planificateur partait chez Gemini avec la clé Gemini ; le codeur `openai/gpt-5.4` devenait
+`gemini/gpt-5.4` ; l'abonnement se déduisait du nom du modèle). Désormais **une seule résolution**,
+`collegue.core.llm.roles.resolve_route`, produit la destination effective d'un rôle, et chaque transport l'applique
+telle quelle.
+
+## Route
+
+`LLMRoute` (dataclass gelée) : `role`, `provider`, `model` (nom canonique nu), `endpoint`, `explicit_endpoint`,
+`auth` (`api_key` | `none` | `subscription`), `credential_source` (`role` | `global` | `none` | `subscription`),
+`credential_fingerprint` (SHA-256 tronqué à 12 caractères). La clé n'est accessible que par `route.credential()`,
+jamais par `repr`, `str`, `describe()`, les erreurs de configuration ni les `ValidationError` (`hide_input_in_errors`,
+`SecretStr` pour les clés de rôle).
+
+Rôles : `CODER`, `QA`, `REVIEWER`, `PLANNER`, `DEFAULT`. Fournisseurs : `gemini`, `openai` (hébergés), `lmstudio`,
+`ollama`, `unsloth` (locaux). Tout autre fournisseur est refusé.
+
+### Règles de résolution
+
+1. Fournisseur du rôle = `LLM_PROVIDER_<ROLE>` sinon `LLM_PROVIDER`. Modèle = `LLM_MODEL_<ROLE>` sinon `LLM_MODEL`
+   **uniquement si le fournisseur du rôle est le fournisseur global** (un autre fournisseur exige son modèle).
+2. Le modèle doit appartenir au fournisseur : `gemini-*`/`gemma-*` refusés sous `openai`, `gpt-*` refusé sous `gemini`
+   ; un préfixe `gemini/` ou `openai/` contradictoire est refusé. Un préfixe cohérent est accepté et retiré.
+3. Clé : `LLM_API_KEY_<ROLE>` sinon `LLM_API_KEY` **seulement si le fournisseur du rôle est le fournisseur global**.
+   Fournisseur local sans clé : accepté (`auth=none`, transport `api_key="local"`). Hébergé sans clé : refus.
+4. Endpoint : `LLM_BASE_URL_<ROLE>` ; sinon `LLM_BASE_URL` global si le fournisseur est celui du global ; sinon défaut
+   du fournisseur. `gemini` garde toujours l'endpoint Google (`LLM_BASE_URL` global ignoré pour lui).
+5. Abonnement (ChatGPT/Codex) : **jamais déduit du nom du modèle**. Explicite par `CODER_SUBSCRIPTION=true` (codeur)
+   ou `LLM_AUTH_<ROLE>=subscription`, fournisseur `openai` uniquement, sans clé de rôle contradictoire.
+6. Préférences d'appelant : une préférence de modèle qui différerait du modèle du rôle est refusée
+   (`normalize_preferences`), car elle changerait le modèle sans changer client, endpoint ni clé.
+
+Toute violation lève `LLMRoutingError` **avant** toute émission.
+
+## Tableau des combinaisons prises en charge
+
+| Fournisseur du rôle | Authentification | Sampling offline (`LocalSamplingContext`) | Handler serveur FastMCP | Worker OpenHands (codeur) |
+|---|---|---|---|---|
+| `gemini` | clé (rôle ou globale Gemini) | oui, endpoint Google | oui | oui, `gemini/<modèle>`, repli `gemma-4-26b-a4b-it` par défaut |
+| `openai` | clé du rôle (ou globale si le global est openai) | oui, `api.openai.com` ou `LLM_BASE_URL_<ROLE>` | oui | oui, `openai/<modèle>`, `LLM_BASE_URL` si nommé, aucun repli par défaut |
+| `openai` | `subscription` | oui (sandbox `oh_sampler`) | **refusé** (pas de repli vers une clé API) | oui (`subscription_login`, modèle nu) |
+| `lmstudio` / `ollama` / `unsloth` | `none` ou clé | oui, endpoint local par défaut ou nommé | oui | oui, `openai/<modèle>` + `LLM_BASE_URL` |
+| autre | — | refusé | refusé | refusé |
+
+## Transport du rôle
+
+* `model_preferences_for_role(role, settings)` renvoie `[modèle_canonique, "collegue-route:<rôle>"]`. Le rôle voyage
+  dans un **nom de hint** : il survit à la sérialisation MCP (un attribut Python ajouté à l'objet y serait perdu).
+  Le premier hint reste le modèle canonique pour un client MCP externe.
+* `accounted_sample` normalise les préférences, puis le transport résout `resolve_route` pour le rôle lu dans le hint.
+* `LocalSamplingContext.from_settings(settings)` : un client `AsyncOpenAI` par `(fournisseur, endpoint, auth,
+  empreinte de clé)`, toujours créé avec `api_key` et `base_url` explicites (le SDK ne relit jamais
+  `OPENAI_API_KEY`/`OPENAI_BASE_URL` de l'hôte). Une rotation de clé produit un autre client.
+* `RoutingSamplingHandler` (`build_routing_sampling_handler`) : même résolution par requête, un handler interne par
+  route. Utilisé par `app.py` au démarrage (le rôle `DEFAULT` doit être cohérent, sinon le serveur refuse de
+  construire le handler).
+* Worker : `runtime._coder_sandbox_env` (non secret : `LLM_MODEL` au format LiteLLM du fournisseur du rôle,
+  `LLM_BASE_URL`, `OH_FALLBACK_MODELS` toujours posé — vide = aucun repli) et `_coder_sandbox_secrets` (clé de SA
+  route). La clé passe par `DockerSandbox(env_secrets=...)` : `-e LLM_API_KEY` sans valeur dans l'argv, valeur remise
+  au seul sous-process `docker` (`subprocess.run(env=...)`), `os.environ` n'est jamais muté. Le repli du codeur est
+  toujours du même fournisseur (`CODER_FALLBACK_MODELS`).
+* `oh_runner` construit `LLM(**llm_kwargs(...))` avec `model`, `api_key`, `base_url` (si nommé) et les paramètres
+  communs, tous dans `LLM_CONSTRUCTOR_KWARGS`.
+
+## Budget (W2 inchangé)
+
+La réservation juge la destination **réellement émise** : `guarded_call(provider=...)` reçoit le fournisseur de la
+route et `RouteSettingsView` remplace `LLM_PROVIDER`/`llm_base_url` globaux par ceux de la route pour le tarif, le
+tokenizer et la gratuité d'un fournisseur local. Chaque tentative (retries compris) est réservée avant émission, sur
+le client du rôle. Une destination non attestée (passerelle dont l'identité de modèle n'est pas reconnue) est refusée
+en mode strict avant émission. `worker_budget` tarife chaque modèle de la chaîne selon l'endpoint et la famille de la
+route (abonnement : famille openai, 0 $). La capacité du worker reste unique dans `worker_budget`
+(`budget_enforcement = "in-runner"` ne borne pas une commande du workspace qui réutiliserait une clé facturable :
+refus en strict sous plafond, abonnement accepté, mode `advisory` disponible) — rien n'est assoupli pour 2 USD /
+250 000 tokens / 900 s.
+
+## Portée exacte du sampling délégué
+
+Si le client MCP annonce la capacité de sampling, il échantillonne **lui-même** : il choisit destination et
+identifiants, Collègue ne les contrôle ni ne les budgétise ; il ne reçoit que le modèle canonique et le hint
+`collegue-route:<rôle>`. Le handler serveur n'est qu'un repli (`sampling_handler_behavior="fallback"`). Le serveur ne
+peut donc pas garantir la route ni le plafond pour un client externe qui échantillonne.
+
+## Exemples de configuration (sans secret)
+
+```env
+# Tout Gemini (défaut)
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-2.5-flash
+LLM_API_KEY=<clé Gemini>
+
+# Planificateur/QA/revue sur OpenAI, avec leurs propres clés ; codeur sur la clé globale Gemini
+LLM_PROVIDER_PLANNER=openai
+LLM_MODEL_PLANNER=gpt-5.4
+LLM_API_KEY_PLANNER=<clé OpenAI planificateur>
+LLM_PROVIDER_QA=openai
+LLM_MODEL_QA=gpt-5.4
+LLM_API_KEY_QA=<clé OpenAI QA>
+LLM_BASE_URL_QA=https://passerelle.exemple/v1
+LLM_MODEL_CODER=gemma-4-31b-it
+
+# QA local sans clé
+LLM_PROVIDER_QA=lmstudio
+LLM_MODEL_QA=qwen3
+LLM_BASE_URL_QA=http://127.0.0.1:1234/v1
+
+# Codeur par abonnement (explicite)
+CODER_SUBSCRIPTION=true
+CODER_SUBSCRIPTION_MODEL=gpt-5.5
+SANDBOX_SUBSCRIPTION_AUTH_DIR=~/.openhands
+```
+
+## Migration et limites
+
+* Un rôle non codeur qui utilisait l'abonnement parce que son modèle n'était « pas Gemini » doit maintenant le demander :
+  `LLM_AUTH_<ROLE>=subscription` (avec `LLM_PROVIDER_<ROLE>=openai`). Sans cela il part sur l'API facturée avec la
+  clé du rôle, ou est refusé faute de clé.
+* `LLM_BASE_URL` global est ignoré pour un rôle `gemini`. Un `LLM_BASE_URL_<ROLE>` pour un codeur `gemini` est refusé
+  (LiteLLM route `gemini/…` vers l'API Google).
+* Repli du codeur : Gemini garde `gemma-4-26b-a4b-it` ; tout autre fournisseur n'a aucun repli sans
+  `CODER_FALLBACK_MODELS` (un repli d'un autre fournisseur est refusé).
+* L'abonnement n'est pas supporté par le handler serveur FastMCP (refus explicite, pas de bascule vers une clé).
+* Le SDK OpenHands (1.19.1, `locks/sandbox-openhands.txt`) n'est pas installé dans l'environnement de développement :
+  le constructeur est testé avec un module `openhands.sdk` factice ; le contrôle réel
+  `set(LLM_CONSTRUCTOR_KWARGS) <= set(openhands.sdk.LLM.model_fields)` est un test qui s'exécute dès que le SDK est
+  présent (image) — à brancher côté CI/image par C.
+* `validate_role_routes(settings, roles)` : préflight sans émission ni dépense, sortie sans secret.
