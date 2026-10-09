@@ -334,13 +334,15 @@ async def test_the_fallback_model_is_reserved_to_the_coder_and_everything_else_i
     ).reservation_id
     reviewer = open_worker(service, scope_key, other, role="reviewer")
 
+    assert (await chat(service, coder, chat_request(model="openai/gemma-4-31b-it")))["model"] == "gemma-4-31b-it"
+    # le repli suit une tentative principale TERMINÉE (consommation connue) : voir la règle de séquencement des modèles
     assert (await chat(service, coder, chat_request(model="gemma-4-26b-a4b-it")))["model"] == "gemma-4-26b-a4b-it"
     assert (await chat(service, coder, chat_request(model="openai/gemma-4-31b-it")))["model"] == "gemma-4-31b-it"
     for bad in ("gemma-4-26b-a4b-it", "gemini-2.5-flash", "gpt-5.4", "gemma-3-27b-it", "models/../x"):
         with pytest.raises(BrokerForbidden) as caught:
             await chat(service, reviewer if bad == "gemma-4-26b-a4b-it" else coder, chat_request(model=bad))
         assert caught.value.code == "model_not_allowed"
-    assert len(upstream.generate_calls) == 2
+    assert len(upstream.generate_calls) == 3
 
 
 @pytest.mark.parametrize(

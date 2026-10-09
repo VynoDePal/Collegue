@@ -41,6 +41,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional, Tuple, Union
@@ -97,6 +98,9 @@ TIMEOUT_EXIT_CODE = 124
 # Auto-limitation du conteneur sous allocation (secondes) : délai entre TERM et KILL, et marge hôte.
 SELF_LIMIT_KILL_AFTER = 15
 SELF_LIMIT_HOST_MARGIN = 30
+# Échéance ABSOLUE (``deadline_epoch``) : aucun délai de grâce de travail. Le processus interne est tué (KILL) à l'échéance ; le filet
+# hôte (kill du conteneur par nom) ne tolère que cette marge d'ordonnancement/démarrage, jamais le délai de grâce ci-dessus.
+DEADLINE_HOST_MARGIN = 2.0
 
 # Préfixe de la note ajoutée à stderr quand le conteneur est tué au timeout —
 # consommé par le moteur (#461 : classification infra ; #464 : usage perdu).
@@ -575,13 +579,25 @@ class DockerSandbox:
             pass
 
     def run_command(
-        self, cmd: Union[str, List[str]], workspace: str, *, timeout: Optional[float] = None
+        self,
+        cmd: Union[str, List[str]],
+        workspace: str,
+        *,
+        timeout: Optional[float] = None,
+        deadline_epoch: Optional[float] = None,
     ) -> SandboxResult:
         """Exécute ``cmd`` dans le sandbox, workspace monté sur ``/workspace``.
 
         ``timeout`` (secondes, optionnel) remplace ``self.timeout`` pour CET appel — l'échéance d'une
         allocation budgétaire (vague 2). Au dépassement, le conteneur est tué PAR NOM : tuer le client
         ``docker`` ne tue pas le conteneur, qui continuerait à dépenser en arrière-plan.
+
+        ``deadline_epoch`` (epoch UTC, optionnel) est une échéance ABSOLUE de travail (courtier W5 : échéance globale
+        persistée). Elle est revalidée au DERNIER point avant le lancement (``SandboxRefused`` si elle est déjà atteinte :
+        rien n'est lancé) ; le délai relatif donné au conteneur et au filet hôte est recalculé à cet instant, donc ni la
+        préparation amont ni un démarrage Docker lent ne la prolongent. Aucun délai de grâce de travail : le processus interne
+        reçoit KILL (pas TERM, qu'un worker peut ignorer) à l'échéance, et le filet hôte tue le conteneur par nom
+        ``DEADLINE_HOST_MARGIN`` secondes après. La collecte et le nettoyage se poursuivent ensuite.
 
         ``cmd`` peut être une chaîne (``sh -c`` dans le conteneur) ou un argv (liste).
         Lève :class:`SandboxUnavailable` si Docker est absent ou si l'on tourne en
@@ -595,16 +611,20 @@ class DockerSandbox:
         ws = self._validate_workspace(workspace)
         os.makedirs(ws, exist_ok=True)
         name = f"collegue-sbx-{uuid.uuid4().hex[:12]}"
-        if timeout is not None and timeout > 0:
+        inner = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
+        if deadline_epoch is not None:
+            # Calculé juste avant le lancement (voir plus bas) : placeholders ici.
+            effective_timeout = self.timeout
+        elif timeout is not None and timeout > 0:
             # Échéance d'allocation : le conteneur S'AUTO-LIMITE (coreutils ``timeout`` : TERM puis KILL),
             # indépendamment du client ``docker`` — si le process hôte meurt, le conteneur ne dépense pas
             # indéfiniment en arrière-plan. Le délai hôte, un peu plus long, n'est qu'un filet.
-            inner = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
             cmd = ["timeout", "--signal=TERM", f"--kill-after={SELF_LIMIT_KILL_AFTER}", str(math.ceil(timeout)), *inner]
             effective_timeout = float(timeout) + SELF_LIMIT_KILL_AFTER + SELF_LIMIT_HOST_MARGIN
         else:
             effective_timeout = self.timeout
         argv = self._build_run_argv(cmd, ws, name=name)
+        limit = timeout
 
         out_f = tempfile.NamedTemporaryFile(prefix="sbx-out-", delete=False)
         err_f = tempfile.NamedTemporaryFile(prefix="sbx-err-", delete=False)
@@ -616,9 +636,23 @@ class DockerSandbox:
                 if self._env_secrets:
                     # Environnement du SEUL process docker enfant : os.environ de l'hôte n'est jamais muté.
                     run_kwargs["env"] = {**os.environ, **{k: _secret_text(v) for k, v in self._env_secrets.items()}}
+                if deadline_epoch is not None:
+                    # DERNIER point avant le lancement : le temps restant est relu ICI (après la préparation du workspace, des
+                    # fichiers de sortie et de l'argv), puis imposé au conteneur (KILL) et au filet hôte.
+                    remaining = float(deadline_epoch) - time.time()
+                    limit = math.floor(remaining)
+                    if timeout is not None and timeout >= 1:
+                        limit = min(limit, math.floor(timeout))
+                    if limit < 1:
+                        raise SandboxRefused(
+                            "échéance absolue atteinte avant le lancement du conteneur : rien n'est lancé "
+                            f"(reste {remaining:.2f}s)"
+                        )
+                    argv = self._build_run_argv(["timeout", "--signal=KILL", str(limit), *inner], ws, name=name)
+                    effective_timeout = min(float(limit), remaining) + DEADLINE_HOST_MARGIN
                 proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=effective_timeout, **run_kwargs)
                 exit_code = proc.returncode
-                if timeout and exit_code in (TIMEOUT_EXIT_CODE, 137):  # auto-limite du conteneur atteinte
+                if limit and exit_code in (TIMEOUT_EXIT_CODE, 137):  # auto-limite du conteneur atteinte
                     timed_out = True
             except subprocess.TimeoutExpired:
                 # Tuer le client ne tue pas le conteneur → on le tue par nom.
@@ -634,7 +668,7 @@ class DockerSandbox:
             stdout = self._read_capped(out_path)
             stderr = self._read_capped(err_path)
             if timed_out:
-                stderr += f"\n{TIMEOUT_NOTE} {(timeout if timeout else effective_timeout):g}s"
+                stderr += f"\n{TIMEOUT_NOTE} {(limit if limit else effective_timeout):g}s"
             return SandboxResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out)
         finally:
             for path in (out_path, err_path):

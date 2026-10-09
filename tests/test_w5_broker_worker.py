@@ -238,6 +238,9 @@ def test_the_coder_may_use_the_fallback_model_and_nothing_else(env):
     seen = []
 
     def behaviour(client, e):
+        ask(
+            client, model="openai/gemma-4-31b-it"
+        )  # le repli suit une tentative principale terminée (règle serveur, A27)
         ask(client, model="openai/gemma-4-26b-a4b-it")
         for bad in ("openai/gemini-2.5-flash", "gpt-5.4"):
             try:
@@ -249,7 +252,7 @@ def test_the_coder_may_use_the_fallback_model_and_nothing_else(env):
     ContainerSandbox.behaviour = behaviour
     result = env.run()
     assert seen == [403, 403] and result.usage_status == "reported"
-    assert [c["url_model"] for c in env.upstream.generate_calls] == ["gemma-4-26b-a4b-it"]
+    assert [c["url_model"] for c in env.upstream.generate_calls] == ["gemma-4-31b-it", "gemma-4-26b-a4b-it"]
 
 
 def test_nothing_the_worker_submits_widens_the_session(env):

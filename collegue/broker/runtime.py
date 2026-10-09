@@ -73,8 +73,16 @@ class AttachedWorker:
     service: BrokerService
     summary: Optional[SessionSummary] = None
     server: Optional[BrokerSocketServer] = field(default=None, repr=False)
-    # Délai effectif (secondes) du conteneur : min(allocation, échéance globale persistée − maintenant) ; ``None`` = non borné.
-    timeout_seconds: Optional[float] = None
+    # Échéance ABSOLUE de travail (epoch UTC) : min(allocation, échéance globale persistée) ; ``None`` = non borné. Elle est portée
+    # jusqu'à ``DockerSandbox.run_command(deadline_epoch=…)``, qui la revalide au dernier point avant le lancement du conteneur.
+    deadline_epoch: Optional[float] = None
+
+    @property
+    def timeout_seconds(self) -> Optional[float]:
+        """Information : secondes ENTIÈRES restantes À CET INSTANT (le délai imposé au conteneur est recalculé au lancement)."""
+        if self.deadline_epoch is None:
+            return None
+        return float(math.floor(self.deadline_epoch - datetime.now(timezone.utc).timestamp()))
 
 
 class BrokerRuntime:
@@ -147,11 +155,11 @@ class BrokerRuntime:
         persisted = service.open_clock(allocation.scope_key)
         if persisted is not None:
             deadline = persisted if deadline is None else min(deadline, persisted)
-        timeout_seconds = None
+        deadline_epoch = None
         if deadline is not None:
-            # Entier INFÉRIEUR : le sandbox arrondit au supérieur, le délai du conteneur ne dépasse donc jamais l'échéance.
-            timeout_seconds = float(math.floor((deadline - datetime.now(timezone.utc)).total_seconds()))
-            if timeout_seconds < 1:
+            deadline_epoch = deadline.timestamp()
+            # Refus précoce (rien n'est ouvert) ; la revalidation DÉFINITIVE a lieu dans ``run_command``, juste avant le lancement.
+            if math.floor(deadline_epoch - datetime.now(timezone.utc).timestamp()) < 1:
                 from collegue.sandbox.executor import SandboxRefused
 
                 # Rien n'a été lancé : l'appelant libère la réservation parent (sémantique « worker non lancé »).
@@ -180,7 +188,7 @@ class BrokerRuntime:
                 proof=proof,
                 service=service,
                 server=server,
-                timeout_seconds=timeout_seconds,
+                deadline_epoch=deadline_epoch,
             )
         except BaseException:
             self._close(service, opened, consolidate=False)

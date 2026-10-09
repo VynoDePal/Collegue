@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from collegue.broker.errors import BrokerForbidden, BrokerRequestRefused
+from collegue.broker.policy import FALLBACK_MODEL, PRIMARY_MODEL
 from collegue.state.budget_ledger import (
     REFUSED_BLOCKED,
     REFUSED_SCOPE,
@@ -52,6 +53,9 @@ from collegue.state.models import (
     BudgetReservation,
     BudgetScope,
 )
+
+# Préfixe du motif d'un refus d'admission dû à la règle de séquencement des modèles (voir ``_model_sequence_refusal``).
+FALLBACK_REFUSAL_PREFIX = "séquence des modèles : "
 
 
 @dataclass(frozen=True)
@@ -587,6 +591,10 @@ class BrokerStore:
             attempt = session.scalar(select(BrokerAttempt).where(BrokerAttempt.attempt_id == attempt_id))
             if attempt is None or attempt.reservation_id is None:
                 return False, "tentative sans réservation"
+            if session_id is not None:
+                refused = self._model_sequence_refusal(session, row, attempt)
+                if refused:
+                    return False, f"{FALLBACK_REFUSAL_PREFIX}{refused}"
             reservation = session.scalar(
                 select(BudgetReservation).where(BudgetReservation.reservation_id == attempt.reservation_id)
             )
@@ -600,6 +608,42 @@ class BrokerStore:
             return (True, "") if done.rowcount == 1 else (False, "tentative reprise par une autre exécution")
 
         return self._run(_do)
+
+    @staticmethod
+    def _model_sequence_refusal(session: Session, row: BrokerSession, attempt: BrokerAttempt) -> str:
+        """Règle SERVEUR de séquencement des modèles d'une session (le client, même hostile, ne la décide jamais).
+
+        * Le repli (26B) n'est admis qu'APRÈS un antécédent qui l'autorise : la dernière tentative du modèle principal de la
+          session est terminée avec une absence d'émission ÉTABLIE (``released`` : refus avant traitement) ou une consommation
+          CONNUE (``settled``). Une réservation bornée n'est PAS un antécédent ; sans aucune tentative du principal, pas de repli.
+        * Jamais de repli (ni de retour au principal) tant qu'une AUTRE tentative de la session dont le modèle diffère est en
+          vol (``emitting``) ou d'usage inconnu : le client a pu perdre la réponse, le fournisseur la traite peut-être encore.
+        La vérification est faite dans la transaction d'admission : deux connexions de la même session ne peuvent pas la contourner
+        en course. Les autres sessions (autres rôles / allocations) ne sont pas concernées.
+        Retourne le motif de refus, ou ``""``.
+        """
+        others = session.scalars(
+            select(BrokerAttempt)
+            .where(BrokerAttempt.session_id == row.id, BrokerAttempt.attempt_id != attempt.attempt_id)
+            .order_by(BrokerAttempt.id.desc())
+        ).all()
+        for other in others:
+            if other.model != attempt.model and other.state in (BROKER_ATTEMPT_EMITTING, BROKER_ATTEMPT_UNKNOWN):
+                status = "en vol" if other.state == BROKER_ATTEMPT_EMITTING else "d'usage inconnu"
+                return (
+                    f"une génération {other.model} de cette session est {status} : "
+                    f"aucune génération {attempt.model} tant que son issue n'est pas établie"
+                )
+        if attempt.model == FALLBACK_MODEL:
+            primary = next((o for o in others if o.model == PRIMARY_MODEL), None)
+            if primary is None:
+                return f"repli {FALLBACK_MODEL} sans antécédent autorisant : aucune tentative du modèle principal dans la session"
+            if primary.state not in (BROKER_ATTEMPT_RELEASED, BROKER_ATTEMPT_SETTLED):
+                return (
+                    f"repli {FALLBACK_MODEL} refusé : la dernière tentative principale est {primary.state} "
+                    "(ni refus établi avant traitement, ni consommation connue)"
+                )
+        return ""
 
     def settle(
         self,

@@ -23,12 +23,13 @@ from w5_broker_support import FakeUpstream
 
 from collegue.broker import BrokerConfig
 from collegue.broker.runtime import BrokerRuntime
+from collegue.broker.server import BrokerSocketServer
 from collegue.core.llm.budget_guard import bind_budget
 from collegue.executor.agent import IssueSpec
 from collegue.executor.openhands_sdk_agent import OHSdkAgent
 from collegue.executor.runner import _run_agent_under_budget
 from collegue.executor.worker_budget import allocate_worker
-from collegue.sandbox.executor import DockerSandbox, SandboxRefused
+from collegue.sandbox.executor import DEADLINE_HOST_MARGIN, DockerSandbox, SandboxRefused
 from collegue.state import BudgetRefused, ProjectStateManager
 
 REPO = Path(__file__).resolve().parents[1]
@@ -36,7 +37,7 @@ REPO = Path(__file__).resolve().parents[1]
 FAKE_DOCKER = textwrap.dedent(
     """\
     #!{python}
-    import json, os, subprocess, sys
+    import json, os, subprocess, sys, time
     argv = sys.argv[1:]
     log = os.environ["FAKE_DOCKER_LOG"]
     def record(entry):
@@ -46,6 +47,11 @@ FAKE_DOCKER = textwrap.dedent(
         sys.exit(0)
     if argv[0] == "kill":
         record({{"kill": argv[1:]}})
+        try:
+            with open(log + "." + argv[1]) as handle:
+                os.killpg(int(handle.read()), 9)   # comme `docker kill NOM` : tue le conteneur, pas seulement le client
+        except (OSError, ValueError):
+            pass
         sys.exit(0)
     assert argv[0] == "run", argv
     mounts, env, i = [], {{}}, 1
@@ -77,8 +83,13 @@ FAKE_DOCKER = textwrap.dedent(
     child_env = {{k: host_path(v) for k, v in env.items()}}
     child_env["PATH"] = os.environ.get("PATH", "")
     cwd = next((h for h, c in mounts if c == "/workspace"), None)
-    record({{"run": argv, "inner": inner, "env_names": sorted(env), "image": image}})
-    sys.exit(subprocess.call(inner, env=child_env, cwd=cwd))
+    name = argv[argv.index("--name") + 1]
+    record({{"run": argv, "inner": inner, "env_names": sorted(env), "image": image, "at": time.time()}})
+    time.sleep(float(os.environ.get("FAKE_DOCKER_START_DELAY", "0")))   # démarrage Docker lent
+    proc = subprocess.Popen(inner, env=child_env, cwd=cwd, start_new_session=True)
+    with open(log + "." + name, "w") as handle:
+        handle.write(str(proc.pid))
+    sys.exit(proc.wait())
     """
 )
 
@@ -105,6 +116,14 @@ WORKER = textwrap.dedent(
         call()   # le fournisseur ne répond jamais : requête émise, worker bloqué
     elif behaviour == "sleep_only":
         time.sleep(120)
+    elif behaviour == "stubborn_heartbeat":
+        # ignore TERM et travaille jusqu'à ce qu'on le tue : chaque battement prouve que le worker VIT encore
+        import signal
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True:
+            with open(os.environ["W5_HEARTBEAT"], "w") as handle:
+                handle.write(repr(time.time()))
+            time.sleep(0.05)
     """
 )
 
@@ -116,6 +135,7 @@ def manager(tmp_path):
 
 class Rig:
     def __init__(self, manager, tmp_path, monkeypatch, *, behaviour, deadline=3, upstream=None, close_wait=0.5):
+        self.heartbeat = tmp_path / "heartbeat"
         docker = tmp_path / "fake-docker"
         docker.write_text(FAKE_DOCKER.format(python=sys.executable))
         docker.chmod(0o755)
@@ -145,6 +165,7 @@ class Rig:
             workspace_root=str(tmp_path),
             env={
                 "W5_BEHAVIOUR": behaviour,
+                "W5_HEARTBEAT": str(self.heartbeat),
                 "W5_RELAY_PATH": str(REPO / "collegue" / "executor" / "oh_broker_relay.py"),
             },
         )
@@ -175,14 +196,18 @@ class Rig:
         with self.binding(**kw):
             return _run_agent_under_budget(self.agent, str(self.workspace), IssueSpec(number=1, title="t", body="b"))
 
+    def last_heartbeat(self):
+        return float(self.heartbeat.read_text()) if self.heartbeat.exists() and self.heartbeat.read_text() else None
+
     def docker_calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
 
 def timeout_seconds_of(call) -> int:
+    """Délai imposé au processus interne : KILL (jamais TERM, qu'un worker peut ignorer) et AUCUN délai de grâce ``--kill-after``."""
     inner = call["inner"]
-    assert inner[:2] == ["timeout", "--signal=TERM"] and inner[2].startswith("--kill-after=")
-    return int(inner[3])
+    assert inner[:2] == ["timeout", "--signal=KILL"] and not any(a.startswith("--kill-after") for a in inner[:3])
+    return int(inner[2])
 
 
 def test_the_worker_process_is_stopped_at_the_persisted_deadline_even_when_it_sleeps_after_its_last_call(
@@ -327,3 +352,100 @@ def test_the_effective_container_timeout_comes_from_the_persisted_clock_not_from
             assert 0 < attached.timeout_seconds <= 61
             assert attached.session.deadline_at is not None
             assert attached.session.deadline_at <= rig.service.persisted_deadline(rig.scope) + timedelta(seconds=1)
+
+
+# --- A27 : l'échéance est ABSOLUE — ni la préparation, ni un démarrage Docker lent, ni un worker qui ignore TERM ne la prolongent ---
+#
+# Tolérance d'ordonnancement EXPLICITE pour les bornes de vie du worker (mesurées par battement, pas par temps de collecte) :
+#   * sans retard de démarrage : KILL à floor(reste au lancement) + démarrage du faux docker ≤ SCHEDULING_TOLERANCE ;
+#   * démarrage lent : le filet hôte tue le conteneur PAR NOM à échéance + DEADLINE_HOST_MARGIN, donc
+#     échéance + DEADLINE_HOST_MARGIN + SCHEDULING_TOLERANCE.
+SCHEDULING_TOLERANCE = 1.0
+
+
+def test_the_worker_is_not_launched_when_the_socket_preparation_consumed_the_remaining_time(
+    manager, tmp_path, monkeypatch
+):
+    """Le délai n'est pas figé AVANT la préparation (session, socket, preuve de transport) : il est relu au dernier point."""
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="sleep_only", deadline=3)
+    rig.service.open_clock(rig.scope)
+    original_start = BrokerSocketServer.start
+    prepared = []
+
+    def slow_start(server):
+        result = original_start(server)
+        time.sleep(4)  # la préparation dépasse l'échéance de 3 s
+        prepared.append(True)
+        return result
+
+    monkeypatch.setattr(BrokerSocketServer, "start", slow_start)
+    with pytest.raises((SandboxRefused, BudgetRefused)):
+        rig.run(window=3600)
+    assert prepared and not [c for c in rig.docker_calls() if "run" in c]  # AUCUN docker run
+    assert rig.service.store.open_sessions() == []
+    assert rig.ledger.snapshot(rig.scope).reserved_tokens == 0  # worker non lancé : réservation parent libérée
+
+
+def test_a_partially_consumed_preparation_shortens_the_container_timeout(manager, tmp_path, monkeypatch):
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="sleep_only", deadline=6)
+    rig.service.open_clock(rig.scope)
+    original_start = BrokerSocketServer.start
+
+    def slow_start(server):
+        result = original_start(server)
+        time.sleep(3)
+        return result
+
+    monkeypatch.setattr(BrokerSocketServer, "start", slow_start)
+    rig.run(window=3600)
+    (call,) = rig.docker_calls()
+    assert 1 <= timeout_seconds_of(call) <= 3  # 6 − 3 s de préparation, pas 6
+
+
+def test_a_worker_ignoring_term_is_dead_at_the_deadline_with_no_grace(manager, tmp_path, monkeypatch):
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="stubborn_heartbeat", deadline=4)
+    rig.service.open_clock(rig.scope)
+    deadline = rig.service.persisted_deadline(rig.scope).timestamp()
+    rig.run(window=7200)
+    beat = rig.last_heartbeat()
+    assert beat is not None
+    assert beat <= deadline + SCHEDULING_TOLERANCE, f"le worker a vécu {beat - deadline:.2f}s après l'échéance"
+    assert not [
+        c for c in rig.docker_calls() if "kill" in c
+    ]  # l'auto-limite du conteneur a suffi (pas de filet nécessaire)
+    assert rig.service.store.open_sessions() == []
+
+
+def test_a_slow_docker_start_does_not_extend_the_worker_life_beyond_the_deadline(manager, tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_DOCKER_START_DELAY", "2.5"
+    )  # le conteneur démarre 2,5 s APRÈS la prise de décision de lancement
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="stubborn_heartbeat", deadline=5)
+    rig.service.open_clock(rig.scope)
+    deadline = rig.service.persisted_deadline(rig.scope).timestamp()
+    rig.run(window=7200)
+    beat = rig.last_heartbeat()
+    assert beat is not None
+    # sans filet hôte, l'auto-limite démarrée en retard aurait laissé vivre le worker jusqu'à ~ échéance + 2,5 s
+    assert beat <= deadline + DEADLINE_HOST_MARGIN + SCHEDULING_TOLERANCE, (
+        f"vie après échéance : {beat - deadline:.2f}s"
+    )
+    assert [c for c in rig.docker_calls() if "kill" in c]  # c'est bien le filet hôte (kill par nom) qui a agi
+
+
+def test_run_command_revalidates_an_absolute_deadline_at_the_last_point_before_launch(tmp_path, monkeypatch):
+    docker = tmp_path / "fake-docker"
+    docker.write_text(FAKE_DOCKER.format(python=sys.executable))
+    docker.chmod(0o755)
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(tmp_path / "docker.log"))
+    sandbox = DockerSandbox(docker_bin=str(docker), allow_root=True, network="none", workspace_root=str(tmp_path))
+    (tmp_path / "ws").mkdir()
+    with pytest.raises(SandboxRefused):
+        sandbox.run_command(["true"], str(tmp_path / "ws"), deadline_epoch=time.time() - 1)
+    with pytest.raises(SandboxRefused):
+        sandbox.run_command(
+            ["true"], str(tmp_path / "ws"), deadline_epoch=time.time() + 0.5
+        )  # < 1 s : rien d'utile à lancer
+    assert not (tmp_path / "docker.log").exists()
+    ok = sandbox.run_command(["true"], str(tmp_path / "ws"), deadline_epoch=time.time() + 30)
+    assert ok.ok and not ok.timed_out

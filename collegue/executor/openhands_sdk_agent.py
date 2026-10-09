@@ -213,7 +213,7 @@ class OHSdkAgent:
         if self._broker is not None:
             return self._implement_via_broker(workspace, issue, alloc)
         run_kwargs = {}
-        if alloc is not None and alloc.runtime_seconds is not None and _accepts_timeout(self._sandbox):
+        if alloc is not None and alloc.runtime_seconds is not None and _accepts_kwarg(self._sandbox, "timeout"):
             # Échéance d'allocation : le conteneur s'auto-limite et l'hôte tue par nom au dépassement.
             run_kwargs["timeout"] = alloc.runtime_seconds
         result = self._sandbox.run_command(self.build_command(issue), workspace, **run_kwargs)
@@ -251,12 +251,15 @@ class OHSdkAgent:
         with self._broker.attach_worker(
             ledger=binding.ledger, allocation=alloc, role=self._role.value, sandbox=self._sandbox
         ) as attached:
-            # Le délai du CONTENEUR est borné par l'échéance persistée : le processus de travail est ARRÊTÉ à cette échéance
-            # (auto-limite coreutils dans le conteneur + kill par nom côté hôte), même s'il dort ou calcule sans appeler le
-            # courtier. ``attached.timeout_seconds`` = min(allocation, échéance persistée − maintenant), calculé au lancement.
+            # L'échéance ABSOLUE (allocation ∩ échéance globale persistée) est portée jusqu'à l'autorité qui supervise le
+            # conteneur : ``run_command`` la revalide au dernier point avant le lancement (refus si atteinte), tue le processus à
+            # l'échéance sans délai de grâce (même s'il dort, calcule ou ignore TERM) et borne le filet hôte.
             run_kwargs = {}
-            if attached.timeout_seconds is not None and _accepts_timeout(self._sandbox):
-                run_kwargs["timeout"] = attached.timeout_seconds
+            if attached.deadline_epoch is not None:
+                if _accepts_kwarg(self._sandbox, "deadline_epoch"):
+                    run_kwargs["deadline_epoch"] = attached.deadline_epoch
+                elif _accepts_kwarg(self._sandbox, "timeout"):  # double de test historique : meilleur effort, relatif
+                    run_kwargs["timeout"] = max(1.0, attached.timeout_seconds or 1.0)
             result = attached.sandbox.run_command(self.build_command(issue), workspace, **run_kwargs)
         summary = attached.summary
         logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
@@ -276,15 +279,15 @@ class OHSdkAgent:
         )
 
 
-def _accepts_timeout(sandbox) -> bool:
-    """Le sandbox accepte-t-il ``run_command(..., timeout=...)`` ? (les doubles de test historiques non)."""
+def _accepts_kwarg(sandbox, name: str) -> bool:
+    """Le sandbox accepte-t-il ``run_command(..., <name>=...)`` ? (les doubles de test historiques non)."""
     import inspect
 
     try:
         params = inspect.signature(sandbox.run_command).parameters
     except (TypeError, ValueError, AttributeError):
         return False
-    return "timeout" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _canonical_fallback(route: LLMRoute, name: str) -> str:

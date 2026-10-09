@@ -54,7 +54,7 @@ from collegue.broker.policy import (
     ROLES,
     models_for_role,
 )
-from collegue.broker.store import AttemptRecord, BrokerStore, SessionRecord, owner_is_alive
+from collegue.broker.store import FALLBACK_REFUSAL_PREFIX, AttemptRecord, BrokerStore, SessionRecord, owner_is_alive
 from collegue.broker.translate import (
     NormalizedRequest,
     canonical_json,
@@ -455,6 +455,10 @@ class BrokerService:
             parent_reservation_id=session.parent_reservation_id if session else None,
         )
         if not admitted_ok:
+            if why.startswith(FALLBACK_REFUSAL_PREFIX):
+                # Règle serveur de séquencement (repli sans antécédent autorisant, génération d'un autre modèle en vol / inconnue).
+                self._release(attempt, "fallback_refused", why)
+                raise BrokerForbidden(why, code="fallback_not_authorized")
             self._release(attempt, "admission_refused", why)
             if "échéance" in why:
                 raise BrokerForbidden(why, code="session_expired")

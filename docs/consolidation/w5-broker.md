@@ -178,3 +178,36 @@ vérifications REQUISES passent sur le transport réellement instancié ; la pr�
 `require_provider_key=True` (étape réelle). Les préflights statique et complet réussissent SANS clé ; aucune clé factice n'est injectée. La clé
 reste `LLM_API_KEY` (réglages), lue seulement par le service de confiance ; C y lie son secret temporaire (`W5_GOOGLE_API_KEY → LLM_API_KEY`
 dans l'étape réelle uniquement), sans alias global.
+
+## Échéance absolue au lancement et séquencement des modèles (A27)
+
+### Échéance absolue portée jusqu'à l'autorité qui supervise le conteneur
+`AttachedWorker.deadline_epoch` (epoch UTC) = allocation ∩ échéance globale persistée. Elle est passée à
+`DockerSandbox.run_command(..., deadline_epoch=…)`, qui la **revalide au dernier point avant `docker run`** (après la préparation du
+workspace, des fichiers de sortie et de l'argv) : déjà atteinte (ou < 1 s) ⇒ `SandboxRefused`, rien n'est lancé, la réservation parent
+est libérée par l'appelant. Sinon, le délai du conteneur et celui du filet hôte sont **recalculés à cet instant** : ni la préparation amont
+(session, socket, preuve de transport) ni un démarrage Docker lent ne prolongent l'échéance.
+
+Aucun délai de grâce de travail : le processus interne est lancé sous `timeout --signal=KILL N` (KILL, pas TERM — un worker peut ignorer
+TERM — et sans `--kill-after`), et le filet hôte tue le conteneur **par nom** `DEADLINE_HOST_MARGIN` (2 s) après l'échéance si le conteneur a
+démarré tard. Borne de vie du worker : `échéance + DEADLINE_HOST_MARGIN + tolérance d'ordonnancement` (démarrage lent), `échéance +
+tolérance` sinon ; la collecte et le nettoyage se poursuivent ensuite. Le chemin direct (`timeout=`, TERM puis KILL à +15 s) est
+inchangé. Une requête déjà émise sans usage connu reste réservée/bloquante (inchangé).
+
+### Règle serveur de séquencement des modèles d'une session
+Appliquée dans `BrokerStore.admit_emission` (transaction d'admission, donc sans course entre connexions) :
+* le repli `gemma-4-26b-a4b-it` n'est admis qu'après une tentative principale (31B) **terminée** de la session : `released` (refus établi
+  avant traitement) ou `settled` (consommation connue). Une réservation bornée n'est pas un antécédent ; sans tentative principale, pas de repli ;
+* aucune génération d'un modèle différent tant qu'une autre génération de la session est `emitting` ou d'usage inconnu (le client a pu perdre
+  la réponse ; le fournisseur la traite peut-être encore), dans les deux sens (repli → principal compris) ;
+* refus : `BrokerForbidden(code="fallback_not_authorized")` (403), tentative libérée, rien d'émis ni gardé ;
+* inchangé : sessions distinctes (autres rôles/allocations) restent concurrentes ; les canaris 26B côté hôte (`sampling_completion`, sans session)
+  restent possibles ; un renvoi du MÊME modèle est une génération distincte, réservée et imputée à part (jamais gratuite) ; le même `request_id`
+  rejoue le résultat sans régénérer.
+
+### Politique du runner (`oh_runner`) en mode courtier
+`num_retries=0` (le SDK ne retente jamais, même si `OH_NUM_RETRIES` est fourni) ; toute nouvelle émission est une décision du runner, que le
+courtier tranche. `broker_failure_verdict(exc)` : code `upstream_rejected` / `count_tokens_failed` ⇒ bascule permise ; tout autre code du courtier
+(budget, blocage, échéance, session fermée, modèle interdit…) ⇒ fin (`rc=4`), aucun repli ; échec de LLM sans verdict (délai dépassé, connexion
+perdue) ⇒ issue inconnue, aucun repli (`rc=4`) ; exception étrangère au LLM ⇒ bascule historique. Preuve de bout en bout :
+`tests/test_w5_broker_fallback_runner.py` (vrai `oh_runner.main()` → relais → socket → courtier → faux fournisseur).
