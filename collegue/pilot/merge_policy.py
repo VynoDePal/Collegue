@@ -17,7 +17,12 @@ Ce qui est vérifié, dans l'ordre (tout échec ou toute vérification inaccessi
 5. **Checks requis** : découverts dans les protections classiques ET les rulesets applicables (avec ``app_id`` /
    ``integration_id`` quand présent), tous présents et ``success`` sur la tête exacte ; check absent, en attente,
    failed/cancelled/skipped/neutral, liste incomplète ou erreur de lecture => pas de fusion.
-6. **Précondition serveur contre la course sur la base** : au moins une protection « branche à jour avant fusion »
+6. **Intégrité des contrôles** (barrière indépendante du check) : le sous-arbre ``.github/`` du tree distant de la tête est
+   IDENTIQUE à celui de la base de confiance (ajout, modification, suppression ou renommage d'un contrôle ⇒ refus), même si un
+   check vert de la bonne application et de la bonne tête a été fabriqué par la contribution elle-même. La comparaison porte sur
+   les objets Git réels (SHA de sous-arbre, qui couvre tout le contenu), jamais sur une liste de fichiers qui peut être
+   incomplète ; une lecture impossible refuse.
+7. **Précondition serveur contre la course sur la base** : au moins une protection « branche à jour avant fusion »
    (``strict``) EFFECTIVEMENT applicable à l'acteur du jeton (ruleset actif non contournable par lui, ou protection
    classique appliquée aux administrateurs / acteur non administrateur). L'API de fusion ne prend qu'un ``sha`` de tête :
    deux lectures successives ne démontrent rien, seule cette règle côté serveur fait refuser une fusion dont la base a
@@ -57,6 +62,9 @@ CODE_POLICY = "policy"
 CODE_API = "api_error"
 CODE_ALREADY_MERGED = "already_merged"
 CODE_STATE = "state"
+CODE_CONTROLS = "controls_altered"
+#: Répertoire des contrôles de la fixture : jamais modifiable par une contribution jugée par ces mêmes contrôles.
+CONTROLS_DIRECTORY = ".github"
 RETRYABLE_CODES = frozenset({CODE_PENDING, CODE_MISSING_CHECK})
 
 
@@ -356,6 +364,37 @@ def evaluate_checks(
 # ── validation complète d'un candidat ──────────────────────────────────────────────────────
 
 
+def _controls_object(branches: Any, owner: str, repo: str, tree_sha: str) -> Optional[str]:
+    """``type:sha`` de l'entrée ``.github`` à la racine du tree (``None`` si absente). Lecture impossible ⇒ refus."""
+    try:
+        getter = getattr(branches, "get_git_tree", None)
+        if callable(getter):
+            data = getter(owner, repo, tree_sha)
+        else:  # route REST en lecture seule (besoin publié : méthode publique du client de branches)
+            data = branches._api_get(f"/repos/{owner}/{repo}/git/trees/{tree_sha}", {})
+        entries = data["tree"]
+        if data.get("truncated") or not isinstance(entries, list):
+            raise ValueError("arbre tronqué ou malformé")
+        for entry in entries:
+            if entry.get("path") == CONTROLS_DIRECTORY:
+                return f"{entry.get('type')}:{str(entry.get('sha')).lower()}"
+        return None
+    except Exception as exc:  # noqa: BLE001 - un arbre illisible ne prouve rien : fail-closed
+        raise MergeRefused(f"arbre Git {str(tree_sha)[:12]} illisible: {exc}", code=CODE_API) from exc
+
+
+def assert_controls_untouched(branches: Any, owner: str, repo: str, *, base_tree: str, head_tree: str) -> None:
+    """Refuse toute contribution dont le sous-arbre ``.github/`` diffère de celui de la base de confiance."""
+    trusted = _controls_object(branches, owner, repo, base_tree)
+    proposed = _controls_object(branches, owner, repo, head_tree)
+    if trusted != proposed:
+        raise MergeRefused(
+            "la contribution modifie les contrôles de la fixture (.github/) par rapport à la base de confiance "
+            f"({trusted or 'absent'} → {proposed or 'absent'}) : un contrôle ne se juge pas lui-même",
+            code=CODE_CONTROLS,
+        )
+
+
 def _read_pr(prs: Any, owner: str, repo: str, number: int) -> Any:
     try:
         return prs.get_pr(owner, repo, int(number))
@@ -450,6 +489,11 @@ def verify_merge_candidate(
         )
     if str(commit.tree_sha).lower() != proof_tree:
         raise MergeRefused("le tree distant de la tête diffère de celui de la preuve de livraison", code=CODE_NO_PROOF)
+    try:
+        base_tree = str(branches.get_git_commit(owner, repo, proof_base).tree_sha).lower()
+    except Exception as exc:  # noqa: BLE001
+        raise MergeRefused(f"tree de la base de confiance illisible: {exc}", code=CODE_API) from exc
+    assert_controls_untouched(branches, owner, repo, base_tree=base_tree, head_tree=proof_tree)
 
     try:
         details = prs.get_commit_check_details(owner, repo, head_sha)

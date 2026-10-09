@@ -422,6 +422,9 @@ class FakeGitHubServer:
             if detail is None:
                 raise HttpError("Not Found", status_code=404)
             return detail
+        m = re.fullmatch(rf"{prefix}/git/trees/([0-9a-f]{{40}})", endpoint)
+        if m:  # arbre de premier niveau : par défaut sans ``.github`` (barrière d'intégrité des contrôles, W5) ; ``trees`` le surcharge
+            return getattr(self, "trees", {}).get(m.group(1), {"tree": [], "truncated": False})
         m = re.fullmatch(rf"{prefix}/commits/([0-9a-f]{{40}})/check-runs", endpoint)
         if m:
             runs = self.check_runs.get(m.group(1), [])

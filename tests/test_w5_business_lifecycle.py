@@ -338,3 +338,46 @@ def test_stop_budget_is_still_the_budget_stop_when_every_later_step_is_skipped(t
 
     assert report.step("R04-improvement").state == STEP_BUDGET_STOP and report.verdict() == "budget_stop"
     assert report.exit_code() == 4 and report.step("R06-cleanup").state == STEP_SUCCEEDED
+
+
+# ── les passes publiques R04 / R05 vivent sous l'échéance globale restante ───────────────────────────────────────────────────
+
+
+def _services(deadline, clock):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        remaining=lambda: None if deadline is None else deadline - clock(),
+    )
+
+
+def test_a_public_pass_is_never_started_after_the_global_deadline():
+    from collegue.pilot import w5_business as w5
+
+    started = []
+
+    async def pass_():
+        started.append(True)
+
+    clock = Clock()
+    coroutine = pass_()
+    with pytest.raises(BudgetStop, match="avant R04 : aucune nouvelle génération"):
+        w5._drive(_services(clock.now - 1.0, clock), coroutine, "R04")
+    coroutine.close()
+    assert started == [], "la passe n'a pas démarré"
+
+
+def test_a_public_pass_still_running_at_the_deadline_is_interrupted_not_extended():
+    import asyncio
+    import time
+
+    from collegue.pilot import w5_business as w5
+
+    async def endless():
+        await asyncio.sleep(30)
+
+    started = time.monotonic()
+    clock = Clock(time.monotonic())
+    with pytest.raises(BudgetStop, match="pendant R05 : passe interrompue"):
+        w5._drive(_services(clock.now + 0.2, time.monotonic), endless(), "R05")
+    assert time.monotonic() - started < 3.0, "aucune grâce après l'échéance"
