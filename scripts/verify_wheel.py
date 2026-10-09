@@ -31,6 +31,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Profil LLM de la vérification : fournisseur du catalogue supporté, valeurs FACTICES. Le démarrage valide le routage
+# LOCALEMENT (aucune requête) ; ce n'est PAS une preuve de disponibilité du fournisseur ni du modèle.
+LLM_PROFILE = {"LLM_PROVIDER": "gemini", "LLM_MODEL": "test-model", "LLM_API_KEY": "test-key"}
+
 # Exécuté DANS le venv, hors checkout. Imprime un JSON ; lève au premier écart.
 CHECK_CODE = r"""
 import asyncio, json, os, re, socket, subprocess, sys, sqlite3
@@ -146,7 +150,15 @@ async def serve():
 tool_count, skill_uris = asyncio.run(serve())
 if tool_count < 15 or len(skill_uris) != 5:
     fail(f"serveur : {tool_count} outils, skills {skill_uris}")
-report["server"] = {"tools": tool_count, "skill_resources": skill_uris, "module": server.__file__}
+# Le profil factice du catalogue est bien celui que LE PAQUET INSTALLÉ a lu (pas un défaut, pas un autre fournisseur).
+llm_profile = {
+    "LLM_PROVIDER": str(server.settings.LLM_PROVIDER),
+    "LLM_MODEL": str(server.settings.LLM_MODEL),
+    "key_is_the_fake_one": server.settings.LLM_API_KEY == "test-key",
+}
+if llm_profile != {"LLM_PROVIDER": "gemini", "LLM_MODEL": "test-model", "key_is_the_fake_one": True}:
+    fail(f"profil LLM du paquet installé inattendu : {llm_profile}")
+report["server"] = {"tools": tool_count, "skill_resources": skill_uris, "module": server.__file__, "llm_profile": llm_profile}
 
 if snapshot() != before:
     fail("le paquet installé a été modifié pendant l'exécution")
@@ -245,9 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                 VERIFY_REPO_ROOT=str(ROOT.resolve()),
                 VERIFY_WORKDIR=str(workdir),
                 COLLEGUE_HOME=str(home),
-                LLM_PROVIDER="anthropic",
-                LLM_API_KEY="test-key",
-                LLM_MODEL="test-model",
+                **LLM_PROFILE,
                 FASTMCP_CHECK_FOR_UPDATES="off",
             ),
             text=True,

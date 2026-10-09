@@ -38,6 +38,11 @@ BASELINE_MIGRATIONS = [
 ]
 
 
+# Profil LLM de ces tests : fournisseur du catalogue supporté (gemini), valeurs FACTICES. Le démarrage valide le routage
+# LOCALEMENT, sans requête ; ce n'est pas une preuve de disponibilité du fournisseur ni du modèle.
+LLM_PROFILE = {"LLM_PROVIDER": "gemini", "LLM_MODEL": "test-model", "LLM_API_KEY": "test-key"}
+
+
 def _repo_files() -> list[Path]:
     out = subprocess.run(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -111,9 +116,7 @@ def _run(dist: dict, code: str, *, home: Path | None = None, extra_env: dict[str
     """Exécute ``code`` avec le paquet INSTALLÉ (site en tête de sys.path), cwd hors checkout, sans PYTHONPATH."""
     env = _clean_env(
         COLLEGUE_SITE=str(dist["site"]),
-        LLM_PROVIDER="anthropic",
-        LLM_API_KEY="test-key",
-        LLM_MODEL="test-model",
+        **LLM_PROFILE,
         FASTMCP_CHECK_FOR_UPDATES="off",
         **(extra_env or {}),
     )
@@ -449,7 +452,8 @@ def test_installed_server_starts_and_serves_skills_without_any_llm_call(dist: di
         "        tools = await c.list_tools()\n"
         "        resources = await c.list_resources()\n"
         "        return {'tools': len(tools), 'skills': sorted(str(r.uri) for r in resources if str(r.uri).startswith('skill://')),\n"
-        "                'app': m.__file__}\n"
+        "                'app': m.__file__, 'provider': str(m.settings.LLM_PROVIDER), 'model': str(m.settings.LLM_MODEL),\n"
+        "                'fake_key': m.settings.LLM_API_KEY == 'test-key'}\n"
         "print('JSON:' + json.dumps(asyncio.run(run())))\n"
     )
     result = _json_out(
@@ -457,6 +461,8 @@ def test_installed_server_starts_and_serves_skills_without_any_llm_call(dist: di
     )
 
     assert result["app"].startswith(str(dist["site"]))
+    # Le profil du catalogue (gemini, valeurs factices) est celui que le PAQUET INSTALLÉ a réellement lu.
+    assert (result["provider"], result["model"], result["fake_key"]) == ("gemini", "test-model", True)
     assert result["tools"] >= 15
     assert [u for u in result["skills"] if u.endswith("/SKILL.md")] == [
         f"skill://{name}/SKILL.md"

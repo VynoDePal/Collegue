@@ -22,7 +22,8 @@ Ce que le script établit (et ce qu'il n'établit pas) :
    * replis : la chaîne ``OH_FALLBACK_MODELS`` garde le fournisseur, l'endpoint et la clé du primaire ;
    * arguments d'allocation (``max_output_tokens``, ``num_retries``…) acceptés par le vrai constructeur ;
 3. **modules d'oracle** (``--require-modules``, par défaut ``pypdf``) : importables dans CETTE image, ``pypdf`` lisant un PDF.
-   Cela ne prouve PAS que le gate exécute ses oracles dans cette image (celle du gate est ``collegue-sandbox``).
+   Cela ne prouve PAS quelle image le gate utilise réellement : ``_build_gate_sandbox`` prend ``SANDBOX_IMAGE`` (comme le
+   codeur, sans ses credentials) et ce contrôle ne lit ni cette configuration ni l'image du run de campagne.
 
 Hors périmètre : le mode abonnement (``LLM.subscription_login`` exige une session ChatGPT), les appels réseau, le budget.
 Sortie : un rapport JSON sur stdout (aucune clé) ; code 0 si tout est vérifié, 1 sinon.
