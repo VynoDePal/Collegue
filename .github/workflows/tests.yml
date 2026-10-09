@@ -176,6 +176,17 @@ jobs:
       - name: Run pip-audit
         run: pip-audit --strict --desc
 
+      # Audit EXPLICITE des dépendances de test/développement verrouillées (locks/dev.txt, pypdf compris),
+      # qui n'étaient auditées par aucun job : l'audit ci-dessus ne voit que l'environnement installé
+      # (locks/audit.txt). Aucune fermeture dev n'est réinstallée : le fichier est lu et chaque version
+      # épinglée est interrogée telle quelle (--no-deps : la fermeture est déjà dans le verrou ;
+      # --disable-pip : pas de résolution). Toute erreur échoue le job (--strict) et AUCUN avis n'est ignoré.
+      # PORTÉE RÉELLE : pip-audit évalue les marqueurs d'environnement du verrou contre l'interpréteur de ce
+      # job (Python 3.12, Linux). Les entrées réservées à Python < 3.12 (backports-tarfile,
+      # importlib-metadata, zipp) ne sont donc PAS auditées ici ; ce n'est pas un audit de la fermeture 3.11.
+      - name: Audit locked dev dependencies (strict)
+        run: pip-audit --strict --desc --no-deps --disable-pip -r locks/dev.txt
+
       # Wheel construit depuis les fichiers du dépôt, installé NON éditable dans un venv vierge avec le
       # verrou runtime, puis exécuté hors checkout (ressources, migrations jusqu'à head, serveur sans LLM).
       - name: Verify the built wheel in a clean environment
@@ -222,6 +233,19 @@ jobs:
         run: |
           docker run --rm collegue-sandbox-openhands:pr-check \
             python -c "from openhands.tools.terminal.definition import TerminalAction; assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; assert TerminalAction.model_validate({'command': 'canonical', 'commands': 'ignored'}).command == 'canonical'"
+
+      # Contrôle SANS MODÈLE du VRAI SDK OpenHands de l'image et du runner embarqué /opt/oh_runner.py :
+      # les arguments utilisés existent dans LLM.model_fields ET un vrai LLM est construit (identifiants
+      # FACTICES, définis par le script) pour Gemini par défaut, OpenAI à endpoint propre, fournisseur local
+      # sans clé et replis (modèle, base_url, clé effective). Conteneur SANS réseau, AUCUN secret ni
+      # variable d'hôte, script transmis sur l'entrée standard (aucun montage). Il vérifie aussi que pypdf est
+      # importable dans l'image du worker ; cela ne prouve PAS que le gate exécute ses oracles dans cette image.
+      - name: Verify OpenHands worker routing (real SDK, no model)
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i --network none \
+            collegue-sandbox-openhands:pr-check \
+            python - < scripts/ci_w4_worker_routing.py
 
       # Prouve que le service est PRÊT (santé + MCP initialize), pas seulement lancé :
       # attente bornée, échec si le conteneur sort ou reste indisponible, journaux
