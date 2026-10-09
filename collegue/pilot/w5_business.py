@@ -65,6 +65,18 @@ FAKE_CREDENTIAL_LINE = re.compile(
     r"AKIA[0-9A-Z]{16}|(?:secret[_ ]?access[_ ]?key|SECRET_ACCESS_KEY)\s*[=:]\s*\S{40}", re.I
 )
 
+#: Seul fichier de la graine que le socle peut MODIFIER (décision manager : aligner les dépendances sur celles, auditées, de l'image).
+ALLOWED_SEED_MODIFICATIONS = ("requirements.txt",)
+#: Ajouts autorisés au socle : le contrôle (workflow), des documents d'exemple et des listes de dépendances racine. Rien d'autre :
+#: aucune implémentation métier (``app/``, ``tests/``, code Python…), aucun fichier inconnu.
+_ADDED_ALLOWED = (
+    re.compile(r"\.github/workflows/[A-Za-z0-9._-]+\.ya?ml"),
+    re.compile(r"docs/[A-Za-z0-9._-]+\.md"),
+    re.compile(r"requirements[A-Za-z0-9._-]*\.(txt|in)"),
+)
+CHECK_PRODUCER_KEYS = frozenset({"workflow", "trigger", "job", "publishes", "head_sha_expression", "app_id"})
+HEAD_SHA_EXPRESSION = "github.event.pull_request.head.sha"
+_PIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*(\[[A-Za-z0-9_,.\- ]+\])?==[A-Za-z0-9_.!+\-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SAFE_PATH = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
@@ -164,7 +176,11 @@ def load_bootstrap_manifest(path: str) -> Dict[str, Any]:
     return data
 
 
-def _manifest_shape(manifest: Mapping[str, Any]) -> Tuple[str, Dict[str, str]]:
+def _manifest_shape(manifest: Mapping[str, Any]) -> Tuple[str, Dict[str, str], List[str]]:
+    """Forme FERMÉE du manifeste : ``(bootstrap_sha, approved_files, modified_seed_files)``.
+
+    ``approved_files`` (chemin → sha256) couvre les ajouts ET la version approuvée des fichiers de graine modifiés, listés dans
+    ``modified_seed_files`` (seul ``requirements.txt`` est admis). Aucune implémentation métier n'est admissible."""
     expected = {
         "schema": BOOTSTRAP_SCHEMA,
         "repository": FIXTURE_REPOSITORY,
@@ -185,6 +201,15 @@ def _manifest_shape(manifest: Mapping[str, Any]) -> Tuple[str, Dict[str, str]]:
     approved = manifest.get("approved_files")
     if not isinstance(approved, dict) or not approved:
         raise RuntimeError("manifeste de bootstrap : approved_files (chemin → sha256) requis")
+    modified = manifest.get("modified_seed_files", [])
+    if (
+        not isinstance(modified, list)
+        or any(m not in ALLOWED_SEED_MODIFICATIONS for m in modified)
+        or len(set(modified)) != len(modified)
+    ):
+        raise RuntimeError(
+            f"manifeste de bootstrap : modified_seed_files doit être inclus dans {list(ALLOWED_SEED_MODIFICATIONS)} (vu {modified!r})"
+        )
     for path, digest in approved.items():
         if (
             not isinstance(path, str)
@@ -195,9 +220,43 @@ def _manifest_shape(manifest: Mapping[str, Any]) -> Tuple[str, Dict[str, str]]:
             raise RuntimeError(f"manifeste de bootstrap : chemin approuvé invalide {path!r}")
         if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
             raise RuntimeError(f"manifeste de bootstrap : sha256 invalide pour {path!r}")
+        if path in modified:
+            continue
         if path in FIXTURE_SEED_FILES:
-            raise RuntimeError(f"manifeste de bootstrap : {path!r} appartient à la graine immuable")
-    return bootstrap_sha, dict(approved)
+            raise RuntimeError(
+                f"manifeste de bootstrap : {path!r} appartient à la graine immuable (non déclaré modifié)"
+            )
+        if not any(rule.fullmatch(path) for rule in _ADDED_ALLOWED):
+            raise RuntimeError(
+                f"manifeste de bootstrap : {path!r} n'est ni un contrôle, ni un document, ni une liste de dépendances"
+            )
+    missing = [path for path in modified if path not in approved]
+    if missing:
+        raise RuntimeError(f"manifeste de bootstrap : version approuvée absente pour {missing}")
+    added = manifest.get("added_files")
+    if added is not None and sorted(added) != sorted(set(approved) - set(modified)):
+        raise RuntimeError("manifeste de bootstrap : added_files ≠ approved_files − modified_seed_files")
+    return bootstrap_sha, dict(approved), list(modified)
+
+
+def requirements_violations(text: str) -> List[str]:
+    """Une liste de dépendances du socle ne contient que des versions ÉPINGLÉES (``nom==version``, empreintes admises) : aucune
+    source externe (URL, VCS, chemin), aucune option d'index, aucune inclusion."""
+    problems: List[str] = []
+    logical = text.replace("\\\n", " ").splitlines()
+    for line in logical:
+        content = line.split("#", 1)[0].strip()
+        if not content:
+            continue
+        head, *rest = content.split()
+        if not _PIN.fullmatch(head.split(";")[0]):
+            problems.append(f"dépendance non épinglée ou source externe : {head!r}")
+            continue
+        for token in rest:
+            if not (re.fullmatch(r"--hash=sha256:[0-9a-f]{64}", token) or token.startswith(";") or token.endswith(";")):
+                if "://" in token or token.startswith(("-", "@", "git+", "file:")):
+                    problems.append(f"option ou source non admise : {token!r}")
+    return problems
 
 
 def read_tree_blobs(clients: Any, owner: str, repo: str, tree_sha: str) -> Dict[str, Tuple[str, str]]:
@@ -243,7 +302,7 @@ def validate_bootstrap_manifest(
     descendant DIRECT de la graine ; arbre Git réel = graine inchangée + EXACTEMENT les fichiers approuvés (octets hachés relus) ;
     workflow du check requis présent parmi les fichiers approuvés ; ruleset actif et check requis associé à l'application
     déclarée, appliqué à l'acteur sur le motif de branche de la campagne. Retourne les preuves relues (consignées)."""
-    bootstrap_sha, approved = _manifest_shape(manifest)
+    bootstrap_sha, approved, modified = _manifest_shape(manifest)
     owner, _, repo = FIXTURE_REPOSITORY.partition("/")
     info = clients.repos.get_repo(owner, repo)
     if (
@@ -271,26 +330,41 @@ def validate_bootstrap_manifest(
     if sorted(seed_tree) != sorted(FIXTURE_SEED_FILES):
         raise RuntimeError("la graine ne contient pas exactement ses huit fichiers connus")
     changed_seed = sorted(path for path in seed_tree if boot_tree.get(path) != seed_tree[path])
-    if changed_seed:
-        raise RuntimeError(f"le socle modifie des fichiers de la graine : {changed_seed}")
-    extra = sorted(set(boot_tree) - set(seed_tree))
-    if extra != sorted(approved):
+    if changed_seed != sorted(modified):
         raise RuntimeError(
-            f"contenu du socle ≠ fichiers approuvés (en trop : {sorted(set(extra) - set(approved))} ; "
-            f"manquants : {sorted(set(approved) - set(extra))})"
+            f"le socle modifie des fichiers de la graine hors de ce que le manifeste déclare : {changed_seed} ≠ {sorted(modified)}"
         )
+    added = sorted(set(approved) - set(modified))
+    extra = sorted(set(boot_tree) - set(seed_tree))
+    if extra != added:
+        raise RuntimeError(
+            f"contenu du socle ≠ fichiers approuvés (en trop : {sorted(set(extra) - set(added))} ; "
+            f"manquants : {sorted(set(added) - set(extra))})"
+        )
+    seed_hashes: Dict[str, str] = {}
     for path, expected in sorted(approved.items()):
         text = _file_text(clients, owner, repo, path, bootstrap_sha)
         if text is None:
             raise RuntimeError(f"fichier approuvé introuvable dans le socle : {path}")
         if hashlib.sha256(text.encode("utf-8")).hexdigest() != expected:
             raise RuntimeError(f"octets du socle ≠ sha256 approuvé : {path}")
-        if _file_text(clients, owner, repo, path, FIXTURE_SEED_SHA) is not None:
+        previous = _file_text(clients, owner, repo, path, FIXTURE_SEED_SHA)
+        if path in modified:
+            if previous is None or hashlib.sha256(previous.encode("utf-8")).hexdigest() == expected:
+                raise RuntimeError(f"fichier de graine déclaré modifié mais identique à la graine : {path}")
+            seed_hashes[path] = hashlib.sha256(previous.encode("utf-8")).hexdigest()
+            if path == "requirements.txt" and requirements_violations(text):
+                raise RuntimeError("requirements.txt du socle : " + " ; ".join(requirements_violations(text)))
+        elif previous is not None:
             raise RuntimeError(f"fichier approuvé déjà présent dans la graine : {path}")
     workflow = [path for path in approved if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))]
     if not workflow:
         raise RuntimeError("aucun workflow approuvé ne produit le check requis")
-    produced = _workflow_jobs(clients, owner, repo, workflow, bootstrap_sha)
+    producer = manifest.get("check_producer")
+    if producer is not None:
+        produced = [_validate_check_producer(producer, manifest, approved, clients, owner, repo, bootstrap_sha)]
+    else:
+        produced = _workflow_jobs(clients, owner, repo, workflow, bootstrap_sha)
     if REQUIRED_CHECK not in produced:
         raise RuntimeError(f"aucun workflow approuvé ne produit le check requis {REQUIRED_CHECK!r}")
     ruleset = clients.branches.get_ruleset(owner, repo, int(manifest["ruleset_id"]))
@@ -316,6 +390,10 @@ def validate_bootstrap_manifest(
         "bootstrap_tree": commit.tree_sha,
         "main_tip": main_tip,
         "approved_files": sorted(approved),
+        "modified_seed_files": sorted(modified),
+        "seed_sha256_of_modified": seed_hashes,
+        "approved_sha256_of_modified": {path: approved[path] for path in modified},
+        "check_producer": producer,
         "workflow_jobs": sorted(produced),
         "ruleset_id": ruleset.id,
         "required_check": REQUIRED_CHECK,
@@ -348,13 +426,76 @@ def _workflow_jobs(clients: Any, owner: str, repo: str, paths: Sequence[str], re
     return names
 
 
+def _validate_check_producer(
+    producer: Any,
+    manifest: Mapping[str, Any],
+    approved: Mapping[str, str],
+    clients: Any,
+    owner: str,
+    repo: str,
+    ref: str,
+) -> str:
+    """Le workflow de confiance qui PUBLIE le check requis est celui décrit, lu sur l'arbre réel (octets approuvés par ailleurs).
+
+    Exigences : forme fermée ; déclencheur ``pull_request_target`` seul ; aucune référence à un secret ; permissions minimales ;
+    extractions sans identifiants conservés ; un job du nom déclaré dont une étape publie, via l'API des check-runs, le check
+    ``Fixture tests`` sur la tête exacte (``HEAD_SHA`` = ``github.event.pull_request.head.sha``). Rend le nom du check publié."""
+    import yaml
+
+    if not isinstance(producer, dict) or set(producer) != CHECK_PRODUCER_KEYS:
+        raise RuntimeError(f"check_producer : clés exactes attendues {sorted(CHECK_PRODUCER_KEYS)}")
+    expectations = {
+        "trigger": "pull_request_target",
+        "publishes": REQUIRED_CHECK,
+        "head_sha_expression": HEAD_SHA_EXPRESSION,
+        "app_id": manifest["check_app_id"],
+    }
+    for key, value in expectations.items():
+        if producer.get(key) != value:
+            raise RuntimeError(f"check_producer : {key} doit valoir {value!r} (vu {producer.get(key)!r})")
+    path = str(producer.get("workflow") or "")
+    if path not in approved or not path.startswith(".github/workflows/"):
+        raise RuntimeError("check_producer : le workflow producteur n'est pas un fichier approuvé du socle")
+    text = _file_text(clients, owner, repo, path, ref) or ""
+    document = yaml.safe_load(text) or {}
+    triggers = document.get("on", document.get(True))
+    if not isinstance(triggers, dict) or set(triggers) != {"pull_request_target"}:
+        raise RuntimeError("check_producer : le workflow doit n'avoir que le déclencheur pull_request_target")
+    if "secrets." in text:
+        raise RuntimeError("check_producer : le workflow référence un secret")
+    permissions = document.get("permissions") or {}
+    if permissions != {"contents": "read", "pull-requests": "read", "checks": "write"}:
+        raise RuntimeError(f"check_producer : permissions non minimales ({permissions})")
+    job = next((j for j in (document.get("jobs") or {}).values() if (j or {}).get("name") == producer["job"]), None)
+    if job is None:
+        raise RuntimeError(f"check_producer : aucun job nommé {producer['job']!r}")
+    if (job.get("env") or {}).get("HEAD_SHA") != "${{ " + HEAD_SHA_EXPRESSION + " }}":
+        raise RuntimeError("check_producer : HEAD_SHA doit valoir la tête exacte de la PR")
+    for step in job.get("steps") or []:
+        if (
+            str(step.get("uses", "")).startswith("actions/checkout")
+            and (step.get("with") or {}).get("persist-credentials") is not False
+        ):
+            raise RuntimeError("check_producer : une extraction conserve ses identifiants")
+    publishing = [
+        str(step.get("run", ""))
+        for step in job.get("steps") or []
+        if "check-runs" in str(step.get("run", ""))
+        and f'name="{REQUIRED_CHECK}"' in str(step.get("run", ""))
+        and 'head_sha="$HEAD_SHA"' in str(step.get("run", ""))
+    ]
+    if not publishing:
+        raise RuntimeError(f"check_producer : aucune étape ne publie le check {REQUIRED_CHECK!r} sur la tête exacte")
+    return REQUIRED_CHECK
+
+
 def verify_fixture_controls_intact(
     clients: Any, manifest: Mapping[str, Any], ref: str, *, label: str
 ) -> Dict[str, str]:
     """Les contrôles de la fixture (workflows approuvés) sont INCHANGÉS sur ``ref`` : un BUILD ou une amélioration ne peut pas
     réécrire le check qui le juge. Échec ⇒ ``RuntimeError`` (jamais une réussite)."""
     owner, _, repo = FIXTURE_REPOSITORY.partition("/")
-    _bootstrap, approved = _manifest_shape(manifest)
+    _bootstrap, approved, _modified = _manifest_shape(manifest)
     seen: Dict[str, str] = {}
     for path, expected in sorted(approved.items()):
         if not path.startswith(".github/"):
