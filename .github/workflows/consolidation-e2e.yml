@@ -141,6 +141,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install --require-hashes --no-deps -r locks/dev.txt
 
+      # Variables que le workflow ne peut pas fixer en dur : lues de l'API publique du produit (santé INDÉPENDANTE de Phase 5, exigée telle
+      # quelle par P02), après l'installation et AVANT tout préflight ; aucun secret, aucun réseau (scripts/w5_workflow_env.py, format
+      # multiligne de $GITHUB_ENV). Un échec arrête le workflow : aucune commande de repli n'est inventée.
+      - name: Exporter la commande de santé indépendante de Phase 5 (API publique du produit)
+        shell: bash
+        run: python scripts/w5_workflow_env.py >> "$GITHUB_ENV"
+
       - name: Initialiser le registre durable local (migrations, base vierge de la campagne)
         shell: bash
         run: python -m collegue.migrations upgrade
