@@ -584,3 +584,105 @@ class BudgetBlock(Base):
     )
     resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
     resolution: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+# ── courtier budgétaire W5 (broker) ───────────────────────────────────────────────────────────────────────
+#
+# Trois tables ADDITIVES (migration 0013). Le registre budgétaire (``budget_*``) reste l'autorité des montants ;
+# ces tables portent l'ÉTAT DU COURTIER : sessions (un worker = une session = un scope enfant), tentatives
+# (préparée → émission marquée → réglée) et l'horloge globale persistée dès la première ouverture réelle.
+
+BROKER_SESSION_OPEN = "open"
+BROKER_SESSION_CLOSING = "closing"
+BROKER_SESSION_CLOSED = "closed"
+BROKER_ATTEMPT_PREPARED = "prepared"  # réservation prise, RIEN n'a encore été émis
+BROKER_ATTEMPT_EMITTING = "emitting"  # émission marquée AVANT l'envoi : un crash ici = usage inconnu
+BROKER_ATTEMPT_SETTLED = "settled"
+BROKER_ATTEMPT_RELEASED = "released"  # absence d'émission/consommation ÉTABLIE
+BROKER_ATTEMPT_UNKNOWN = "unknown"
+
+
+class BrokerSession(Base):
+    """Session d'un worker : droits fixés CÔTÉ SERVEUR (rôle, modèles, plafond de sortie, échéance), jeton hashé."""
+
+    __tablename__ = "broker_sessions"
+    __table_args__ = (
+        CheckConstraint("state IN ('open', 'closing', 'closed')", name="ck_broker_sessions_state"),
+        CheckConstraint("in_flight >= 0", name="ck_broker_sessions_in_flight"),
+        CheckConstraint("max_output_tokens > 0", name="ck_broker_sessions_max_output"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # SHA-256 du jeton de session : le jeton lui-même n'est jamais stocké (ni une clé fournisseur).
+    token_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    role: Mapped[str] = mapped_column(String(24), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)  # scope ENFANT
+    parent_scope_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    parent_reservation_id: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
+    allowed_models: Mapped[str] = mapped_column(Text, nullable=False)  # JSON, liste de noms canoniques nus
+    max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(12), nullable=False, default="open", server_default="open")
+    in_flight: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    deadline_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    consolidated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    close_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    unknown_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    closed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+
+
+class BrokerAttempt(Base):
+    """Une génération demandée : ``prepared`` → ``emitting`` (écrit AVANT l'envoi) → ``settled`` / ``released`` / ``unknown``."""
+
+    __tablename__ = "broker_attempts"
+    __table_args__ = (
+        UniqueConstraint("scope_key", "request_id", name="uq_broker_attempts_scope_request"),
+        CheckConstraint(
+            "state IN ('prepared', 'emitting', 'settled', 'released', 'unknown')",
+            name="ck_broker_attempts_state",
+        ),
+        CheckConstraint("reserved_tokens >= 0 AND output_cap > 0", name="ck_broker_attempts_bounds"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    attempt_id: Mapped[str] = mapped_column(String(96), nullable=False, unique=True)
+    request_id: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)  # clé d'idempotence de l'appelant
+    session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("broker_sessions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    scope_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)  # où vit la réservation
+    role: Mapped[str] = mapped_column(String(24), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(12), nullable=False, default="prepared", server_default="prepared")
+    reservation_id: Mapped[Optional[str]] = mapped_column(String(96), nullable=True)
+    counted_tokens: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    reserved_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    output_cap: Mapped[int] = mapped_column(Integer, nullable=False)
+    usage_prompt: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    usage_candidates: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    usage_thoughts: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    usage_total: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    response_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+    error_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime, nullable=False, default=_utcnow, server_default=func.now()
+    )
+    emitted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    settled_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+
+
+class BrokerClock(Base):
+    """Échéance GLOBALE persistée à la première ouverture RÉELLE (canaris compris) ; jamais remise à zéro."""
+
+    __tablename__ = "broker_clocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)

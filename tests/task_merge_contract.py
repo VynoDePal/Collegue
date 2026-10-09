@@ -504,7 +504,9 @@ def run_alembic_upgrade_0011_to_0012(url):
         assert before[1] == [(task_id, project_id, "T1", "in_review")]
 
         command.upgrade(cfg, "0012")
-        assert version() == "0012" and head_revisions() == ["0012"]
+        assert (
+            version() == "0012" and head_revisions()[0] >= "0012"
+        )  # la tête avance avec les migrations suivantes (0013…)
         schema = inspect(engine)
         assert "task_merges" in schema.get_table_names()
         assert {
@@ -568,7 +570,7 @@ def run_alembic_upgrade_0011_to_0012(url):
         assert snapshot() == before, "le downgrade ne touche que task_merges"
 
         command.upgrade(cfg, "head")
-        assert version() == head_revisions()[0] == "0012" and "task_merges" in inspect(engine).get_table_names()
+        assert version() == head_revisions()[0] and "task_merges" in inspect(engine).get_table_names()
         assert snapshot() == before
     finally:
         engine.dispose()
