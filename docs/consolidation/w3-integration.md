@@ -1,11 +1,11 @@
 # Vague 3 — protocole et checklist d'intégration (C)
 
-**État : intégré localement, non publié.** Le document a été rédigé **avant** les livraisons de A et B ; les §1 à §6
-décrivent le protocole et la checklist, qui restent la référence de revue. Intégration : lot A `ee15e0b` et lot B `c4e63c6`
-fusionnés `--no-ff` sur la branche de C (résultats chiffrés, SHA et preuves : `reports/w3-c-integration.md`, hors dépôt).
-Les §3 (« points de raccord existants ») décrivent l'état de `58355a4`, **avant** les lots : ils ne décrivent plus le
-code courant. Les garanties ne sont établies que sur le SHA figé ; les cinq checks distants et les revues restent à
-observer. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole et checklists précédentes :
+**État : livrée** (PR #611 fusionnée, `main` = `5c1cbf51cec854b2fa73e3951273951e7a7212be`). Le document a été rédigé **avant** les
+livraisons de A et B ; les §1 à §6 décrivent le protocole et la checklist, qui restent la référence de revue. Intégration : lot A
+`ee15e0b` et lot B `c4e63c6` ; résultats chiffrés, SHA et preuves : `reports/w3-c-integration.md`, `w3-c-delivery.md`, `w3-final.md`
+(hors dépôt). Suite : [`w4-integration.md`](w4-integration.md). Les §3 (« points de raccord existants ») décrivent l'état de `58355a4`, **avant** les lots : ils ne décrivent plus le
+code courant. Les cinq checks de la PR et du push sur `main` sont verts ; les revues externes ont été indisponibles par
+quota (aucun avis favorable). Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole et checklists précédentes :
 [`protocole.md`](protocole.md) ; vague 2 : [`w2-integration.md`](w2-integration.md) ; lots : [`w3-quality.md`](w3-quality.md)
 (A) et [`w3-merge.md`](w3-merge.md) (B).
 

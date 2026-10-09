@@ -7,10 +7,10 @@ MCP, donc pas de ``ctx`` : ``run_project_from_settings`` recevait ``ctx=None`` e
 les chemins LLM réels échouaient.
 
 Ce module fournit un ``ctx`` qui appelle le LLM via un client **OpenAI-compatible**
-(``AsyncOpenAI`` + ``base_url`` par provider), en réutilisant la MÊME résolution
-provider→endpoint que le handler serveur (``resolve_openai_endpoint``) → **multi-
-provider** (Gemini OpenAI-compat / OpenAI / lmstudio / ollama / unsloth), pas de
-lock-in (brief §8). Au même chokepoint que le handler serveur, on applique la
+(``AsyncOpenAI``), en réutilisant la MÊME résolution de destination que le handler serveur
+(:func:`collegue.core.llm.roles.resolve_route`) → **multi-provider** (Gemini OpenAI-compat / OpenAI /
+lmstudio / ollama / unsloth), pas de lock-in (brief §8). Vague 4 : chaque appel résout la route DE SON RÔLE
+(fournisseur, modèle, endpoint, clé) ; un client est construit par route, jamais partagé entre deux identités. Au même chokepoint que le handler serveur, on applique la
 **garde budget dur** (``enforce_budget``, C4) et la **capture d'usage**
 (``record_usage``) — tous les ``ctx.sample()`` offline transitent ici.
 
@@ -20,7 +20,9 @@ Contrat reproduit fidèlement (lu dans le code) :
   ``.result`` (instance ``result_type`` si parsable, sinon le texte) — exactement
   ce que lisent ``tools/base.py`` (``result.result if result_type else result.text``)
   et le planner ;
-- ``model_preferences=[modèle]`` route vers ce modèle (rôle → modèle, C1/C2) ;
+- ``model_preferences=[modèle, "collegue-route:<rôle>"]`` (voir ``model_preferences_for_role``) route vers la destination
+  complète du rôle ; une préférence qui contredit le modèle du rôle est REFUSÉE (elle changerait le modèle sans changer
+  client, endpoint ni clé) ;
 - stubs ``info/debug/warning/error/report_progress`` no-op attendus par les outils ;
 - ``max_output_tokens`` généreux par défaut (quirk gemma : trop bas ⇒ contenu vide).
 
@@ -41,7 +43,15 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
+
+from collegue.core.llm.roles import (
+    LLMRole,
+    LLMRoute,
+    LLMRoutingError,
+    parse_route_preferences,
+    resolve_route,
+)
 
 DEFAULT_MAX_TOKENS = 8192
 
@@ -179,7 +189,12 @@ class LocalSamplingContext:
         sampler_script: Optional[str] = None,
         sampler_timeout: float = 240.0,
         runner: Any = None,
+        settings_obj: Any = None,
+        subscription_models: Iterable[str] = (),
     ):
+        self._settings = settings_obj  # présent ⇒ mode ROUTÉ (une route par rôle) ; absent ⇒ ctx statique (tests)
+        self._clients: Dict[tuple, Any] = {}
+        self._subscription_models = frozenset(str(m).strip().lower() for m in subscription_models if str(m).strip())
         self._default_model = default_model or ""
         self._api_key = api_key
         self._base_url = base_url
@@ -187,8 +202,9 @@ class LocalSamplingContext:
         self._default_max_tokens = int(default_max_tokens)
         self._max_retries = int(max_retries)
         self._client = client
-        # Abonnement (Codex/ChatGPT) : un modèle NON-Gemini (ex. gpt-5.4) est échantillonné
-        # via le sandbox (le SDK subscription_login n'est PAS dans le process principal).
+        # Abonnement (Codex/ChatGPT) : échantillonné via le sandbox (le SDK subscription_login n'est PAS dans le
+        # process principal). Choisi EXPLICITEMENT : par la route du rôle (``auth == subscription``) ou, pour un ctx
+        # statique, par ``subscription_models`` — jamais déduit du nom du modèle.
         self._subscription_enabled = bool(subscription_enabled and subscription_auth_dir and sampler_script)
         self._subscription_auth_dir = subscription_auth_dir
         self._sampler_image = sampler_image
@@ -204,7 +220,10 @@ class LocalSamplingContext:
 
     @classmethod
     def from_settings(cls, settings_obj: Any) -> "LocalSamplingContext":
-        """Construit le ctx depuis la config (provider→endpoint).
+        """Construit le ctx ROUTÉ depuis la config : la destination se résout à chaque appel, par rôle.
+
+        Construire n'ouvre aucune connexion et n'exige aucune clé : une route incohérente ou sans credential lève
+        :class:`LLMRoutingError` au ``sample`` correspondant, avant toute émission.
 
         **Pas de rate-limiter par défaut** : les réglages ``LLM_RATE_LIMIT_*`` bornent
         le middleware **serveur par-client** (autre couche) ; les y réutiliser
@@ -213,16 +232,9 @@ class LocalSamplingContext:
         ``enforce_budget`` (C4). Un ``PerModelRateLimiter`` reste **injectable** au
         constructeur pour qui veut cadencer un quota free-tier.
         """
-        from collegue.core.llm.sampling_handler import resolve_openai_endpoint
-
-        default_model, api_key, base_url = resolve_openai_endpoint(settings_obj)
-        # Abonnement : un rôle dont le modèle est NON-Gemini (ex. reviewer=gpt-5.4) est
-        # routé vers le sampler d'abonnement (sandbox), comme le coder. Gaté par
-        # ``CODER_SUBSCRIPTION`` + creds montées (``SANDBOX_SUBSCRIPTION_AUTH_DIR``).
-        sub = bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False))
-        auth = ""
-        if sub:
-            auth = os.path.expanduser(str(getattr(settings_obj, "SANDBOX_SUBSCRIPTION_AUTH_DIR", "") or "").strip())
+        # Abonnement : explicite par rôle (CODER_SUBSCRIPTION / LLM_AUTH_<ROLE>=subscription) ; le montage des
+        # creds (``SANDBOX_SUBSCRIPTION_AUTH_DIR``) est requis au moment où une route d'abonnement est utilisée.
+        auth = os.path.expanduser(str(getattr(settings_obj, "SANDBOX_SUBSCRIPTION_AUTH_DIR", "") or "").strip())
         # oh_sampler.py committé : collegue/executor/oh_sampler.py (ce fichier = collegue/core/llm/).
         sampler_script = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -230,27 +242,54 @@ class LocalSamplingContext:
             "oh_sampler.py",
         )
         return cls(
-            default_model=default_model,
-            api_key=api_key,
-            base_url=base_url,
-            subscription_enabled=sub,
+            default_model="",
+            subscription_enabled=bool(auth),
             subscription_auth_dir=auth or None,
             sampler_script=sampler_script,
             # Le sampler d'abonnement (reviewer/juge) tourne dans la MÊME image que le coder.
             sampler_image=str(
                 getattr(settings_obj, "SANDBOX_IMAGE", "collegue-sandbox:latest") or "collegue-sandbox:latest"
             ),
+            settings_obj=settings_obj,
         )
 
     async def _noop(self, *args: Any, **kwargs: Any) -> None:  # ctx.info/debug/...
         return None
 
-    def _client_obj(self) -> Any:
-        if self._client is None:
-            from openai import AsyncOpenAI
+    def _client_obj(self, route: Optional[LLMRoute] = None) -> Any:
+        """Client OpenAI-compatible de la route (un par destination+identité) ; l'injecté prime (tests)."""
+        if self._client is not None:
+            return self._client
+        from openai import AsyncOpenAI
 
+        if route is None:
             self._client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url, max_retries=self._max_retries)
-        return self._client
+            return self._client
+        key = route.cache_key()
+        client = self._clients.get(key)
+        if client is None:
+            # ``base_url`` et ``api_key`` TOUJOURS explicites : le SDK relirait sinon OPENAI_BASE_URL/OPENAI_API_KEY
+            # de l'environnement hôte, c'est-à-dire une autre destination ou une autre identité que la route.
+            client = AsyncOpenAI(api_key=route.transport_key(), base_url=route.endpoint, max_retries=self._max_retries)
+            self._clients[key] = client
+        return client
+
+    def _route_for(self, model_preferences: Any) -> tuple:
+        """``(route | None, modèle)`` : la route du rôle porté par les préférences (rôle DEFAULT sinon).
+
+        Mode routé : la destination vient de la config, la préférence ne peut que la CONFIRMER. Ctx statique : le premier
+        nom de modèle des préférences, sinon le modèle par défaut (comportement historique des tests).
+        """
+        role, models = parse_route_preferences(model_preferences)
+        if self._settings is None:
+            return None, (models[0] if models else self._default_model)
+        route = resolve_route(role or LLMRole.DEFAULT, self._settings)
+        if models and models[0] != route.model:
+            raise LLMRoutingError(
+                f"préférence de modèle {models[0]!r} contradictoire avec la route du rôle {route.role!r} "
+                f"({route.model!r}) : refusée (elle changerait le modèle sans changer client, endpoint ni clé)"
+            )
+        return route, route.model
 
     async def sample(
         self,
@@ -263,10 +302,15 @@ class LocalSamplingContext:
         model_preferences: Any = None,
         **_ignored: Any,
     ) -> SampleResult:
-        model = _pick_model(model_preferences, self._default_model)
+        route, model = self._route_for(model_preferences)
         oai_messages = to_openai_messages(messages, system_prompt)
-        if self._is_subscription_model(model):
-            # Modèle d'abonnement (ex. gpt-5.4) → sampler dans le sandbox (subscription_login).
+        if self._is_subscription(route, model):
+            # Abonnement EXPLICITEMENT choisi pour ce rôle → sampler dans le sandbox (subscription_login).
+            if not self._subscription_enabled:
+                raise LLMRoutingError(
+                    f"rôle {route.role if route else '?'} : authentification par abonnement sélectionnée mais "
+                    "SANDBOX_SUBSCRIPTION_AUTH_DIR (creds montées) est absent"
+                )
             text = await self._sample_subscription(model, oai_messages)
         else:
             # On RESPECTE le ``max_tokens`` explicite de l'appelant (parité avec le handler
@@ -276,22 +320,21 @@ class LocalSamplingContext:
             eff_max = int(max_tokens) if max_tokens else self._default_max_tokens
             if self._limiter is not None:
                 await self._limiter.acquire(model)
-            text = await self._create(model, oai_messages, temperature, eff_max)
+            text = await self._create(model, oai_messages, temperature, eff_max, route=route)
         res = SampleResult(text=text)
         if result_type is not None:
             res.result = _coerce(text, result_type)
         return res
 
-    def _is_subscription_model(self, model: str) -> bool:
-        """Vrai si ``model`` doit passer par l'abonnement (sandbox) plutôt que l'endpoint Gemini.
+    def _is_subscription(self, route: Optional[LLMRoute], model: str) -> bool:
+        """Vrai si l'abonnement a été CHOISI : route ``subscription`` (config) ou modèle listé (ctx statique).
 
-        Heuristique générique : abonnement activé + creds + le modèle n'est PAS un modèle
-        Gemini (``gemma*``/``gemini*``). Les modèles ChatGPT (``gpt-*``) y matchent.
+        Plus aucune heuristique « modèle non-Gemini ⇒ abonnement » : un modèle sans choix explicite part sur le
+        transport HTTP de SA route, avec SA clé.
         """
-        if not self._subscription_enabled:
-            return False
-        m = (model or "").strip().lower()
-        return bool(m) and not (m.startswith("gemma") or m.startswith("gemini"))
+        if route is not None:
+            return route.uses_subscription
+        return self._subscription_enabled and (model or "").strip().lower() in self._subscription_models
 
     def _validated_subscription_mounts(self) -> tuple:
         """Chemins CANONIQUES (auth RW, script RO) à monter, ou ``RuntimeError`` (fail-closed).
@@ -444,21 +487,30 @@ class LocalSamplingContext:
             raise
         return proc.returncode, proc.stdout, proc.stderr
 
-    def _endpoint_url(self, client) -> Optional[str]:
+    def _endpoint_url(self, client, route: Optional[LLMRoute] = None) -> Optional[str]:
         """Destination RÉELLE des appels HTTP (URL de base du client qui émet), pour justifier la borne de tokens.
 
         ``None`` = inconnue (client factice sans ``base_url``, ni URL de config) : la garde retombe alors sur le
-        routage de la config et n'admet que les destinations hébergées connues.
+        routage de la config et n'admet que les destinations hébergées connues. En mode routé, l'URL de la route
+        remplace le repli sur une URL globale (un client injecté sans ``base_url`` ne rend pas la destination inconnue).
         """
-        url = getattr(client, "base_url", None) or self._base_url
+        url = getattr(client, "base_url", None) or (route.endpoint if route is not None else None) or self._base_url
         return str(url) if url else None
 
-    async def _create(self, model: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+    async def _create(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        *,
+        route: Optional[LLMRoute] = None,
+    ) -> str:
         from collegue.core.llm.budget_guard import TRANSPORT_HTTP, current_binding, guarded_call
         from collegue.monitoring.sampling_usage import record_usage
 
         binding = current_binding()
-        client = self._client_obj()
+        client = self._client_obj(route)
         if binding is None:
             # Hors registre (serveur MCP sans projet) : garde historique C4 basée sur le
             # MetricsCollector — NON couverte par la garantie stricte (cf. w2-budget.md).
@@ -487,7 +539,8 @@ class LocalSamplingContext:
                 transport=TRANSPORT_HTTP,
                 usage_of=_openai_usage,
                 max_attempts=self._max_retries + 1,
-                endpoint=self._endpoint_url(client),
+                endpoint=self._endpoint_url(client, route),
+                provider=route.provider if route is not None else None,
             )
         usage = getattr(resp, "usage", None)
         if usage is not None:
@@ -499,6 +552,13 @@ class LocalSamplingContext:
         return _extract_text(resp)
 
     async def aclose(self) -> None:
+        for client in list(self._clients.values()):
+            close = getattr(client, "close", None) or getattr(client, "aclose", None)
+            if close is not None:
+                maybe = close()
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+        self._clients.clear()
         if self._client is not None:
             close = getattr(self._client, "close", None) or getattr(self._client, "aclose", None)
             if close is not None:

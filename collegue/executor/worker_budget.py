@@ -44,6 +44,7 @@ from collegue.core.llm.budget_guard import (
     BudgetBinding,
     current_binding,
     resolve_prices,
+    settings_for_route,
 )
 from collegue.state.budget_ledger import (
     REFUSED_CAP_TOKENS,
@@ -178,15 +179,26 @@ def _require_enforceable(agent: object, billable: bool, snap) -> None:
     raise BudgetRefused(REFUSED_UNBOUNDED, f"agent {name} : capacité budgétaire inconnue ({enforcement!r}) : refusé")
 
 
-def _coder_model_and_billable(settings: Optional[object]) -> Tuple[str, bool]:
-    from collegue.core.llm.roles import LLMRole, resolve_role
+def _coder_route(settings: Optional[object]):
+    """Route EFFECTIVE du codeur (même résolution que le sandbox du worker) — cohérence validée, clé non exigée ici.
 
-    _provider, model = resolve_role(LLMRole.CODER, settings)
-    model = model or ""
-    subscription = bool(getattr(settings, "CODER_SUBSCRIPTION", False)) and not model.lower().startswith(
-        ("gemma", "gemini")
-    )
-    return model, not subscription
+    ``None`` quand AUCUN modèle de codeur n'est configuré : l'allocation n'a alors rien à tarifer (un agent factice sans
+    appel reste admissible, comme avant la vague 4) et le lancement d'un vrai worker refuse de toute façon sans modèle.
+    Toute autre incohérence (fournisseur, modèle, endpoint, abonnement) lève :class:`LLMRoutingError`.
+    """
+    from collegue.core.llm.roles import LLMRole, resolve_role, resolve_route
+
+    if not resolve_role(LLMRole.CODER, settings)[1]:
+        return None
+    return resolve_route(LLMRole.CODER, settings, require_credential=False)
+
+
+def _coder_model_and_billable(settings: Optional[object]) -> Tuple[str, bool]:
+    """``(modèle, facturé)`` du codeur d'après sa route : l'abonnement est un CHOIX explicite, pas une déduction du nom."""
+    route = _coder_route(settings)
+    if route is None:
+        return "", True
+    return route.model, not route.uses_subscription
 
 
 def allocate_worker(
@@ -223,18 +235,24 @@ def allocate_worker(
     min_tokens = int(_setting(settings, "BUDGET_WORKER_MIN_TOKENS", DEFAULT_MIN_WORKER_TOKENS, integer=True))
     timeout_seconds = _runtime_seconds(timeout_seconds)
 
-    # Tarifs de CHAQUE modèle de la chaîne (principal + replis) : un repli est tarifé à son propre prix.
+    # Tarifs de CHAQUE modèle de la chaîne (principal + replis) : un repli est tarifé à son propre prix. L'autorité
+    # tarifaire est la DESTINATION RÉELLE de la route du codeur (hôte de l'endpoint ; abonnement = backend OpenAI), jamais
+    # le préfixe LiteLLM du nom (``openai/…`` peut désigner une passerelle) ni le fournisseur global de la config.
+    route = _coder_route(settings)
+    price_settings = settings_for_route(settings, route.provider, route.endpoint) if route is not None else settings
+    route_endpoint = route.endpoint if route is not None and not route.uses_subscription else None
+    route_family = route.hosted_family if route is not None else None
     chain = _chain_models(agent, model)
     table = []
     for name in chain:
-        # Autorité tarifaire = fournisseur RÉEL de la chaîne (nom LiteLLM ``gemini/…`` ou ``openai/…`` ; nom nu =
-        # backend OpenAI en abonnement), pas le provider déclaré de la config.
-        provider_part = name.partition("/")[0].lower() if "/" in name else ("openai" if not billable else "")
+        head, sep, tail = name.partition("/")
+        bare = tail if sep and head.lower() in ("gemini", "openai") else name
         priced = resolve_prices(
-            name.split("/")[-1],
-            settings,
+            bare,
+            price_settings,
             billable=billable,
-            family=provider_part if provider_part in ("gemini", "openai") else None,
+            endpoint=route_endpoint,
+            family=route_family,
         )
         if priced is not None:
             table.append((name, priced[0], priced[1]))

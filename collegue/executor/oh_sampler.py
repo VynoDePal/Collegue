@@ -83,23 +83,22 @@ def main() -> int:
     # ``max_output_tokens`` réservé et le SDK ne retente JAMAIS en interne (un retry non comptabilisé
     # dépasserait la réservation). Les échecs remontent à l'hôte, qui les règle (usage inconnu).
     strict = bool(data.get("strict"))
-    llm_kwargs = {}
     if strict:
         max_output = int(data.get("max_output_tokens") or 0)
         if max_output <= 0:
             print("oh_sampler: budget strict sans max_output_tokens : sortie non bornée, refusé", file=sys.stderr)
             return 3
-        llm_kwargs["max_output_tokens"] = max_output
+        # Contrat hôte conservé (réservation faite sur ce plafond), mais il n'est PAS transmis au SDK : ``subscription_login``
+        # fixe déjà ``max_output_tokens=None`` (le passer lève ``TypeError``) et le backend abonnement ne l'honore jamais.
     llm = LLM.subscription_login(
         vendor="openai",
         model=model,
         open_browser=False,
-        service_id="sampler",
+        usage_id="sampler",
         num_retries=0 if strict else int(os.environ.get("OH_NUM_RETRIES", "6")),
         retry_min_wait=int(os.environ.get("OH_RETRY_MIN", "5")),
         retry_max_wait=int(os.environ.get("OH_RETRY_MAX", "60")),
         timeout=int(os.environ.get("OH_LLM_TIMEOUT", "180")),
-        **llm_kwargs,
     )
     messages = [
         Message(role="system", content=[TextContent(text=system)]),

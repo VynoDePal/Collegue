@@ -79,13 +79,17 @@ def _valid_sha256(value: Any) -> bool:
 
 
 def require_plan_approved(manager: Any, project_id: int, approval_check: Optional[Callable[..., Any]] = None) -> None:
-    """Plan toujours approuvé et inchangé depuis son approbation, sinon :class:`ContractError`."""
+    """Contenu du plan toujours approuvé et inchangé depuis son approbation, sinon :class:`ContractError`.
+
+    Le statut de cycle ``improving`` (posé après la livraison du MVP) n'est PAS une perte d'approbation : seul le hash
+    du contenu scellé compte ici. La garde d'écriture P4 (``require_approved``) n'est pas concernée.
+    """
     try:
         checker = approval_check
         if checker is None:
-            from collegue.planner.plan_review import require_approved
+            from collegue.planner.plan_review import require_approved_content
 
-            checker = require_approved
+            checker = require_approved_content
         checker(manager, project_id)
     except Exception as exc:  # noqa: BLE001 - tout doute sur l'approbation bloque
         raise ContractError(f"plan non approuvé ou modifié depuis son approbation : {exc}") from exc

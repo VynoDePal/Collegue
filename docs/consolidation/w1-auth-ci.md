@@ -146,9 +146,13 @@ de validation.
 
 `scripts/ci_docker_smoke.sh IMAGE` :
 
-- lance le conteneur **sans réseau** (`--network none`) avec `LLM_PROVIDER=anthropic` et une
-  clé factice (ce provider ne valide rien à distance au démarrage ; garde-fou :
-  `test_anthropic_startup_validation_makes_no_network_call`) → aucun appel LLM/API possible ;
+- lance le conteneur **sans réseau** (`--network none`) avec le profil du catalogue supporté
+  `LLM_PROVIDER=gemini`, `LLM_MODEL=test-model`, `LLM_API_KEY=test-key` (valeurs factices ; vague 4 : le
+  démarrage valide **localement** le routage par rôle, sans requête, et refuse un fournisseur hors catalogue
+  comme l'ancien profil `anthropic` ; garde-fou :
+  `test_supported_smoke_profile_startup_validation_makes_no_remote_call`, qui interdit toute émission réseau
+  et tout SDK distant et appelle la vraie `validate_llm_config`) → aucun appel LLM/API possible. Ce profil
+  ne prouve **pas** la disponibilité du fournisseur ni du modèle ;
 - sonde via `docker exec … curl` sur le loopback du conteneur : santé `:4122/_health`
   (`{"status":"ok"}`), MCP `initialize` sur `:4121/mcp/` (HTTP 200 + résultat) **et** la
   commande exacte du healthcheck Compose (un test garantit qu'elle est identique à celle de

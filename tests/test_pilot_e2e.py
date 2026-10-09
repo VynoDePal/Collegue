@@ -299,7 +299,7 @@ async def test_plan_time_oracle_is_persisted_approved_and_replayed_without_llm(
         repo="r",
         settings_obj=SimpleNamespace(
             GATE_ACCEPTANCE_TESTS=True,
-            LLM_PROVIDER="test",
+            LLM_PROVIDER="gemini",
             LLM_MODEL="qa-fixture",
         ),
         manager=manager,

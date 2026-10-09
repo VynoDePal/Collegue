@@ -132,6 +132,8 @@ HOSTED_KNOWN_MODELS = {
     ),
 }
 _SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
+# Destinations hébergées connues (même table que ``collegue.core.llm.roles.HOSTED_ENDPOINT_HOSTS`` ; ce script est copié seul).
+_HOSTED_HOSTS = {"generativelanguage.googleapis.com": "gemini", "api.openai.com": "openai"}
 PER_MESSAGE_FRAMING_TOKENS = 16
 PER_TOOL_FRAMING_TOKENS = 64
 REQUEST_FRAMING_TOKENS = 64
@@ -241,6 +243,7 @@ class BudgetGuard:
         max_attempts=1,
         attested_models=(),
         subscription=False,
+        endpoint=None,
         clock=None,
         sleep=None,
         exit_fn=None,
@@ -254,6 +257,14 @@ class BudgetGuard:
         self.max_attempts = max(1, int(max_attempts))
         self.attested_models = tuple(m.strip().lower() for m in attested_models if m and m.strip())
         self.subscription = bool(subscription)
+        # URL de base personnalisée (``LLM_BASE_URL``) : le préfixe LiteLLM ``openai/`` ne prouve plus alors le backend
+        # OpenAI hébergé (passerelle, serveur local) — seule une attestation exacte de l'opérateur justifie la borne.
+        self.endpoint_family = None
+        self.custom_endpoint = bool(endpoint)
+        if endpoint:
+            from urllib.parse import urlparse
+
+            self.endpoint_family = _HOSTED_HOSTS.get((urlparse(str(endpoint)).hostname or "").lower())
         # Résolus à l'appel (et non figés à la définition) : horloge/sommeil substituables.
         self._clock = clock or (lambda: time.time())
         self._sleep = sleep or (lambda seconds: time.sleep(seconds))
@@ -288,6 +299,8 @@ class BudgetGuard:
             if provider == "openai" or (not provider and self.subscription)
             else None
         )
+        if self.custom_endpoint and family != self.endpoint_family:
+            family = None  # destination personnalisée non hébergée reconnue : le nom ne prouve aucun tokenizer
         return family is not None and (bare in HOSTED_KNOWN_MODELS[family] or undated in HOSTED_KNOWN_MODELS[family])
 
     def needs_price(self) -> bool:
@@ -501,7 +514,61 @@ def _guard_from_args(args) -> "BudgetGuard | None":
         max_attempts=int(os.environ.get("OH_NUM_RETRIES", "8")) + 1,
         attested_models=[m for m in (args.byte_bounded_models or "").split(",")],
         subscription=os.environ.get("LLM_SUBSCRIPTION", "") == "1",
+        endpoint=os.environ.get("LLM_BASE_URL") or None,
     )
+
+
+# Arguments du constructeur ``openhands.sdk.LLM`` que ce runner utilise (mode clé API). ``base_url`` et ``usage_id`` sont des
+# champs de ``LLM`` (SDK 1.19.1, verrou ``locks/sandbox-openhands.txt``) ; le contrôle d'image ``scripts``/CI vérifie qu'ils
+# sont tous dans ``LLM.model_fields`` (voir docs/consolidation/w4-routing.md). ATTENTION : ``LLM`` déclare
+# ``extra="ignore"`` — un argument inconnu (ex. l'ancien ``service_id``, devenu ``usage_id``) est ignoré SANS erreur, d'où ce
+# contrôle explicite. L'identité du coder est ``usage_id="coder"`` (``llm.usage_id`` sur l'objet réel).
+LLM_CONSTRUCTOR_KWARGS = (
+    "model",
+    "api_key",
+    "base_url",
+    "usage_id",
+    "num_retries",
+    "retry_min_wait",
+    "retry_max_wait",
+    "timeout",
+    "max_output_tokens",
+)
+
+# Mode abonnement : ``LLM.subscription_login(vendor=…, model=…, open_browser=…, **kwargs)``. Les ``kwargs`` vont au
+# constructeur ``LLM`` par ``create_llm``, qui fixe DÉJÀ ``max_output_tokens=None`` (le backend Codex ne le supporte pas) :
+# le passer à nouveau lève ``TypeError`` (« multiple values »), et le SDK ne l'envoie jamais en mode abonnement. Ce sont donc
+# les seuls champs ``LLM`` transmis au login (le reste, ``vendor``/``model``/``open_browser``, sont ses paramètres).
+LLM_SUBSCRIPTION_KWARGS = (
+    "usage_id",
+    "num_retries",
+    "retry_min_wait",
+    "retry_max_wait",
+    "timeout",
+)
+
+
+def resolve_credential(model: str, environ=None):
+    """Clé API du worker, avec sa PROVENANCE : ``(clé | None, nom de la variable)``.
+
+    ``LLM_API_KEY`` est la seule référence normale (injectée par l'hôte, par référence, hors argv). L'ancien nom
+    ``GEMINI_API_KEY`` n'est lu que pour un modèle ``gemini/…`` : une clé Gemini ne part jamais vers un autre fournisseur.
+    """
+    environ = os.environ if environ is None else environ
+    if environ.get("LLM_API_KEY"):
+        return environ["LLM_API_KEY"], "LLM_API_KEY"
+    if str(model).lower().startswith("gemini/") and environ.get("GEMINI_API_KEY"):
+        return environ["GEMINI_API_KEY"], "GEMINI_API_KEY"
+    return None, ""
+
+
+def llm_kwargs(model: str, api_key, base_url, common: dict) -> dict:
+    """Arguments exacts du ``LLM(...)`` en mode clé API : modèle (préfixe du fournisseur), clé, endpoint si nommé."""
+    kwargs = dict(model=model, api_key=api_key)
+    if base_url:
+        kwargs["base_url"] = base_url
+    kwargs.update(common)
+    return kwargs
 
 
 def main() -> int:
@@ -547,10 +614,14 @@ def main() -> int:
     # montées depuis l'hôte ; login fait en amont en device_code). Opt-in strict :
     # sans LLM_SUBSCRIPTION=1, le chemin clé-API (gemma) reste inchangé.
     subscription = os.environ.get("LLM_SUBSCRIPTION", "") == "1"
-    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not subscription and not api_key:
-        print("oh_runner: LLM_API_KEY/GEMINI_API_KEY manquante", file=sys.stderr)
+    api_key, _credential_name = resolve_credential(primary)
+    base_url = os.environ.get("LLM_BASE_URL") or None
+    local_endpoint = bool(base_url) and primary.lower().startswith("openai/")
+    if not subscription and not api_key and not local_endpoint:
+        print("oh_runner: LLM_API_KEY manquante", file=sys.stderr)
         return 2
+    if not subscription and not api_key:
+        api_key = "local"  # serveur local OpenAI-compatible sans clé : valeur fictive explicite, jamais une clé hôte
 
     chain = [primary, *[m for m in fallbacks if m != primary]]
     if guard is not None:
@@ -566,7 +637,7 @@ def main() -> int:
     def run_with(model: str) -> None:
         # Résilience 503 : on retente longtemps (le budget-temps global du run borne).
         common = dict(
-            service_id="coder",
+            usage_id="coder",
             # Sous allocation, le SDK ne retente JAMAIS en interne : la garde boucle et contrôle avant
             # chaque nouvelle émission.
             num_retries=0 if guard is not None else int(os.environ.get("OH_NUM_RETRIES", "8")),
@@ -593,9 +664,13 @@ def main() -> int:
                 pass
             # open_browser=False : headless, on réutilise les creds en cache (le
             # login interactif device_code a déjà eu lieu hors-run).
-            llm = LLM.subscription_login(vendor="openai", model=model, open_browser=False, **common)
+            # ``max_output_tokens`` n'est PAS transmis : ``create_llm`` le fixe à ``None`` (TypeError sinon) et il n'est jamais
+            # émis en mode abonnement. Sous allocation, la garde constate alors une sortie non bornée et REFUSE l'émission
+            # (fail-closed) — voir reports/w4-a-sdk-service-id.md.
+            login_kwargs = {k: v for k, v in common.items() if k in LLM_SUBSCRIPTION_KWARGS}
+            llm = LLM.subscription_login(vendor="openai", model=model, open_browser=False, **login_kwargs)
         else:
-            llm = LLM(model=model, api_key=api_key, **common)
+            llm = LLM(**llm_kwargs(model, api_key, base_url, common))
         if guard is not None:
             guard.install(llm, model)  # AllocationExhausted si aucun point d'émission n'est contrôlable
         agent = get_default_agent(llm=llm, cli_mode=True)

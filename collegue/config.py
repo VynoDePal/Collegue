@@ -6,7 +6,7 @@ import logging
 import math
 from typing import ClassVar, List, Optional, Union
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     COLLEGUE_PUBLISH_HOST: Optional[str] = None
     DEBUG: bool = True
 
-    LLM_API_KEY: Optional[str] = None
+    # Jamais dans ``repr(settings)`` (journaux, tracebacks) ; les erreurs de validation ne rejouent pas non plus les
+    # valeurs saisies (``hide_input_in_errors`` ci-dessous).
+    LLM_API_KEY: Optional[str] = Field(default=None, repr=False)
     LLM_MODEL: str = "gemini-3-flash-preview"
     LLM_PROVIDER: str = "gemini"
     # URL de base pour les providers compatibles OpenAI (LM Studio, etc.).
@@ -47,6 +49,53 @@ class Settings(BaseSettings):
     LLM_PROVIDER_REVIEWER: Optional[str] = None
     LLM_MODEL_PLANNER: Optional[str] = None
     LLM_PROVIDER_PLANNER: Optional[str] = None
+
+    # Vague 4 — destination et authentification PAR RÔLE (résolues ensemble par collegue.core.llm.resolve_route).
+    # Clé : celle du rôle, sinon la clé GLOBALE — héritée UNIQUEMENT si le fournisseur du rôle est le fournisseur global
+    # (un fournisseur différent sans clé dédiée est refusé avant toute émission ; un fournisseur local peut n'en avoir
+    # aucune). Endpoint : celui du rôle, sinon celui du fournisseur global (même fournisseur), sinon le défaut du
+    # fournisseur. Authentification : ``LLM_AUTH_<ROLE>`` = api_key | none | subscription (abonnement ChatGPT/Codex,
+    # fournisseur openai uniquement, JAMAIS déduit du modèle ; le codeur l'active aussi via CODER_SUBSCRIPTION).
+    LLM_API_KEY_CODER: Optional[SecretStr] = None
+    LLM_API_KEY_QA: Optional[SecretStr] = None
+    LLM_API_KEY_REVIEWER: Optional[SecretStr] = None
+    LLM_API_KEY_PLANNER: Optional[SecretStr] = None
+    LLM_BASE_URL_CODER: Optional[str] = None
+    LLM_BASE_URL_QA: Optional[str] = None
+    LLM_BASE_URL_REVIEWER: Optional[str] = None
+    LLM_BASE_URL_PLANNER: Optional[str] = None
+    LLM_AUTH_CODER: Optional[str] = None
+    LLM_AUTH_QA: Optional[str] = None
+    LLM_AUTH_REVIEWER: Optional[str] = None
+    LLM_AUTH_PLANNER: Optional[str] = None
+    # Modèles de repli du codeur (CSV, noms NUS du MÊME fournisseur/endpoint/clé que le codeur). Vide (défaut) : repli
+    # historique ``gemma-4-26b-a4b-it`` pour un codeur Gemini, AUCUN repli pour un autre fournisseur (un repli ne change
+    # jamais de fournisseur ni d'identité).
+    CODER_FALLBACK_MODELS: Optional[str] = None
+
+    @field_validator("LLM_AUTH_CODER", "LLM_AUTH_QA", "LLM_AUTH_REVIEWER", "LLM_AUTH_PLANNER", mode="before")
+    @classmethod
+    def _normalize_llm_auth(cls, v):
+        text = str(v or "").strip().lower()
+        if text and text not in ("api_key", "none", "subscription"):
+            # Ne jamais rejouer la valeur saisie (elle pourrait être une clé collée au mauvais endroit).
+            raise ValueError("méthode d'authentification inconnue (api_key, none ou subscription)")
+        return text or None
+
+    @field_validator(
+        "LLM_BASE_URL_CODER", "LLM_BASE_URL_QA", "LLM_BASE_URL_REVIEWER", "LLM_BASE_URL_PLANNER", mode="before"
+    )
+    @classmethod
+    def _normalize_llm_base_url(cls, v):
+        text = str(v or "").strip()
+        if not text:
+            return None
+        from urllib.parse import urlparse
+
+        parsed = urlparse(text)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("endpoint invalide (http/https avec hôte, sans identifiant dans l'URL)")
+        return text
 
     MAX_TOKENS: int = 8192
     REQUEST_TIMEOUT: int = 60
@@ -424,7 +473,13 @@ class Settings(BaseSettings):
                 raise ValueError("OAUTH_ALGORITHM ne peut pas être vide lorsque OAUTH_ENABLED est true.")
         return self
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+        # Une ValidationError ne rejoue pas la valeur saisie : une clé collée dans un champ invalide ne fuit pas.
+        "hide_input_in_errors": True,
+    }
 
     @property
     def llm_model(self) -> str:
@@ -437,6 +492,7 @@ class Settings(BaseSettings):
     # Providers locaux compatibles OpenAI (coût nul ; clé requise pour unsloth).
     LOCAL_PROVIDERS: ClassVar[tuple] = ("lmstudio", "ollama", "unsloth")
 
+    # Source unique : collegue.core.llm.roles (la résolution de destination s'y appuie aussi).
     LOCAL_DEFAULT_BASE_URLS: ClassVar[dict] = {
         "lmstudio": "http://localhost:1234/v1",
         "ollama": "http://localhost:11434/v1",

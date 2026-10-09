@@ -7,18 +7,20 @@ agent la remplace pour le run réel : il lance :mod:`collegue.executor.oh_runner
 sur le workspace monté, et fait fonctionner le **coder par abonnement** (Codex/ChatGPT,
 gpt-5.5, sans coût API) quand il est activé — le runner appelle ``subscription_login``.
 
-Le **modèle CODER** et la **clé API** (ou l'abonnement) sont fournis par
-l'**environnement du sandbox** (injectés par ``DockerSandbox`` : ``env`` /
-``env_passthrough`` / ``subscription_auth_dir``), **jamais** dans l'argv. L'agent mute
+La **destination du CODER** (fournisseur, modèle, endpoint, clé ou abonnement) est résolue UNE fois par
+:func:`collegue.core.llm.roles.resolve_route` puis fournie par l'**environnement du sandbox** (``LLM_MODEL`` au format
+LiteLLM du FOURNISSEUR du rôle, ``LLM_BASE_URL``, clé par référence ``env_secrets``, ``subscription_auth_dir``),
+**jamais** dans l'argv. L'agent mute
 le workspace ; la **capture autoritative du diff** revient à l'exécuteur Collègue (E2).
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import List, Optional
 
-from collegue.core.llm.roles import LLMRole, resolve_role
+from collegue.core.llm.roles import LLMRole, LLMRoute, canonical_model, resolve_route
 from collegue.executor.agent import AgentResult, IssueSpec
 from collegue.executor.openhands_agent import parse_usage_from_logs, usage_status_from_run
 
@@ -39,8 +41,11 @@ class OHSdkAgent:
     émission, retries et replis compris ; le conteneur s'auto-limite à l'échéance (``timeout``) même si
     le client Docker meurt. ``"in-runner"`` borne les appels du framework d'agent, PAS une commande du
     workspace qui contacterait librement le fournisseur avec la même clé : avec une clé facturable
-    ce n'est donc pas une barrière effective et le mode strict sous plafond le REFUSE (abonnement :
-    0 $/token, accepté ; mode ``advisory`` : disponible). Voir ``docs/consolidation/w2-budget.md``.
+    ce n'est donc pas une barrière effective et le mode strict sous plafond le REFUSE. Abonnement (0 $/token) : accepté
+    UNIQUEMENT sous un plafond USD sans plafond de tokens ; REFUSÉ sous un plafond strict de tokens (le backend ne
+    garantit pas la sortie en amont et les commandes du workspace ont les credentials montés — la campagne 2 USD /
+    250 000 tokens est donc refusée en strict). Mode ``advisory`` : disponible, sans garantie stricte.
+    Voir ``docs/consolidation/w2-budget.md`` et ``docs/consolidation/w4-routing.md``.
     """
 
     budget_enforcement = "in-runner"
@@ -62,34 +67,54 @@ class OHSdkAgent:
         self._max_iterations = int(max_iterations)
         self._python_bin = python_bin
 
-    def litellm_model(self) -> str:
-        """Modèle CODER au format LiteLLM (``gemini/<modèle>``) pour OpenHands.
+    def route(self, *, require_credential: bool = False) -> LLMRoute:
+        """Destination effective du codeur (fournisseur, modèle, endpoint, authentification) ; lève si incohérente."""
+        return resolve_route(self._role, self._settings, require_credential=require_credential)
 
-        Préfixe ``gemini/`` ajouté si absent (LiteLLM route le provider par préfixe) ;
-        un modèle déjà préfixé (``provider/modèle``) est laissé tel quel. Sert au mode
-        **clé API** ; en mode abonnement, le modèle (gpt-5.5 nu) vient de l'env du sandbox.
+    def litellm_model(self) -> str:
+        """Modèle du codeur au format LiteLLM, préfixé par le FOURNISSEUR DU RÔLE (``gemini/…`` ou ``openai/…``).
+
+        Le préfixe vient de la route : un codeur ``openai/gpt-5.4`` n'est jamais renommé ``gemini/gpt-5.4``. En
+        abonnement le modèle est nu (le backend ChatGPT n'a pas de préfixe LiteLLM). Une configuration qui se
+        contredit lève :class:`~collegue.core.llm.roles.LLMRoutingError` avant tout lancement.
         """
-        _provider, model = resolve_role(self._role, self._settings)
-        if not model:
-            model = "gemma-4-31b-it"
-        return model if "/" in model else f"gemini/{model}"
+        return self.route().litellm_model()
+
+    def fallback_models(self) -> List[str]:
+        """Replis du codeur (noms nus), toujours du MÊME fournisseur, endpoint et identité que le principal.
+
+        Abonnement : ``CODER_SUBSCRIPTION_FALLBACK``. Sinon ``CODER_FALLBACK_MODELS`` ; à défaut, le repli historique
+        ``gemma-4-26b-a4b-it`` pour un codeur Gemini et AUCUN repli pour un autre fournisseur — un repli ne change
+        jamais de fournisseur ni de clé.
+        """
+        route = self.route()
+        settings = self._settings
+        if route.uses_subscription:
+            raw = str(getattr(settings, "CODER_SUBSCRIPTION_FALLBACK", "gpt-5.4") or "")
+        else:
+            raw = str(getattr(settings, "CODER_FALLBACK_MODELS", "") or "")
+            if not raw.strip() and route.provider == "gemini":
+                raw = RUNNER_DEFAULT_FALLBACK
+        names: List[str] = []
+        for item in raw.split(","):
+            name = item.strip()
+            if not name:
+                continue
+            canonical = _canonical_fallback(route, name)
+            if canonical != route.model and canonical not in names:
+                names.append(canonical)
+        return names
 
     def model_chain(self) -> List[str]:
         """Modèles que le runner peut utiliser, dans l'ordre (principal puis replis), tels que le runner les nomme.
 
-        Reproduit le choix de l'environnement du sandbox (``pilot.runtime._coder_sandbox_env``) : abonnement →
-        modèle nu + ``CODER_SUBSCRIPTION_FALLBACK`` ; clé API → ``litellm_model()`` + repli par défaut du runner.
+        Reproduit EXACTEMENT ce que reçoit le runner (``runtime._coder_sandbox_env``) : ``LLM_MODEL`` puis
+        ``OH_FALLBACK_MODELS``, tous de la route du codeur ; la tarification budgétaire s'appuie sur cette chaîne.
         """
-        settings = self._settings
-        if bool(getattr(settings, "CODER_SUBSCRIPTION", False)):
-            primary = str(getattr(settings, "CODER_SUBSCRIPTION_MODEL", "gpt-5.5") or "gpt-5.5")
-            fallbacks = str(getattr(settings, "CODER_SUBSCRIPTION_FALLBACK", "gpt-5.4") or "gpt-5.4")
-        else:
-            primary, fallbacks = self.litellm_model(), RUNNER_DEFAULT_FALLBACK
-        chain = [primary]
-        for item in fallbacks.split(","):
-            if item.strip() and item.strip() not in chain:
-                chain.append(item.strip())
+        route = self.route()
+        chain = [route.litellm_model()]
+        for name in self.fallback_models():
+            chain.append(replace(route, model=name).litellm_model())
         return chain
 
     def _budget_args(self, alloc) -> List[str]:
@@ -185,3 +210,8 @@ def _accepts_timeout(sandbox) -> bool:
     except (TypeError, ValueError, AttributeError):
         return False
     return "timeout" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _canonical_fallback(route: LLMRoute, name: str) -> str:
+    """Nom nu d'un repli, validé contre le fournisseur de la route (un repli d'un autre fournisseur est refusé)."""
+    return canonical_model(route.provider, name, where="repli du codeur")

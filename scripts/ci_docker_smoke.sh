@@ -3,10 +3,13 @@
 #
 # Usage : ci_docker_smoke.sh IMAGE
 #
-# Le conteneur est démarré sans réseau (--network none) avec un provider LLM qui ne
-# valide rien à distance au démarrage (LLM_PROVIDER=anthropic + clé factice) : aucun
-# appel LLM/API n'est possible. Les sondes passent par `docker exec … curl` sur le
-# loopback DU conteneur (aucun port publié, aucun conflit sur le runner) :
+# Le conteneur est démarré sans réseau (--network none) avec le profil du catalogue supporté
+# LLM_PROVIDER=gemini, LLM_MODEL=test-model, LLM_API_KEY=test-key (valeurs FACTICES). Le démarrage de
+# l'application valide LOCALEMENT le routage par rôle (validate_llm_config : fournisseur du catalogue,
+# modèle, endpoint et authentification cohérents) sans émettre de requête : aucun appel LLM/API n'est
+# possible. Ce n'est PAS une preuve de disponibilité du fournisseur ni du modèle, seulement que la
+# configuration est acceptée localement. Aucune option ne contourne cette validation.
+# Les sondes passent par `docker exec … curl` sur le loopback DU conteneur (aucun port publié, aucun conflit sur le runner) :
 #   - health : GET  :4122/_health            -> {"status":"ok"}
 #   - MCP    : POST :4121/mcp/ (initialize)  -> HTTP 200 + résultat JSON-RPC
 #   - healthcheck : la commande EXACTE du healthcheck de docker-compose.yml, exécutée dans le
@@ -118,7 +121,7 @@ container_state() {
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 if ! run_output=$(docker run -d --name "$NAME" --network none \
-  -e LLM_PROVIDER=anthropic -e LLM_API_KEY=test-key -e LLM_MODEL=test-model \
+  -e LLM_PROVIDER=gemini -e LLM_API_KEY=test-key -e LLM_MODEL=test-model \
   -e FASTMCP_CHECK_FOR_UPDATES=off \
   "$IMAGE" 2>&1); then
   echo "::error::docker run a échoué pour l'image $IMAGE"

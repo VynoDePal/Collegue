@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import inspect
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, List, Optional, Tuple
 
 from collegue.improve.gate import DEFAULT_MIN_GAIN, evaluate
@@ -403,10 +403,19 @@ async def _run_improvement_impl(
             if promotable:
                 report = _improvement_quality_report(dimension.value, before, after, gate.delta)
                 from collegue.executor.pr import open_pr
+                from collegue.executor.workspace import branch_for_improvement
 
                 try:
-                    pr = open_pr(
+                    # Identité de publication DISTINCTE du BUILD et des passes précédentes (le compteur de round
+                    # repart à 1 à chaque passe) : liée au contenu publié, jamais à ``collegue/issue-<round>``.
+                    publish_workspace = replace(
                         workspace,
+                        branch=branch_for_improvement(
+                            round_num, content.base_sha, content.base_tree_sha, content.tree_sha
+                        ),
+                    )
+                    pr = open_pr(
+                        publish_workspace,
                         report,
                         improvement,
                         owner,

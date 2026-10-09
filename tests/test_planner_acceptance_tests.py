@@ -159,9 +159,9 @@ async def test_generate_uses_qa_role_normalizes_and_persists_expected_provenance
     ctx = _Ctx([_Result(text=f"```python\r\n{VALID_SOURCE}```"), _Result(text=VALID_SOURCE)])
     settings = SimpleNamespace(
         LLM_PROVIDER="gemini",
-        LLM_MODEL="default",
+        LLM_MODEL="gemini-2.5-flash",
         LLM_PROVIDER_QA="openai",
-        LLM_MODEL_QA="qa-model",
+        LLM_MODEL_QA="gpt-5.4",
         LLM_CALL_TIMEOUT=0,
     )
 
@@ -177,7 +177,7 @@ async def test_generate_uses_qa_role_normalizes_and_persists_expected_provenance
 
     assert list(artifacts) == [1, 2]  # sampling et résultat en ordre stable par id
     assert len(ctx.calls) == 2
-    assert all(call["model_preferences"] == ["qa-model"] for call in ctx.calls)
+    assert all(call["model_preferences"] == ["gpt-5.4", "collegue-route:qa"] for call in ctx.calls)
     assert all(call["system_prompt"] == at.ACCEPTANCE_TEST_SYSTEM_PROMPT for call in ctx.calls)
     assert all(call["temperature"] == 0.1 for call in ctx.calls)
     assert manager.calls == [(7, artifacts)]
@@ -190,7 +190,7 @@ async def test_generate_uses_qa_role_normalizes_and_persists_expected_provenance
         "generator": "collegue.planner.acceptance_tests",
         "role": "qa",
         "requested_provider": "openai",
-        "requested_model": "qa-model",
+        "requested_model": "gpt-5.4",
         "prompt_sha256": provenance["prompt_sha256"],
         "spec_sha256": at.sha256_text(at.spec_text(_spec())),
         "criteria_sha256": at.sha256_text(at.criteria_text(tasks[1])),

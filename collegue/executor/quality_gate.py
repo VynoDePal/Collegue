@@ -2443,6 +2443,12 @@ class ExpertReviewer:
         if self._review_context:
             base_context = f"{base_context}\n\n{self._review_context}" if base_context else self._review_context
         request = CodeReviewRequest(code=diff or "(diff vide)", language=language, context=base_context)
+        # La revue du pilote est le rôle REVIEWER : la boucle agentique en propage le hint de route, le transport
+        # résout alors la destination (fournisseur, endpoint, clé) du reviewer — pas celle du rôle par défaut.
+        try:
+            tool.llm_role = "reviewer"
+        except AttributeError:  # outil injecté immuable (tests) : rôle par défaut inchangé
+            pass
         response = await tool.execute_async(request, ctx=ctx)
         return outcome_from_review(response, min_quality=self._min_quality)
 

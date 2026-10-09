@@ -772,14 +772,14 @@ class BaseTool(ABC):
                 "temperature": temperature,
             }
             if role is not None:
-                try:
-                    from collegue.core.llm.client import model_preferences_for_role
+                # Le rôle voyage dans les préférences (hint de route sérialisable) : le transport résout alors la
+                # destination COMPLÈTE du rôle (fournisseur, endpoint, clé). Une config de routage contradictoire est
+                # une erreur franche — jamais avalée, sous peine de retomber en silence sur la destination par défaut.
+                from collegue.core.llm.client import model_preferences_for_role
 
-                    prefs = model_preferences_for_role(role)
-                    if prefs:
-                        sample_kwargs["model_preferences"] = prefs
-                except Exception as exc:
-                    self.logger.debug("Routage par rôle ignoré: %s", exc)
+                prefs = model_preferences_for_role(role)
+                if prefs:
+                    sample_kwargs["model_preferences"] = prefs
 
             _llm_start = time.time()
             result = await ctx.sample(**sample_kwargs)

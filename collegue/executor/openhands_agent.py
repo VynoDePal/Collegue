@@ -28,7 +28,7 @@ import math
 import time
 from typing import List, Optional, Tuple
 
-from collegue.core.llm.roles import LLMRole, resolve_role
+from collegue.core.llm.roles import LLMRole, LLMRoutingError, resolve_role
 from collegue.executor.agent import AgentResult, IssueSpec
 
 # Point d'entrée headless d'OpenHands (module exécuté dans le conteneur sandbox).
@@ -209,7 +209,11 @@ def coder_pricing_is_explicitly_free(settings_obj=None) -> bool:
 
     from collegue.monitoring.pricing import is_explicitly_free
 
-    provider, model = resolve_role(LLMRole.CODER, settings_obj)
+    try:
+        provider, model = resolve_role(LLMRole.CODER, settings_obj)
+    except LLMRoutingError:
+        # Configuration contradictoire : jamais « gratuit » (le refus explicite est levé au lancement, pas ici).
+        return False
     return is_explicitly_free(model, provider=provider)
 
 

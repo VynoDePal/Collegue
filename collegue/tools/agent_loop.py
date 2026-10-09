@@ -176,16 +176,15 @@ class AgentLoopMixin:
                 }
                 if system_prompt is not None:
                     sample_kwargs["system_prompt"] = system_prompt
-                # Routage par rôle (optionnel) : self.llm_role par défaut DEFAULT
-                # → préférence = modèle global, comportement inchangé.
-                try:
-                    from collegue.core.llm.client import model_preferences_for_role
+                # Routage par rôle : self.llm_role par défaut DEFAULT → destination du fournisseur global. Le rôle
+                # voyage dans les préférences (hint de route) ; une config contradictoire est une erreur franche,
+                # jamais un repli silencieux sur la destination par défaut.
+                # (LLMRoutingError est capturé par le handler d'itération ci-dessous : l'itération échoue, rien n'est émis.)
+                from collegue.core.llm.client import model_preferences_for_role
 
-                    prefs = model_preferences_for_role(getattr(self, "llm_role", "default"))
-                    if prefs:
-                        sample_kwargs["model_preferences"] = prefs
-                except Exception as exc:
-                    logger.debug("Routage par rôle ignoré: %s", exc)
+                prefs = model_preferences_for_role(getattr(self, "llm_role", "default"))
+                if prefs:
+                    sample_kwargs["model_preferences"] = prefs
                 _it_start = time.time()
                 # Timeout par appel LLM (C5) : un ctx.sample pendu est annulé
                 # proprement et lève LLMCallTimeout (capté plus bas comme une
