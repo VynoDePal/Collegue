@@ -318,6 +318,11 @@ class LocalSamplingContext:
             # cap retombe sur ``_default_max_tokens`` (généreux : un modèle « raisonnant »
             # type gemma coupé trop tôt rend un contenu vide).
             eff_max = int(max_tokens) if max_tokens else self._default_max_tokens
+            if not max_tokens and self._settings is not None and _broker_mode(self._settings):
+                # Défaut PROPRE au contexte (jamais une demande de l'appelant) : borné au plafond de sortie du courtier.
+                from collegue.broker.runtime import runtime_for
+
+                eff_max = min(eff_max, runtime_for(self._settings).config.max_output_tokens)
             if self._limiter is not None:
                 await self._limiter.acquire(model)
             text = await self._create(model, oai_messages, temperature, eff_max, route=route)
@@ -509,6 +514,8 @@ class LocalSamplingContext:
         from collegue.core.llm.budget_guard import TRANSPORT_HTTP, current_binding, guarded_call
         from collegue.monitoring.sampling_usage import record_usage
 
+        if self._settings is not None and _broker_mode(self._settings):
+            return await self._create_via_broker(model, messages, temperature, max_tokens, route)
         binding = current_binding()
         client = self._client_obj(route)
         if binding is None:
@@ -551,6 +558,27 @@ class LocalSamplingContext:
             )
         return _extract_text(resp)
 
+    async def _create_via_broker(
+        self, model: str, messages: List[Dict[str, str]], temperature: float, max_tokens: int, route: Optional[LLMRoute]
+    ) -> str:
+        """Mode ``budget_broker`` : la génération passe par le courtier (autorité de budget) — ni client réseau, ni garde dupliquée."""
+        from collegue.broker.client import BrokerChatClient
+        from collegue.monitoring.sampling_usage import record_usage
+
+        role = route.role if route is not None else "default"
+        # Aucun écrêtage ici : une limite explicite plus haute que le plafond du serveur est REFUSÉE par le courtier.
+        response = await BrokerChatClient(self._settings, role).create(
+            model=model, messages=messages, temperature=temperature, max_tokens=int(max_tokens)
+        )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            record_usage(
+                getattr(usage, "prompt_tokens", 0) or 0,
+                getattr(usage, "completion_tokens", 0) or 0,
+                getattr(response, "model", model),
+            )
+        return _extract_text(response)
+
     async def aclose(self) -> None:
         for client in list(self._clients.values()):
             close = getattr(client, "close", None) or getattr(client, "aclose", None)
@@ -570,6 +598,12 @@ class LocalSamplingContext:
 
 SUBSCRIPTION_MAX_OUTPUT_ESTIMATE = 8192
 SAMPLER_HOST_MARGIN = 45.0
+
+
+def _broker_mode(settings: Any) -> bool:
+    from collegue.broker.runtime import is_broker_mode
+
+    return is_broker_mode(settings)
 
 
 def _kill_container(name: str) -> None:

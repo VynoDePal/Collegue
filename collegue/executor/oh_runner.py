@@ -496,6 +496,18 @@ class BudgetGuard:
         return guarded
 
 
+def _start_broker_relay(socket_path: str) -> int:
+    """Démarre le relais embarqué (``oh_broker_relay.py``, copié à côté de ce fichier dans l'image) ; renvoie son port loopback."""
+    import importlib.util
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("oh_broker_relay", os.path.join(here, "oh_broker_relay.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _server, port = module.start(socket_path)
+    return port
+
+
 def _guard_from_args(args) -> "BudgetGuard | None":
     """Construit la garde depuis l'allocation hôte ; ``None`` si aucune allocation n'est fournie."""
     if not (args.budget_usd or args.budget_tokens or args.deadline_epoch):
@@ -533,6 +545,7 @@ LLM_CONSTRUCTOR_KWARGS = (
     "retry_max_wait",
     "timeout",
     "max_output_tokens",
+    "reasoning_effort",
 )
 
 # Mode abonnement : ``LLM.subscription_login(vendor=…, model=…, open_browser=…, **kwargs)``. Les ``kwargs`` vont au
@@ -590,13 +603,23 @@ def main() -> int:
     ap.add_argument("--no-billing", action="store_true", help="abonnement : aucune facturation au token")
     args = ap.parse_args()
 
+    broker_socket = os.environ.get("COLLEGUE_BROKER_SOCKET", "").strip()
     try:
-        guard = _guard_from_args(args)
+        # Courtier (W5) : plafonds, échéance et usage sont appliqués par le service de confiance HORS du conteneur ; la garde
+        # interne (historique) n'est donc pas armée — elle ne saurait ni tarifer ni borner un relais loopback.
+        guard = None if broker_socket else _guard_from_args(args)
     except AllocationExhausted as exc:
         print(f"oh_runner: {exc}", file=sys.stderr)
         return 3
 
     os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+    if broker_socket:
+        if os.environ.get("LLM_SUBSCRIPTION", "") == "1":
+            print("oh_runner: abonnement et courtier sont exclusifs", file=sys.stderr)
+            return 2
+        # Le conteneur n'a AUCUN réseau : le SDK parle à un relais loopback qui recopie vers le socket Unix monté. Le jeton de
+        # session (LLM_API_KEY) n'est pas une clé fournisseur ; le relais ne se connecte qu'à ce socket.
+        os.environ["LLM_BASE_URL"] = f"http://127.0.0.1:{_start_broker_relay(broker_socket)}/v1"
 
     from openhands.sdk import LLM, Conversation
     from openhands.tools.preset.default import get_default_agent
@@ -645,6 +668,11 @@ def main() -> int:
             retry_max_wait=int(os.environ.get("OH_RETRY_MAX", "90")),
             timeout=int(os.environ.get("OH_LLM_TIMEOUT", "300")),
         )
+        if broker_socket:
+            # La limite de sortie doit être posée EXPLICITEMENT et rester ≤ plafond de la session : le courtier REFUSE (il n'écrête
+            # jamais) une limite plus haute ; sans elle le SDK enverrait la valeur par défaut du modèle. Aucun raisonnement imposé.
+            common["max_output_tokens"] = int(os.environ.get("OH_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS))
+            common["reasoning_effort"] = None
         if guard is not None:
             guard.admit(model)  # ModelNotBounded : ce modèle est écarté, le suivant de la chaîne est tenté
             # La sortie DOIT être bornée par un plafond réellement porté par le LLM (reasoning compris).

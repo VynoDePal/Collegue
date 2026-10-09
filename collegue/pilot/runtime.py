@@ -128,6 +128,8 @@ def _coder_sandbox_env(settings_obj) -> dict:
     """
     from collegue.executor.openhands_sdk_agent import OHSdkAgent
 
+    if _broker_mode(settings_obj):
+        return _broker_coder_sandbox_env(settings_obj)
     agent = OHSdkAgent(object(), settings_obj=settings_obj)
     route = agent.route(require_credential=True)
     env = {
@@ -156,6 +158,39 @@ def _coder_sandbox_env(settings_obj) -> dict:
     return env
 
 
+def _broker_mode(settings_obj) -> bool:
+    from collegue.broker.runtime import is_broker_mode
+
+    return is_broker_mode(settings_obj)
+
+
+def _broker_coder_sandbox_env(settings_obj) -> dict:
+    """Env NON secret du codeur en mode courtier : modèles au format Chat Completions du relais (``openai/<identité>``), AUCUN
+    endpoint (le relais loopback est lancé dans le conteneur), AUCUNE clé. Le jeton de session est ajouté par allocation."""
+    from collegue.broker.runtime import validate_broker_settings
+    from collegue.executor.openhands_sdk_agent import OHSdkAgent
+
+    validate_broker_settings(settings_obj)
+    agent = OHSdkAgent(object(), settings_obj=settings_obj, broker=object())
+    chain = agent.runner_model_chain()
+    env = {
+        "OPENHANDS_SUPPRESS_BANNER": "1",
+        # Chaque nouvelle tentative du SDK est une NOUVELLE génération réservée par le courtier : peu de retries, jamais 8.
+        "OH_NUM_RETRIES": "2",
+        "OH_RETRY_MIN": str(getattr(settings_obj, "CODER_LLM_RETRY_MIN_WAIT", 8)),
+        "OH_RETRY_MAX": str(getattr(settings_obj, "CODER_LLM_RETRY_MAX_WAIT", 90)),
+        "LLM_MODEL": chain[0],
+        "OH_FALLBACK_MODELS": ",".join(chain[1:]),
+    }
+    try:
+        call_timeout = float(getattr(settings_obj, "LLM_CALL_TIMEOUT", 0) or 0)
+    except (TypeError, ValueError):
+        call_timeout = 0.0
+    if 0 < call_timeout < float("inf"):
+        env["OH_LLM_TIMEOUT"] = str(max(1, int(call_timeout)))
+    return env
+
+
 def _coder_sandbox_secrets(settings_obj) -> dict:
     """Secrets du codeur PAR RÉFÉRENCE (``DockerSandbox(env_secrets=…)``) : la clé de SA route, ou rien.
 
@@ -164,6 +199,8 @@ def _coder_sandbox_secrets(settings_obj) -> dict:
     """
     from collegue.executor.openhands_sdk_agent import OHSdkAgent
 
+    if _broker_mode(settings_obj):
+        return {}  # la clé Google n'existe QUE dans le courtier ; le jeton de session est ajouté par allocation
     key = OHSdkAgent(object(), settings_obj=settings_obj).route(require_credential=True).credential()
     return {"LLM_API_KEY": key} if key else {}
 
@@ -174,6 +211,18 @@ def _coder_sandbox_kwargs(settings_obj) -> dict:
     from collegue.executor.openhands_sdk_agent import OHSdkAgent
     from collegue.sandbox import DEFAULT_SANDBOX_IMAGE
 
+    if _broker_mode(settings_obj):
+        # Courtier : conteneur SANS réseau (ni DNS ni cache pip), aucune clé, aucun montage hors workspace ; le socket de la
+        # session est monté par allocation (``DockerSandbox.with_broker``).
+        return dict(
+            image=str(getattr(settings_obj, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE),
+            network="none",
+            env=_coder_sandbox_env(settings_obj),
+            env_secrets=_coder_sandbox_secrets(settings_obj),
+            memory=str(getattr(settings_obj, "SANDBOX_MEMORY", "6g") or "6g"),
+            cpus=str(getattr(settings_obj, "SANDBOX_CPUS", "2.0") or "2.0"),
+            timeout=float(getattr(settings_obj, "SANDBOX_TIMEOUT", 2400.0) or 2400.0),
+        )
     # Le montage des creds d'abonnement est exigé par la route DU CODEUR, jamais par celle d'un autre rôle : un reviewer
     # en abonnement ne doit pas imposer ce montage (ni son HOME hors /tmp) à un codeur par clé API.
     uses_subscription = OHSdkAgent(object(), settings_obj=settings_obj).route(require_credential=True).uses_subscription
@@ -236,6 +285,10 @@ def _build_agent(sandbox, settings_obj):  # pragma: no cover - infra réelle (in
     # l'agent SDK (``oh_runner`` baké dans l'image), qui gère aussi l'abonnement gpt-5.5.
     from collegue.executor import OHSdkAgent
 
+    if _broker_mode(settings_obj):
+        from collegue.broker.runtime import runtime_for
+
+        return OHSdkAgent(sandbox, settings_obj=settings_obj, broker=runtime_for(settings_obj))
     return OHSdkAgent(sandbox, settings_obj=settings_obj)
 
 

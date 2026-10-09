@@ -198,6 +198,17 @@ async def validate_llm_config():
     Cette validation ne prouve PAS que le fournisseur est joignable ni que le modèle existe : la disponibilité n'est pas
     présumée et rien n'est émis au démarrage, donc aucune clé n'est jamais envoyée ailleurs que par un appel routé.
     """
+    from collegue.broker.runtime import is_broker_mode, validate_broker_settings
+
+    if is_broker_mode(settings):
+        try:
+            validate_broker_settings(
+                settings
+            )  # contrat W5 : Google seul, deux Gemma officiels, repli = le 26B du codeur
+        except ValueError as exc:
+            error_msg = f"❌ Configuration du courtier budgétaire incohérente, démarrage refusé — {exc}"
+            logger.error(error_msg)
+            raise ValueError(error_msg) from None
     state = _llm_route_report(settings)
     if state["invalid"]:
         detail = " ; ".join(f"{role} : {error}" for role, error in state["invalid"].items())
@@ -305,13 +316,16 @@ async def core_lifespan(server):
 
 sampling_handler = None
 try:
-    from collegue.core.llm.sampling_handler import build_routing_sampling_handler
-
     # Une destination PAR RÔLE (vague 4) : le handler résout, à chaque requête, la route du rôle porté par les
     # préférences de modèle (fournisseur, endpoint, clé). Il est attaché dès qu'AU MOINS UN rôle peut servir et qu'aucune
     # route n'est contradictoire ; un rôle sans clé (le rôle par défaut compris) est refusé à son appel, avant émission,
     # sans désactiver les routes indépendamment configurées. Une contradiction refuse aussi le démarrage
     # (``validate_llm_config``).
+    from collegue.broker.runtime import is_broker_mode, validate_broker_settings
+    from collegue.core.llm.sampling_handler import build_routing_sampling_handler
+
+    if is_broker_mode(settings):
+        validate_broker_settings(settings)
     _llm_state = _llm_route_report(settings)
     if _llm_state["invalid"]:
         print(f"⚠️ Sampling handler non configuré (routage incohérent) : {_llm_state['invalid']}", file=sys.stderr)

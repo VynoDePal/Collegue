@@ -48,8 +48,6 @@ class OHSdkAgent:
     Voir ``docs/consolidation/w2-budget.md`` et ``docs/consolidation/w4-routing.md``.
     """
 
-    budget_enforcement = "in-runner"
-
     def __init__(
         self,
         sandbox,
@@ -59,13 +57,44 @@ class OHSdkAgent:
         runner_path: str = RUNNER_PATH,
         max_iterations: int = 40,
         python_bin: str = "python",
+        broker: Optional[object] = None,
     ):
+        # ``broker`` (W5) : un ``BrokerRuntime``. Avec lui, TOUTE génération du worker passe par le courtier (socket Unix par
+        # allocation, conteneur sans réseau, aucune clé fournisseur dans le sandbox) ; sans lui, comportement historique.
+        self._broker = broker
         self._sandbox = sandbox
         self._settings = settings_obj
         self._role = role
         self._runner_path = runner_path
         self._max_iterations = int(max_iterations)
         self._python_bin = python_bin
+
+    @property
+    def transport(self) -> str:
+        return "budget_broker" if self._broker is not None else "direct"
+
+    @property
+    def budget_enforcement(self) -> str:
+        """``broker`` seulement si un courtier est attaché — et l'allocation en exige encore la PREUVE (jamais cette chaîne)."""
+        return "broker" if self._broker is not None else "in-runner"
+
+    def broker_transport_proof(self):
+        """Preuve du transport sur le sandbox RÉEL de cet agent (réseau none, socket unique ro, aucune clé fournisseur)."""
+        from collegue.broker.capability import TransportCheck, TransportProof, prove_worker_transport
+
+        if self._broker is None:
+            return TransportProof(
+                "direct", (TransportCheck("broker_attached", False, "aucun courtier attaché à l'agent"),)
+            )
+        return prove_worker_transport(self._sandbox, provider_keys=self._broker.provider_keys())
+
+    def runner_model_chain(self) -> List[str]:
+        """Modèles tels que le RUNNER les nomme (LiteLLM). Courtier : ``openai/<identité>`` — format Chat Completions du relais ;
+        la destination sémantique reste Google (``model_chain`` / route restent ``gemini``)."""
+        if self._broker is None:
+            return self.model_chain()
+        route = self.route()
+        return [f"openai/{route.model}", *[f"openai/{name}" for name in self.fallback_models()]]
 
     def route(self, *, require_credential: bool = False) -> LLMRoute:
         """Destination effective du codeur (fournisseur, modèle, endpoint, authentification) ; lève si incohérente."""
@@ -119,8 +148,8 @@ class OHSdkAgent:
 
     def _budget_args(self, alloc) -> List[str]:
         """Arguments d'allocation du runner (vide sans allocation : comportement historique)."""
-        if alloc is None:
-            return []
+        if alloc is None or self._broker is not None:
+            return []  # courtier : plafonds, échéance et usage sont appliqués par le service de confiance, hors du worker
         args: List[str] = []
         if alloc.max_micro_usd:
             args += ["--budget-usd", f"{alloc.max_usd:.6f}"]
@@ -175,6 +204,8 @@ class OHSdkAgent:
         from collegue.executor.worker_budget import current_allocation
 
         alloc = current_allocation()
+        if self._broker is not None:
+            return self._implement_via_broker(workspace, issue, alloc)
         run_kwargs = {}
         if alloc is not None and alloc.runtime_seconds is not None and _accepts_timeout(self._sandbox):
             # Échéance d'allocation : le conteneur s'auto-limite et l'hôte tue par nom au dépassement.
@@ -198,6 +229,41 @@ class OHSdkAgent:
             cost_authoritative=cost_authoritative,
             usage_status=status,
             usage_reason=reason,
+        )
+
+    def _implement_via_broker(self, workspace: str, issue: IssueSpec, alloc) -> AgentResult:
+        """Worker raccordé au courtier : session sur la réservation parent, sandbox sans réseau, usage = autorité du courtier."""
+        from collegue.core.llm.budget_guard import current_binding
+        from collegue.state.budget_ledger import REFUSED_UNBOUNDED, BudgetRefused
+
+        binding = current_binding()
+        if alloc is None or binding is None:
+            # Le courtier n'accepte pas un contexte absent comme exemption : sans registre ni allocation, aucun lancement.
+            raise BudgetRefused(
+                REFUSED_UNBOUNDED, "mode courtier : aucune allocation ni registre lié au contexte — worker non lancé"
+            )
+        run_kwargs = {}
+        if alloc.runtime_seconds is not None and _accepts_timeout(self._sandbox):
+            run_kwargs["timeout"] = alloc.runtime_seconds
+        with self._broker.attach_worker(
+            ledger=binding.ledger, allocation=alloc, role=self._role.value, sandbox=self._sandbox
+        ) as attached:
+            result = attached.sandbox.run_command(self.build_command(issue), workspace, **run_kwargs)
+        summary = attached.summary
+        logs = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        unknown = summary is None or summary.unknown
+        return AgentResult(
+            success=result.ok,
+            logs=logs[-8000:],
+            summary=f"OpenHands SDK (courtier) sur l'issue #{issue.number}",
+            prompt_tokens=0 if summary is None else summary.prompt_tokens,
+            completion_tokens=0 if summary is None else summary.completion_tokens,
+            cost_usd=0.0,
+            cost_authoritative=True,  # Gemma 4 : 0 $ attesté par identité exacte + endpoint officiel, pas par une clé
+            usage_status="incomplete" if unknown else "reported",
+            usage_reason=(summary.unknown_reason if summary is not None else None)
+            or ("session non consolidée" if unknown else ""),
+            usage_source="broker",
         )
 
 
