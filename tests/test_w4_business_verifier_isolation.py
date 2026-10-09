@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -277,23 +278,53 @@ def hostile_checkout(folder, tamper, sleep="time.sleep(8)"):
     return checkout, marker
 
 
-def run_public_docker_path_locally(monkeypatch, checkout, **kwargs):
+def docker_cli_exit_status(raw_returncode):
+    """Contrat de sortie du CLI Docker : le code du processus principal du conteneur, ou 128 + signal s'il est mort d'un signal.
+
+    ``subprocess`` rend ce second cas en NÉGATIF (``-9``) quand le processus est exécuté localement : une frontière Docker simulée
+    doit traduire (``-9`` -> 137), sinon le double expose un code que le vrai CLI ne produit jamais. Capturé en réel sur
+    ``python:3.12-slim`` (GNU timeout 9.7 en PID 1, aucun réseau, aucun montage) : TERM honoré -> 124, TERM ignoré puis KILL -> 137
+    (``evidence/w4-b-ci-deadline-docker-contract-term-ignored.txt``). GNU ``timeout`` envoie KILL à tout son groupe, lui compris :
+    localement il meurt de SIGKILL (-9) là où uutils (Ubuntu 26.04) rend 137 ; la traduction rend les deux équivalents."""
+    return 128 - raw_returncode if raw_returncode < 0 else raw_returncode
+
+
+GNU_TIMEOUT = shutil.which("gnutimeout")  # GNU timeout explicite quand `timeout` est une autre implémentation (uutils)
+TIMEOUT_BINARIES = ["timeout"] + (["gnutimeout"] if GNU_TIMEOUT and Path(GNU_TIMEOUT).name != "timeout" else [])
+
+
+def run_in_place_of_docker(argv, checkout, options, real_run, *, timeout_binary="timeout"):
+    """Exécute LOCALEMENT la commande qu'aurait lancée le conteneur (vraie commande publique, vrai superviseur ``timeout``) et
+    rend le résultat dans le contrat du CLI Docker (voir :func:`docker_cli_exit_status`). Retourne ``(résultat, brut, durée)``."""
+    assert argv[:2] == ["docker", "run"], argv[:2]
+    mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
+    scratch = next(value.split(":/scratch:")[0] for value in mounts if ":/scratch:" in value)
+    command = [str(a).replace("/scratch/", scratch + "/") for a in argv[argv.index(IMAGE) + 1 :]]
+    command = [sys.executable if part == "python" else part for part in command]
+    if command[0] == "timeout" and timeout_binary != "timeout":
+        command[0] = GNU_TIMEOUT
+    env = dict(options.get("env") or {})
+    env["PATH"] = str(Path(sys.executable).parent) + ":" + os.environ.get("PATH", "")
+    started = time.monotonic()
+    result = real_run(command, cwd=checkout, env=env, capture_output=True, text=True, timeout=12)
+    raw = result.returncode
+    result.returncode = docker_cli_exit_status(raw)
+    return result, raw, time.monotonic() - started
+
+
+def run_public_docker_path_locally(monkeypatch, checkout, *, timeout_binary="timeout", **kwargs):
     """Chemin Docker PUBLIC : la commande réelle est construite ; seule la frontière Docker est remplacée par son exécution
-    locale (sans le délai du client hôte : un plafond de secours distinct de 12 s subsiste). Isole le superviseur de durée."""
+    locale au contrat du CLI Docker (sans le délai du client hôte : un plafond de secours distinct de 12 s subsiste). Isole le
+    superviseur de durée."""
     real_run = subprocess.run
     calls = []
 
     def docker_boundary(argv, **options):
-        assert argv[:2] == ["docker", "run"], argv[:2]
-        mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
-        scratch = next(value.split(":/scratch:")[0] for value in mounts if ":/scratch:" in value)
-        command = [str(a).replace("/scratch/", scratch + "/") for a in argv[argv.index(IMAGE) + 1 :]]
-        command = [sys.executable if part == "python" else part for part in command]
-        env = dict(options.get("env") or {})
-        env["PATH"] = str(Path(sys.executable).parent) + ":" + os.environ.get("PATH", "")
-        started = time.monotonic()
-        result = real_run(command, cwd=checkout, env=env, capture_output=True, text=True, timeout=12)
-        calls.append({"head": command[:5], "returncode": result.returncode, "seconds": time.monotonic() - started})
+        result, raw, seconds = run_in_place_of_docker(argv, checkout, options, real_run, timeout_binary=timeout_binary)
+        calls.append(
+            {"head": list(argv[argv.index(IMAGE) + 1 :][:5]), "raw_returncode": raw, "returncode": result.returncode,
+             "seconds": seconds, "timeout_binary": timeout_binary}
+        )  # fmt: skip
         return result
 
     monkeypatch.setattr(subprocess, "run", docker_boundary)
@@ -302,28 +333,36 @@ def run_public_docker_path_locally(monkeypatch, checkout, **kwargs):
     return observation, calls, time.monotonic() - started
 
 
+def test_the_docker_boundary_double_reproduces_the_cli_exit_contract_for_signals():
+    assert [docker_cli_exit_status(code) for code in (0, 1, 124, 137, -9, -15, -11)] == [0, 1, 124, 137, 137, 143, 139]
+
+
+@pytest.mark.parametrize("timeout_binary", TIMEOUT_BINARIES)
 @pytest.mark.parametrize(
-    "tamper, bound",
+    "tamper, bound, expected_status",
     [
-        ("pass", 4.7),  # témoin ordinaire
-        ("signal.alarm(0)", 4.7),  # le livrable annule un minuteur interne
-        ("signal.signal(signal.SIGALRM, signal.SIG_IGN)\nsignal.alarm(0)", 4.7),
-        ("signal.signal(signal.SIGTERM, signal.SIG_IGN)", 8.0),  # ignore TERM : le superviseur tue (KILL)
+        ("pass", 4.7, 124),  # témoin ordinaire : TERM honoré
+        ("signal.alarm(0)", 4.7, 124),  # le livrable annule un minuteur interne
+        ("signal.signal(signal.SIGALRM, signal.SIG_IGN)\nsignal.alarm(0)", 4.7, 124),
+        ("signal.signal(signal.SIGTERM, signal.SIG_IGN)", 8.0, 137),  # ignore TERM : le superviseur tue (KILL)
     ],
     ids=["ordinary", "cancels-alarm", "ignores-alarm", "ignores-term"],
 )
 def test_the_duration_supervisor_lives_outside_the_untrusted_interpreter_and_cannot_be_cancelled_by_it(
-    monkeypatch, tmp_path, tamper, bound
+    monkeypatch, tmp_path, tamper, bound, expected_status, timeout_binary
 ):
     checkout, marker = hostile_checkout(tmp_path, tamper, sleep="time.sleep(30)")
 
-    observation, calls, elapsed = run_public_docker_path_locally(monkeypatch, checkout, timeout=4)
+    observation, calls, elapsed = run_public_docker_path_locally(
+        monkeypatch, checkout, timeout=4, timeout_binary=timeout_binary
+    )
 
     assert marker.exists() and calls, "l'import du livrable a réellement été atteint"
     supervisor = calls[0]["head"]
     assert supervisor[:4] == ["timeout", "--signal=TERM", f"--kill-after={business.WATCHDOG_KILL_AFTER}", "4.000"]
     assert observation.status == "incomplete" and "échéance" in observation.detail
-    assert calls[0]["returncode"] in business.DEADLINE_EXITS
+    assert calls[0]["returncode"] == expected_status, calls[0]  # contrat Docker : 124 (TERM) ou 137 (KILL), jamais -9
+    assert calls[0]["raw_returncode"] in (expected_status, -(expected_status - 128)), calls[0]
     assert elapsed < bound, (
         f"arrêté par le superviseur ({elapsed:.1f}s), pas à la fin du témoin ou du plafond de secours"
     )
@@ -476,53 +515,43 @@ def test_the_measured_duration_is_compared_with_the_imposed_limit_with_a_small_t
     assert observation.status == "incomplete" and "interruption précoce" in observation.detail
 
 
+@pytest.mark.parametrize("timeout_binary", TIMEOUT_BINARIES)
 def test_a_fixture_killing_itself_early_through_the_public_docker_path_is_incomplete_not_a_budget_stop(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, timeout_binary
 ):
-    """Chemin PUBLIC et vrai ``timeout`` GNU : le code local -9 est traduit en contrat Docker 128 + signal (137)."""
+    """Chemin PUBLIC et vrai ``timeout`` : la mort de l'import par SIGKILL est rendue au contrat Docker (137), même si le code
+    local brut est négatif (-9)."""
     checkout, marker = hostile_checkout(tmp_path, "import os", sleep="os.kill(os.getpid(), signal.SIGKILL)")
-    real_run = subprocess.run
-    seen = []
 
-    def boundary(argv, **options):
-        mounts = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "-v"]
-        scratch = next(value.split(":/scratch:")[0] for value in mounts if ":/scratch:" in value)
-        command = [str(a).replace("/scratch/", scratch + "/") for a in argv[argv.index(IMAGE) + 1 :]]
-        command = [sys.executable if part == "python" else part for part in command]
-        env = dict(options.get("env") or {}, PATH=str(Path(sys.executable).parent) + ":" + os.environ["PATH"])
-        result = real_run(command, cwd=checkout, env=env, capture_output=True, text=True, timeout=12)
-        raw = result.returncode
-        result.returncode = 128 - raw if raw < 0 else raw
-        seen.append((raw, result.returncode))
-        return result
-
-    monkeypatch.setattr(subprocess, "run", boundary)
-    observation = business.verify_business_checkout(
-        str(checkout), image=IMAGE, timeout=120, deadline_monotonic=time.monotonic() + 20.0
+    observation, calls, _ = run_public_docker_path_locally(
+        monkeypatch, checkout, timeout=120, deadline_monotonic=time.monotonic() + 20.0, timeout_binary=timeout_binary
     )
 
-    assert marker.exists() and seen == [(-9, 137)]
+    assert marker.exists() and [c["returncode"] for c in calls] == [137], calls
+    assert calls[0]["raw_returncode"] in (-9, 137)
     assert observation.status == "incomplete" and "interruption précoce" in observation.detail
     assert "pas une expiration" in observation.detail
 
 
+@pytest.mark.parametrize("timeout_binary", TIMEOUT_BINARIES)
 def test_a_term_ignoring_fixture_reaching_the_global_deadline_is_a_budget_stop_via_the_kill_after(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, timeout_binary
 ):
     checkout, marker = hostile_checkout(
         tmp_path, "signal.signal(signal.SIGTERM, signal.SIG_IGN)", sleep="time.sleep(30)"
     )
     started = time.monotonic()
 
-    def run():
-        return run_public_docker_path_locally(
-            monkeypatch, checkout, timeout=120, deadline_monotonic=time.monotonic() + 2.0
+    with pytest.raises(business.BudgetStop, match="échéance globale atteinte pendant la phase"):
+        run_public_docker_path_locally(
+            monkeypatch,
+            checkout,
+            timeout=120,
+            deadline_monotonic=time.monotonic() + 2.0,
+            timeout_binary=timeout_binary,
         )
 
-    with pytest.raises(business.BudgetStop, match="échéance globale atteinte pendant la phase"):
-        run()
-
-    assert marker.exists() and time.monotonic() - started < 9.0, "TERM ignoré : tué par KILL (code 137), durée atteinte"
+    assert marker.exists() and time.monotonic() - started < 9.0, "TERM ignoré : tué par KILL (137), durée atteinte"
 
 
 def test_docker_failures_are_incomplete_never_failed(monkeypatch, tmp_path):
