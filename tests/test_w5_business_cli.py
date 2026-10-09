@@ -91,7 +91,9 @@ def test_main_claims_the_identity_then_runs_both_phases_on_production_services_t
         < kinds.index("R05")
         < kinds.index("resources")
         < kinds.index("cleanup")
-    ), "la SPEC est matérialisée après l'activation et AVANT tout BUILD ; les ressources de campagne avant le nettoyage nightly"
+    ), (
+        "la SPEC est matérialisée après l'activation et AVANT tout BUILD ; les ressources de campagne avant le nettoyage nightly"
+    )
     assert ("claim", "w5-camp-001") in wired.events, "l'identifiant de la campagne est revendiqué"
     assert ("R04", wired.services) in wired.events and ("R05", wired.services) in wired.events
     steps = {s["id"]: s["state"] for s in report["steps"]}
