@@ -328,28 +328,30 @@ async def core_lifespan(server):
 
 
 sampling_handler = None
-if settings.LLM_API_KEY or settings.is_local_provider:
+try:
+    from collegue.core.llm.roles import LLMRole, LLMRoutingError, resolve_route
+    from collegue.core.llm.sampling_handler import build_routing_sampling_handler
+
+    # Une destination PAR RÔLE (vague 4) : le handler résout, à chaque requête, la route du rôle porté par les
+    # préférences de modèle (fournisseur, endpoint, clé). Au démarrage on exige seulement que le rôle PAR DÉFAUT soit
+    # cohérent ; une route de rôle incohérente est refusée à l'appel concerné, avant toute émission.
     try:
-        from collegue.core.llm.sampling_handler import build_sampling_handler, resolve_openai_endpoint
-
-        provider = settings.LLM_PROVIDER.lower()
-        # Résolution provider→endpoint partagée avec le ctx offline (source unique).
-        default_model, api_key, base_url = resolve_openai_endpoint(settings)
-
-        sampling_handler = build_sampling_handler(
-            default_model=default_model,
-            api_key=api_key,
-            base_url=base_url,
-        )
+        _default_route = resolve_route(LLMRole.DEFAULT, settings)
+    except LLMRoutingError as _routing_error:
+        _default_route = None
+        print(f"⚠️ Sampling handler non configuré (routage du rôle par défaut) : {_routing_error}", file=sys.stderr)
+    if _default_route is not None:
+        sampling_handler = build_routing_sampling_handler(settings)
         if sampling_handler is None:
             print("⚠️ Sampling handler indisponible - pip install 'fastmcp[openai]'", file=sys.stderr)
         else:
             print(
-                f"✅ Sampling handler configuré (provider={provider}, modèle={settings.LLM_MODEL})",
+                f"✅ Sampling handler routé par rôle (défaut : provider={_default_route.provider}, "
+                f"modèle={_default_route.model})",
                 file=sys.stderr,
             )
-    except Exception as e:
-        print(f"⚠️ Impossible de configurer le sampling handler: {e}", file=sys.stderr)
+except Exception as e:
+    print(f"⚠️ Impossible de configurer le sampling handler: {e}", file=sys.stderr)
 
 app = FastMCP(
     auth=auth_provider,

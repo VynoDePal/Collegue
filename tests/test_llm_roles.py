@@ -9,7 +9,7 @@ tests de fallback à tort).
 import pytest
 
 from collegue.config import Settings
-from collegue.core.llm import LLMRole, resolve_role
+from collegue.core.llm import LLMRole, LLMRoutingError, resolve_role
 
 _ROLE_ENV_VARS = [
     "LLM_MODEL_CODER",
@@ -68,14 +68,20 @@ def test_role_with_dedicated_provider_and_model():
     assert resolve_role(LLMRole.QA, s) == ("lmstudio", "qwen2.5-coder")
 
 
-def test_independent_fallback_per_dimension():
-    # Provider du rôle défini mais pas le modèle → modèle retombe sur le global.
+def test_provider_change_without_a_model_is_refused_not_inherited():
+    # Fournisseur du rôle différent du global, modèle absent : le modèle global (Gemini) ne s'hérite JAMAIS chez OpenAI.
     s = _settings(
         LLM_PROVIDER="gemini",
         LLM_MODEL="gemini-3-flash-preview",
         LLM_PROVIDER_PLANNER="openai",
     )
-    assert resolve_role(LLMRole.PLANNER, s) == ("openai", "gemini-3-flash-preview")
+    with pytest.raises(LLMRoutingError, match="nommer le modèle"):
+        resolve_role(LLMRole.PLANNER, s)
+
+
+def test_model_only_override_keeps_the_global_provider():
+    s = _settings(LLM_PROVIDER="gemini", LLM_MODEL="gemini-3-flash-preview", LLM_MODEL_PLANNER="gemini-2.5-pro")
+    assert resolve_role(LLMRole.PLANNER, s) == ("gemini", "gemini-2.5-pro")
 
 
 def test_role_accepts_string_value():

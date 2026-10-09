@@ -176,19 +176,14 @@ async def test_aclose_closes_client():
 # --- from_settings -------------------------------------------------------------
 
 
-def test_from_settings_resolves_endpoint_without_limiter(monkeypatch):
+def test_from_settings_builds_a_routed_context_without_limiter_nor_connection():
     # Les LLM_RATE_LIMIT_* (middleware serveur par-client) NE doivent PAS throttler
     # le ctx du moteur : aucun limiter assemblé depuis la config, même si définis.
-    monkeypatch.setattr(
-        "collegue.core.llm.sampling_handler.resolve_openai_endpoint",
-        lambda s: ("modX", "k", "http://bu/"),
-    )
     settings = SimpleNamespace(LLM_RATE_LIMIT_PER_MINUTE=5, LLM_RATE_LIMIT_PER_DAY=500)
     ctx = LocalSamplingContext.from_settings(settings)
-    assert ctx._default_model == "modX"
-    assert ctx._api_key == "k"
-    assert ctx._base_url == "http://bu/"
+    assert ctx._settings is settings  # mode ROUTÉ : la destination se résout à chaque appel, par rôle
     assert ctx._limiter is None  # pas de throttle moteur par défaut
+    assert ctx._client is None and ctx._clients == {}  # construire n'ouvre aucune connexion
 
 
 def test_rate_limiter_injectable_via_constructor():
@@ -216,22 +211,24 @@ def _sub_ctx(runner):
     return LocalSamplingContext(
         default_model="d",
         subscription_enabled=True,
+        subscription_models=["gpt-5.4"],  # choix EXPLICITE : jamais déduit du nom du modèle
         subscription_auth_dir="/home/u/.openhands",
         sampler_script="/repo/collegue/executor/oh_sampler.py",
         runner=runner,
     )
 
 
-def test_is_subscription_model_routes_non_gemini_only():
+def test_subscription_is_an_explicit_choice_never_deduced_from_the_model_name():
     ctx = _sub_ctx(runner=lambda a, p: (0, "", ""))
-    assert ctx._is_subscription_model("gpt-5.4") is True
-    assert ctx._is_subscription_model("gemma-4-26b-a4b-it") is False
-    assert ctx._is_subscription_model("gemini-2.5-pro") is False
+    assert ctx._is_subscription(None, "gpt-5.4") is True  # listé explicitement
+    assert ctx._is_subscription(None, "gpt-5.5") is False  # un autre gpt-* n'est PAS déduit
+    assert ctx._is_subscription(None, "gemma-4-26b-a4b-it") is False
+    assert ctx._is_subscription(None, "claude-x") is False  # modèle non-Gemini quelconque : pas d'abonnement
 
 
 def test_subscription_disabled_never_routes():
-    ctx = LocalSamplingContext(default_model="d")  # subscription_enabled=False
-    assert ctx._is_subscription_model("gpt-5.4") is False
+    ctx = LocalSamplingContext(default_model="d", subscription_models=["gpt-5.4"])  # creds non montées
+    assert ctx._is_subscription(None, "gpt-5.4") is False
 
 
 async def test_sample_gpt_model_goes_through_subscription_sampler(monkeypatch):

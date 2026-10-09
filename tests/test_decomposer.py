@@ -1,6 +1,7 @@
 """Tests P2 (#353) : décomposition SPEC → graphe de tâches (state store)."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,12 +117,15 @@ async def test_decompose_json_text_fallback(manager):
 
 
 @pytest.mark.asyncio
-async def test_decompose_routes_planner_role(monkeypatch, manager):
-    monkeypatch.setattr(dec, "model_preferences_for_role", lambda role, settings_obj=None: ["planner-model"])
+async def test_decompose_routes_planner_role(manager):
+    settings = SimpleNamespace(
+        LLM_PROVIDER="gemini", LLM_MODEL="gemini-2.5-flash", LLM_MODEL_PLANNER="gemini-2.5-pro", LLM_API_KEY="fake-key"
+    )
     pid = _project(manager)
     ctx = _Ctx(_decomp([{"title": "x", "depends_on": []}]))
-    await decompose("spec", ctx, manager=manager, project_id=pid)
-    assert ctx.kwargs["model_preferences"] == ["planner-model"]
+    await decompose("spec", ctx, manager=manager, project_id=pid, settings_obj=settings)
+    # modèle canonique du rôle + hint nommé qui porte le rôle jusqu'au transport
+    assert ctx.kwargs["model_preferences"] == ["gemini-2.5-pro", "collegue-route:planner"]
 
 
 @pytest.mark.asyncio

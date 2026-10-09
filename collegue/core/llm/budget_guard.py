@@ -106,7 +106,8 @@ HOSTED_KNOWN_MODELS = {
     ),
 }
 # Destinations RÉELLES des transports hébergés : c'est l'hôte du client qui fait foi, pas un réglage sans rapport.
-HOSTED_ENDPOINT_HOSTS = {"generativelanguage.googleapis.com": "gemini", "api.openai.com": "openai"}
+from collegue.core.llm.roles import HOSTED_ENDPOINT_HOSTS  # noqa: E402  (source unique du routage)
+
 _SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8})$")
 SOURCE_NOT_BILLED = "not-billed"
 SOURCE_GRID = "grid"  # tarif standard ≤ 200k de monitoring/pricing.py
@@ -557,6 +558,34 @@ def _ledger_call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         raise BudgetRefused(REFUSED_LEDGER, f"registre budgétaire indisponible : {exc}") from exc
 
 
+class RouteSettingsView:
+    """Réglages vus depuis UNE route : fournisseur et endpoint du rôle à la place des globaux.
+
+    Les décisions tarifaires/de tokenizer retombent sur ``LLM_PROVIDER``/``llm_base_url`` quand l'endpoint est inconnu
+    et jugent un provider « local » d'après eux. Pour un appel dont la route est connue (rôle ≠ fournisseur global), ces
+    deux valeurs doivent être CELLES DE LA ROUTE, sinon la réservation tarifierait une autre destination que celle
+    réellement utilisée. Tout le reste (plafonds, tarifs configurés, attestations) vient de la configuration.
+    """
+
+    def __init__(self, base: Optional[object], *, provider: str, endpoint: Optional[str]):
+        self._base = base
+        self.LLM_PROVIDER = provider
+        self.llm_base_url = endpoint
+        self.LLM_BASE_URL = endpoint
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+
+def settings_for_route(
+    settings: Optional[object], provider: Optional[str], endpoint: Optional[str]
+) -> Optional[object]:
+    """Vue des réglages pour la route ; ``settings`` inchangé si aucun fournisseur de route n'est donné."""
+    if not provider:
+        return settings
+    return RouteSettingsView(settings, provider=str(provider).strip().lower(), endpoint=endpoint)
+
+
 async def guarded_call(
     call: Callable[[], Awaitable[Any]],
     *,
@@ -574,6 +603,7 @@ async def guarded_call(
     backoff_cap: float = 8.0,
     output_bound_proven: bool = True,
     endpoint: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> Any:
     """Émet ``call`` avec une RÉSERVATION par tentative (retries inclus), bornée par l'échéance.
 
@@ -585,6 +615,9 @@ async def guarded_call(
     JAMAIS faits en interne par le SDK : c'est cette boucle qui retente, une réservation à chaque fois.
     """
     ledger, scope_key = binding.ledger, binding.scope_key
+    # ``provider`` = fournisseur de la ROUTE réellement utilisée : tarif, tokenizer et gratuité du local se jugent sur
+    # lui et sur ``endpoint``, jamais sur le fournisseur global (qui peut être un autre).
+    settings = settings_for_route(binding.settings, provider, endpoint)
     snap = _ledger_call(ledger.snapshot, scope_key)
     strict = snap.strict
     # La borne de tokens ne sert que si une dimension plafonnée en dépend : le plafond de tokens, ou le plafond
@@ -592,7 +625,7 @@ async def guarded_call(
     # besoin d'aucune borne de tokens — mais n'offre alors AUCUNE garantie de tokens (voir plus bas).
     # Un transport effectivement GRATUIT (provider local sur une destination non hébergée, modèle gratuit de sa
     # famille) n'a pas d'exposition en dollars non plus : seul un plafond de tokens exige alors une borne.
-    priced = resolve_prices_with_source(model, binding.settings, billable=billable, endpoint=endpoint)
+    priced = resolve_prices_with_source(model, settings, billable=billable, endpoint=endpoint)
     free_transport = priced is not None and priced[0] == (0.0, 0.0)
     guaranteed = strict and (
         snap.cap_tokens is not None or (snap.cap_micro_usd is not None and billable and not free_transport)
@@ -613,7 +646,7 @@ async def guarded_call(
             messages=messages,
             max_tokens=max_tokens,
             tools=tools,
-            settings=binding.settings,
+            settings=settings,
             billable=billable,
             capped_usd=snap.cap_micro_usd is not None and strict,
             require_bound=guaranteed,
@@ -691,7 +724,7 @@ async def guarded_call(
             else:
                 prompt_tokens, completion_tokens, actual_model = usage
                 micro = actual_micro(
-                    resolve_prices(actual_model or model, binding.settings, billable=billable, endpoint=endpoint),
+                    resolve_prices(actual_model or model, settings, billable=billable, endpoint=endpoint),
                     prompt_tokens,
                     completion_tokens,
                 )

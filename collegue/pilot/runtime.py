@@ -117,17 +117,19 @@ def _sandbox_subscription_auth(settings_obj):
 
 
 def _coder_sandbox_env(settings_obj) -> dict:
-    """Env du sandbox pour le coder OpenHands SDK (``oh_runner``) — parité harnais↔produit.
+    """Env NON secret du sandbox pour le coder OpenHands SDK (``oh_runner``) — parité harnais↔produit.
 
-    Politique retries du canal coder (#422), puis selon ``CODER_SUBSCRIPTION`` : soit le
-    modèle d'**abonnement** nu (gpt-5.5 + ``LLM_SUBSCRIPTION=1`` + fallback gpt-5.4 ;
-    le runner appelle ``subscription_login`` avec les creds montées), soit le modèle
-    **CODER** au format LiteLLM (``gemini/<modèle>``) avec clé API. ``HOME`` hors /tmp est
-    requis uniquement par le montage des creds d'abonnement ; en mode clé API,
-    :class:`DockerSandbox` conserve son ``HOME=/tmp`` écrivable quel que soit l'UID hôte.
+    La destination du codeur est celle de sa ROUTE (``resolve_route``) : modèle au format LiteLLM du fournisseur du
+    rôle (``gemini/…`` ou ``openai/…``), ``LLM_BASE_URL`` si l'endpoint est nommé (passerelle, serveur local), replis
+    du MÊME fournisseur (``OH_FALLBACK_MODELS``, vide = aucun), et en abonnement le modèle nu + ``LLM_SUBSCRIPTION=1``.
+    La clé ne figure JAMAIS ici : voir :func:`_coder_sandbox_secrets`. Une configuration contradictoire ou sans clé lève
+    :class:`~collegue.core.llm.roles.LLMRoutingError` avant tout lancement. ``HOME`` hors /tmp est requis uniquement par
+    le montage des creds d'abonnement ; en mode clé API, :class:`DockerSandbox` conserve son ``HOME=/tmp``.
     """
     from collegue.executor.openhands_sdk_agent import OHSdkAgent
 
+    agent = OHSdkAgent(object(), settings_obj=settings_obj)
+    route = agent.route(require_credential=True)
     env = {
         "OPENHANDS_SUPPRESS_BANNER": "1",
         "OH_NUM_RETRIES": str(getattr(settings_obj, "CODER_LLM_NUM_RETRIES", 8)),
@@ -142,14 +144,46 @@ def _coder_sandbox_env(settings_obj) -> dict:
         # Le runner OpenHands a son propre nom d'env. Propager le plafond produit
         # évite qu'un appel coder dépasse silencieusement la limite planner/QA.
         env["OH_LLM_TIMEOUT"] = str(max(1, int(call_timeout)))
-    if bool(getattr(settings_obj, "CODER_SUBSCRIPTION", False)):
+    chain = agent.model_chain()
+    env["LLM_MODEL"] = chain[0]
+    env["OH_FALLBACK_MODELS"] = ",".join(chain[1:])
+    if route.uses_subscription:
         env["HOME"] = "/home/sandbox"
-        env["LLM_MODEL"] = str(getattr(settings_obj, "CODER_SUBSCRIPTION_MODEL", "gpt-5.5") or "gpt-5.5")
         env["LLM_SUBSCRIPTION"] = "1"
-        env["OH_FALLBACK_MODELS"] = str(getattr(settings_obj, "CODER_SUBSCRIPTION_FALLBACK", "gpt-5.4") or "gpt-5.4")
-    else:
-        env["LLM_MODEL"] = OHSdkAgent(object(), settings_obj=settings_obj).litellm_model()
+    base_url = route.worker_base_url()
+    if base_url:
+        env["LLM_BASE_URL"] = base_url
     return env
+
+
+def _coder_sandbox_secrets(settings_obj) -> dict:
+    """Secrets du codeur PAR RÉFÉRENCE (``DockerSandbox(env_secrets=…)``) : la clé de SA route, ou rien.
+
+    Jamais la clé d'un autre fournisseur, jamais une variable de l'environnement hôte, jamais l'argv. Abonnement ou
+    fournisseur local sans clé : aucun secret.
+    """
+    from collegue.executor.openhands_sdk_agent import OHSdkAgent
+
+    key = OHSdkAgent(object(), settings_obj=settings_obj).route(require_credential=True).credential()
+    return {"LLM_API_KEY": key} if key else {}
+
+
+def _coder_sandbox_kwargs(settings_obj) -> dict:
+    """Arguments de ``DockerSandbox`` du codeur (pur : testable sans Docker)."""
+    from collegue.sandbox import DEFAULT_SANDBOX_IMAGE
+
+    return dict(
+        image=str(getattr(settings_obj, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE),
+        network=str(getattr(settings_obj, "SANDBOX_NETWORK", "bridge") or "bridge"),
+        dns=_sandbox_dns(settings_obj),
+        pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
+        subscription_auth_dir=_sandbox_subscription_auth(settings_obj),  # creds abo Codex/ChatGPT
+        env=_coder_sandbox_env(settings_obj),
+        env_secrets=_coder_sandbox_secrets(settings_obj),
+        memory=str(getattr(settings_obj, "SANDBOX_MEMORY", "6g") or "6g"),
+        cpus=str(getattr(settings_obj, "SANDBOX_CPUS", "2.0") or "2.0"),
+        timeout=float(getattr(settings_obj, "SANDBOX_TIMEOUT", 2400.0) or 2400.0),
+    )
 
 
 def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
@@ -157,21 +191,10 @@ def _build_sandbox(settings_obj):  # pragma: no cover - infra réelle (integrati
     # (défaut durci ``network="none"``). ``SANDBOX_NETWORK`` ("host" éprouvé contre la
     # flakiness pip du bridge, #485) ; ressources remontées (les défauts 512m/1cpu/120s
     # sont trop bas pour OpenHands). Le coder (oh_runner SDK) lit ``env`` + l'abonnement
-    # via ``subscription_auth_dir`` ; la clé API passe par ``env_passthrough`` (jamais l'argv).
-    from collegue.sandbox import DEFAULT_SANDBOX_IMAGE, DockerSandbox
+    # via ``subscription_auth_dir`` ; sa clé passe par ``env_secrets`` (référence, jamais l'argv ni os.environ).
+    from collegue.sandbox import DockerSandbox
 
-    return DockerSandbox(
-        image=str(getattr(settings_obj, "SANDBOX_IMAGE", DEFAULT_SANDBOX_IMAGE) or DEFAULT_SANDBOX_IMAGE),
-        network=str(getattr(settings_obj, "SANDBOX_NETWORK", "bridge") or "bridge"),
-        dns=_sandbox_dns(settings_obj),
-        pip_cache_dir=_sandbox_pip_cache(settings_obj),  # #496 : cache pip persistant opt-in
-        subscription_auth_dir=_sandbox_subscription_auth(settings_obj),  # creds abo Codex/ChatGPT
-        env=_coder_sandbox_env(settings_obj),
-        env_passthrough=("LLM_API_KEY", "GEMINI_API_KEY"),
-        memory=str(getattr(settings_obj, "SANDBOX_MEMORY", "6g") or "6g"),
-        cpus=str(getattr(settings_obj, "SANDBOX_CPUS", "2.0") or "2.0"),
-        timeout=float(getattr(settings_obj, "SANDBOX_TIMEOUT", 2400.0) or 2400.0),
-    )
+    return DockerSandbox(**_coder_sandbox_kwargs(settings_obj))
 
 
 def _build_gate_sandbox(settings_obj):  # pragma: no cover - infra réelle (integration)
