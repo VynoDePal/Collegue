@@ -348,7 +348,7 @@ WORKER = """\
 #: Worker du VRAI SDK OpenHands (``openhands.sdk.LLM``) : texte libre, sortie JSON structurée, repli et retries contrôlés, concurrence de connexions.
 #: Tout passe par le vrai relais et le vrai courtier ; les faits rapportés sont CONTRÔLÉS côté hôte contre le fournisseur simulé et le registre.
 SDK_WORKER = """\
-    import importlib.util, json, os, sys, threading, time
+    import importlib.util, json, os, re, sys, threading, time
     from pydantic import SecretStr
     from openhands.sdk import LLM, Message, TextContent
     spec = importlib.util.spec_from_file_location("oh_broker_relay", os.environ["W5_RELAY_PATH"])
@@ -359,7 +359,9 @@ SDK_WORKER = """\
     PRIMARY, FALLBACK = "gemma-4-31b-it", "gemma-4-26b-a4b-it"
 
     def make(model, **kw):
-        return LLM(model=f"openai/{model}", base_url=base, api_key=SecretStr(token), usage_id="coder",
+        # Options EXPLICITES du runner du produit en mode courtier (oh_runner.run_with) : sans ``reasoning_effort=None`` le SDK émet son défaut
+        # (« high ») dans la requête, champ que le courtier REFUSE (il change la génération et l'usage) ; la limite de sortie est posée explicitement.
+        return LLM(model=f"openai/{model}", base_url=base, api_key=SecretStr(token), usage_id="coder", reasoning_effort=None,
                    num_retries=kw.pop("num_retries", 0), timeout=kw.pop("timeout", 60), max_output_tokens=64, **kw)
 
     def ask(llm, text="x", **kw):
@@ -367,11 +369,19 @@ SDK_WORKER = """\
         blocks = getattr(response.message, "content", None) or []
         return "".join(getattr(block, "text", "") or "" for block in blocks)
 
+    # Diagnostic SÛR d'un refus du courtier : SEULS les NOMS de champs de la phrase fixe « champ(s) non pris en charge : [...] » (jamais un contenu, un
+    # jeton ni le reste du message) ; aucun appel supplémentaire.
+    REFUSED = re.compile(r"champ\(s\) non pris en charge : \[([A-Za-z0-9_', ]{0,200})\]")
+
     def attempt(label, fn):
         try:
             facts[label] = {"ok": True, "text": fn()}
-        except BaseException as exc:  # noqa: BLE001 - on rapporte la classe seulement, jamais un message susceptible de contenir un secret
-            facts[label] = {"ok": False, "error": type(exc).__name__}
+        except BaseException as exc:  # noqa: BLE001 - on rapporte la classe (et les noms de champs refusés) seulement, jamais le message
+            entry = {"ok": False, "error": type(exc).__name__}
+            found = REFUSED.search(str(exc))
+            if found:
+                entry["refused_fields"] = sorted(set(re.findall(r"[A-Za-z0-9_]+", found.group(1))))
+            facts[label] = entry
 
     facts = {}
     scenario = os.environ["W5_SCENARIO"]

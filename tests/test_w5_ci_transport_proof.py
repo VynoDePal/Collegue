@@ -143,7 +143,14 @@ class FakeSdk(types.ModuleType):
                 token = self.kwargs["api_key"].get_secret_value()
                 if behaviour == "bad-token":
                     token = "autre"
-                body = json.dumps({"model": self.kwargs["model"].split("/", 1)[1], "messages": [{"role": "user"}]})
+                payload = {"model": self.kwargs["model"].split("/", 1)[1], "messages": [{"role": "user"}]}
+                if "reasoning_effort" not in self.kwargs:
+                    payload["reasoning_effort"] = (
+                        "high"  # défaut supposé du SDK réel quand l'option n'est pas posée explicitement
+                    )
+                if behaviour == "extra-field":
+                    payload["prompt_cache_key"] = "uuid-de-conversation"
+                body = json.dumps(payload)
                 conn.request(
                     "POST",
                     "/v1/chat/completions",
@@ -243,6 +250,17 @@ def test_the_whole_proof_passes_with_a_healthy_relay_and_fails_for_each_fault(pr
     assert report["sdk"]["usage"] == [7, 2] and report["sdk"]["usage_id"] == "coder"
     assert report["relay"] == {"other_route": 404, "absolute_url": 404, "oversized": report["relay"]["oversized"]}
 
+    assert report["sdk"]["request_fields"] == ["messages", "model"], (
+        "aucun champ au-delà de ce que le courtier accepte : le script pose reasoning_effort=None comme le runner du produit"
+    )
+
+    fake_sdk("extra-field")
+    refused = proof.run_checks(write_relay(tmp_path), None)["failures"]
+    assert any("prompt_cache_key" in m and "refuserait" in m for m in refused), (
+        refused
+    )  # NOMS de champs seulement, jamais de contenu
+    assert not any("uuid-de-conversation" in m for m in refused)
+
     fake_sdk("bad-token")
     assert any(
         "jeton" in m or "réponse" in m or "SDK" in m for m in proof.run_checks(write_relay(tmp_path), None)["failures"]
@@ -320,3 +338,22 @@ def test_the_image_contents_check_refuses_the_legacy_web_application_and_jose(pr
     failures = proof.Failures()
     proof.check_image_contents(_lock(tmp_path, [f"pytest=={metadata.version('pytest')} \\"]), failures, min_entries=1)
     assert any("interdites" in m and "pytest" in m for m in failures.items)
+
+
+def test_the_unaccepted_fields_helper_names_only_what_the_broker_would_refuse(proof):
+    assert proof.unaccepted_fields(["model", "messages", "max_completion_tokens"]) == []
+    assert proof.unaccepted_fields(["model", "reasoning_effort", "prompt_cache_key", "messages"]) == [
+        "prompt_cache_key",
+        "reasoning_effort",
+    ]
+
+
+def test_the_accepted_field_set_of_the_script_is_exactly_the_one_of_the_real_broker_translation(proof):
+    """Le script tourne dans l'image sans le produit : son miroir de la liste blanche du courtier ne doit jamais dériver du code réel."""
+    from collegue.broker import translate
+
+    real = set(translate._ALLOWED_TOP_LEVEL) | set(getattr(translate, "INERT_TRANSPORT_FIELDS", ()))
+    assert set(proof.BROKER_ACCEPTED_FIELDS) == real, (
+        sorted(set(proof.BROKER_ACCEPTED_FIELDS) ^ real),
+        "mettre à jour BROKER_ACCEPTED_FIELDS (scripts/ci_w5_broker_transport.py) avec la liste blanche du courtier",
+    )

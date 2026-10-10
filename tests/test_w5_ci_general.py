@@ -380,3 +380,33 @@ def test_the_activation_composition_tests_use_the_real_modules_and_write_no_favo
     assert "xfail" not in source and "skip" not in source.replace("jamais un saut", ""), (
         "A et B sont intégrés : plus aucun marqueur de raccord, ni saut, dans l'activation"
     )
+
+
+def test_the_sdk_workers_of_the_proofs_use_the_explicit_llm_options_of_the_product_runner_in_broker_mode():
+    """Un LLM construit SANS les options explicites du runner n'est pas celui du produit : le SDK émet alors ses défauts (ex. ``reasoning_effort="high"``),
+    que le courtier refuse. Les options posées par ``oh_runner`` en mode courtier doivent figurer dans CHAQUE worker de preuve qui construit un ``LLM``."""
+    import ast
+
+    runner = (ROOT / "collegue" / "executor" / "oh_runner.py").read_text(encoding="utf-8")
+    broker_block = runner.split("if broker_socket:\n            # La limite de sortie", 1)[1].split(
+        "if guard is not None:", 1
+    )[0]
+    body_options = sorted(set(re.findall(r'common\["(\w+)"\]', broker_block)))
+    assert body_options == ["max_output_tokens", "reasoning_effort"], (
+        f"le runner pose d'autres options en mode courtier ({body_options}) : aligner les workers de preuve (harnais et script de transport)"
+    )
+    assert 'common["reasoning_effort"] = None' in broker_block
+    harness = (ROOT / "tests" / "w5_integration_harness.py").read_text(encoding="utf-8")
+    sdk_worker = harness.split("SDK_WORKER = ", 1)[1].split('"""', 2)[1]
+    code = "\n".join(
+        line.split("#", 1)[0] for line in sdk_worker.splitlines()
+    )  # hors commentaires : l'option doit être dans l'appel LLM(...)
+    llm_call = code.split("LLM(model=", 1)[1].split(")\n", 1)[0]
+    assert "reasoning_effort=None" in llm_call and "max_output_tokens=" in llm_call
+    script = ast.parse((ROOT / "scripts" / "ci_w5_broker_transport.py").read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(script) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "LLM"]
+    assert calls, "le script de transport construit un LLM du SDK"
+    for call in calls:
+        keywords = {k.arg: k.value for k in call.keywords}
+        assert {"reasoning_effort", "max_output_tokens"} <= set(keywords)
+        assert isinstance(keywords["reasoning_effort"], ast.Constant) and keywords["reasoning_effort"].value is None

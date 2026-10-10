@@ -116,6 +116,9 @@ class FakeBroker:
                     return
                 record["model"] = body.get("model")
                 record["messages"] = len(body.get("messages") or [])
+                record["fields"] = (
+                    sorted(str(key) for key in body) if isinstance(body, dict) else []
+                )  # NOMS seulement, jamais de contenu
                 self._send(
                     200,
                     {
@@ -211,6 +214,33 @@ def message_text(response: Any) -> str:
     return "".join(str(getattr(block, "text", "") or "") for block in (content or []))
 
 
+#: Champs de premier niveau que le courtier accepte (miroir de ``collegue.broker.translate._ALLOWED_TOP_LEVEL``, plus ses champs inertes) : le script
+#: tourne dans l'image, où le produit n'est pas installé ; ``tests/test_w5_ci_transport_proof.py`` garde l'égalité des deux ensembles.
+BROKER_ACCEPTED_FIELDS = frozenset(
+    {
+        "model",
+        "messages",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "response_format",
+        "stop",
+        "n",
+        "stream",
+        "seed",
+        "parallel_tool_calls",
+    }
+)
+
+
+def unaccepted_fields(fields: Any) -> List[str]:
+    """Noms de champs d'une requête que le courtier ne reconnaît pas (liste vide = tous acceptés)."""
+    return sorted(str(name) for name in fields if name not in BROKER_ACCEPTED_FIELDS)
+
+
 def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -> Dict[str, Any]:
     os.environ.setdefault(
         "LITELLM_LOCAL_MODEL_COST_MAP", "True"
@@ -218,7 +248,7 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
     sdk = importlib.import_module("openhands.sdk")
     from pydantic import SecretStr
 
-    llm = sdk.LLM(
+    llm = sdk.LLM(  # mêmes options explicites que le runner du produit en mode courtier (oh_runner.run_with)
         model=f"openai/{MODEL}",
         base_url=f"http://127.0.0.1:{port}/v1",
         api_key=SecretStr(SESSION_TOKEN),
@@ -226,6 +256,7 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
         num_retries=0,
         timeout=30,
         max_output_tokens=64,
+        reasoning_effort=None,
     )
     before = len(broker.requests)
     response = llm.completion(
@@ -239,6 +270,11 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
         request.get("authorization") == f"Bearer {SESSION_TOKEN}", "le jeton de session n'est pas celui présenté"
     )
     failures.check(MODEL in str(request.get("model")), f"modèle transmis inattendu : {request.get('model')!r}")
+    refused = unaccepted_fields(request.get("fields") or [])
+    failures.check(
+        not refused,
+        f"champ(s) de la requête du SDK que le courtier refuserait (noms seulement) : {refused} ; vus : {request.get('fields')}",
+    )
     failures.check(
         message_text(response) == ANSWER, f"réponse du courtier non relue par le SDK : {message_text(response)!r}"
     )
@@ -248,7 +284,12 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
     failures.check(
         (prompt, completion) == (7, 2), f"usage relu par le SDK ≠ usage du courtier : {(prompt, completion)}"
     )
-    return {"requests": seen, "usage": [prompt, completion], "usage_id": getattr(llm, "usage_id", None)}
+    return {
+        "requests": seen,
+        "request_fields": request.get("fields"),
+        "usage": [prompt, completion],
+        "usage_id": getattr(llm, "usage_id", None),
+    }
 
 
 def check_relay_is_not_a_proxy(relay: Any, port: int, broker: FakeBroker, failures: Failures) -> Dict[str, Any]:
