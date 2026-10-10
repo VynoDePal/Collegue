@@ -253,3 +253,22 @@ l'émission et sa réserve est libérée).
 moins d'une seconde ; il n'est pas vrai qu'il ne puisse « jamais gagner » du temps. Mesure (12 exécutions, faux docker + vrai `DockerSandbox`, worker qui ignore TERM, dernier battement −
 échéance) : sans retard de démarrage −1,00 s à −0,97 s ; démarrage retardé de 2,5 s −0,50 s à +0,50 s (`evidence/w5-a29-guard-measure.json`). Critère retenu, étroit et explicite :
 `SCHEDULING_TOLERANCE = 1,0 s` dans les tests (le filet hôte à `+DEADLINE_HOST_MARGIN` = 2 s ne couvre que le conteneur qui ne démarre pas). Hypothèse non vérifiée ici : horloge du conteneur = horloge de l'hôte.
+
+## Arrêt à l'échéance sous `timeout` GNU : fidélité du banc, arbitrage (A32 → A33)
+
+**Défaut établi : la traduction des codes de sortie du banc.** Le rouge distant (Python 3.11 et 3.12) venait du faux `docker` des tests : avec le `timeout` de GNU coreutils
+(CI) le processus du conteneur simulé meurt de SIGKILL (code brut −9) et le faux `docker` rendait `sys.exit(-9)` = 247, un code que Docker ne produit pas (il rend 137 = 128+9).
+Le sandbox reconnaît 124 et 137 ; avec 247, `timed_out` restait faux et le journal vide. Avec le `timeout` d'uutils (poste local) le code est 124 : le défaut ne se voyait pas.
+Le faux `docker` rend désormais 128+N pour un signal N, consigne le code brut et le code rendu, et la suite d'échéance est rejouée sous les DEUX `timeout` (uutils, et GNU 9.7 par PATH).
+
+**Observation locale, non reclassée en défaut produit.** Le `timeout` externe (plafond hôte) et le `timeout` interne (garde) créent chacun leur groupe de processus ; l'externe peut partir le
+premier (jusqu'à ~1 s avant l'échéance, tolérance A29) et ne tuer que le `timeout` interne, laissant le worker vivant jusqu'à la mort du PID 1 du conteneur. Dans un conteneur réel, la
+mort du PID 1 démonte son PID namespace et tue TOUS les processus restants : c'est l'isolation et la supervision de Docker, non un mécanisme qui « masquerait » un défaut. L'exigence est
+qu'aucun worker ne survive AU CONTENEUR et au délai accepté. Le banc émule ce démontage et vérifie l'absence de survivants APRÈS lui ; les survivants vivants à l'instant du démontage sont
+consignés à titre d'information, sans être exigés nuls. **Le produit (`collegue/sandbox/executor.py`) est inchangé depuis A29** (garde, marges et tolérance de 1 s d'origine). Un correctif
+de supervision proposé en A32 (`+2 s` au filet, `−1 s` à la garde) a été écarté à l'arbitrage : non nécessaire au défaut distant, et la troncature de `floor(échéance)` sur une échéance
+flottante pouvait arrêter près de 2 s trop tôt.
+
+**Journal des refus avant tentative (revue A31).** Il ne recopie plus rien de ce que le client a fourni : ni le texte de l'exception, ni un nom de champ arbitraire, ni une valeur
+de rôle / modèle. Il porte `code` (liste fermée `LOGGABLE_REFUSAL_CODES`, sinon « autre »), `statut`, les noms de paramètres CONNUS (liste fermée `KNOWN_REFUSED_PARAMETERS`, ex.
+`reasoning_effort`) et le NOMBRE des autres. Le client reçoit toujours le refus explicite complet.
