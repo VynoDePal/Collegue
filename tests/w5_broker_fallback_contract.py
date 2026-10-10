@@ -9,6 +9,7 @@ ou d'usage inconnu, quel que soit le client (timeout, retry, connexions concurre
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 from w5_broker_contract import chat, open_worker, service_for
@@ -26,12 +27,22 @@ class ModelGatedUpstream(FakeUpstream):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.sent = asyncio.Event()
+        self.emitted_threadsafe = (
+            threading.Event()
+        )  # observable depuis un AUTRE thread (client, relais) : l'émission a bien eu lieu
         self.release = asyncio.Event()
         self.models = []
         self.primary_error = None
+        self.count_delay = 0.0  # latence injectée AVANT l'émission (charge, GC…) : aucun test ne doit en dépendre
+
+    async def count_tokens(self, request):
+        if self.count_delay:
+            await asyncio.sleep(self.count_delay)
+        return await super().count_tokens(request)
 
     async def generate(self, request):
         self.models.append(request.model)
+        self.emitted_threadsafe.set()
         if request.model == PRIMARY:
             self.sent.set()
             await self.release.wait()
