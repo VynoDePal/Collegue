@@ -331,6 +331,20 @@ class BranchCommands(GitHubClient):
             raise ToolExecutionError("message du commit Git absent ou malformé")
         return GitCommitInfo(sha=response_sha, tree_sha=tree_sha, parents=parents, message=message)
 
+    def get_git_tree(self, owner: str, repo: str, tree_sha: str, recursive: bool = False) -> Dict[str, Any]:
+        """Arbre Git RÉEL (``GET /git/trees/{sha}``), validé : ``{"tree": [...], "truncated": bool}``. Une réponse malformée
+        lève ; la troncature est RAPPORTÉE (l'appelant décide : les gardes de fusion et de socle la traitent en refus)."""
+        validate_ref(owner, "owner")
+        validate_ref(repo, "repo")
+        tree_sha = self._validate_full_sha(tree_sha, "SHA du tree")
+        data = self._api_get(f"/repos/{owner}/{repo}/git/trees/{tree_sha}", {"recursive": "1"} if recursive else None)
+        if not isinstance(data, dict) or not isinstance(data.get("tree"), list):
+            raise ToolExecutionError("arbre Git malformé")
+        for entry in data["tree"]:
+            if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in ("path", "type", "sha")):
+                raise ToolExecutionError("entrée d'arbre Git malformée")
+        return {"tree": data["tree"], "truncated": bool(data.get("truncated"))}
+
     def _branch_matches_commit_tree(
         self,
         owner: str,

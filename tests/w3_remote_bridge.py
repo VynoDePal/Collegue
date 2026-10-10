@@ -113,6 +113,10 @@ class BridgeServer(FakeGitHubServer):
         self.auto_green = True  # CI simulée : les cinq checks passent dès l'ouverture de la PR
         self.on_write: Optional[Callable[["BridgeServer", str], None]] = None
         self.published_calls: List[tuple] = []
+        self.protected_direct_writes: set = (
+            set()
+        )  # branches où GitHub refuse toute écriture directe (ruleset « PR obligatoire »)
+        self.truncate_trees = False  # réponses d'arbre « tronquées » (la lecture ne prouve alors rien)
 
     # ── objets Git réels ───────────────────────────────────────────────────────
     def commit(self, parents: List[str], *, tree: str, message: str = "c") -> str:
@@ -144,6 +148,8 @@ class BridgeServer(FakeGitHubServer):
             return self._post(path, data)
         if method == "DELETE":
             return self._delete(path, data)
+        if method == "PATCH":
+            return self._patch(path, data)
         raise AssertionError(f"méthode non simulée: {method} {endpoint}")
 
     # ── GET ────────────────────────────────────────────────────────────────────
@@ -153,6 +159,20 @@ class BridgeServer(FakeGitHubServer):
             self.calls.append(("GET", path, dict(params)))
             self._maybe_fail("GET", path)
             return self._read_file(m.group(1), params.get("ref") or self.base_branch)
+        m = re.fullmatch(rf"{_PREFIX}/git/trees/([0-9a-f]{{40}})", path)
+        if m:  # arbre Git RÉEL de premier niveau (barrière d'intégrité des contrôles ``.github/``)
+            self.calls.append(("GET", path, dict(params)))
+            self._maybe_fail("GET", path)
+            recursive = ["-r"] if str(params.get("recursive", "")).lower() in {"1", "true"} else []
+            rows = self.remote._git("ls-tree", "-z", *recursive, m.group(1), strip=False).split("\0")
+            entries = []
+            for row in rows:
+                if not row:
+                    continue
+                meta, _, name = row.partition("\t")
+                mode, kind, sha = meta.split(" ")
+                entries.append({"path": name, "mode": mode, "type": kind, "sha": sha})
+            return {"tree": entries, "truncated": bool(getattr(self, "truncate_trees", False))}
         if path == _PREFIX:
             self.calls.append(("GET", path, dict(params)))
             return {"default_branch": self.base_branch}
@@ -186,6 +206,11 @@ class BridgeServer(FakeGitHubServer):
         self.calls.append(("PUT", path, {k: v for k, v in data.items() if k != "content"}))
         self._maybe_fail("PUT", path)
         rel, branch = m.group(1), data.get("branch") or self.base_branch
+        if branch in self.protected_direct_writes:  # texte du refus réel d'un ruleset (observé sur la fixture protégée)
+            raise HttpError(
+                "GH013: Changes must be made through a pull request. Required status check Fixture tests is expected.",
+                status_code=409,
+            )
         current = None
         try:
             current = self._read_file(rel, branch)
@@ -200,7 +225,26 @@ class BridgeServer(FakeGitHubServer):
             self.on_write(self, rel)
         return {"content": {"path": rel}, "commit": {"sha": commit}}
 
+    def _patch(self, path: str, data: Dict[str, Any]) -> Any:
+        m = re.fullmatch(rf"{_PREFIX}/pulls/(\d+)", path)
+        if not m or int(m.group(1)) not in self.prs:
+            raise AssertionError(f"route PATCH non simulée: {path}")
+        self.calls.append(("PATCH", path, dict(data)))
+        self._maybe_fail("PATCH", path)
+        pr = self.prs[int(m.group(1))]
+        if data.get("state") == "closed" and not pr["merged"]:  # fermeture sans fusion (nettoyage de la campagne)
+            pr["state"] = "closed"
+        return {k: v for k, v in pr.items() if k != "files"}
+
     def _delete(self, path: str, data: Dict[str, Any]) -> Any:
+        ref = re.fullmatch(rf"{_PREFIX}/git/refs/heads/(.+)", path)
+        if ref:  # suppression d'une branche (nettoyage de la campagne) ; 404 si absente
+            self.calls.append(("DELETE", path, dict(data)))
+            self._maybe_fail("DELETE", path)
+            if ref.group(1) not in self.branches:
+                raise HttpError("Not Found", status_code=404)
+            del self.branches[ref.group(1)]
+            return {}
         m = re.fullmatch(rf"{_PREFIX}/contents/(.+)", path)
         if not m:
             raise AssertionError(f"route DELETE non simulée: {path}")
@@ -316,6 +360,10 @@ class BridgeServer(FakeGitHubServer):
         states = {name: "success" for name in FIVE_CHECKS}
         states.update(overrides)
         self.set_checks(self.prs[number]["head"]["sha"], states)
+
+    def protect_direct_writes(self, *branches: str) -> None:
+        """Ces branches refusent les écritures directes (Contents) comme le ruleset des bases de campagne ; seule une PR y fusionne."""
+        self.protected_direct_writes.update(branches)
 
     def required_names(self) -> List[str]:
         return list(FIVE_CHECKS)

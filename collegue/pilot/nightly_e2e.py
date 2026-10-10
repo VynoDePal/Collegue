@@ -186,6 +186,14 @@ class NightlyConfig:
     run_attempt: str
     manifest_path: str
     marker_path: str = _DEFAULT_MARKER_PATH
+    # Socle de bootstrap approuvé (campagne métier W5) : commit descendant DIRECT du seed, validé par API avant tout usage. Absent
+    # (smoke nightly historique) ⇒ la base éphémère part du seed lui-même.
+    bootstrap_sha: Optional[str] = None
+
+    @property
+    def base_parent_sha(self) -> str:
+        """Commit sur lequel le commit propriétaire de la base éphémère est posé (socle approuvé, sinon le seed)."""
+        return str(self.bootstrap_sha or self.seed_sha).lower()
 
     @classmethod
     def from_env(
@@ -516,7 +524,7 @@ class NightlyE2ERunner:
             root = self.clients.branches.get_git_commit(
                 self.config.owner,
                 self.config.repo,
-                self.config.seed_sha,
+                self.config.base_parent_sha,
             )
             candidate = self.clients.branches.get_git_commit(
                 self.config.owner,
@@ -526,7 +534,7 @@ class NightlyE2ERunner:
         except Exception:  # noqa: BLE001 - preuve distante absente => refus
             return False
         return (
-            list(candidate.parents) == [self.config.seed_sha]
+            list(candidate.parents) == [self.config.base_parent_sha]
             and candidate.tree_sha == root.tree_sha
             and getattr(candidate, "message", None) == self._base_owner_message()
         )
@@ -537,7 +545,7 @@ class NightlyE2ERunner:
         current = self._branch_sha_or_none(cfg.base_branch)
         if current is not None:
             raise NightlyE2EError("la branche de base nightly existe avant son intent de création")
-        root = self.clients.branches.get_git_commit(cfg.owner, cfg.repo, cfg.seed_sha)
+        root = self.clients.branches.get_git_commit(cfg.owner, cfg.repo, cfg.base_parent_sha)
         manifest.base_creation_started = True
         _write_manifest(cfg.manifest_path, manifest)
         try:
@@ -545,7 +553,7 @@ class NightlyE2ERunner:
                 cfg.owner,
                 cfg.repo,
                 cfg.base_branch,
-                parent_sha=cfg.seed_sha,
+                parent_sha=cfg.base_parent_sha,
                 tree_sha=root.tree_sha,
                 message=self._base_owner_message(),
             )

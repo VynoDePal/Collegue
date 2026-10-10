@@ -92,6 +92,20 @@ TARGETS: dict[str, Target] = {
             groups=("sandbox-openhands",),
             python_version="3.12",
         ),
+        Target(
+            "fixture-stack",
+            "pile métier approuvée de la fixture (workflow « Fixture tests » du socle)",
+            project_deps=False,
+            groups=("fixture-stack",),
+            python_version="3.12",
+        ),
+        Target(
+            "sandbox-broker",
+            "docker/sandbox/Dockerfile.broker (SDK/tools OpenHands 1.19.1 seuls, pile métier approuvée)",
+            project_deps=False,
+            groups=("fixture-stack", "sandbox-broker"),
+            python_version="3.12",
+        ),
     )
 }
 

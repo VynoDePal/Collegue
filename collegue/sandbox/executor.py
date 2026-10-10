@@ -33,6 +33,7 @@ différée en Phase 2 ; le pilote Phase 3 câblera cet exécuteur).
 
 from __future__ import annotations
 
+import copy
 import errno
 import math
 import os
@@ -40,6 +41,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional, Tuple, Union
@@ -53,6 +55,26 @@ SANDBOX_PIP_CACHE_MOUNT = "/tmp/.pip_cache"
 # creds NE peuvent PAS vivre sous /tmp (le ``--tmpfs /tmp`` les masquerait), d'où
 # le fail-loud si HOME pointe sous /tmp (cf. _build_run_argv).
 SANDBOX_OPENHANDS_AUTH_SUBPATH = ".openhands"
+# Courtier budgétaire (W5) : répertoire hôte ne contenant QUE le socket Unix d'UNE session, monté en lecture seule. Le worker
+# n'a aucun réseau (``--network none``) ; un relais loopback embarqué (``oh_broker_relay``) recopie vers ce socket.
+SANDBOX_BROKER_MOUNT = "/run/collegue-broker"
+BROKER_SOCKET_NAME = "broker.sock"
+# Variables qu'un worker raccordé au courtier ne reçoit JAMAIS : clés fournisseur et proxy (aucun chemin réseau détourné).
+BROKER_FORBIDDEN_ENV = frozenset(
+    {
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENAI_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+    }
+)
 
 # Marqueur posé dans le répertoire de contrôle Git d'un workspace (frontière Git,
 # ``collegue.executor.git_boundary``). Ce répertoire — hooks/config/refs/index,
@@ -76,6 +98,15 @@ TIMEOUT_EXIT_CODE = 124
 # Auto-limitation du conteneur sous allocation (secondes) : délai entre TERM et KILL, et marge hôte.
 SELF_LIMIT_KILL_AFTER = 15
 SELF_LIMIT_HOST_MARGIN = 30
+# Échéance ABSOLUE (``deadline_epoch``) : aucun délai de grâce de travail. Le processus interne est tué (KILL) à l'échéance ; le filet
+# hôte (kill du conteneur par nom) ne tolère que cette marge d'ordonnancement/démarrage, jamais le délai de grâce ci-dessus.
+DEADLINE_HOST_MARGIN = 2.0
+# Garde exécutée DANS le conteneur au démarrage effectif du travail : l'échéance ABSOLUE (epoch, secondes entières par défaut) y est relue
+# avec l'horloge du conteneur (même noyau que l'hôte). Échéance atteinte ⇒ rien n'est exécuté (code 124) ; sinon le travail est lancé
+# sous ``timeout --signal=KILL <reste>``. Un démon qui démarre le conteneur en retard ne peut donc pas faire travailler après l'échéance.
+DEADLINE_GUARD_SCRIPT = (
+    'r=$(( $1 - $(date +%s) )) || exit 124; [ "$r" -ge 1 ] || exit 124; shift; exec timeout --signal=KILL "$r" "$@"'
+)
 
 # Préfixe de la note ajoutée à stderr quand le conteneur est tué au timeout —
 # consommé par le moteur (#461 : classification infra ; #464 : usage perdu).
@@ -282,6 +313,7 @@ class DockerSandbox:
         dns: Optional[Tuple[str, ...]] = None,
         pip_cache_dir: Optional[str] = None,
         subscription_auth_dir: Optional[str] = None,
+        broker_socket_dir: Optional[str] = None,
         memory: str = "512m",
         cpus: str = "1.0",
         pids_limit: int = 256,
@@ -314,6 +346,8 @@ class DockerSandbox:
         # hors-run). Opt-in : vide (défaut) = aucun montage, argv inchangé. Validé
         # comme un -v (realpath + refus ':'/racine) ; hors confinement workspace_root.
         self.subscription_auth_dir = subscription_auth_dir or None
+        # Courtier budgétaire (W5) : répertoire du socket d'UNE session (voir ``with_broker``). Vide = aucun montage.
+        self.broker_socket_dir = broker_socket_dir or None
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
@@ -341,6 +375,69 @@ class DockerSandbox:
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or name in self.env or name in self.env_passthrough:
                 raise SandboxRefused(f"env_secrets : nom de variable invalide ou dupliqué ({name!r})")
         self.read_only = bool(read_only)
+        if self.broker_socket_dir:
+            self._validate_broker()
+
+    # ── courtier budgétaire (W5) ──────────────────────────────────────────────────
+
+    def with_broker(
+        self,
+        socket_dir: str,
+        *,
+        env: Optional[Mapping[str, str]] = None,
+        env_secrets: Optional[Mapping[str, Any]] = None,
+    ) -> "DockerSandbox":
+        """Copie de ce sandbox RACCORDÉE au socket d'UNE session du courtier (``socket_dir``), sans toucher à l'original.
+
+        ``env`` (non secret) et ``env_secrets`` (par référence : ``-e NAME``, valeur dans l'env du seul process docker) sont
+        AJOUTÉS ; le jeton de session passe ainsi comme secret par référence. Refus (``SandboxRefused``) si le sandbox a un
+        réseau, un passthrough d'environnement, une variable de clé fournisseur / de proxy, des creds d'abonnement montés, ou
+        si ``socket_dir`` n'est pas un répertoire ordinaire ne contenant que ``broker.sock``.
+        """
+        clone = copy.copy(self)
+        clone.env = {**self.env, **dict(env or {})}
+        clone._env_secrets = {**self._env_secrets, **{str(k): v for k, v in (env_secrets or {}).items()}}
+        clone.broker_socket_dir = socket_dir
+        for name in clone._env_secrets:
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) or name in clone.env or name in clone.env_passthrough:
+                raise SandboxRefused(f"env_secrets : nom de variable invalide ou dupliqué ({name!r})")
+        clone._validate_broker()
+        return clone
+
+    def _validate_broker(self) -> str:
+        """Valide le raccordement au courtier ; renvoie le chemin canonique du répertoire. Rejoué à CHAQUE lancement."""
+        if self.network != "none":
+            raise SandboxRefused("courtier : un worker raccordé doit tourner sans réseau (--network none)")
+        if self.env_passthrough:
+            raise SandboxRefused("courtier : env_passthrough interdit (l'environnement hôte ne doit rien transmettre)")
+        if self.subscription_auth_dir:
+            raise SandboxRefused("courtier : creds d'abonnement et courtier sont exclusifs")
+        names = {str(k).upper() for k in list(self.env) + list(self._env_secrets)}
+        if names & BROKER_FORBIDDEN_ENV:
+            raise SandboxRefused(
+                f"courtier : variable(s) interdite(s) dans le worker : {sorted(names & BROKER_FORBIDDEN_ENV)}"
+            )
+        directory = str(self.broker_socket_dir)
+        try:
+            top = os.lstat(directory)
+        except OSError as exc:
+            raise SandboxRefused(f"broker_socket_dir illisible : {exc.strerror}") from None
+        if stat.S_ISLNK(top.st_mode) or not stat.S_ISDIR(top.st_mode):
+            raise SandboxRefused("broker_socket_dir doit être un répertoire ordinaire (ni lien symbolique ni fichier)")
+        real = os.path.realpath(os.path.abspath(directory))
+        if ":" in real or real == os.path.sep:
+            raise SandboxRefused(f"broker_socket_dir invalide (':' ou racine) : {real}")
+        _refuse_if_git_control_exposed(directory, "broker_socket_dir")
+        try:
+            entries = sorted(entry.name for entry in os.scandir(real))
+            sock = os.lstat(os.path.join(real, BROKER_SOCKET_NAME))
+        except OSError as exc:
+            raise SandboxRefused(f"broker_socket_dir : socket absent ou illisible ({exc.strerror})") from None
+        if entries != [BROKER_SOCKET_NAME] or not stat.S_ISSOCK(sock.st_mode):
+            raise SandboxRefused(
+                f"broker_socket_dir ne doit contenir que le socket {BROKER_SOCKET_NAME!r} (contenu : {entries})"
+            )
+        return real
 
     # ── validation / construction (pur, testable sans Docker) ─────────────────────
 
@@ -420,6 +517,16 @@ class DockerSandbox:
                     "(le tmpfs /tmp masquerait le montage des creds d'abonnement)"
                 )
             argv += ["-v", f"{auth}:{home}/{SANDBOX_OPENHANDS_AUTH_SUBPATH}"]
+        if self.broker_socket_dir:
+            # Courtier (W5) : le SEUL chemin vers un fournisseur est ce socket, monté en lecture seule (la connexion à un socket
+            # n'exige pas d'écriture sur le système de fichiers). Revalidé à chaque lancement (le socket a pu disparaître).
+            broker = self._validate_broker()
+            argv += [
+                "-v",
+                f"{broker}:{SANDBOX_BROKER_MOUNT}:ro",
+                "-e",
+                f"COLLEGUE_BROKER_SOCKET={SANDBOX_BROKER_MOUNT}/{BROKER_SOCKET_NAME}",
+            ]
         if self.read_only:
             argv += ["--read-only"]  # root FS en lecture seule
         argv += [
@@ -478,13 +585,25 @@ class DockerSandbox:
             pass
 
     def run_command(
-        self, cmd: Union[str, List[str]], workspace: str, *, timeout: Optional[float] = None
+        self,
+        cmd: Union[str, List[str]],
+        workspace: str,
+        *,
+        timeout: Optional[float] = None,
+        deadline_epoch: Optional[float] = None,
     ) -> SandboxResult:
         """Exécute ``cmd`` dans le sandbox, workspace monté sur ``/workspace``.
 
         ``timeout`` (secondes, optionnel) remplace ``self.timeout`` pour CET appel — l'échéance d'une
         allocation budgétaire (vague 2). Au dépassement, le conteneur est tué PAR NOM : tuer le client
         ``docker`` ne tue pas le conteneur, qui continuerait à dépenser en arrière-plan.
+
+        ``deadline_epoch`` (epoch UTC, optionnel) est une échéance ABSOLUE de travail (courtier W5 : échéance globale
+        persistée). Elle est revalidée au DERNIER point avant le lancement (``SandboxRefused`` si elle est déjà atteinte :
+        rien n'est lancé) ; le délai relatif donné au conteneur et au filet hôte est recalculé à cet instant, donc ni la
+        préparation amont ni un démarrage Docker lent ne la prolongent. Aucun délai de grâce de travail : le processus interne
+        reçoit KILL (pas TERM, qu'un worker peut ignorer) à l'échéance, et le filet hôte tue le conteneur par nom
+        ``DEADLINE_HOST_MARGIN`` secondes après. La collecte et le nettoyage se poursuivent ensuite.
 
         ``cmd`` peut être une chaîne (``sh -c`` dans le conteneur) ou un argv (liste).
         Lève :class:`SandboxUnavailable` si Docker est absent ou si l'on tourne en
@@ -498,16 +617,22 @@ class DockerSandbox:
         ws = self._validate_workspace(workspace)
         os.makedirs(ws, exist_ok=True)
         name = f"collegue-sbx-{uuid.uuid4().hex[:12]}"
-        if timeout is not None and timeout > 0:
+        inner = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
+        if deadline_epoch is not None:
+            # Calculé juste avant le lancement (voir plus bas) : placeholders ici.
+            effective_timeout = self.timeout
+        elif timeout is not None and timeout > 0:
             # Échéance d'allocation : le conteneur S'AUTO-LIMITE (coreutils ``timeout`` : TERM puis KILL),
             # indépendamment du client ``docker`` — si le process hôte meurt, le conteneur ne dépense pas
             # indéfiniment en arrière-plan. Le délai hôte, un peu plus long, n'est qu'un filet.
-            inner = ["sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
             cmd = ["timeout", "--signal=TERM", f"--kill-after={SELF_LIMIT_KILL_AFTER}", str(math.ceil(timeout)), *inner]
             effective_timeout = float(timeout) + SELF_LIMIT_KILL_AFTER + SELF_LIMIT_HOST_MARGIN
         else:
             effective_timeout = self.timeout
-        argv = self._build_run_argv(cmd, ws, name=name)
+        argv = (
+            None if deadline_epoch is not None else self._build_run_argv(cmd, ws, name=name)
+        )  # sous échéance : plus bas
+        limit = timeout
 
         out_f = tempfile.NamedTemporaryFile(prefix="sbx-out-", delete=False)
         err_f = tempfile.NamedTemporaryFile(prefix="sbx-err-", delete=False)
@@ -519,9 +644,43 @@ class DockerSandbox:
                 if self._env_secrets:
                     # Environnement du SEUL process docker enfant : os.environ de l'hôte n'est jamais muté.
                     run_kwargs["env"] = {**os.environ, **{k: _secret_text(v) for k, v in self._env_secrets.items()}}
+                if deadline_epoch is not None:
+                    # Construction COMPLÈTE de l'argv d'abord (elle peut être lente : vérifications de montages…), échéance ABSOLUE
+                    # portée dans la commande (garde au démarrage du travail dans le conteneur) ; puis DERNIÈRE relecture de l'horloge,
+                    # immédiatement avant le lancement : aucune préparation ne recrée une fenêtre de durée ancienne.
+                    absolute = math.floor(
+                        float(deadline_epoch)
+                    )  # entier INFÉRIEUR : le travail ne dépasse jamais l'échéance
+                    if timeout is not None and timeout >= 1:
+                        absolute = min(absolute, math.floor(time.time() + timeout))
+                    ceiling = math.floor(float(deadline_epoch) - time.time())
+                    if timeout is not None and timeout >= 1:
+                        ceiling = min(ceiling, math.floor(timeout))
+                    guarded = [
+                        "timeout",
+                        "--signal=KILL",
+                        str(max(ceiling, 1)),  # plafond hôte (filet) ; la borne ABSOLUE est celle de la garde interne
+                        "sh",
+                        "-c",
+                        DEADLINE_GUARD_SCRIPT,
+                        "collegue-deadline",
+                        str(absolute),
+                        *inner,
+                    ]
+                    argv = self._build_run_argv(guarded, ws, name=name)
+                    remaining = float(deadline_epoch) - time.time()  # DERNIÈRE relecture, juste avant subprocess.run
+                    limit = math.floor(remaining)
+                    if timeout is not None and timeout >= 1:
+                        limit = min(limit, math.floor(timeout))
+                    if limit < 1:
+                        raise SandboxRefused(
+                            "échéance absolue atteinte avant le lancement du conteneur : rien n'est lancé "
+                            f"(reste {remaining:.2f}s)"
+                        )
+                    effective_timeout = min(float(limit), remaining) + DEADLINE_HOST_MARGIN
                 proc = subprocess.run(argv, stdout=out_f, stderr=err_f, timeout=effective_timeout, **run_kwargs)
                 exit_code = proc.returncode
-                if timeout and exit_code in (TIMEOUT_EXIT_CODE, 137):  # auto-limite du conteneur atteinte
+                if limit and exit_code in (TIMEOUT_EXIT_CODE, 137):  # auto-limite du conteneur atteinte
                     timed_out = True
             except subprocess.TimeoutExpired:
                 # Tuer le client ne tue pas le conteneur → on le tue par nom.
@@ -537,7 +696,7 @@ class DockerSandbox:
             stdout = self._read_capped(out_path)
             stderr = self._read_capped(err_path)
             if timed_out:
-                stderr += f"\n{TIMEOUT_NOTE} {(timeout if timeout else effective_timeout):g}s"
+                stderr += f"\n{TIMEOUT_NOTE} {(limit if limit else effective_timeout):g}s"
             return SandboxResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=timed_out)
         finally:
             for path in (out_path, err_path):

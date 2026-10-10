@@ -20,6 +20,7 @@ ni un succès ni une preuve du parcours avec modèles réels.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import json
 import os
@@ -31,7 +32,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from collegue.sandbox import DEFAULT_SANDBOX_IMAGE
 
@@ -52,11 +53,17 @@ EXIT_CODES = {VERDICT_VALIDATED: 0, VERDICT_FAILED: 1, VERDICT_INCOMPLETE: 3, VE
 
 REPORT_SCHEMA = "w4-business-report/1"
 REDACTION = "[REDACTED]"
-SECRET_ENV_NAMES = ("GITHUB_TOKEN", "LLM_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+SECRET_ENV_NAMES = (
+    "GITHUB_TOKEN", "LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+)  # fmt: skip
 
 
 class BudgetStop(Exception):
     """Arrêt par budget ou échéance : l'étape se termine ``budget_stop``."""
+
+
+class BaseMovedError(RuntimeError):
+    """La base de campagne a bougé hors de ce que la campagne a vérifié : aucune poursuite (BUILD jamais lancé sur une base non prouvée)."""
 
 
 class IncompleteValidation(Exception):
@@ -230,16 +237,30 @@ BASE_BRANCH_PREFIX = "collegue-business"
 LAUNCH_CONFIRMATION = "LANCER-UNE-FOIS-2USD-250000TOKENS-900S"
 
 #: Réglages que l'invocation réelle impose (toute dérive est refusée au préflight).
+#: Modèles IMPOSÉS (W5) : Gemma 4 31B pour tous les rôles ; repli du CODEUR seulement 26B.
+MODEL_PRIMARY = "gemma-4-31b-it"
+MODEL_CODER_FALLBACK = "gemma-4-26b-a4b-it"
+
 CAMPAIGN_SETTINGS: Dict[str, str] = {
     "BUDGET_MODE": "strict",
     "BUDGET_EXHAUSTED_ACTION": "pause",
     "BUILD_AUTO_MERGE": "true",
-    "AUTO_MERGE_ENABLED": "false",
+    # Phase 5 (IMPROVE : fusion automatique de faible risque, santé indépendante, revert) ACTIVE pour R04/R05 ; la politique de
+    # faible risque (liste blanche documentaire, 50 lignes, fichiers sensibles) n'est PAS élargie.
+    "AUTO_MERGE_ENABLED": "true",
+    "AUTO_REVERT_ENABLED": "true",
     "DEPS_REQUIRE_MERGED": "true",
     "STRICT_MAX_INFLIGHT_PRS": "1",
     "TASK_MAX_ATTEMPTS": "1",
     "GATE_ACCEPTANCE_TESTS": "true",
     "REQUIRE_COST_PRICING": "true",
+    # Transport W5 : relais budgétaire (lot A) ; la destination reste Google/Gemini, jamais reclassée.
+    "LLM_TRANSPORT": "budget_broker",
+    "LLM_PROVIDER": "gemini",
+    "LLM_MODEL": MODEL_PRIMARY,
+    "CODER_FALLBACK_MODELS": MODEL_CODER_FALLBACK,
+    # Échéance globale du relais (ouverte au premier accès Google réel, persistée) : explicitement configurée à l'enveloppe.
+    "BROKER_GLOBAL_DEADLINE_SECONDS": "900",
 }
 
 BUSINESS_PROBLEM = (
@@ -251,8 +272,25 @@ BUSINESS_PROBLEM = (
     "(2) `POST /audits` (201, corps JSON title, auditor, summary, findings[{severity, description}]) puis `GET /audits/{id}` "
     "(200, mêmes données ; 404 si inconnu), données lues dans la base ; "
     "(3) `GET /audits/{id}/export.pdf` (application/pdf) dont le TEXTE contient le titre, l'auditeur et chaque constat de cet "
-    "audit, lu depuis la base. Ajoute les tests de chaque tâche et les dépendances nécessaires à `requirements.txt`."
+    "audit, lu depuis la base. Le PDF exporté reprend le gabarit du fichier de documentation `docs/export_header.md` (que tu "
+    "crées dans cette tâche et relis à chaque export) : ce fichier contient la mention légale `CONFIDENTIEL` sur une ligne "
+    "dédiée, et cette mention doit figurer dans le TEXTE du PDF. "
+    "Ajoute les tests de chaque tâche et les dépendances nécessaires à `requirements.txt`."
 )
+
+
+def business_problem(stack: Sequence[str] = ()) -> str:
+    """Problème de la campagne. ``stack`` = les ``nom==version`` du ``requirements.txt`` APPROUVÉ du socle (relu par l'API) : le
+    codeur travaille HORS LIGNE sur cette pile et la reçoit dans son problème, qui ne contient ni ne crée aucune quatrième tâche."""
+    if not stack:
+        return BUSINESS_PROBLEM
+    return (
+        BUSINESS_PROBLEM
+        + " Contrainte d'environnement (travail HORS LIGNE, ce n'est pas une tâche supplémentaire) : seule la pile approuvée du dépôt "
+        "est installable, déjà listée dans `requirements.txt` — "
+        + ", ".join(stack)
+        + ". N'utilise aucune autre dépendance ni aucune autre version : une dépendance hors de cette liste fait échouer la vérification."
+    )
 
 
 def campaign_environment(campaign_id: str, home: str, bounds: CampaignBounds = CAMPAIGN_BOUNDS) -> Dict[str, str]:
@@ -265,6 +303,8 @@ def campaign_environment(campaign_id: str, home: str, bounds: CampaignBounds = C
         "COLLEGUE_RUN_DEADLINE_SECONDS": str(bounds.max_seconds),
         "COLLEGUE_HOME": home,
         "STATE_DATABASE_URL": f"sqlite:///{state_db}",
+        # Santé INDÉPENDANTE de Phase 5 : la sonde métier (jamais les tests de l'agent), exécutée par le sandbox du gate.
+        "AUTO_REVERT_HEALTH_COMMAND": health_command(),
     }
 
 
@@ -299,6 +339,10 @@ def validate_campaign_environment(env: Mapping[str, str], bounds: CampaignBounds
     url = str(env.get("STATE_DATABASE_URL", "") or "")
     if not url.startswith("sqlite:////"):
         problems.append("STATE_DATABASE_URL doit viser une SQLite absolue (registre W2 de la campagne)")
+    if str(env.get("AUTO_REVERT_HEALTH_COMMAND", "") or "") != health_command():
+        problems.append(
+            "AUTO_REVERT_HEALTH_COMMAND doit être la sonde métier indépendante (health_command()) — jamais autre chose"
+        )
     if str(env.get("INTEGRATION_E2E_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}:
         problems.append("INTEGRATION_E2E_ENABLED est actif : la campagne ponctuelle refuse toute récurrence")
     return problems
@@ -331,7 +375,7 @@ def check_environment(env: Mapping[str, str], report: CampaignReport, step: Step
         raise IncompleteValidation("environnement hors enveloppe : " + " ; ".join(problems))
 
 
-LLM_KEY_NAME = re.compile(r"^(LLM_API_KEY(_[A-Z]+)?|GEMINI_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY)$")
+LLM_KEY_NAME = re.compile(r"^(LLM_API_KEY(_[A-Z]+)?|GEMINI_API_KEY|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY)$")
 STAGE_STATIC, STAGE_FULL, STAGE_LAUNCH = "static", "full", "launch"
 PREFLIGHT_STAGES = (STAGE_STATIC, STAGE_FULL, STAGE_LAUNCH)
 
@@ -358,6 +402,18 @@ def check_secret_scope(
         step.evidence["scope"] = (
             "lancement : les clés ne sont lues que par l'étape qui les consomme, valeurs jamais affichées"
         )
+        # Contrat de clé W5 : le secret temporaire de la campagne est lié à ``LLM_API_KEY`` (le SEUL nom que lisent les réglages du
+        # produit et le service de confiance du courtier). Toute autre variable de clé est hors contrat : un nom par rôle pourrait
+        # détourner un rôle vers une autre clé, ``GOOGLE_API_KEY`` & co sont ignorés par le produit mais restent des fuites possibles.
+        if "LLM_API_KEY" not in present:
+            raise IncompleteValidation(
+                "clé du fournisseur absente à l'étape réelle : LLM_API_KEY (lue par le seul service de confiance)"
+            )
+        foreign = [name for name in present if name != "LLM_API_KEY"]
+        if foreign:
+            raise RuntimeError(
+                f"variable(s) de clé hors contrat à l'étape réelle : {', '.join(foreign)} (seule LLM_API_KEY est lue)"
+            )
         return
     if present:
         raise RuntimeError(f"clé(s) de modèle exposée(s) à l'étape de préflight : {', '.join(present)}")
@@ -542,6 +598,22 @@ def effective_worker_capacity(settings: Any, bounds: CampaignBounds = CAMPAIGN_B
     modèle, aucune dépense — la réservation vit dans le registre jetable, pas dans celui de la campagne."""
     from datetime import datetime, timedelta, timezone
 
+    if str(getattr(settings, "LLM_TRANSPORT", "") or "").strip().lower() == "budget_broker":
+        # W5 : la capacité est celle du relais budgétaire RÉELLEMENT instancié, prouvée par l'interface publique du lot A ; la
+        # matrice historique des workers à clé directe n'a plus de sens et ne décide pas à sa place.
+        from collegue.pilot import w5_business as w5
+
+        proof = dict(w5.broker_capability_proof()(settings))
+        accepted = proof.get("accepted") is True and proof.get("transport") == "budget_broker"
+        return {
+            "worker": str(proof.get("instance") or "budget_broker"),
+            "declared_enforcement": proof.get("enforcement"),
+            "accepted": accepted,
+            "code": proof.get("code"),
+            "reason": str(proof.get("reason") or ("capacité non acceptée" if not accepted else "")),
+            "source": "collegue.broker.capability_proof",
+        }
+
     from collegue.core.llm.budget_guard import BudgetBinding
     from collegue.executor import OHSdkAgent
     from collegue.executor.worker_budget import allocate_worker
@@ -676,6 +748,7 @@ def run_preflight(
     capacity: Optional[Callable[[Any], Mapping[str, Any]]] = None,
     capacity_matrix: Optional[List[Dict[str, Any]]] = None,
     route_check: Optional[Callable[..., Mapping[str, Any]]] = None,
+    extra_checks: Sequence[Tuple[str, str, Callable[[Step], None]]] = (),
 ) -> CampaignReport:
     """Préflight complet, SANS appel de modèle : l'ordre va du moins coûteux au plus dépendant d'un service externe.
 
@@ -710,6 +783,8 @@ def run_preflight(
     report.declare(
         "P07-base-protection", "Politique de fusion W3 applicable à la base éphémère (acteur et branche réels)"
     )
+    for extra_id, extra_title, _check in extra_checks:  # contrôles W5 (socle, modèles, relais, identité de campagne)
+        report.declare(extra_id, extra_title)
     # Étape « static » : tout sauf l'image du gate (construite seulement si ces contrôles passent) — P08 est alors
     # facultative ET non jouée ; « full » et « launch » (verdicts qui autorisent le lancement) l'exigent.
     report.declare(
@@ -754,6 +829,8 @@ def run_preflight(
         "P07-base-protection",
         lambda s: check_base_protection(clients, report, s, owner=owner, repo=repo, run_tag=run_tag),
     )
+    for extra_id, _title, check in extra_checks:
+        report.run(extra_id, check)
     if stage == STAGE_STATIC:
         return report
     report.run(
@@ -929,6 +1006,68 @@ def trusted_local_runner(
         source=env, allowlist=tuple(VERIFIER_ENV_ALLOWLIST) + ("PYTHONDONTWRITEBYTECODE", "PYTHONPATH")
     )
     return subprocess.run(list(argv), cwd=cwd, env=clean, capture_output=True, text=True, timeout=timeout)
+
+
+_HEALTH_PROGRAM = r"""
+import base64, json, os, subprocess, sys, tempfile
+SCRIPT = base64.b64decode(%(script)r).decode()
+MARKER = %(marker)r
+REFERENCE = %(reference)r
+NOTICE = %(notice)r
+
+def phase(name, database, audit_id):
+    proc = subprocess.run(
+        [sys.executable, "-c", SCRIPT, name, database, audit_id, REFERENCE, NOTICE],
+        capture_output=True, text=True, timeout=%(timeout)d,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=""),
+    )
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith(MARKER):
+            return json.loads(line[len(MARKER):])
+    return {"incomplete": "rapport illisible: " + (proc.stderr or proc.stdout)[-300:]}
+
+database = os.path.join(tempfile.mkdtemp(), "audits.db")
+failed = []
+write = phase("write", database, "")
+if write.get("incomplete"):
+    print(json.dumps({"incomplete": write["incomplete"]}))
+    sys.exit(2)
+failed += ["write:" + k for k, ok in write["checks"].items() if not ok]
+audit_id = (write.get("observations") or {}).get("audit_id")
+if audit_id is not None:
+    reread = phase("reread", database, str(audit_id))
+    if reread.get("incomplete"):
+        print(json.dumps({"incomplete": reread["incomplete"]}))
+        sys.exit(2)
+    failed += ["reread:" + k for k, ok in reread["checks"].items() if not ok]
+print(json.dumps({"failed": failed}))
+sys.exit(1 if failed else 0)
+"""
+
+#: Durée maximale de CHAQUE phase de la sonde de santé (le sandbox du gate borne en plus l'ensemble).
+HEALTH_PHASE_TIMEOUT = 60
+
+
+def health_command() -> str:
+    """Commande de santé INDÉPENDANTE de Phase 5 (``AUTO_REVERT_HEALTH_COMMAND``).
+
+    Même sonde métier que la vérification R02 (base vierge, migration, audit créé / relu / relu après redémarrage, PDF lu par un
+    vrai lecteur, mention légale exigée) : jamais les tests écrits par l'agent. Autonome (un seul argument, aucun fichier du
+    dépôt, aucun secret) ; exécutée par le sandbox du gate dans le clone de la base fusionnée. Code 0 = sain, 1 = régression
+    observée, 2 = sonde non établie (pile ou lecteur PDF absent).
+
+    **Aucun opérateur shell** (``; | & ` $( > <`` ni saut de ligne) : la garde de Phase 5 refuse une commande de santé qui pourrait
+    masquer un échec ; le programme voyage donc en base64 dans un unique ``exec`` (aucune relaxation de la garde)."""
+    script = _VERIFY_SCRIPT % {"marker": REPORT_MARKER}
+    program = _HEALTH_PROGRAM % {
+        "script": base64.b64encode(script.encode("utf-8")).decode("ascii"),
+        "marker": REPORT_MARKER,
+        "reference": json.dumps(REFERENCE_AUDIT, ensure_ascii=False),
+        "notice": LEGAL_NOTICE,
+        "timeout": HEALTH_PHASE_TIMEOUT,
+    }
+    encoded = base64.b64encode(program.encode("utf-8")).decode("ascii")
+    return f"python -c \"exec(__import__('base64').b64decode('{encoded}'))\""
 
 
 def _parse_report(stdout: str) -> Optional[Dict[str, Any]]:
@@ -1211,10 +1350,20 @@ def _verify_in_docker(
 # ── registre W2 : les plafonds viennent du registre durable, jamais d'un compteur propre ─────────────────────────────────
 
 
-def registry_counters(manager: Any, project_id: int) -> Dict[str, Any]:
-    """Compteurs du registre durable d'un projet (consommé / réservé / inconnu / plafonds), lus sans calcul propre."""
+def registry_counters(
+    manager: Any, project_id: Optional[int] = None, scope_key: Optional[str] = None
+) -> Dict[str, Any]:
+    """Compteurs du registre durable (consommé / réservé / inconnu / plafonds), lus sans calcul propre.
+
+    Le scope du PROJET fait foi quand il existe (il contient le cycle de planification lié) ; avant la création du projet — dès
+    l'activation de la campagne —, le scope de cycle ``planning:cycle:<id>`` est lu directement : la dépense des canaris et de la
+    planification est lisible même si aucun projet n'aboutit."""
     ledger = getattr(manager, "budget_ledger", None)
-    snapshot = ledger.snapshot_for_project(int(project_id)) if ledger is not None else None
+    snapshot = None
+    if ledger is not None and project_id:
+        snapshot = ledger.snapshot_for_project(int(project_id))
+    if snapshot is None and ledger is not None and scope_key:
+        snapshot = ledger.snapshot(str(scope_key))
     if snapshot is None:
         return {"scope": None}
     return {
@@ -1233,10 +1382,109 @@ def registry_counters(manager: Any, project_id: int) -> Dict[str, Any]:
     }
 
 
+def usage_defect(counters: Mapping[str, Any]) -> Optional[str]:
+    """Une consommation inconnue ou un scope bloqué interdit tout verdict complet, quelle que soit la lecture qui le révèle."""
+    if counters.get("blocked_reason"):
+        return f"scope budgétaire bloqué ({counters.get('blocked_reason')}) : usage inconnu, aucune validation complète"
+    unknown_usd, unknown_tokens = counters.get("unknown_micro_usd") or 0, counters.get("unknown_tokens") or 0
+    if unknown_usd or unknown_tokens:
+        return f"consommation inconnue au registre ({unknown_usd} µ$ / {unknown_tokens} tokens) : aucune validation complète"
+    return None
+
+
+_MONOTONE = ("consumed_micro_usd", "consumed_tokens", "unknown_micro_usd", "unknown_tokens", "revision")
+
+
+class RegistryProof:
+    """Preuve de budget de la campagne : l'historique des lectures OBLIGATOIRES du registre durable.
+
+    Une lecture est obligatoire après chaque phase qui a tourné et à la sortie. Règles (aucune ne dépend d'un simple compteur final) :
+
+    * toute lecture qui révèle une consommation inconnue, un blocage ou un dépassement est un défaut PERMANENT de la campagne,
+      même si une lecture plus tardive n'en dit rien (les compteurs sont cumulatifs) ;
+    * une lecture obligatoire manquante est une *lacune* : elle ferme définitivement les nouvelles émissions (``emission_refusal``)
+      et laisse la preuve incomplète, avec sa cause d'origine ;
+    * une lacune ne peut être RÉPARÉE que par la PREMIÈRE lecture ultérieure, et seulement si elle, cumulativement : (a) arrive avant toute nouvelle
+      émission (la fermeture des émissions l'impose, ``emitted_since_gap`` le vérifie), (b) porte sur le même scope et ne
+      régresse sur aucun compteur monotone par rapport à la dernière lecture valide, (c) ne révèle ni inconnue, ni blocage, ni
+      dépassement. La réparation couvre la preuve de dépense (elle est consignée avec sa cause), jamais les phases refusées entre
+      temps : elles restent non jouées et le verdict reste incomplet.
+    """
+
+    def __init__(self) -> None:
+        self.reads: List[Dict[str, Any]] = []
+        self.gaps: List[Dict[str, Any]] = []
+        self._last_good: Optional[Mapping[str, Any]] = None
+        self.emitted_since_gap = 0
+
+    def note_emission(self) -> None:
+        if any(gap["repaired_by"] is None for gap in self.gaps):
+            self.emitted_since_gap += 1
+
+    def record_gap(self, label: str, cause: str) -> None:
+        self.gaps.append({"label": label, "cause": cause, "repaired_by": None})
+
+    def record(self, label: str, counters: Mapping[str, Any]) -> Optional[str]:
+        """Enregistre une lecture ; retourne le défaut d'usage qu'elle révèle (jamais effacé)."""
+        defect = usage_defect(counters) or self._regression(counters)
+        self.reads.append({"label": label, "defect": defect})
+        pending = [gap for gap in self.gaps if gap["repaired_by"] is None and not gap.get("closed")]
+        if defect:
+            for gap in pending:
+                gap["closed"] = True  # la PREMIÈRE lecture qui suit une lacune est la seule à pouvoir la réparer
+            return defect
+        repair = bool(pending) and self._may_repair(counters)
+        for gap in pending:
+            if repair:
+                gap["repaired_by"] = label
+            else:
+                gap["closed"] = True
+        self._last_good = dict(counters)
+        return None
+
+    def _regression(self, counters: Mapping[str, Any]) -> Optional[str]:
+        """Les compteurs cumulatifs d'un même scope ne reculent jamais : un recul rend le registre non fiable (défaut permanent)."""
+        previous = self._last_good
+        if previous is None or previous.get("scope") != counters.get("scope"):
+            return None
+        fallen = [key for key in _MONOTONE if (counters.get(key) or 0) < (previous.get(key) or 0)]
+        return f"compteurs cumulatifs en recul ({', '.join(fallen)}) : registre non fiable" if fallen else None
+
+    def _may_repair(self, counters: Mapping[str, Any]) -> bool:
+        if self.emitted_since_gap:
+            return False
+        previous = self._last_good
+        return previous is None or previous.get("scope") == counters.get("scope")
+
+    @property
+    def open_gaps(self) -> List[Dict[str, Any]]:
+        return [gap for gap in self.gaps if gap["repaired_by"] is None]
+
+    @property
+    def usage_defects(self) -> List[str]:
+        return [f"{read['label']} : {read['defect']}" for read in self.reads if read["defect"]]
+
+    def emission_refusal(self) -> Optional[str]:
+        """Pourquoi aucune nouvelle émission ne peut démarrer à cause d'une lacune (même réparée côté preuve)."""
+        if not self.gaps:
+            return None
+        first = self.gaps[0]
+        return (
+            f"lecture obligatoire du registre manquante après {first['label']} ({first['cause']}) : "
+            "preuve de dépense incomplète, aucune nouvelle émission"
+        )
+
+    def to_fact(self) -> Dict[str, Any]:
+        return {"reads": list(self.reads), "gaps": [dict(gap) for gap in self.gaps]}
+
+
 def assert_registry_within_bounds(counters: Mapping[str, Any], bounds: CampaignBounds = CAMPAIGN_BOUNDS) -> None:
     """Le registre porte bien l'enveloppe de la campagne (plafonds ≤ bornes, strict) et ne l'a pas dépassée."""
     if counters.get("scope") is None:
         raise IncompleteValidation("aucun scope budgétaire durable pour le projet")
+    defect = usage_defect(counters)
+    if defect:
+        raise BudgetStop(defect)
     if not counters.get("strict"):
         raise RuntimeError("le registre n'est pas en mode strict")
     cap_usd, cap_tokens = counters.get("cap_usd"), counters.get("cap_tokens")
@@ -1253,6 +1501,19 @@ def assert_registry_within_bounds(counters: Mapping[str, Any], bounds: CampaignB
 
 
 # ── invocation réelle unique ────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _declared_bootstrap_sha(env: Mapping[str, str]) -> Optional[str]:
+    """SHA de bootstrap DÉCLARÉ par le manifeste (si fourni). Ce n'est qu'un paramètre : la preuve est ``validate_bootstrap_manifest``,
+    rejouée par l'API au préflight ET juste avant la création de la base."""
+    path = str(env.get("W5_BOOTSTRAP_MANIFEST", "") or "")
+    if not path:
+        return None
+    try:
+        declared = str(json.loads(Path(path).read_text(encoding="utf-8")).get("bootstrap_sha") or "").lower()
+    except (OSError, ValueError, AttributeError):
+        return None
+    return declared if re.fullmatch(r"[0-9a-f]{40}", declared) else None
 
 
 def business_config(env: Mapping[str, str]) -> Any:
@@ -1273,6 +1534,7 @@ def business_config(env: Mapping[str, str]) -> Any:
         run_id=str(env.get("GITHUB_RUN_ID", "")),
         run_attempt=str(env.get("GITHUB_RUN_ATTEMPT", "")),
         manifest_path=str(env.get("COLLEGUE_NIGHTLY_MANIFEST", "")),
+        bootstrap_sha=_declared_bootstrap_sha(env),
     )
 
 
@@ -1306,8 +1568,13 @@ class NightlyAdapter:
         return self.inner.cleanup()
 
 
+def _deadline_of(value: Any) -> Optional[float]:
+    """Échéance globale : un nombre, ou une fonction (l'échéance peut se resserrer APRÈS l'activation, jamais s'allonger)."""
+    return value() if callable(value) else value
+
+
 def bounded_command_runner(
-    deadline_monotonic: float, *, clock: Optional[Callable[[], float]] = None
+    deadline_monotonic: Any, *, clock: Optional[Callable[[], float]] = None
 ) -> Callable[..., Any]:
     """Exécuteur de commandes BORNÉ par l'échéance globale : aucune commande n'est lancée passé 900 s, et une commande en cours
     à l'échéance est tuée IMMÉDIATEMENT avec son groupe de processus. Aucune grâce : une commande de planification ou de
@@ -1315,7 +1582,7 @@ def bounded_command_runner(
     from collegue.pilot.nightly_e2e import CommandResult
 
     def run(argv: Sequence[str], *, cwd: Optional[str] = None) -> Any:
-        remaining = deadline_monotonic - (clock or time.monotonic)()
+        remaining = float(_deadline_of(deadline_monotonic)) - (clock or time.monotonic)()
         if remaining <= 0:
             raise BudgetStop("échéance globale de 900 s atteinte avant le lancement de la commande suivante")
         process = subprocess.Popen(
@@ -1336,6 +1603,8 @@ def bounded_command_runner(
 
 
 BUILD_STOP_BUDGET = {"paused_budget", "deadline_reached"}
+#: Fenêtre du nettoyage (sans génération), indépendante de l'échéance de génération de 900 s.
+CLEANUP_WINDOW_SECONDS = 600
 
 
 def launch_campaign(
@@ -1344,9 +1613,24 @@ def launch_campaign(
     adapter: Any,
     env: Mapping[str, str],
     python: str = sys.executable,
+    claim: Optional[Callable[[CampaignReport], Any]] = None,
+    activate: Optional[Callable[[CampaignReport], Any]] = None,
+    cycle_id: Optional[str] = None,
+    materialize_spec: Optional[Callable[[CampaignReport, Dict[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """Planifie, approuve, synchronise et exécute les TROIS tâches sur la base éphémère (BUILD + fusions W3), puis rend le
-    contexte nécessaire à la vérification métier. ``adapter.cleanup()`` est TOUJOURS appelé (ressources distantes éphémères).
+    contexte nécessaire à la vérification métier.
+
+    **Aucun nettoyage ici.** Les ressources distantes éphémères, le projet et le budget vivent jusqu'APRÈS les étapes
+    suivantes (vérification métier, R04, R05) : le nettoyage est effectué UNE fois par :func:`run_campaign` (étape
+    ``R06-cleanup``), même sur erreur. ``claim`` (facultatif) REVENDIQUE durablement l'identifiant de campagne avant toute
+    création distante : un identifiant consommé ne donne jamais un nouvel essai gratuit. ``activate`` ouvre ensuite le scope durable
+    de la campagne (2 USD / 250000 tokens) et qualifie les deux modèles AVANT toute création distante et toute planification ;
+    ``cycle_id`` lie le brouillon public à ce même scope (``--cycle-id``) : même ligne, même solde, même horloge.
+
+    ``materialize_spec`` (campagne sur base PROTÉGÉE) : après l'approbation et AVANT ``plan sync --execute``, matérialise la SPEC
+    approuvée par une PR sous les protections réelles (le commit direct de ``plan sync`` y est refusé par GitHub) ; un refus est un
+    arrêt explicite avant tout BUILD.
 
     Aucun retry payant : une seule exécution du produit ; un arrêt par budget/échéance est rapporté ``budget_stop``."""
     from collegue.pilot.nightly_e2e import NightlyManifest, _write_manifest
@@ -1357,58 +1641,86 @@ def launch_campaign(
     # lit le MÊME registre après un arrêt, sans dépendre de la valeur de retour (absente quand l'exécution lève).
     context: Dict[str, Any] = report.facts.setdefault("launch", {})
     context.update(base_branch=cfg.base_branch)
-    try:
-        manifest.root_sha = adapter.guard_fixture()
-        _write_manifest(cfg.manifest_path, manifest)
-        base_sha = adapter.create_base(manifest)
-        context["base_sha"] = base_sha
-        draft = adapter.product(
-            "plan", "draft", "--name", f"W4 {cfg.tag}", "--problem", BUSINESS_PROBLEM, "--owner", cfg.owner,
-            "--repo", cfg.repo, "--base", cfg.base_branch, "--labels", cfg.issue_label, "--milestone", "",
-            "--spec-filename", "SPEC.md", "--deadline-hours", "0.25", "--nightly-exact-task-count", "3",
-            "--format", "json",
-        )  # fmt: skip
-        project_id, plan_hash = int(draft.get("project_id") or 0), str(draft.get("plan_hash") or "")
-        if draft.get("action") != "draft" or int(draft.get("task_count") or 0) != 3 or project_id <= 0:
-            raise RuntimeError("contrat JSON du draft inattendu (trois tâches exigées)")
-        manifest.project_id, manifest.plan_hash = project_id, plan_hash
-        context.update(project_id=project_id, plan_hash=plan_hash)
-        _write_manifest(cfg.manifest_path, manifest)
-        approved = adapter.product(
-            "plan", "approve", "--project-id", str(project_id), "--expected-plan-hash", plan_hash, "--format", "json"
-        )
-        if approved.get("plan_hash") != plan_hash or int(approved.get("task_count") or 0) != 3:
-            raise RuntimeError("l'approbation n'a pas scellé le hash attendu")
-        adapter.create_label(manifest)
-        synced = adapter.product("plan", "sync", "--project-id", str(project_id), "--execute", "--format", "json")
-        issues = sorted(
-            {int(i.get("issue_number") or 0) for i in list(synced.get("issues") or []) if i.get("issue_number")}
-        )
-        if len(issues) != 3:
-            raise RuntimeError("la synchronisation doit créer exactement trois issues")
-        manifest.issue_numbers = issues
-        context["issue_numbers"] = issues
-        _write_manifest(cfg.manifest_path, manifest)
-        source = adapter.clone(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch))
-        result = adapter.product(
-            "--project-id", str(project_id), "--repo-source", source, "--owner", cfg.owner, "--repo", cfg.repo,
-            "--base", cfg.base_branch, "--execute", "--format", "json", accepted_codes=(0, 1, 2, 3, 4, 5),
-        )  # fmt: skip
-        stop = str(result.get("stop_reason") or "")
-        context.update(
-            stop_reason=stop,
-            opened_prs=list(result.get("opened_prs") or []),
-        )
-        if stop in BUILD_STOP_BUDGET:
-            raise BudgetStop(f"arrêt du produit : {stop} (enveloppe 2 USD / 250000 tokens / 900 s)")
-        if stop != "completed":
-            raise RuntimeError(f"le produit s'est arrêté sur {stop!r} au lieu de 'completed'")
-        final_sha = adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch)
-        context["final_sha"] = final_sha
-        context["final_checkout"] = adapter.clone(final_sha)
-        return context
-    finally:
-        adapter.cleanup()
+    manifest.root_sha = adapter.guard_fixture()
+    _write_manifest(cfg.manifest_path, manifest)
+    if claim is not None:
+        claim(report)
+    if activate is not None:
+        activate(report)
+    # Pile approuvée relue par l'API juste avant (socle revalidé) : annoncée au codeur, qui travaille hors ligne.
+    approved_stack = tuple((report.facts.get("bootstrap_revalidated") or {}).get("approved_stack") or ())
+    base_sha = adapter.create_base(manifest)
+    context["base_sha"] = base_sha
+    draft = adapter.product(
+        "plan", "draft", "--name", f"W4 {cfg.tag}", "--problem", business_problem(approved_stack), "--owner", cfg.owner,
+        "--repo", cfg.repo, "--base", cfg.base_branch, "--labels", cfg.issue_label, "--milestone", "",
+        "--spec-filename", "SPEC.md", "--deadline-hours", "0.25", "--nightly-exact-task-count", "3",
+        *(["--cycle-id", cycle_id] if cycle_id else []), "--format", "json",
+    )  # fmt: skip
+    project_id, plan_hash = int(draft.get("project_id") or 0), str(draft.get("plan_hash") or "")
+    if draft.get("action") != "draft" or int(draft.get("task_count") or 0) != 3 or project_id <= 0:
+        raise RuntimeError("contrat JSON du draft inattendu (trois tâches exigées)")
+    manifest.project_id, manifest.plan_hash = project_id, plan_hash
+    context.update(project_id=project_id, plan_hash=plan_hash)
+    _write_manifest(cfg.manifest_path, manifest)
+    approved = adapter.product(
+        "plan", "approve", "--project-id", str(project_id), "--expected-plan-hash", plan_hash, "--format", "json"
+    )
+    if approved.get("plan_hash") != plan_hash or int(approved.get("task_count") or 0) != 3:
+        raise RuntimeError("l'approbation n'a pas scellé le hash attendu")
+    expected_tip: Optional[str] = None
+
+    def _assert_base_unmoved(where: str) -> str:
+        tip = str(adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch)).lower()
+        if expected_tip is not None and tip != expected_tip:
+            raise BaseMovedError(
+                f"la base '{cfg.base_branch}' ({tip[:12]}) n'est plus le sommet vérifié ({expected_tip[:12]}) {where} : écriture "
+                "extérieure, aucun BUILD sur une base non prouvée"
+            )
+        return tip
+
+    if materialize_spec is not None:
+        outcome = materialize_spec(report, context)
+        fact = outcome.to_fact() if hasattr(outcome, "to_fact") else dict(outcome or {})
+        report.facts["spec_materialization"] = fact
+        expected_tip = str(fact.get("base_after") or "").lower() or None
+        if expected_tip is None:  # la suite exige le sommet post-fusion EXACT : sans lui, aucune base n'est prouvée
+            raise BaseMovedError(
+                "la matérialisation de la SPEC n'a pas établi le sommet exact de la base : aucun BUILD"
+            )
+        _assert_base_unmoved("juste après la matérialisation de la SPEC")
+    adapter.create_label(manifest)
+    synced = adapter.product("plan", "sync", "--project-id", str(project_id), "--execute", "--format", "json")
+    issues = sorted(
+        {int(i.get("issue_number") or 0) for i in list(synced.get("issues") or []) if i.get("issue_number")}
+    )
+    if len(issues) != 3:
+        raise RuntimeError("la synchronisation doit créer exactement trois issues")
+    manifest.issue_numbers = issues
+    context["issue_numbers"] = issues
+    _write_manifest(cfg.manifest_path, manifest)
+    _assert_base_unmoved("après plan sync")
+    source = adapter.clone(_assert_base_unmoved("juste avant le clone de l'opérateur"))
+    context["operator_checkout"] = (
+        source  # checkout de l'opérateur : resynchronisé par le produit, réutilisé par R04 / R05
+    )
+    result = adapter.product(
+        "--project-id", str(project_id), "--repo-source", source, "--owner", cfg.owner, "--repo", cfg.repo,
+        "--base", cfg.base_branch, "--execute", "--format", "json", accepted_codes=(0, 1, 2, 3, 4, 5),
+    )  # fmt: skip
+    stop = str(result.get("stop_reason") or "")
+    context.update(
+        stop_reason=stop,
+        opened_prs=list(result.get("opened_prs") or []),
+    )
+    if stop in BUILD_STOP_BUDGET:
+        raise BudgetStop(f"arrêt du produit : {stop} (enveloppe 2 USD / 250000 tokens / 900 s)")
+    if stop != "completed":
+        raise RuntimeError(f"le produit s'est arrêté sur {stop!r} au lieu de 'completed'")
+    final_sha = adapter.inner.clients.branches.get_branch_sha(cfg.owner, cfg.repo, cfg.base_branch)
+    context["final_sha"] = final_sha
+    context["final_checkout"] = adapter.clone(final_sha)
+    return context
 
 
 CAMPAIGN_SCOPE_NOT_WIRED = (
@@ -1416,11 +1728,12 @@ CAMPAIGN_SCOPE_NOT_WIRED = (
     "R05-incident-rollback",
 )
 NOT_WIRED_STOP_POINT = (
-    "point d'arrêt documenté : l'invocation réelle ne câble que planification, approbation, synchronisation, BUILD des trois "
-    "tâches, vérification métier du livrable et lecture du registre ; la passe d'amélioration (handoff BUILD→IMPROVE) et "
-    "l'incident contrôlé avec rollback Phase 5 ne sont pas exécutés par ce lancement (la preuve déterministe est dans "
-    "tests/w4_business_campaign.py) — un BUILD réussi n'est pas la validation finale"
+    "point d'arrêt documenté : cette invocation ne câble pas la passe d'amélioration (handoff BUILD→IMPROVE) ni l'incident "
+    "contrôlé avec rollback Phase 5 ; un BUILD réussi n'est pas la validation finale"
 )
+
+#: Étapes qui peuvent émettre (modèle) : aucune ne démarre après l'expiration de l'échéance globale, ni sur un usage inconnu.
+EMITTING_STEPS = ("R01-run", "R04-improvement", "R05-incident-rollback")
 
 
 def run_campaign(
@@ -1430,18 +1743,29 @@ def run_campaign(
     launch: Callable[[CampaignReport], Any],
     verify: Optional[Callable[[CampaignReport, Any], None]] = None,
     read_registry: Optional[Callable[[Any], Mapping[str, Any]]] = None,
+    improve: Optional[Callable[[CampaignReport, Dict[str, Any]], None]] = None,
+    incident: Optional[Callable[[CampaignReport, Dict[str, Any]], None]] = None,
+    cleanup: Optional[Callable[[CampaignReport], Any]] = None,
+    deadline_monotonic: Any = None,
+    clock: Optional[Callable[[], float]] = None,
 ) -> CampaignReport:
     """Invocation réelle : ``launch`` n'est appelé QUE si tout le préflight a réussi, et au plus UNE fois.
 
     Le rapport retourné reprend les étapes du préflight ; en cas de préflight non validé, ``launch`` n'est jamais appelé, aucune
-    action facturable n'est émise et le verdict reste celui du préflight (jamais un résultat métier inventé).
+    action facturable n'est émise, rien n'est nettoyé (rien n'a été créé) et le verdict reste celui du préflight.
 
-    **Portée annoncée.** Le rapport déclare TOUTES les preuves de sa portée (BUILD, métier, registre, amélioration, incident /
-    rollback). Celles que ce lancement ne câble pas restent ``not_executed`` (arrêt amont) ou ``incomplete_validation`` avec le
-    point d'arrêt exact : le verdict ne peut pas être ``validated`` tant qu'elles ne sont pas jouées.
+    **Parcours** : R01 BUILD → R02 vérification métier → R04 amélioration → R05 incident / rollback / reprise → R03 registre
+    final → R06 nettoyage. R04 / R05 sont des phases fournies par l'appelant (``improve`` / ``incident``) ; absentes, elles se
+    terminent ``incomplete_validation`` avec le point d'arrêt exact (jamais un succès).
 
-    **Identité conservée.** Le contexte (projet, scope, base, tâches) est lu dans ``report.facts['launch']``, alimenté dès sa
-    création par ``launch`` : un arrêt budget/échéance/erreur ne le perd pas et le registre lu est bien celui du projet."""
+    **Durée de vie.** Les ressources distantes, le projet et le budget vivent jusqu'après R05 : ``cleanup`` est appelé UNE seule
+    fois, dans un ``finally`` (R06), même sur erreur ; un échec de nettoyage est rapporté (R06 ``failed``) sans effacer la cause
+    d'origine (``facts.verdict_before_cleanup``).
+
+    **Budget.** Le registre du projet est relu après CHAQUE phase et à chaque sortie (``facts.registry[<étiquette>]``) ; une
+    lecture impossible garde l'arrêt d'origine et déclare la preuve manquante (aucun zéro inventé). Aucune phase qui émet ne
+    démarre après l'expiration de l'échéance globale (``deadline_monotonic``), sur un usage inconnu ou sur une enveloppe atteinte :
+    ``budget_stop``. Aucun compteur ni délai n'est remis à zéro."""
     report = CampaignReport("campaign", preflight.campaign_id, secrets=secret_values(env))
     for item in preflight.steps:
         copy = report.declare(item.id, item.title, required=item.required)
@@ -1454,18 +1778,21 @@ def run_campaign(
     report.declare(
         "R02-business", "Vérification métier du livrable fusionné (base vierge, HTTP, PDF lu par un vrai lecteur)"
     )
-    report.declare("R03-registry", "Compteurs du registre durable dans l'enveloppe")
     report.declare(
         "R04-improvement",
-        "Passe d'amélioration par l'entrée publique : handoff BUILD→IMPROVE, mesure réelle, PR promue",
+        "Passe d'amélioration par l'entrée publique : handoff BUILD→IMPROVE, mesure réelle, PR livrée",
     )
     report.declare(
         "R05-incident-rollback", "Incident contrôlé, rollback Phase 5, acquittement et reprise avec observations métier"
     )
+    report.declare("R03-registry", "Compteurs du registre durable dans l'enveloppe (après chaque phase et à la sortie)")
+    report.declare("R06-cleanup", "Nettoyage unique des ressources éphémères, après toutes les phases")
+    wired = ["build", "business", "registry", "cleanup"] + (["improvement"] if improve else [])
+    wired += ["incident_rollback"] if incident else []
     report.facts["scope"] = {
-        "announced": ["build", "business", "registry", "improvement", "incident_rollback"],
-        "wired": ["build", "business", "registry"],
-        "not_wired": ["improvement", "incident_rollback"],
+        "announced": ["build", "business", "registry", "improvement", "incident_rollback", "cleanup"],
+        "wired": wired,
+        "not_wired": [name for name in ("improvement", "incident_rollback") if name not in wired],
         "stop_point": NOT_WIRED_STOP_POINT,
     }
     if preflight.verdict() != VERDICT_VALIDATED:
@@ -1473,10 +1800,74 @@ def run_campaign(
         report.facts["billable_actions_emitted"] = 0
         report.facts["stop_point"] = "preflight"
         return report
+
+    now = clock or time.monotonic
     context: Dict[str, Any] = {}
+    proof = RegistryProof()
+    gate: Dict[str, Optional[str]] = {"budget": None}
 
     def _sync_context() -> None:
         context.update(report.facts.get("launch") or {})
+
+    def _snapshot(label: str) -> Optional[Dict[str, Any]]:
+        """Relit le MÊME registre après une phase ou un arrêt ; ne masque jamais la cause d'origine.
+
+        Lecture impossible = lacune de preuve (``RegistryProof``) : les émissions se ferment, aucun zéro n'est inventé."""
+        _sync_context()
+        slot = report.facts.setdefault("registry", {})
+        if read_registry is None or not (context.get("project_id") or context.get("scope_key")):
+            cause = "aucun projet ni scope créé ou registre non lisible : dépense non établie"
+            slot[label] = {"unreadable": cause}
+            proof.record_gap(label, cause)
+            return None
+        try:
+            counters = dict(read_registry(context))
+        except Exception as exc:  # noqa: BLE001 - illisible = preuve manquante, jamais un zéro inventé
+            cause = f"{type(exc).__name__} : {str(exc)[:200]} (dépense non établie)"
+            slot[label] = {"unreadable": cause}
+            proof.record_gap(label, cause)
+            return None
+        slot[label] = counters
+        report.facts["registry_final"] = counters
+        defect = proof.record(label, counters)
+        if defect:
+            gate["budget"] = defect
+            return counters
+        used_usd = (
+            counters.get("consumed_micro_usd", 0)
+            + counters.get("reserved_micro_usd", 0)
+            + counters.get("unknown_micro_usd", 0)
+        ) / 1_000_000
+        used_tokens = (
+            counters.get("consumed_tokens", 0) + counters.get("reserved_tokens", 0) + counters.get("unknown_tokens", 0)
+        )
+        cap_usd, cap_tokens = counters.get("cap_usd"), counters.get("cap_tokens")
+        if (cap_usd is not None and used_usd >= cap_usd - 1e-9) or (
+            cap_tokens is not None and used_tokens >= cap_tokens
+        ):
+            gate["budget"] = f"enveloppe atteinte ({used_usd:.6f} $ / {used_tokens} tokens) : aucune nouvelle émission"
+        return counters
+
+    def _before_emission(step: Step) -> None:
+        deadline = _deadline_of(deadline_monotonic)
+        if deadline is not None and deadline - now() <= 0:
+            raise BudgetStop(f"échéance globale atteinte avant {step.id} : aucune nouvelle génération")
+        if gate["budget"]:
+            raise BudgetStop(f"{gate['budget']} (avant {step.id})")
+        refusal = proof.emission_refusal()
+        if refusal:
+            raise IncompleteValidation(f"{refusal} (avant {step.id})")
+        proof.note_emission()
+
+    def _phase(step_id: str, fn: Callable[[Step], Any]) -> bool:
+        def guarded(step: Step) -> None:
+            _before_emission(step)
+            try:
+                fn(step)
+            finally:
+                _snapshot(f"after-{step_id}")
+
+        return report.run(step_id, guarded)
 
     def _launch(step: Step) -> None:
         try:
@@ -1484,47 +1875,77 @@ def run_campaign(
         finally:
             _sync_context()  # même quand l'exécution lève (budget, échéance, erreur) : l'identité du projet survit
 
-    report.run("R01-run", _launch)
-    _sync_context()
-
     def _verify(step: Step) -> None:
         if verify is None:
             raise IncompleteValidation("aucune vérification métier fournie")
         verify(report, context)
 
+    def _judge_proof() -> None:
+        """Jugement de la preuve de dépense sur TOUT l'historique des lectures (et pas seulement la dernière)."""
+        if proof.usage_defects:
+            raise BudgetStop("; ".join(proof.usage_defects))
+        if proof.open_gaps:
+            gap = proof.open_gaps[0]
+            raise IncompleteValidation(
+                f"lecture obligatoire du registre manquante après {gap['label']} ({gap['cause']}) et non réparée : "
+                "dépense non établie (aucun zéro n'est inventé)"
+            )
+
     def _registry(step: Step) -> None:
         if read_registry is None:
             raise IncompleteValidation("registre durable illisible")
-        if not context.get("project_id"):
+        if not (context.get("project_id") or context.get("scope_key")):
             raise IncompleteValidation(
-                "aucun projet créé avant l'arrêt : la dépense éventuelle n'est pas établie (aucun zéro n'est inventé)"
+                "aucun projet ni scope créé avant l'arrêt : la dépense éventuelle n'est pas établie (aucun zéro n'est inventé)"
             )
-        try:
-            counters = dict(read_registry(context))
-        except (IncompleteValidation, BudgetStop):
-            raise
-        except Exception as exc:  # noqa: BLE001 - illisible = preuve manquante, jamais un échec qui masquerait l'arrêt d'origine
-            raise IncompleteValidation(
-                f"registre durable du projet {context.get('project_id')} illisible ({type(exc).__name__}) : "
-                "dépense non établie (aucun zéro n'est inventé)"
-            ) from exc
+        counters = _snapshot("final")
+        step.evidence["registry_proof"] = proof.to_fact()
+        _judge_proof()
+        if counters is None:
+            raise IncompleteValidation("relecture finale du registre impossible : dépense non établie")
         step.evidence["counters"] = counters
-        report.facts["registry_final"] = counters
         assert_registry_within_bounds(counters)
 
     def _not_wired(step: Step) -> None:
         raise IncompleteValidation(NOT_WIRED_STOP_POINT)
 
-    report.run("R02-business", _verify)
-    # Le registre est relu après TOUT arrêt dès que le lancement a eu lieu (projet/scope créé ou non) : la vérification
-    # métier qui échoue, est incomplète ou dépasse l'échéance ne fait pas disparaître la dépense déjà réalisée. La lecture ne
-    # masque jamais l'arrêt d'origine : impossible ⇒ preuve manquante (incomplete_validation), jamais un zéro inventé.
-    halted_before = report.halted
-    report.halted = False
-    report.run("R03-registry", _registry)
-    report.halted = halted_before or report.halted
-    for step_id in CAMPAIGN_SCOPE_NOT_WIRED:
-        report.run(step_id, _not_wired)  # arrêt amont ⇒ reste not_executed ; sinon validation incomplète documentée
+    try:
+        _phase("R01-run", _launch)
+        _sync_context()
+        report.run("R02-business", _verify)
+        if report.step("R02-business").state != STEP_NOT_EXECUTED:
+            _snapshot("after-R02-business")
+        _phase("R04-improvement", (lambda s: improve(report, context)) if improve else _not_wired)
+        _phase("R05-incident-rollback", (lambda s: incident(report, context)) if incident else _not_wired)
+        # Le registre est relu après TOUT arrêt dès que le lancement a eu lieu (projet/scope créé ou non) ; l'arrêt d'origine
+        # n'est jamais masqué.
+        halted_before = report.halted
+        report.halted = False
+        report.run("R03-registry", _registry)
+        report.halted = halted_before or report.halted
+    finally:
+        _snapshot("exit")
+        report.facts["registry_proof"] = proof.to_fact()
+        # Une lecture de SORTIE qui révèle une inconnue, un blocage ou une lacune non réparée retire le succès déjà accordé à
+        # R03 : aucun verdict complet si le défaut n'apparaît qu'à la dernière lecture.
+        registry_step = report.step("R03-registry")
+        if registry_step.state == STEP_SUCCEEDED:
+            try:
+                _judge_proof()
+            except BudgetStop as exc:
+                registry_step.state, registry_step.detail = STEP_BUDGET_STOP, f"lecture de sortie : {exc}"
+            except IncompleteValidation as exc:
+                registry_step.state, registry_step.detail = STEP_INCOMPLETE, f"lecture de sortie : {exc}"
+        cleanup_step = report.step("R06-cleanup")
+        cleanup_step.required = False  # le verdict « avant nettoyage » ne dépend pas du nettoyage lui-même
+        report.facts["verdict_before_cleanup"] = report.verdict()
+        cleanup_step.required = True
+        if cleanup is not None:
+            report.halted = False
+            report.run("R06-cleanup", lambda step: cleanup(report))
+            report.facts["cleanup_calls"] = 1
+        else:
+            report.step("R06-cleanup").detail = "aucun nettoyage fourni"
     return report
 
 
@@ -1567,11 +1988,12 @@ def registry_reader(env: Mapping[str, str]) -> Callable[[Mapping[str, Any]], Map
     def read(context: Mapping[str, Any]) -> Mapping[str, Any]:
         from collegue.state import ProjectStateManager
 
-        if not context.get("project_id"):
-            raise IncompleteValidation("identité du projet absente : registre non lisible")
+        if not context.get("project_id") and not context.get("scope_key"):
+            raise IncompleteValidation("identité du projet et du scope absente : registre non lisible")
 
         manager = ProjectStateManager.from_url(str(env["STATE_DATABASE_URL"]))
-        return registry_counters(manager, int(context["project_id"]))
+        project = context.get("project_id")
+        return registry_counters(manager, int(project) if project else None, context.get("scope_key"))
 
     return read
 
@@ -1587,15 +2009,44 @@ def _real_preflight(env: Mapping[str, str], campaign_id: str, stage: str = STAGE
 
         report.run("P00-github-token", _no_token)
         return report
+    from collegue.pilot import w5_business as w5
+
     run_tag = f"{env.get('GITHUB_RUN_ID', '0')}-{env.get('GITHUB_RUN_ATTEMPT', '0')}"
+    clients = _fixture_clients(token)
+    try:
+        settings = effective_settings(env)
+    except Exception:  # noqa: BLE001 - jugé par P05 / P06 (message sûr, jamais une valeur de configuration)
+        settings = None
     return run_preflight(
         env,
-        clients=_fixture_clients(token),
+        clients=clients,
         campaign_id=campaign_id,
         run_tag=run_tag,
         image_runner=lambda argv: subprocess.run(list(argv), capture_output=True, text=True, timeout=120),
         stage=stage,
+        extra_checks=w5.w5_preflight_checks(
+            env, settings=settings, clients=clients, campaign_id=campaign_id, run_tag=run_tag
+        ),
     )
+
+
+def cleanup_campaign(
+    report: CampaignReport, adapter: Any, *, before: Optional[Callable[[CampaignReport], Any]] = None
+) -> None:
+    """Nettoyage UNIQUE, après toutes les phases : ressources distantes éphémères (idempotent) puis clone de l'opérateur local.
+    La revendication de l'identifiant de campagne n'est JAMAIS supprimée. ``before`` (campagne W5) traite d'abord ce que le nettoyage
+    nightly ne connaît pas (PR documentaire de la SPEC, PR d'amélioration résiduelles, base avancée par les fusions)."""
+    import shutil
+
+    launch = report.facts.get("launch") or {}
+    try:
+        if before is not None:
+            report.facts["cleanup_campaign_resources"] = before(report)
+        report.facts["cleanup"] = adapter.cleanup()
+    finally:
+        checkout = launch.get("operator_checkout")
+        if checkout:
+            shutil.rmtree(os.path.dirname(str(checkout)), ignore_errors=True)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1623,11 +2074,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if (
         args.action == "cleanup"
     ):  # idempotent, sans clé de modèle : ferme PR/issues et supprime les branches/labels du run
+        from collegue.pilot import w5_business as w5
+
         config = business_config(env)
+        clients = _fixture_clients(config.token)
+        # Mêmes preuves DURABLES et mêmes gardes que le nettoyage du run, sans mémoire de ce run : base d'état (preuves de livraison du
+        # projet), registre d'appartenance et manifeste à côté du manifeste nightly. Une ressource inconnue n'est jamais supprimable :
+        # l'étape lève (code 1) AVANT le nettoyage nightly, qui ne tente pas de « passer » la base.
+        resources = w5.cleanup_campaign_resources(
+            CampaignReport("cleanup", args.campaign_id), clients=clients, config=config, env=env
+        )
         payload = NightlyAdapter(
-            config, _fixture_clients(config.token), bounded_command_runner(time.monotonic() + 600)
+            config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)
         ).cleanup()
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+        print(
+            json.dumps(
+                {**dict(payload), "campaign_resources": resources}, ensure_ascii=False, sort_keys=True, default=str
+            )
+        )
         return 0
     # « preflight » : contrôles SANS clé (étape choisie) ; « run » : validation EFFECTIVE juste avant lancement — l'environnement
     # reçoit légitimement la clé du transport choisi (jamais affichée), les routes sont exigées avec leur credential.
@@ -1635,15 +2099,62 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.action == "preflight":
         report = preflight
     else:
-        deadline = time.monotonic() + CAMPAIGN_BOUNDS.max_seconds
+        from collegue.pilot import w5_business as w5
+
+        window = {"deadline": time.monotonic() + CAMPAIGN_BOUNDS.max_seconds}
+
+        def deadline() -> float:
+            return window["deadline"]
+
+        def tighten(remaining_seconds: float) -> None:
+            """L'échéance durable du courtier (ouverte au premier accès Google) ne s'allonge JAMAIS : on ne fait que la resserrer."""
+            window["deadline"] = min(window["deadline"], time.monotonic() + max(0.0, remaining_seconds))
+
         config = business_config(env)
-        adapter = NightlyAdapter(config, _fixture_clients(config.token), bounded_command_runner(deadline))
+        clients = _fixture_clients(config.token)
+        adapter = NightlyAdapter(config, clients, bounded_command_runner(deadline))
+        cache: Dict[str, Any] = {}
+
+        def services() -> Any:
+            if "value" not in cache:  # paresseux : le manifeste n'est lu que si le préflight a été validé
+                manifest = w5.load_bootstrap_manifest(str(env.get(w5.BOOTSTRAP_MANIFEST_ENV, "") or ""))
+                image = gate_image(effective_settings(env))
+                cache["value"] = w5.production_services(
+                    env=env,
+                    adapter=adapter,
+                    clients=clients,
+                    manifest=manifest,
+                    image=image,
+                    deadline_monotonic=deadline(),
+                    config=config,
+                )
+            return cache["value"]
+
         report = run_campaign(
             env,
             preflight=preflight,
-            launch=lambda r: launch_campaign(r, adapter=adapter, env=env),
-            verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline),
+            launch=lambda r: launch_campaign(
+                r,
+                adapter=adapter,
+                env=env,
+                claim=lambda rep: w5.revalidate_and_claim(clients, env, args.campaign_id, rep),
+                activate=lambda rep: w5.activate_budget(env, args.campaign_id, rep, on_remaining=tighten),
+                cycle_id=args.campaign_id,
+                materialize_spec=lambda rep, ctx: w5.materialize_spec_for_launch(
+                    clients=clients, config=config, env=env, project_id=int(ctx["project_id"]), deadline=deadline
+                ),
+            ),
+            verify=lambda r, ctx: verify_in_container(r, ctx, env=env, deadline_monotonic=deadline()),
             read_registry=registry_reader(env),
+            improve=lambda r, ctx: w5.run_improvement_phase(r, ctx, services()),
+            incident=lambda r, ctx: w5.run_incident_phase(r, ctx, services()),
+            # Collecte et nettoyage ne GÉNÈRENT rien : ils continuent après l'échéance de génération (fenêtre propre, jamais celle du 900 s).
+            cleanup=lambda r: cleanup_campaign(
+                r,
+                NightlyAdapter(config, clients, bounded_command_runner(time.monotonic() + CLEANUP_WINDOW_SECONDS)),
+                before=lambda rep: w5.cleanup_campaign_resources(rep, clients=clients, config=config, env=env),
+            ),
+            deadline_monotonic=deadline,
         )
     if args.output:
         Path(args.output).write_text(report.to_json(), encoding="utf-8")

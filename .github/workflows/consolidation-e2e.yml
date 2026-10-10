@@ -1,20 +1,31 @@
-# Campagne métier W4 PONCTUELLE (FastAPI + SQLite + Alembic, trois tâches dépendantes) sur le dépôt fixture dédié.
+# Campagne métier W5 PONCTUELLE (FastAPI + SQLite + Alembic, trois tâches dépendantes, amélioration R04, incident R05) sur le dépôt
+# fixture dédié, avec Gemma par le COURTIER budgétaire.
 #
 # Ce workflow est le SEUL mécanisme autorisé pour le lancement réel : déclenchement manuel (workflow_dispatch) uniquement, jamais
-# de planification, jamais d'événement de dépôt, jamais de relance automatique (le préflight refuse une tentative > 1).
-# Il n'active PAS INTEGRATION_E2E_ENABLED et ne lance AUCUN test LLM du nightly : une seule enveloppe, 2 USD / 250000 tokens / 900 s,
-# portée par le registre durable W2 (COLLEGUE_HOME / STATE_DATABASE_URL propres à ce run).
+# de planification, jamais d'événement de dépôt, jamais de relance automatique : un identifiant de campagne consommé (revendiqué côté
+# fixture avant toute création distante) ne donne AUCUN nouvel essai. Il n'active PAS INTEGRATION_E2E_ENABLED et ne lance AUCUN test
+# LLM du nightly : une seule enveloppe, 2 USD / 250000 tokens / 900 s, portée par le registre durable W2 (COLLEGUE_HOME /
+# STATE_DATABASE_URL propres à ce run). L'échéance de 900 s est persistée dans ce registre : aucune étape ne la remet à zéro.
+#
+# Environnement GitHub « w5-gemma-campaign » : propre à la campagne, créé vide ; le manager y injecte la clé TEMPORAIRE
+# (W5_GOOGLE_API_KEY) après la livraison W5 et la retire à la fin, même sur refus. La clé n'existe QUE dans l'étape de campagne, sous le
+# nom ``LLM_API_KEY`` (le seul que les réglages du produit lisent ; ce n'est pas le secret du nightly) : elle n'atteint que le service du
+# courtier (processus de confiance), jamais l'environnement du codeur, du gate ni des tests. Un scanner de confiance (scripts/w5_leak_scan.py)
+# la cherche, en octets et par la variable d'environnement, dans tout ce qui sera déposé ; un fichier contaminé n'est jamais déposé.
+# Le contrôle des deux modèles Gemma (canaris) consomme la MÊME enveloppe : aucune estimation de secours, aucune seconde campagne.
 #
 # Ordre (une étape qui échoue arrête tout, aucune étape suivante ne s'exécute) :
-#   1. préflight STATIQUE — contexte de lancement, enveloppe, secrets, identité du dépôt fixture, capacité du transport de worker,
-#      protections W3 de la base éphémère. Jeton de LECTURE du dépôt fixture seulement : AUCUNE clé de modèle dans cette étape.
-#   2. image du sandbox (construite seulement si 1. a réussi), puis préflight COMPLET (pile des oracles + lecteur PDF réel).
-#   3. campagne : c'est la SEULE étape qui reçoit la clé du fournisseur de modèle.
-#   4. nettoyage idempotent des ressources éphémères et dépôt du rapport (machine JSON + humain), sans secret.
+#   1. préflight STATIQUE — contexte de lancement, enveloppe, secrets, identité du dépôt fixture, socle approuvé (relu par l'API),
+#      protections W3 de la base éphémère, capacité du transport. Jeton de LECTURE du dépôt fixture seulement : AUCUNE clé de modèle.
+#   2. image du sandbox (construite seulement si 1. a réussi), puis préflight COMPLET (pile des oracles + lecteur PDF réel), sans clé.
+#   3. campagne : c'est la SEULE étape qui reçoit la clé du fournisseur de modèle ; le courtier est activé, les modèles contrôlés,
+#      puis BUILD, R04, R05 et le nettoyage unique, dans l'enveloppe commune.
+#   4. nettoyage idempotent des ressources éphémères, puis dépôt du rapport (machine JSON + humain) ET du registre durable, sans secret
+#      (fichier contaminé : mis en quarantaine, jamais déposé, campagne rouge ; les preuves saines et le nettoyage sont conservés).
 # Un préflight qui ne peut pas ÉTABLIR un plafond ou une protection termine « validation incomplète » (code 3) AVANT toute
 # émission : ce n'est ni un succès ni une preuve du parcours avec modèles réels.
 
-name: Consolidation E2E (campagne ponctuelle)
+name: Consolidation E2E (campagne ponctuelle W5)
 
 on:
   workflow_dispatch:
@@ -24,9 +35,9 @@ on:
         required: true
         type: string
       campaign_id:
-        description: "Identifiant de la campagne (registre durable propre)"
+        description: "Identifiant NEUF de la campagne (consommé au lancement : aucun rerun avec le même)"
         required: true
-        default: "w4-business-final"
+        default: "w5-gemma-001"
         type: string
 
 permissions:
@@ -38,10 +49,11 @@ concurrency:
 
 jobs:
   campaign:
-    name: Campagne métier W4 (préflight → campagne → rapport)
+    name: Campagne métier W5 (préflight → campagne → rapport)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm == 'LANCER-UNE-FOIS-2USD-250000TOKENS-900S' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    environment: w5-gemma-campaign
     env:
       W4_BUSINESS_CONFIRM: ${{ inputs.confirm }}
       W4_BUSINESS_CAMPAIGN_ID: ${{ inputs.campaign_id }}
@@ -54,9 +66,11 @@ jobs:
       BUDGET_MODE: strict
       BUDGET_EXHAUSTED_ACTION: pause
       REQUIRE_COST_PRICING: "true"
-      # Fusion BUILD sur la base éphémère, sous les contrôles W3 (preuve, tête exacte, checks requis, base protégée, sync prouvée).
+      # Fusion BUILD puis amélioration R04 / incident R05 sur la base éphémère, sous les contrôles W3 (preuve, tête exacte, checks
+      # requis, base protégée, sync prouvée) ; la politique de faible risque n'est pas élargie.
       BUILD_AUTO_MERGE: "true"
-      AUTO_MERGE_ENABLED: "false"
+      AUTO_MERGE_ENABLED: "true"
+      AUTO_REVERT_ENABLED: "true"
       DEPS_REQUIRE_MERGED: "true"
       STRICT_MAX_INFLIGHT_PRS: "1"
       TASK_MAX_ATTEMPTS: "1"
@@ -64,8 +78,17 @@ jobs:
       GATE_ACCEPTANCE_TESTS: "true"
       GATE_TEST_COMMAND: python -m pytest -q
       GATE_FRONTEND: "false"
-      SANDBOX_IMAGE: collegue-sandbox-openhands:ci
-      SANDBOX_NETWORK: bridge
+      # Transport W5 : tous les rôles passent par le courtier budgétaire ; la destination reste Google (Gemma), jamais reclassée.
+      LLM_TRANSPORT: budget_broker
+      LLM_PROVIDER: gemini
+      LLM_MODEL: gemma-4-31b-it
+      CODER_FALLBACK_MODELS: gemma-4-26b-a4b-it
+      # Le codeur n'a AUCUN réseau : il parle au relais loopback de l'image, qui recopie vers le socket Unix du courtier. L'image est celle du
+      # transport broker (SDK/outils seuls, pile métier approuvée, verrou audité) : docker/sandbox/Dockerfile.broker.
+      BROKER_GLOBAL_DEADLINE_SECONDS: "900"
+      BROKER_RUN_DIR: /tmp/cbk
+      SANDBOX_IMAGE: collegue-sandbox-broker:ci
+      SANDBOX_NETWORK: none
       SANDBOX_MEMORY: 6g
       SANDBOX_CPUS: "2.0"
       SANDBOX_TIMEOUT: "720"
@@ -73,26 +96,32 @@ jobs:
       CODER_LLM_NUM_RETRIES: "3"
       CODER_LLM_RETRY_MIN_WAIT: "5"
       CODER_LLM_RETRY_MAX_WAIT: "30"
-      LLM_PROVIDER: ${{ vars.INTEGRATION_LLM_PROVIDER }}
-      LLM_MODEL: ${{ vars.INTEGRATION_LLM_MODEL }}
-      LLM_PRICE_PROMPT_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_PROMPT_PER_1M }}
-      LLM_PRICE_COMPLETION_PER_1M: ${{ vars.INTEGRATION_LLM_PRICE_COMPLETION_PER_1M }}
     steps:
       - name: Initialiser les chemins éphémères du runner
         shell: bash
+        env:
+          W5_BOOTSTRAP_MANIFEST_JSON: ${{ vars.W5_BOOTSTRAP_MANIFEST_JSON }}
         run: |
           if [[ ! "$W4_BUSINESS_CAMPAIGN_ID" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
             echo "::error::campaign_id invalide (minuscules, chiffres et tirets, 3 à 40 caractères)."
             exit 1
           fi
-          root="$RUNNER_TEMP/w4-business"
-          mkdir -p "$root/home" "$root/report" "$root/pip-cache"
+          root="$RUNNER_TEMP/w5-business"
+          mkdir -p "$root/home" "$root/report" "$root/pip-cache" "$root/diagnostic" "$BROKER_RUN_DIR"
+          chmod 700 "$BROKER_RUN_DIR"
+          # Manifeste du socle de la fixture (variable d'environnement GitHub, non secrète) : le préflight le relit par l'API,
+          # il n'est jamais une preuve à lui seul.
+          printf '%s' "$W5_BOOTSTRAP_MANIFEST_JSON" > "$root/bootstrap-manifest.json"
           {
             printf 'COLLEGUE_NIGHTLY_MANIFEST=%s/manifest.json\n' "$root"
             printf 'COLLEGUE_HOME=%s/home\n' "$root"
             printf 'STATE_DATABASE_URL=sqlite:///%s/home/%s.sqlite3\n' "$root" "$W4_BUSINESS_CAMPAIGN_ID"
             printf 'SANDBOX_PIP_CACHE_DIR=%s/pip-cache\n' "$root"
             printf 'W4_REPORT_DIR=%s/report\n' "$root"
+            printf 'W5_BOOTSTRAP_MANIFEST=%s/bootstrap-manifest.json\n' "$root"
+            printf 'W5_PUBLISH=%s/publish\n' "$root"
+            printf 'W5_DIAG=%s/diagnostic\n' "$root"
+            printf 'W5_QUARANTINE=%s/quarantine\n' "$root"
           } >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
@@ -112,6 +141,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install --require-hashes --no-deps -r locks/dev.txt
 
+      # Variables que le workflow ne peut pas fixer en dur : lues de l'API publique du produit (santé INDÉPENDANTE de Phase 5, exigée telle
+      # quelle par P02), après l'installation et AVANT tout préflight ; aucun secret, aucun réseau (scripts/w5_workflow_env.py, format
+      # multiligne de $GITHUB_ENV). Un échec arrête le workflow : aucune commande de repli n'est inventée.
+      - name: Exporter la commande de santé indépendante de Phase 5 (API publique du produit)
+        shell: bash
+        run: python scripts/w5_workflow_env.py >> "$GITHUB_ENV"
+
       - name: Initialiser le registre durable local (migrations, base vierge de la campagne)
         shell: bash
         run: python -m collegue.migrations upgrade
@@ -129,7 +165,7 @@ jobs:
       - name: Construire l'image du sandbox
         if: steps.preflight_static.outcome == 'success'
         shell: bash
-        run: docker build -f docker/sandbox/Dockerfile.openhands -t "$SANDBOX_IMAGE" .
+        run: docker build -f docker/sandbox/Dockerfile.broker -t "$SANDBOX_IMAGE" .
 
       - name: Préflight complet (pile des oracles et lecteur PDF réel)
         id: preflight_full
@@ -148,12 +184,23 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
-          LLM_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.INTEGRATION_LLM_API_KEY }}
+          LLM_API_KEY: ${{ secrets.W5_GOOGLE_API_KEY }}
         run: |
+          set +e
           python -m collegue.pilot.w4_business run \
             --campaign-id "$W4_BUSINESS_CAMPAIGN_ID" \
             --output "$W4_REPORT_DIR/campaign.json" --human "$W4_REPORT_DIR/campaign.txt"
+          status=$?
+          # Scanner de confiance : valeur lue dans l'environnement, tout le contenu ET les noms, binaires compris, jamais affichée. Il construit
+          # le SEUL ensemble publiable ($W5_PUBLISH) : un fichier n'y entre qu'après avoir été lu, vérifié et copié dans le même passage.
+          python scripts/w5_leak_scan.py --env LLM_API_KEY --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
+            --report "$W5_DIAG/leak-scan.json" \
+            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*" \
+            --state-file "resources=$COLLEGUE_NIGHTLY_MANIFEST"
+          scan=$?
+          set -e
+          if [ "$scan" -ne 0 ]; then status=1; fi
+          exit "$status"
 
       - name: Nettoyage idempotent des ressources éphémères
         if: always() && steps.preflight_static.outcome == 'success'
@@ -162,11 +209,69 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
         run: python -m collegue.pilot.w4_business cleanup
 
+      # Campagne NON lancée (préflight refusé) : la clé n'a jamais existé dans un environnement ; mêmes règles de nature et même construction
+      # atomique de l'ensemble publiable, sans recherche de clé. Si la campagne a démarré, c'est SON étape qui a construit l'ensemble.
+      - name: Préparer les artefacts publiables (campagne non lancée, aucune clé n'a existé)
+        if: always() && steps.campaign.outcome == 'skipped'
+        shell: bash
+        run: |
+          python scripts/w5_leak_scan.py --assume-no-key --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
+            --report "$W5_DIAG/leak-scan.json" \
+            --source "report=$W4_REPORT_DIR" --source "registry=$COLLEGUE_HOME::*.sqlite3*" \
+            --state-file "resources=$COLLEGUE_NIGHTLY_MANIFEST"
+
+      # Diagnostic minimal SÛR, jamais dérivé d'un fichier : seulement les issues des étapes (valeurs énumérées par GitHub) et des
+      # identifiants validés. Il est déposé même si le scanner a planté ou si la commande a été interrompue.
+      - name: Diagnostic minimal sûr (issues des étapes seulement)
+        if: always()
+        shell: bash
+        env:
+          OUTCOME_STATIC: ${{ steps.preflight_static.outcome }}
+          OUTCOME_FULL: ${{ steps.preflight_full.outcome }}
+          OUTCOME_CAMPAIGN: ${{ steps.campaign.outcome }}
+        run: |
+          printf '{"campaign_id":"%s","run_id":"%s","run_attempt":"%s","sha":"%s","preflight_static":"%s","preflight_full":"%s","campaign":"%s","publishable":"verified-files-only"}\n' \
+            "$W4_BUSINESS_CAMPAIGN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$OUTCOME_STATIC" "$OUTCOME_FULL" "$OUTCOME_CAMPAIGN" \
+            > "$W5_DIAG/outcomes.json"
+
+      # Seul $W5_PUBLISH est publié : ensemble de fichiers positivement vérifiés (vide si le scanner n'a pas tourné ou a planté ;
+      # jamais un répertoire source, donc jamais ce que le nettoyage ou une commande interrompue ont pu écrire après ou pendant le scan).
       - name: Déposer le rapport (machine + humain, sans secret)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: w4-business-report
-          path: ${{ env.W4_REPORT_DIR }}
+          name: w5-business-report
+          path: ${{ env.W5_PUBLISH }}/report
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Déposer le registre durable de la campagne (budget, échéance, identité consommée)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-business-registry
+          path: ${{ env.W5_PUBLISH }}/registry
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Identités de ressources de CE run (manifeste nightly et frères ``manifest.json.*`` : matérialisation de la SPEC, propriété/reprise), scannées par
+      # le même scanner de confiance. INSTANTANÉ pris par l'étape de campagne, AVANT le nettoyage autonome qui la suit (date : `snapshot_utc` du rapport du scanner) : il
+      # contient les identités AVANT les dernières suppressions (un nettoyage repris doit réconcilier une ressource déjà absente) et n'affirme jamais
+      # qu'un nettoyage a réussi. Campagne non lancée : pris par l'étape de préparation (aucune ressource n'a pu être créée ; fichier absent = aucune). Jamais le dossier source.
+      - name: Déposer les identités de ressources de la campagne (instantané scanné, reprise du nettoyage)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-business-resources
+          path: ${{ env.W5_PUBLISH }}/resources
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Déposer le diagnostic minimal sûr et le rapport du scanner (noms expurgés)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-business-diagnostic
+          path: ${{ env.W5_DIAG }}
           if-no-files-found: warn
           retention-days: 30

@@ -73,6 +73,35 @@ class Settings(BaseSettings):
     # jamais de fournisseur ni d'identité).
     CODER_FALLBACK_MODELS: Optional[str] = None
 
+    # ── Transport LLM (vague 5) ────────────────────────────────────────────────────────────────────────────
+    # ``direct`` (défaut historique) : chaque rôle parle à son fournisseur ; ``budget_broker`` : TOUTE génération passe par le
+    # courtier budgétaire (service de confiance, seul détenteur de la clé Google ; codeur sans réseau, relais vers un socket Unix
+    # par allocation). La destination sémantique reste Google (jamais reclassée OpenAI parce que le relais parle Chat Completions).
+    LLM_TRANSPORT: str = "direct"
+    # Échéance GLOBALE en secondes (0 = aucune), ouverte une seule fois à la première ouverture RÉELLE du fournisseur (canaris
+    # compris), persistée en base et jamais remise à zéro par phase ou par processus.
+    BROKER_GLOBAL_DEADLINE_SECONDS: int = 0
+    # Plafond de sortie par appel imposé par le courtier ; une requête qui en demande plus est REFUSÉE (jamais écrêtée).
+    BROKER_MAX_OUTPUT_TOKENS: int = 8192
+    BROKER_UPSTREAM_TIMEOUT: float = 120.0
+    # Racine des répertoires de sockets (un répertoire privé par session). Vide : répertoire temporaire du processus.
+    BROKER_RUN_DIR: Optional[str] = None
+
+    @field_validator("LLM_TRANSPORT", mode="before")
+    @classmethod
+    def _normalize_llm_transport(cls, v):
+        text = str(v or "direct").strip().lower()
+        if text not in ("direct", "budget_broker"):
+            raise ValueError("transport LLM inconnu (direct ou budget_broker)")
+        return text
+
+    @field_validator("BROKER_GLOBAL_DEADLINE_SECONDS", "BROKER_MAX_OUTPUT_TOKENS", mode="before")
+    @classmethod
+    def _normalize_broker_ints(cls, v):
+        if isinstance(v, bool) or int(v) < 0:
+            raise ValueError("entier positif ou nul requis")
+        return int(v)
+
     @field_validator("LLM_AUTH_CODER", "LLM_AUTH_QA", "LLM_AUTH_REVIEWER", "LLM_AUTH_PLANNER", mode="before")
     @classmethod
     def _normalize_llm_auth(cls, v):

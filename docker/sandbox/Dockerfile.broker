@@ -1,0 +1,55 @@
+# Image du transport BROKER (W5) : SDK + outils OpenHands SEULS, pile métier approuvée, aucun navigateur, aucune clé.
+#
+# Différences voulues avec docker/sandbox/Dockerfile.openhands (qui reste l'image du transport « direct » historique) :
+#  * pas d'application web ``openhands-ai`` ni de ``python-jose`` / ``ecdsa`` / ``passlib`` : le runner n'importe que
+#    ``openhands.sdk``, ``openhands.tools.preset.default`` (``cli_mode=True``, sans navigateur) et ``openhands.sdk.llm.auth.openai`` ;
+#  * verrou ``locks/sandbox-broker.txt`` (groupes ``fixture-stack`` + ``sandbox-broker`` de pyproject.toml), AUDITÉ en mode strict
+#    par la CI (aucun avis connu) ; pytest 9.x et pytest-asyncio 1.x ;
+#  * la pile métier (FastAPI, uvicorn, httpx, SQLAlchemy, Alembic, pypdf, reportlab, python-multipart, pytest) est déjà installée,
+#    aux versions EXACTES du socle de la fixture : un ``pip install -r requirements.txt`` du gate est satisfait sans réseau ;
+#  * pas de Node ni de Chromium (le gate frontend est désactivé dans la campagne W5) ;
+#  * le relais loopback du transport broker est copié à côté du runner.
+
+FROM python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+
+# git : indispensable à l'agent (diffs, commits locaux). tmux : outil terminal du SDK. curl : sonde de santé.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+        tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv : version EXACTE = scripts/locks.py (UV_VERSION).
+COPY --from=ghcr.io/astral-sh/uv:0.11.33 /uv /usr/local/bin/uv
+
+# Closure COMPLÈTE verrouillée et hachée, en une seule installation (aucune résolution flottante).
+COPY locks/sandbox-broker.txt /opt/locks/sandbox-broker.txt
+RUN uv pip install --system --require-hashes --no-deps -r /opt/locks/sandbox-broker.txt
+
+# Compatibilité Gemma 4 / OpenHands SDK 1.19.1 (mode explicite sdk-only : versions exactes du SDK et des outils, ``openhands-ai``
+# ABSENT, SHA-256 exact de la source de TerminalAction). Toute dérive casse le build : aucune préimage inconnue n'est modifiée.
+COPY scripts/patch_openhands_gemma4_terminal.py /opt/patch_openhands_gemma4_terminal.py
+RUN python /opt/patch_openhands_gemma4_terminal.py --mode sdk-only \
+    && rm /opt/patch_openhands_gemma4_terminal.py
+
+ENV RUNTIME=process \
+    INSTALL_DOCKER=0 \
+    OPENHANDS_DISABLE_BROWSER=1 \
+    OPENHANDS_SUPPRESS_BANNER=1
+
+# Scripts du worker : sources committées, autonomes (aucun import ``collegue`` : tout import ajouté exige un COPY).
+COPY collegue/executor/oh_runner.py /opt/oh_runner.py
+COPY collegue/executor/oh_sampler.py /opt/oh_sampler.py
+# Relais loopback du transport W5 (stdlib seule) : le codeur tourne SANS réseau ; ses clients HTTP/SDK parlent à 127.0.0.1 et ce
+# relais recopie les octets vers le socket Unix du courtier, monté en lecture seule dans un répertoire qui ne contient que
+# ``broker.sock``. Aucune clé fournisseur n'est dans l'image ni dans l'environnement du codeur.
+COPY collegue/executor/oh_broker_relay.py /opt/oh_broker_relay.py
+
+RUN useradd --create-home --uid 1000 sandbox
+
+WORKDIR /workspace
+USER sandbox
+
+CMD ["python", "--version"]

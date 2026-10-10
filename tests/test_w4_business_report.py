@@ -201,11 +201,11 @@ def test_llm_keys_may_not_reach_the_keyless_preflight_stages():
 def test_the_launch_stage_legitimately_holds_the_key_of_the_chosen_transport_and_records_only_names():
     report = CampaignReport("preflight", "unit", secrets=[SECRET])
     step = report.declare("P03", "secrets")
-    env = {**GOOD_ENV, "LLM_API_KEY": SECRET, "LLM_API_KEY_CODER": SECRET + "-coder"}
+    env = {**GOOD_ENV, "LLM_API_KEY": SECRET}
 
     business.check_secret_scope(env, report, step, stage="launch")
 
-    assert step.evidence["llm_secret_names_present"] == ["LLM_API_KEY", "LLM_API_KEY_CODER"]
+    assert step.evidence["llm_secret_names_present"] == ["LLM_API_KEY"]
     assert SECRET not in report.to_json() and SECRET not in report.to_human()
 
 
@@ -231,7 +231,7 @@ def test_the_informative_matrix_documents_the_general_picture_but_never_decides(
     assert all(row["code"] == "unbounded_transport" for row in matrix)
 
 
-EFFECTIVE_API_KEY = {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-2.5-flash", "CODER_SUBSCRIPTION": "false"}
+EFFECTIVE_API_KEY = {"CODER_SUBSCRIPTION": "false"}  # le modèle imposé (31B) reste celui de la campagne
 EFFECTIVE_SUBSCRIPTION = {"LLM_PROVIDER": "openai", "LLM_MODEL": "gpt-5.5", "CODER_SUBSCRIPTION": "true"}
 
 
@@ -241,7 +241,7 @@ EFFECTIVE_SUBSCRIPTION = {"LLM_PROVIDER": "openai", "LLM_MODEL": "gpt-5.5", "COD
     ids=["api-key", "subscription"],
 )
 def test_the_effective_worker_is_a_real_ohsdk_agent_judged_by_the_production_rules(overrides, reason):
-    settings = business.effective_settings({**GOOD_ENV, **overrides})
+    settings = business.effective_settings({**GOOD_ENV, **overrides, "LLM_TRANSPORT": "direct"})
 
     outcome = business.effective_worker_capacity(settings)
 
@@ -252,7 +252,7 @@ def test_the_effective_worker_is_a_real_ohsdk_agent_judged_by_the_production_rul
 def test_the_capacity_step_judges_the_chosen_configuration_and_the_matrix_never_decides():
     report = CampaignReport("preflight", "unit")
     step = report.declare("P06", "capacité")
-    settings = business.effective_settings({**GOOD_ENV, **EFFECTIVE_API_KEY})
+    settings = business.effective_settings({**GOOD_ENV, **EFFECTIVE_API_KEY, "LLM_TRANSPORT": "direct"})
     accepting = [{"transport": "futur", "accepted": True, "max_micro_usd": 1, "max_tokens": 1}]
 
     with pytest.raises(IncompleteValidation, match="zéro appel émis"):
@@ -548,7 +548,9 @@ def test_the_real_preflight_stops_incomplete_with_zero_billable_action_when_the_
     server = FixtureNamedServer()
     server.add_ruleset(1)
 
-    report = preflight(server, {**GOOD_ENV, **EFFECTIVE_API_KEY})
+    env = {**GOOD_ENV, **EFFECTIVE_API_KEY}
+    # transport DIRECT (historique) pour juger la matrice des workers à clé ; en W5 la capacité vient du relais (voir test_w5_*)
+    report = preflight(server, env, settings=business.effective_settings({**env, "LLM_TRANSPORT": "direct"}))
 
     by_id = {s.id: s.state for s in report.steps}
     assert by_id["P01-launch-context"] == by_id["P02-environment"] == by_id["P03-secret-scope"] == STEP_SUCCEEDED

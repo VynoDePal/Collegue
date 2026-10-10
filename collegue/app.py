@@ -198,6 +198,17 @@ async def validate_llm_config():
     Cette validation ne prouve PAS que le fournisseur est joignable ni que le modèle existe : la disponibilité n'est pas
     présumée et rien n'est émis au démarrage, donc aucune clé n'est jamais envoyée ailleurs que par un appel routé.
     """
+    from collegue.broker.runtime import is_broker_mode, validate_broker_settings
+
+    if is_broker_mode(settings):
+        try:
+            validate_broker_settings(
+                settings
+            )  # contrat W5 : Google seul, deux Gemma officiels, repli = le 26B du codeur
+        except ValueError as exc:
+            error_msg = f"❌ Configuration du courtier budgétaire incohérente, démarrage refusé — {exc}"
+            logger.error(error_msg)
+            raise ValueError(error_msg) from None
     state = _llm_route_report(settings)
     if state["invalid"]:
         detail = " ; ".join(f"{role} : {error}" for role, error in state["invalid"].items())
@@ -238,6 +249,17 @@ async def core_lifespan(server):
 
     # Validation stricte du LLM au démarrage
     await validate_llm_config()
+
+    # Mode courtier : AVANT toute dépense de ce processus, les producteurs abandonnés par un arrêt / crash précédent sont réparés
+    # (émission en vol ⇒ usage inconnu, projet bloqué ; propriétaire vivant conservé). Même registre que les outils
+    # (STATE_DATABASE_URL) ; aucune échéance ouverte, aucune requête Google. Une erreur refuse le démarrage.
+    from collegue.broker.runtime import recover_at_startup
+
+    repaired = await recover_at_startup(settings)
+    if repaired:
+        logger.warning(
+            "⚠️ Courtier : %d élément(s) abandonné(s) réparé(s) au démarrage (voir l'état du budget)", repaired
+        )
 
     # Eager tool discovery — runs once at startup. Before #211 this was driven
     # lazily by the first `smart_orchestrator` call through a module-level
@@ -305,13 +327,16 @@ async def core_lifespan(server):
 
 sampling_handler = None
 try:
-    from collegue.core.llm.sampling_handler import build_routing_sampling_handler
-
     # Une destination PAR RÔLE (vague 4) : le handler résout, à chaque requête, la route du rôle porté par les
     # préférences de modèle (fournisseur, endpoint, clé). Il est attaché dès qu'AU MOINS UN rôle peut servir et qu'aucune
     # route n'est contradictoire ; un rôle sans clé (le rôle par défaut compris) est refusé à son appel, avant émission,
     # sans désactiver les routes indépendamment configurées. Une contradiction refuse aussi le démarrage
     # (``validate_llm_config``).
+    from collegue.broker.runtime import is_broker_mode, validate_broker_settings
+    from collegue.core.llm.sampling_handler import build_routing_sampling_handler
+
+    if is_broker_mode(settings):
+        validate_broker_settings(settings)
     _llm_state = _llm_route_report(settings)
     if _llm_state["invalid"]:
         print(f"⚠️ Sampling handler non configuré (routage incohérent) : {_llm_state['invalid']}", file=sys.stderr)

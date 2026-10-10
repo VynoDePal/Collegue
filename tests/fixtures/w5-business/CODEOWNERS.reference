@@ -1,0 +1,5 @@
+# SIGNAL de revue (information) pour les chemins qui DÉFINISSENT le contrôle (workflow, propriétaires, pile approuvée).
+# Ce fichier N'EST PAS une barrière : avec 0 approbation requise, une PR de l'auteur-propriétaire qui modifie ces chemins fusionne (observé, C47).
+# La protection est le garde de fusion du produit (arbre Git réel de .github/ et ci/) et la provenance du check, pas ce fichier.
+/.github/ @VynoDePal
+/ci/ @VynoDePal

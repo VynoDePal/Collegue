@@ -264,8 +264,13 @@ def _validate_plan_args(parser: argparse.ArgumentParser, args: argparse.Namespac
             )
         if args.project_id is not None or args.expected_plan_hash is not None or args.execute:
             parser.error("plan draft : --project-id, --expected-plan-hash et --execute ne sont pas acceptés")
-        if args.nightly_exact_task_count is not None and args.nightly_exact_task_count != 1:
-            parser.error("plan draft : --nightly-exact-task-count doit valoir 1")
+        if args.nightly_exact_task_count is not None:
+            # Même borne que le décomposeur (``exact_task_count`` ∈ [1, MAX_TASKS]) : le nightly pose 1, la campagne métier W5 en
+            # pose 3. Ce n'est PAS un contournement : une valeur hors borne reste refusée ici, avant tout appel de modèle.
+            from collegue.planner.decomposer import MAX_TASKS
+
+            if not 1 <= args.nightly_exact_task_count <= MAX_TASKS:
+                parser.error(f"plan draft : --nightly-exact-task-count doit être un entier dans [1, {MAX_TASKS}]")
         return
     if action == "approve":
         missing = []

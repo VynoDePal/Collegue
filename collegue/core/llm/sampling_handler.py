@@ -95,16 +95,21 @@ def _make_handler_class():
     class UsageTrackingSamplingHandler(OpenAISamplingHandler):
         """Handler OpenAI-compatible : capture d'usage + modèle arbitraire honoré."""
 
-        def __init__(self, *args, provider: Optional[str] = None, **kwargs):
+        def __init__(self, *args, provider: Optional[str] = None, broker: bool = False, **kwargs):
             super().__init__(*args, **kwargs)
             self.route_provider = provider
+            self.broker = bool(broker)
             inner = self.client.chat.completions.create
 
             async def _create(*a, **kw):
                 from collegue.core.llm.budget_guard import TRANSPORT_HTTP, current_binding, guarded_call
 
                 binding = current_binding()
-                if binding is not None:
+                if self.broker:
+                    # Mode courtier : le courtier réserve, émet et règle (autorité unique) ; aucune garde dupliquée ici.
+                    normalize_output_limit(kw)
+                    response = await inner(*a, **kw)
+                elif binding is not None:
                     # Registre durable lié (moteur autonome) : réservation AVANT chaque tentative, pas de
                     # retry interne du SDK (max_retries=0), règlement avec l'usage réel.
                     # La sortie DOIT être bornée par UNE limite réellement transmise (celle de l'appelant, sinon la
@@ -209,8 +214,11 @@ def _make_routing_class(inner_cls):
         """
 
         def __init__(self, settings_obj: Any) -> None:
+            from collegue.broker.runtime import is_broker_mode
+
             self._settings = settings_obj
             self._handlers: dict = {}
+            self._broker = is_broker_mode(settings_obj)
 
         def _handler_for(self, route):
             from openai import AsyncOpenAI
@@ -227,8 +235,15 @@ def _make_routing_class(inner_cls):
             key = (*route.cache_key(), route.model)
             handler = self._handlers.get(key)
             if handler is None:
-                client = AsyncOpenAI(api_key=route.transport_key(), base_url=route.endpoint)
-                handler = inner_cls(default_model=route.model, client=client, provider=route.provider)
+                if self._broker:
+                    # Courtier : AUCUN client réseau ni clé ; la destination sémantique reste Google.
+                    from collegue.broker.client import BrokerChatClient
+
+                    client = BrokerChatClient(self._settings, route.role)
+                    handler = inner_cls(default_model=route.model, client=client, provider=route.provider, broker=True)
+                else:
+                    client = AsyncOpenAI(api_key=route.transport_key(), base_url=route.endpoint)
+                    handler = inner_cls(default_model=route.model, client=client, provider=route.provider)
                 self._handlers[key] = handler
             return handler
 

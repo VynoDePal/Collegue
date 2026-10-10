@@ -48,6 +48,10 @@ def test_metadata_declares_all_tables():
         "budget_events",
         "budget_blocks",
         "task_merges",
+        "broker_sessions",
+        "broker_attempts",
+        "broker_clocks",
+        "broker_owners",
     }
 
 

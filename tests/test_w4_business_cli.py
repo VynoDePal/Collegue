@@ -23,6 +23,8 @@ from test_w4_business_report import (
 
 from collegue.pilot import w4_business as business
 
+REAL_ROUTE_VALIDATOR = business.route_validator  # avant que la fixture ne le remplace : l'API publique de routage d'A
+
 FAKE_KEY = "fake-model-key-for-cli-test"
 FAKE_ROLE_KEY = "fake-role-key-for-cli-test"
 FAKE_GITHUB = "fake-github-token-for-cli-test"
@@ -38,7 +40,7 @@ def cli_environment(root, **extra):
         "W4_BUSINESS_CONFIRM": business.LAUNCH_CONFIRMATION,
         "GITHUB_TOKEN": FAKE_GITHUB,
         "LLM_PROVIDER": "gemini",
-        "LLM_MODEL": "gemini-2.5-flash",
+        "LLM_MODEL": business.MODEL_PRIMARY,
         "LLM_API_KEY": FAKE_KEY,
         "LLM_API_KEY_CODER": FAKE_ROLE_KEY,
         "COLLEGUE_NIGHTLY_MANIFEST": str(root / "manifest.json"),
@@ -52,6 +54,8 @@ def boundary(monkeypatch, tmp_path):
 
     Le répertoire courant est un dossier vierge : un ``.env`` de développeur ne doit pas rendre la configuration ambiguë."""
     monkeypatch.chdir(tmp_path)
+    # Les contrôles W5 (socle, modèles, relais, identité) ont leurs propres tests : ces tests-ci isolent le câblage W4 de `main`.
+    monkeypatch.setattr("collegue.pilot.w5_business.w5_preflight_checks", lambda *args, **kwargs: [])
     server = FixtureNamedServer()
     server.add_ruleset(1)
     clients = full_clients(server)
@@ -79,8 +83,10 @@ class SimpleBoundary:
         self.server, self.docker_calls, self.real_run = server, docker_calls, real_run
 
 
-def invoke(monkeypatch, tmp_path, action, *arguments, drop=(), **extra):
+def invoke(monkeypatch, tmp_path, action, *arguments, drop=(), keep_role_key=False, **extra):
     env = cli_environment(tmp_path, **extra)
+    if action == "run" and not keep_role_key:
+        env.pop("LLM_API_KEY_CODER")  # contrat de clé W5 : l'étape réelle ne porte QUE LLM_API_KEY
     for name in drop:
         env.pop(name)
     output = tmp_path / f"{action}.json"
@@ -98,23 +104,47 @@ def invoke(monkeypatch, tmp_path, action, *arguments, drop=(), **extra):
 def test_run_validates_the_effective_configuration_with_the_legitimate_key_instead_of_rejecting_it(
     monkeypatch, tmp_path, boundary
 ):
+    # la VRAIE validation de routes d'A (pas le substitut de la fixture) : la route effective de chaque rôle est Gemma 4 chez Google
+    monkeypatch.setattr(business, "route_validator", REAL_ROUTE_VALIDATOR)
     code, report, steps = invoke(monkeypatch, tmp_path, "run")
 
     assert steps["P03-secret-scope"]["state"] == "succeeded", steps["P03-secret-scope"]
-    assert steps["P03-secret-scope"]["evidence"]["llm_secret_names_present"] == ["LLM_API_KEY", "LLM_API_KEY_CODER"]
+    assert steps["P03-secret-scope"]["evidence"]["llm_secret_names_present"] == ["LLM_API_KEY"], (
+        "la clé de campagne est acceptée au bon nom, seul son NOM est consigné"
+    )
     assert steps["P05-role-routes"]["state"] == "succeeded"
     assert steps["P05-role-routes"]["evidence"]["credential_required"] is True, (
         "la clé est exigée à l'étape de lancement"
     )
-    # raison précise de la validation effective : le worker choisi (clé API facturable) ne tient pas le mode strict
-    assert steps["P06-worker-capacity"]["state"] == "incomplete_validation"
-    assert (
-        "OHSdkAgent" in steps["P06-worker-capacity"]["detail"]
-        and "FACTURABLE" in steps["P06-worker-capacity"]["detail"]
-    )
+    routes = steps["P05-role-routes"]["evidence"]["routes"]
+    assert sorted(routes) == ["coder", "planner", "qa", "reviewer"]
+    for role, route in routes.items():
+        assert (route["provider"], route["model"]) == ("gemini", business.MODEL_PRIMARY), role
+        assert route["endpoint"].startswith("https://generativelanguage.googleapis.com/"), role
+        assert route["credential_source"] == "global" and route["credential_present"] is True, role
+    # capacité RÉELLEMENT bornée : celle du relais budgétaire, prouvée par l'interface publique d'A (pas un OHSdkAgent à clé directe)
+    capacity = steps["P06-worker-capacity"]
+    assert capacity["state"] == "succeeded", capacity
+    assert capacity["evidence"]["effective"]["source"] == "collegue.broker.capability_proof"
+    assert capacity["evidence"]["effective"]["accepted"] is True
+    # tout le préflight est vert ; l'arrêt a une raison précise et sûre : le socle approuvé (manifeste) n'est pas fourni
+    assert all(step["state"] == "succeeded" for step_id, step in steps.items() if step_id.startswith("P0"))
+    assert steps["R01-run"]["state"] == "incomplete_validation"
+    assert "W5_BOOTSTRAP_MANIFEST absent" in steps["R01-run"]["detail"]
     assert code == 3 and report["verdict"] == "incomplete_validation"
-    assert report["facts"]["billable_actions_emitted"] == 0 and report["facts"]["stop_point"] == "preflight"
-    assert steps["R01-run"]["state"] == "not_executed"
+    assert report["facts"]["billable_actions_emitted"] == 0 and report["facts"].get("llm_calls_emitted", 0) == 0
+    for later in ("R02-business", "R04-improvement", "R05-incident-rollback"):
+        assert steps[later]["state"] == "not_executed", later
+
+
+def test_run_refuses_a_per_role_key_that_is_not_part_of_the_key_contract(monkeypatch, tmp_path, boundary):
+    code, report, steps = invoke(monkeypatch, tmp_path, "run", keep_role_key=True)
+
+    assert steps["P03-secret-scope"]["state"] == "failed" and "hors contrat" in steps["P03-secret-scope"]["detail"]
+    assert "LLM_API_KEY_CODER" in steps["P03-secret-scope"]["detail"]
+    assert (
+        code == 1 and report["facts"]["billable_actions_emitted"] == 0 and steps["R01-run"]["state"] == "not_executed"
+    )
 
 
 def test_the_keyless_preflight_action_still_rejects_the_same_keys(monkeypatch, tmp_path, boundary):

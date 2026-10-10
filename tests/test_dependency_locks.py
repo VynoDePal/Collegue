@@ -23,7 +23,7 @@ from packaging.utils import canonicalize_name
 ROOT = Path(__file__).resolve().parents[1]
 LOCKS_SCRIPT = ROOT / "scripts" / "locks.py"
 PYPROJECT = ROOT / "pyproject.toml"
-TARGETS = ("lint", "runtime", "dev", "audit", "sandbox", "sandbox-openhands")
+TARGETS = ("lint", "runtime", "dev", "audit", "sandbox", "sandbox-openhands", "fixture-stack", "sandbox-broker")
 
 
 def _load_locks_module():
@@ -75,7 +75,7 @@ def test_committed_locks_match_pyproject_offline() -> None:
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "6 verrou(s) cohérent(s)" in completed.stdout
+    assert "8 verrou(s) cohérent(s)" in completed.stdout
 
 
 @pytest.mark.parametrize("target", TARGETS)
@@ -192,7 +192,7 @@ def test_tightening_a_specifier_is_detected(sandbox_repo: Path) -> None:
 def test_changing_a_group_only_flags_the_locks_that_use_it(sandbox_repo: Path) -> None:
     text = (sandbox_repo / "pyproject.toml").read_text(encoding="utf-8")
     (sandbox_repo / "pyproject.toml").write_text(
-        text.replace('"aiosqlite",', '"aiosqlite",\n    "orjson",'), encoding="utf-8"
+        text.replace('"psycopg2-binary",', '"psycopg2-binary",\n    "orjson",'), encoding="utf-8"
     )
 
     completed = _run_check(sandbox_repo)

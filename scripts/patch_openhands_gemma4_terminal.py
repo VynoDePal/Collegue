@@ -1,13 +1,20 @@
-"""Patch the terminal schema bundled with OpenHands AI 1.7.0 for Gemma 4.
+"""Patch the terminal schema of ``openhands-tools==1.19.1`` for Gemma 4.
 
 This is deliberately a build-time, fail-closed compatibility patch.  It may only
-touch the exact ``openhands-tools==1.19.1`` source pulled by ``openhands-ai==1.7.0``.
+touch the exact ``openhands-tools==1.19.1`` source.  Two explicit modes:
+
+* ``legacy`` (default, ``docker/sandbox/Dockerfile.openhands``): the tools are pulled by ``openhands-ai==1.7.0``,
+  which must be installed at exactly that version;
+* ``sdk-only`` (``docker/sandbox/Dockerfile.broker``): only ``openhands-sdk`` and ``openhands-tools`` at 1.19.1 are installed;
+  the web application ``openhands-ai`` must be ABSENT (an image that still carries it is not the reviewed one).
+
 When OpenHands changes that source, the image build must fail and this patch must
 be reviewed instead of being applied to an unknown preimage.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib
 import importlib.metadata
@@ -16,6 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+MODES = ("legacy", "sdk-only")
 SUPPORTED_VERSIONS = {
     "openhands-ai": "1.7.0",
     "openhands-sdk": "1.19.1",
@@ -109,10 +117,20 @@ def _distribution(name: str) -> importlib.metadata.Distribution:
     return distribution
 
 
-def locate_target() -> Path:
+def locate_target(mode: str = "legacy") -> Path:
     """Resolve the file owned by the exact pinned OpenHands distributions."""
 
-    _distribution("openhands-ai")
+    if mode not in MODES:
+        raise PatchError(f"unknown mode {mode!r}: expected one of {MODES}")
+    if mode == "legacy":
+        _distribution("openhands-ai")
+    else:
+        try:
+            present = importlib.metadata.distribution("openhands-ai").version
+        except importlib.metadata.PackageNotFoundError:
+            present = None
+        if present is not None:
+            raise PatchError(f"sdk-only mode refuses an image carrying openhands-ai {present}")
     _distribution("openhands-sdk")
     tools_distribution = _distribution("openhands-tools")
     target = Path(tools_distribution.locate_file(TARGET_RELATIVE_PATH)).resolve()
@@ -153,9 +171,12 @@ def verify_runtime_contract() -> None:
         raise PatchError("postcheck failed: canonical command lost precedence")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--mode", choices=MODES, default="legacy")
+    args = parser.parse_args(argv)
     try:
-        target = locate_target()
+        target = locate_target(args.mode)
         patched = patch_source(target.read_bytes())
         _atomic_write(target, patched)
         if target.read_bytes() != patched:

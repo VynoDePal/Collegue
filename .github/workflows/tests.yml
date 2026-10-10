@@ -118,6 +118,23 @@ jobs:
           pytest tests/test_delivery_proof_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-delivery-proofs.xml
           python scripts/ci_require_junit.py pg-delivery-proofs.xml --min-tests 5 --expect-tests "${expected}"
 
+      # Vague 5 : état durable du courtier budgétaire (sessions, tentatives, horloge persistée, migration 0012 → 0013), rejoué sur un
+      # VRAI PostgreSQL avec les mêmes scénarios que SQLite. Le fichier doit exister (``test -f`` : son absence rend le job rouge,
+      # jamais un pas sauté). Le plancher (139 = 118 + 11 contrat SDK + 10 confidentialité du journal) est le nombre EXACT collecté à l'intégration locale de A33 (`6c3db18`) ; il ne baisse plus, il se relève si des cas
+      # sont ajoutés (checklist de docs/consolidation/w5-integration.md).
+      - name: PostgreSQL broker state - real durable-state proof
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          test -n "${COLLEGUE_TEST_POSTGRES_URL:-}"
+          test -f tests/test_w5_broker_postgres.py
+          expected="$(pytest tests/test_w5_broker_postgres.py -o addopts= --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests PostgreSQL collectés: ${expected}"
+          pytest tests/test_w5_broker_postgres.py -o addopts= -p no:cacheprovider -rA --junitxml=pg-broker.xml
+          python scripts/ci_require_junit.py pg-broker.xml --min-tests 139 --expect-tests "${expected}"
+
       - name: Upload PostgreSQL proof report
         if: always()
         uses: actions/upload-artifact@v4
@@ -127,6 +144,7 @@ jobs:
             pg-budget.xml
             pg-task-merges.xml
             pg-delivery-proofs.xml
+            pg-broker.xml
           if-no-files-found: warn
 
       - name: Run pytest with coverage
@@ -186,6 +204,17 @@ jobs:
       # importlib-metadata, zipp) ne sont donc PAS auditées ici ; ce n'est pas un audit de la fermeture 3.11.
       - name: Audit locked dev dependencies (strict)
         run: pip-audit --strict --desc --no-deps --disable-pip -r locks/dev.txt
+
+      # Vague 5 : verrou de l'image du transport broker (docker/sandbox/Dockerfile.broker) et verrou de la pile métier approuvée
+      # (copié dans le socle de la fixture) : même méthode, AUCUN avis ignoré. Ces deux verrous sont résolus pour Python 3.12 ; les entrées
+      # réservées à une autre plate-forme (marqueurs ``sys_platform``) ne sont pas évaluées sur ce runner Linux. L'ancien verrou
+      # locks/sandbox-openhands.txt (image « direct » historique) N'est PAS audité ici : son audit strict est rouge (voir
+      # docs/consolidation/w5-integration.md) et il n'est pas utilisé par la campagne W5.
+      - name: Audit locked broker image dependencies (strict)
+        run: pip-audit --strict --desc --no-deps --disable-pip -r locks/sandbox-broker.txt
+
+      - name: Audit locked approved fixture stack (strict)
+        run: pip-audit --strict --desc --no-deps --disable-pip -r locks/fixture-stack.txt
 
       # Wheel construit depuis les fichiers du dépôt, installé NON éditable dans un venv vierge avec le
       # verrou runtime, puis exécuté hors checkout (ressources, migrations jusqu'à head, serveur sans LLM).
@@ -250,6 +279,41 @@ jobs:
             collegue-sandbox-openhands:pr-check \
             python - < scripts/ci_w4_worker_routing.py
 
+      # Image du transport BROKER (W5) : SDK/outils seuls, pile métier approuvée, verrou audité (docker/sandbox/Dockerfile.broker).
+      - name: Build OpenHands broker sandbox image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/sandbox/Dockerfile.broker
+          push: false
+          load: true
+          tags: collegue-sandbox-broker:pr-check
+
+      - name: Verify the broker image Gemma 4 terminal contract (sdk-only)
+        run: |
+          docker run --rm --network none collegue-sandbox-broker:pr-check \
+            python -c "from openhands.tools.terminal.definition import TerminalAction; assert TerminalAction.model_validate({'commands': 'true'}).command == 'true'; assert TerminalAction.model_validate({'command': 'canonical', 'commands': 'ignored'}).command == 'canonical'"
+
+      - name: Verify OpenHands worker routing in the broker image (real SDK, no model)
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i --network none \
+            collegue-sandbox-broker:pr-check \
+            python - < scripts/ci_w4_worker_routing.py
+
+      # Transport W5 SANS MODÈLE ni clé : le VRAI SDK OpenHands de l'image appelle le relais embarqué /opt/oh_broker_relay.py, qui recopie
+      # vers un socket Unix tenu par un FAUX courtier (route OpenAI, jeton de session factice, usage). Conteneur SANS réseau, aucun
+      # secret ni variable d'hôte, script transmis sur l'entrée standard (aucun montage). Le script prouve aussi l'isolation (seule la
+      # boucle locale, aucune connexion externe, aucune variable ressemblant à une clé) et que le relais n'est pas un proxy (autre
+      # route ou URL absolue → 404, corps au-delà du plafond coupé). Le VRAI courtier, ses budgets et son fournisseur sont éprouvés par
+      # les tests de A et la preuve d'intégration hôte ; aucun fournisseur réel n'est joint ici.
+      - name: Verify OpenHands broker transport (real SDK, fake broker, network none)
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i --network none \
+            collegue-sandbox-broker:pr-check \
+            python - < scripts/ci_w5_broker_transport.py
+
       # Preuve du VRAI vérificateur métier public (collegue.pilot.w4_business.verify_business_checkout, runner omis) dans
       # l'image CONSTRUITE ci-dessus, sans modèle, sans clé et sans réseau applicatif (les conteneurs sont lancés par B en
       # --network none). L'orchestrateur tourne sur l'hôte avec les dépendances de test VERROUILLÉES et hachées (locks/dev.txt) ;
@@ -278,6 +342,46 @@ jobs:
         with:
           name: w4-business-verifier-proof
           path: w4-verifier-report/
+          if-no-files-found: warn
+
+      # Même preuve dans l'image que la campagne W5 utilise réellement (transport broker).
+      - name: Prove the business verifier in the broker image (public path, no model)
+        timeout-minutes: 10
+        run: python scripts/ci_w4_business_verifier.py --image collegue-sandbox-broker:pr-check --report-dir w5-broker-verifier-report
+
+      # PREUVE COMPOSÉE W5 en conteneur réel (tests/test_w5_integration_image.py, marqueur w5_image) : le VRAI SDK / oh_runner / relais de l'image
+      # broker, lancés par le VRAI DockerSandbox (--network none, un seul montage en lecture seule), traversent le VRAI BrokerSocketServer +
+      # BrokerService + registre SQLite de l'hôte, avec un FAUX fournisseur Google derrière qui observe countTokens / generateContent. Elle prouve
+      # aussi : code hostile appelant le socket (modèle / URL / session / champs non autorisés, aucun accès Internet, aucune clé), et un worker qui
+      # dort ou calcule SANS nouvel appel est tué à l'échéance persistée commune, conteneur absent ensuite, réservation en vol conservée si usage inconnu.
+      # Ces tests sont exclus de la suite générale (addopts) et SÉLECTIONNÉS ici : collectés et exécutés sans saut (ci_require_junit refuse un test
+      # sauté, désélectionné, manquant ou une collecte tronquée) ; Docker ou image absents = échec. L'usage vient du registre, jamais du stdout du worker.
+      - name: Prove the real SDK through the real broker service (fake Google, hostile code, persisted deadline)
+        timeout-minutes: 20
+        env:
+          PYTHONPATH: .:tests
+          W5_BROKER_IMAGE: collegue-sandbox-broker:pr-check
+        run: |
+          set -euo pipefail
+          expected="$(pytest tests/test_w5_integration_image.py -o addopts= -m w5_image --collect-only -q -p no:cacheprovider | grep -c '::')"
+          echo "tests de la preuve composée collectés: ${expected}"
+          pytest tests/test_w5_integration_image.py -o addopts= -m w5_image -p no:cacheprovider -rA --junitxml=w5-image-proof.xml
+          python scripts/ci_require_junit.py w5-image-proof.xml --min-tests 18 --expect-tests "${expected}"
+
+      - name: Upload the composed proof report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-image-composed-proof
+          path: w5-image-proof.xml
+          if-no-files-found: warn
+
+      - name: Upload broker image business verifier proof report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-broker-business-verifier-proof
+          path: w5-broker-verifier-report/
           if-no-files-found: warn
 
       # Prouve que le service est PRÊT (santé + MCP initialize), pas seulement lancé :

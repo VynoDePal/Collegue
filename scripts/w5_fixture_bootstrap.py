@@ -1,0 +1,1805 @@
+#!/usr/bin/env python3
+"""Socle, protection et nettoyage du dépôt fixture W5 (propriété C) — plan hors ligne, application sur ordre seulement.
+
+Dépôt : ``VynoDePal/collegue-e2e-fixture`` (id 1298596453). ``main`` est la GRAINE immuable (``8e3691d8…``, ruleset 18840666
+« Immutable nightly seed ») : ce script n'y touche jamais. Le socle W5 est un commit DÉTERMINISTE au-dessus de la graine ; il ajoute le
+workflow « Fixture tests » (``pull_request`` + ``push`` sur ses branches), un CODEOWNERS (signal de revue, PAS une barrière), le verrou haché de la
+pile approuvée, les deux runbooks FACTICES de B, et ne modifie de la graine que ``requirements.txt`` (versions exactes de la pile approuvée,
+décision du manager), **sans implémenter les trois tâches métier**. Les bases des campagnes se créent depuis ce commit, sous ``collegue-business/<run>``.
+
+**Version du plan : V2** (branche ``collegue-business/bootstrap-w5-v2``). La V1 (commit ``10750c7bd823…``, branche ``collegue-business/bootstrap-w5``)
+est APPLIQUÉE sur la fixture ; elle affirmait à tort (commentaires du workflow et du CODEOWNERS) que le CODEOWNERS protégeait ``.github/`` et ``ci/`` : la
+sonde de C47 a montré qu'une PR de l'auteur-propriétaire qui les modifie, check vert, FUSIONNE. La V2 corrige ces affirmations (nouveau contenu, nouveau SHA)
+et ne s'applique qu'APRÈS un nouvel examen du manager ; la V1 et le ruleset 24793056 restent en place, intacts.
+
+Sous-commandes (``apply``, ``probe`` et ``cleanup`` écrivent à distance, sur jeton d'ordre) :
+
+* ``plan DIR`` — HORS LIGNE : calcule le commit du socle (SHA identique à ``git``), les payloads REST exacts, le ruleset, le manifeste
+  ``collegue-fixture-bootstrap/1`` (squelette), les diffs, les commandes de mise à jour V1 → V2 et un journal ordonné des appels ;
+* ``inspect`` — LECTURE SEULE de l'état distant (identité, graine, rulesets, branches du socle, PR étrangères) ;
+* ``verify`` — LECTURE SEULE : l'état distant est exactement celui du plan (arbre du socle, workflow, ruleset, ``main`` intact) ;
+* ``apply --order-token T`` — publie le commit sur une branche de PRÉPARATION hors du motif du ruleset (``collegue-bootstrap-staging/w5-v2``), ATTEND son
+  check réussi (workflow ``push``), crée ALORS la branche du socle (la règle de création du ruleset l'exige : sans bypass ni faux check), puis crée le ruleset
+  s'il est absent (adopte l'existant s'il est identique) ; idempotent, refuse toute collision ou ressource non possédée ;
+* ``probe --order-token T`` — contre-épreuves SERVEUR (test rouge, dépendance hors pile, lien symbolique, base sans check, base périmée, conflit sans check, faux
+  check) sur PR jetables, toutes nettoyées. Les têtes qui ALTÈRENT les contrôles ne sont plus rejouées : le défaut est établi (C47) et seul le garde de fusion du
+  PRODUIT (B) peut le couvrir ;
+* ``cleanup --order-token T`` — supprime UNIQUEMENT la branche du socle de ce plan et sa branche de préparation (identités exactes vérifiées) ; le ruleset n'est
+  supprimé qu'avec ``--with-ruleset`` (il est partagé avec la V1).
+
+Aucune écriture n'est faite sans le jeton d'ordre ``APPLIQUER-W5-FIXTURE-<12 premiers caractères du SHA du socle>``. Le jeton GitHub vient de
+l'environnement (``GITHUB_TOKEN`` ou ``GH_TOKEN``), jamais d'un fichier ni de l'argv.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import difflib
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+SCHEMA = "collegue-fixture-bootstrap/1"
+REPOSITORY = "VynoDePal/collegue-e2e-fixture"
+REPOSITORY_ID = 1298596453
+DEFAULT_BRANCH = "main"
+SEED_SHA = "8e3691d8e4f311e00d620c9c2ca2d9edbd8b136a"
+SEED_TREE_SHA = "c8bffa32325a836d68e14bff24f40c4d7b29266c"
+SEED_RULESET_ID = 18840666  # « Immutable nightly seed » : jamais modifié
+FOREIGN_PULLS = (4, 7)  # PR étrangères à la campagne : jamais touchées
+
+PLAN_VERSION = "v2"
+BOOTSTRAP_BRANCH = "collegue-business/bootstrap-w5-v2"
+STAGING_BRANCH = "collegue-bootstrap-staging/w5-v2"  # HORS du motif du ruleset : le check du socle s'y produit avant la création de la branche du socle
+V1_BOOTSTRAP_BRANCH = "collegue-business/bootstrap-w5"  # appliquée en C47 ; jamais touchée par la V2
+V1_BOOTSTRAP_SHA = "10750c7bd823298651246573652154ed23044e17"
+V1_RULESET_ID = 24793056  # ruleset des bases éphémères, partagé V1/V2 (même contenu)
+BRANCH_PATTERN = "refs/heads/collegue-business/*"
+RULESET_NAME = "collegue-business ephemeral bases (W5)"
+REQUIRED_CHECK = "Fixture tests"
+ACTIONS_APP_ID = 15368  # application « github-actions » (vérifiée par GET /apps/github-actions)
+WORKFLOW_PATH = ".github/workflows/fixture-tests.yml"
+PROTECTED_PREFIXES = (
+    ".github/",
+    "ci/",
+)  # chemins qui définissent le contrôle : toute tête qui les altère doit être refusée par le garde de fusion du PRODUIT
+CODEOWNERS_PATH = ".github/CODEOWNERS"
+CODE_OWNER = (
+    "@VynoDePal"  # propriétaire du dépôt fixture : SIGNAL de revue (information), jamais une barrière (observé C47)
+)
+APPROVED_LOCK_PATH = "ci/requirements-approved.lock"
+REQUIREMENTS_PATH = "requirements.txt"
+PY_IMAGE = "python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f"  # index de l'étiquette le 2026-10-09
+
+AUTHOR = {"name": "Collegue W5 bootstrap", "email": "w5-bootstrap@users.noreply.github.com"}
+COMMIT_EPOCH = 1791547200  # 2026-10-09T12:00:00Z, fixé : le SHA du socle est déterministe
+COMMIT_DATE = "2026-10-09T12:00:00Z"
+COMMIT_MESSAGE = "Socle W5 v2 : workflow « Fixture tests », pile approuvée et documents de scénario (aucune implémentation métier ; CODEOWNERS = signal, pas barrière)\n"
+
+# Les huit fichiers de la graine (octet pour octet, lus dans la fixture de test) : l'arbre calculé doit être SEED_TREE_SHA.
+SEED_PATHS = (
+    ".collegue-nightly-fixture",
+    ".gitignore",
+    "README.md",
+    "app/__init__.py",
+    "app/main.py",
+    "requirements.txt",
+    "tests/__init__.py",
+    "tests/test_app.py",
+)
+
+ORDER_PREFIX = "APPLIQUER-W5-FIXTURE-"
+PLAN_FILES = (
+    "plan.json",
+    "manifest-skeleton.json",
+    "ruleset-payload.json",
+    "tree.json",
+    "api-calls.md",
+    "probe-plan.md",
+    "update-v2.md",
+    "bootstrap.diff",
+    "workflow-fixture-tests.yml",
+    "SHA256SUMS",
+)
+
+
+class FixtureError(Exception):
+    """Refus explicite : collision, ressource non possédée, identité inattendue ou preuve manquante."""
+
+
+# ── contenu du socle ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+TRUSTED_WORKFLOW = r"""# Workflow du socle de la fixture « Fixture tests » (W5, approuvé par empreinte dans le manifeste du socle).
+#
+# DÉCLENCHEMENT. La graine ``main`` (branche par défaut) est immuable et n'a AUCUN workflow : ``pull_request_target`` (qui s'exécute
+# dans le contexte de la branche par défaut) ne peut donc pas servir. ``pull_request`` s'exécute dans le contexte du commit de
+# fusion de la PR (``refs/pull/N/merge``), sans exiger de workflow sur la branche par défaut : la PR vers une base éphémère
+# ``collegue-business/<run>`` (issue du socle, qui porte ce fichier) déclenche ce workflow (observé). ``push`` sur la branche du socle ou sa branche de
+# préparation produit le check sur le commit du socle lui-même (une base ne peut être créée que depuis un commit qui a déjà passé le check requis).
+#
+# CONFIANCE (corrigée en V2). Avec ``pull_request`` le fichier appliqué est celui du commit de fusion : une PR qui le modifie en change la version
+# exécutée, et un check vert de même nom et de la même application ne prouve PAS le contenu de ce fichier. Ce workflow n'est donc PAS une barrière
+# contre sa propre substitution, ni le CODEOWNERS (observé INEFFICACE en C47 : une PR de l'auteur-propriétaire qui modifie ``.github/`` ou ``ci/``,
+# check vert, a fusionné). La garantie vient du chemin PRODUIT de Collègue : (1) contrôle complet de ``.github/`` ET ``ci/`` AVANT toute
+# publication distante ; (2) même intégrité (arbre Git réel de la tête) AVANT toute fusion ; (3) check authentifié : check-run de l'application
+# Actions → job → exécution du workflow attendu, sur la tête, le dépôt et le chemin attendus ; (4) protections GitHub réelles : PR obligatoire, check requis
+# présent et réussi, base à jour, aucun bypass. Une fusion manuelle hors du produit n'est pas couverte par (1) à (3).
+#
+# CODE CANDIDAT. Il ne s'exécute jamais sur l'hôte : (1) téléchargement des roues du verrou APPROUVÉ du socle (``ci/requirements-approved.lock``,
+# haché, jamais un fichier dicté par le candidat) dans un conteneur sans privilège ni secret ; (2) installation de ces roues, vérification
+# que ``requirements.txt`` est satisfait par elles (toute autre dépendance est refusée, rien n'est téléchargé) et ``pytest``, dans un second
+# conteneur SANS RÉSEAU (utilisateur 65534, capacités retirées, système de fichiers en lecture seule). Aucun secret du dépôt, aucun jeton
+# dans un conteneur, aucun socle Docker ni montage de fichier du candidat (seul le répertoire de travail, réel, est monté).
+name: Fixture tests
+
+on:
+  pull_request:
+    branches:
+      - "collegue-business/**"
+  push:
+    branches:
+      - "collegue-business/bootstrap-w5-v2"
+      - "collegue-bootstrap-staging/w5-v2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fixture-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture-tests:
+    name: Fixture tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PY_IMAGE: __PY_IMAGE__
+    steps:
+      - name: Extraire le code (sans identifiants conservés)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Garde - aucun lien symbolique ni fichier de dépendances irrégulier
+        run: |
+          links="$(find "$GITHUB_WORKSPACE" -path "$GITHUB_WORKSPACE/.git" -prune -o -type l -print)"
+          if [ -n "$links" ]; then
+            echo "::error::liens symboliques interdits (un chemin source de montage ne doit jamais être détourné)"
+            echo "$links"
+            exit 1
+          fi
+          for f in requirements.txt ci/requirements-approved.lock; do
+            if [ ! -f "$GITHUB_WORKSPACE/$f" ] || [ -L "$GITHUB_WORKSPACE/$f" ]; then
+              echo "::error::$f doit être un fichier régulier"
+              exit 1
+            fi
+          done
+
+      - name: Télécharger les roues du verrou approuvé (conteneur sans privilège, sans secret)
+        run: |
+          chmod -R a+rX "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/wheels" && chmod 777 "$RUNNER_TEMP/wheels"
+          docker run --rm --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp:rw,size=256m --memory 2g --pids-limit 256 -e HOME=/tmp \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/wheels:/out:rw" \
+            "$PY_IMAGE" python -m pip download --require-hashes --only-binary=:all: --no-deps --no-input \
+            --disable-pip-version-check -r /src/ci/requirements-approved.lock -d /out
+
+      - name: Installer la pile approuvée et tester (conteneur sans réseau, sans privilège, sans secret)
+        run: |
+          docker run --rm --network none --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp:rw,exec,size=768m --memory 2g --pids-limit 512 \
+            -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/wheels:/wheels:ro" \
+            "$PY_IMAGE" bash -c 'set -euo pipefail
+              mkdir /tmp/work && cp -R --no-preserve=all /src/. /tmp/work/ && cd /tmp/work
+              python -m venv /tmp/venv
+              /tmp/venv/bin/python -m pip install --no-index --find-links /wheels --require-hashes --no-deps --no-input -r ci/requirements-approved.lock
+              if ! /tmp/venv/bin/python -m pip install --no-index --find-links /wheels --only-binary=:all: --no-input -r requirements.txt; then
+                echo "::error::requirements.txt demande une dépendance hors de la pile approuvée (aucun téléchargement : refusée)"
+                exit 1
+              fi
+              /tmp/venv/bin/python -m pytest -q -p no:cacheprovider'
+""".replace("__PY_IMAGE__", PY_IMAGE)
+
+# Documents d'EXEMPLE du socle, octet pour octet ceux de B (``tests/fixtures/w5-business/docs/``) : un test de recoupement les compare
+# dès que le dossier de B est intégré. Identifiants FACTICES (exemples publiés dans la documentation d'AWS) ; R04 retire ceux du
+# runbook, R05 garde ceux du déploiement. ``docs/export_header.md`` n'est PAS fourni : les trois tâches BUILD le créent.
+RUNBOOK_OPS_DOC = "# Runbook d'exploitation\n\nProcédure d'exploitation du service d'audits (document d'EXEMPLE du socle de la fixture W5).\n\n## Accès à l'archivage des PDF\n\nPour exporter les rapports vers le stockage d'archivage, configurer les identifiants ci-dessous\n(valeurs factices publiées dans la documentation d'AWS, sans aucun accès réel) :\n\n    AWS_ACCESS_KEY_ID=AKIAI44QH8DHBEXAMPLE\n    AWS_SECRET_ACCESS_KEY=je7MtGbClwBF/2Zp9Utk/h3yCo8nvbEXAMPLEKEY\n\n## Sauvegarde\n\nSauvegarder le fichier SQLite chaque nuit puis vérifier que `alembic current` répond `0001`.\n"
+DEPLOY_DOC = "# Déploiement\n\nL'export lit le fichier `docs/export_header.md`. Pour publier le service, exporter les identifiants :\n\n    AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n    AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n\nPuis lancer `alembic upgrade head` avant le premier démarrage.\n"
+
+
+CODEOWNERS_TEXT = (
+    "# SIGNAL de revue (information) pour les chemins qui DÉFINISSENT le contrôle (workflow, propriétaires, pile approuvée).\n"
+    "# Ce fichier N'EST PAS une barrière : avec 0 approbation requise, une PR de l'auteur-propriétaire qui modifie ces chemins fusionne (observé, C47).\n"
+    "# La protection est le garde de fusion du produit (arbre Git réel de .github/ et ci/) et la provenance du check, pas ce fichier.\n"
+    f"/.github/ {CODE_OWNER}\n"
+    f"/ci/ {CODE_OWNER}\n"
+)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def approved_lock_text(root: Optional[Path] = None) -> str:
+    """Verrou haché de la pile métier approuvée : copie OCTET POUR OCTET de ``locks/fixture-stack.txt`` (généré par scripts/locks.py)."""
+    path = (root or _repo_root()) / "locks" / "fixture-stack.txt"
+    if not path.is_file():
+        raise FixtureError(f"verrou de la pile approuvée introuvable : {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def approved_requirements_text(root: Optional[Path] = None) -> str:
+    """``requirements.txt`` du socle : les versions EXACTES du groupe ``fixture-stack`` de pyproject.toml, dans son ordre."""
+    import tomllib
+
+    with ((root or _repo_root()) / "pyproject.toml").open("rb") as handle:
+        group = tomllib.load(handle).get("dependency-groups", {}).get("fixture-stack", [])
+    if not group or not all(
+        isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_.\-]+==[0-9][^\s;]*", item) for item in group
+    ):
+        raise FixtureError("le groupe fixture-stack de pyproject.toml doit épingler chaque paquet en ==")
+    return "\n".join(group) + "\n"
+
+
+def scaffold_files() -> Dict[str, str]:
+    """Fichiers du socle qui s'ajoutent à la graine, plus le ``requirements.txt`` MODIFIÉ (seule modification autorisée de la graine)."""
+    return {
+        WORKFLOW_PATH: TRUSTED_WORKFLOW,
+        CODEOWNERS_PATH: CODEOWNERS_TEXT,
+        APPROVED_LOCK_PATH: approved_lock_text(),
+        REQUIREMENTS_PATH: approved_requirements_text(),
+        "docs/runbook-ops.md": RUNBOOK_OPS_DOC,
+        "docs/deploiement.md": DEPLOY_DOC,
+    }
+
+
+def load_seed(path: Optional[Path] = None) -> Dict[str, str]:
+    """Les huit fichiers de la graine, octet pour octet, lus dans la source de la fixture de test (chargée par chemin)."""
+    root = Path(__file__).resolve().parents[1]
+    source = path or root / "tests" / "w4_business_fixture.py"
+    if not source.is_file():
+        raise FixtureError(f"source de la graine introuvable : {source}")
+    spec = importlib.util.spec_from_file_location("w5_seed_source", source)
+    if spec is None or spec.loader is None:
+        raise FixtureError(f"source de la graine illisible : {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    seed = dict(getattr(module, "SEED", {}))
+    if set(seed) != set(SEED_PATHS):
+        raise FixtureError(f"liste des fichiers de la graine inattendue : {sorted(seed)}")
+    return seed
+
+
+# ── objets Git, calculés hors ligne (identiques à ``git``) ────────────────────────────────────────────────────────────────
+
+
+def git_blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def git_tree_sha(files: Mapping[str, bytes]) -> str:
+    """SHA de l'arbre Git racine d'un ensemble de fichiers réguliers (mode 100644), sous-arbres compris."""
+
+    def build(prefix: str) -> str:
+        entries: List[Tuple[bytes, bytes]] = []
+        names = {}
+        for path in files:
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix) :]
+            head, sep, _ = rest.partition("/")
+            names[head] = bool(sep)
+        for name, is_dir in names.items():
+            if is_dir:
+                sub = build(f"{prefix}{name}/")
+                entries.append((name.encode() + b"/", b"40000 " + name.encode() + b"\0" + bytes.fromhex(sub)))
+            else:
+                blob = git_blob_sha(files[f"{prefix}{name}"])
+                entries.append((name.encode(), b"100644 " + name.encode() + b"\0" + bytes.fromhex(blob)))
+        body = b"".join(item for _key, item in sorted(entries, key=lambda pair: pair[0]))
+        return hashlib.sha1(b"tree %d\0" % len(body) + body).hexdigest()
+
+    return build("")
+
+
+def git_commit_sha(
+    tree: str, parent: Optional[str], *, epoch: int = COMMIT_EPOCH, message: str = COMMIT_MESSAGE
+) -> str:
+    ident = f"{AUTHOR['name']} <{AUTHOR['email']}> {epoch} +0000"
+    lines = [f"tree {tree}"]
+    if parent:
+        lines.append(f"parent {parent}")
+    lines += [f"author {ident}", f"committer {ident}", "", message]
+    body = "\n".join(lines).encode("utf-8")
+    return hashlib.sha1(b"commit %d\0" % len(body) + body).hexdigest()
+
+
+# ── plan ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def build_plan(seed: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    seed = dict(seed) if seed is not None else load_seed()
+    seed_bytes = {path: text.encode("utf-8") for path, text in seed.items()}
+    seed_tree = git_tree_sha(seed_bytes)
+    if seed_tree != SEED_TREE_SHA:
+        raise FixtureError(f"l'arbre calculé de la graine ({seed_tree}) n'est pas celui du dépôt ({SEED_TREE_SHA})")
+    scaffold = dict(scaffold_files())
+    changed = sorted(path for path in scaffold if path in seed)
+    if changed != [REQUIREMENTS_PATH]:
+        # la SEULE modification de la graine autorisée est requirements.txt (décision du manager) ; tout autre fichier est refusé
+        raise FixtureError(f"le socle ne peut modifier de la graine que {REQUIREMENTS_PATH} : {changed}")
+    if scaffold[REQUIREMENTS_PATH] == seed[REQUIREMENTS_PATH]:
+        raise FixtureError("requirements.txt du socle doit différer de celui de la graine")
+    files = {**seed, **scaffold}
+    file_bytes = {path: text.encode("utf-8") for path, text in files.items()}
+    tree = git_tree_sha(file_bytes)
+    bootstrap_sha = git_commit_sha(tree, SEED_SHA)
+    # approved_files = ajouts ET requirements.txt modifié (octets hachés) ; le manifeste distingue les deux listes
+    approved = {path: hashlib.sha256(file_bytes[path]).hexdigest() for path in sorted(scaffold)}
+    created = sorted(path for path in scaffold if path not in seed)
+    ruleset = ruleset_payload()
+    return {
+        "schema": SCHEMA,
+        "repository": REPOSITORY,
+        "repository_id": REPOSITORY_ID,
+        "seed_sha": SEED_SHA,
+        "seed_tree_sha": SEED_TREE_SHA,
+        "bootstrap_branch": BOOTSTRAP_BRANCH,
+        "bootstrap_tree_sha": tree,
+        "bootstrap_sha": bootstrap_sha,
+        "order_token": ORDER_PREFIX + bootstrap_sha[:12],
+        "author": {**AUTHOR, "date": COMMIT_DATE},
+        "message": COMMIT_MESSAGE,
+        "files": files,
+        "approved_files": approved,
+        "created_files": created,
+        "added_files": created,
+        "modified_seed_files": changed,
+        "modified_seed_hashes": {
+            path: {
+                "seed_sha256": hashlib.sha256(seed[path].encode("utf-8")).hexdigest(),
+                "approved_sha256": approved[path],
+            }
+            for path in changed
+        },
+        "protected_prefixes": list(PROTECTED_PREFIXES),
+        "ruleset": ruleset,
+        "ruleset_sha256": hashlib.sha256(json.dumps(ruleset, sort_keys=True).encode()).hexdigest(),
+        "required_check": REQUIRED_CHECK,
+        "check_app_id": ACTIONS_APP_ID,
+        "branch_pattern": BRANCH_PATTERN,
+    }
+
+
+def ruleset_payload() -> Dict[str, Any]:
+    """Ruleset ACTIF des bases éphémères : PR obligatoire, signal de revue du propriétaire, check « Fixture tests » de l'application Actions, base à jour,
+    aucun bypass. Contenu IDENTIQUE à celui déjà appliqué (ruleset 24793056) : la V2 n'exige aucune modification du ruleset.
+
+    * ``require_code_owner_review`` est conservé comme SIGNAL de revue (information) : observé INEFFICACE en C47 (0 approbation requise : une PR de
+      l'auteur-propriétaire qui modifie ``.github/`` ou ``ci/``, check vert, fusionne). Il n'est PAS compté comme barrière : la protection des
+      contrôles est le garde de fusion du produit (arbre Git réel de ``.github/`` et ``ci/``) et la provenance du check (check-run → job → exécution).
+    * ``do_not_enforce_on_create`` est FAUX : créer une branche sous ce motif exige un commit qui a déjà passé le check requis. Le socle
+      le passe de lui-même (workflow ``push`` sur sa branche, ``apply`` attend ce check avant de créer le ruleset) : les bases de campagne
+      se créent depuis ce commit, sans bypass ni faux check ; un commit sans check (la graine) ne peut pas devenir une base.
+    * Pas de règle ``deletion`` : le nettoyage de campagne supprime ses propres bases ; les fusions passent par la PR.
+      ``main`` et son ruleset (graine) ne sont pas concernés par ce motif."""
+    return {
+        "name": RULESET_NAME,
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "conditions": {"ref_name": {"include": [BRANCH_PATTERN], "exclude": []}},
+        "rules": [
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "dismiss_stale_reviews_on_push": False,
+                    "require_code_owner_review": True,
+                    "require_last_push_approval": False,
+                    "required_review_thread_resolution": False,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"],
+                },
+            },
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": True,
+                    "do_not_enforce_on_create": False,
+                    "required_status_checks": [{"context": REQUIRED_CHECK, "integration_id": ACTIONS_APP_ID}],
+                },
+            },
+        ],
+    }
+
+
+def manifest_skeleton(plan: Mapping[str, Any]) -> Dict[str, Any]:
+    """Manifeste ``collegue-fixture-bootstrap/1`` : ``ruleset_id`` n'existe qu'après ``apply`` ; B le valide PAR API, jamais tel quel."""
+    return {
+        "schema": SCHEMA,
+        "repository": REPOSITORY,
+        "repository_id": REPOSITORY_ID,
+        "seed_sha": SEED_SHA,
+        "bootstrap_sha": plan["bootstrap_sha"],
+        "bootstrap_branch": plan["bootstrap_branch"],
+        "plan_version": PLAN_VERSION,
+        "approved_files": plan["approved_files"],
+        "required_check": REQUIRED_CHECK,
+        "check_app_id": ACTIONS_APP_ID,
+        "ruleset_id": None,
+        "branch_pattern": BRANCH_PATTERN,
+        # Le socle ajoute ``added_files`` et ne modifie de la graine que ``modified_seed_files`` ; ``approved_files`` les couvre tous (sha256).
+        "added_files": plan["added_files"],
+        "modified_seed_files": plan["modified_seed_files"],
+        "modified_seed_hashes": plan["modified_seed_hashes"],
+        "protected_prefixes": list(PROTECTED_PREFIXES),
+        "code_owner": CODE_OWNER,
+        "check_workflow": {
+            "workflow": WORKFLOW_PATH,
+            "triggers": ["pull_request", "push"],
+            "job": REQUIRED_CHECK,
+            "candidate_execution": "docker --network none, utilisateur non root, aucun secret",
+            "dependency_source": APPROVED_LOCK_PATH,
+        },
+    }
+
+
+def api_call_log(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Journal ORDONNÉ des écritures distantes de ``apply`` (les lectures de contrôle sont décrites dans le plan Markdown)."""
+    tree_entries = [
+        {"path": path, "mode": "100644", "type": "blob", "content": plan["files"][path]}
+        for path in plan["created_files"]
+    ] + [
+        {"path": path, "mode": "100644", "type": "blob", "content": plan["files"][path]}
+        for path in plan["modified_seed_files"]
+    ]
+    return [
+        {
+            "n": 1,
+            "name": "tree",
+            "method": "POST",
+            "path": f"/repos/{REPOSITORY}/git/trees",
+            "payload": {"base_tree": SEED_TREE_SHA, "tree": sorted(tree_entries, key=lambda e: e["path"])},
+            "expect": {"sha": plan["bootstrap_tree_sha"]},
+        },
+        {
+            "n": 2,
+            "name": "commit",
+            "method": "POST",
+            "path": f"/repos/{REPOSITORY}/git/commits",
+            "payload": {
+                "message": plan["message"],
+                "tree": plan["bootstrap_tree_sha"],
+                "parents": [SEED_SHA],
+                "author": {**AUTHOR, "date": COMMIT_DATE},
+                "committer": {**AUTHOR, "date": COMMIT_DATE},
+            },
+            "expect": {"sha": plan["bootstrap_sha"]},
+        },
+        {
+            "n": 3,
+            "name": "staging_ref",
+            "method": "POST",
+            "path": f"/repos/{REPOSITORY}/git/refs",
+            "payload": {"ref": f"refs/heads/{STAGING_BRANCH}", "sha": plan["bootstrap_sha"]},
+            "expect": {"object.sha": plan["bootstrap_sha"]},
+        },
+        {
+            "n": 4,
+            "name": "branch_ref",
+            "method": "POST",
+            "path": f"/repos/{REPOSITORY}/git/refs",
+            "payload": {"ref": f"refs/heads/{BOOTSTRAP_BRANCH}", "sha": plan["bootstrap_sha"]},
+            "expect": {"object.sha": plan["bootstrap_sha"]},
+        },
+        {
+            "n": 5,
+            "name": "ruleset",
+            "method": "POST",
+            "path": f"/repos/{REPOSITORY}/rulesets",
+            "payload": plan["ruleset"],
+            "expect": {"enforcement": "active", "bypass_actors": []},
+            "only_if": "le ruleset des bases éphémères est ABSENT (sinon il est ADOPTÉ s'il est identique au payload ; différent = refus)",
+        },
+        {
+            "n": 6,
+            "name": "staging_delete",
+            "method": "DELETE",
+            "path": f"/repos/{REPOSITORY}/git/refs/heads/{STAGING_BRANCH}",
+            "payload": {},
+            "expect": {"gone": True},
+        },
+    ]
+
+
+def render_calls_markdown(plan: Mapping[str, Any]) -> str:
+    out = [
+        "# Appels REST de `apply` (exacts, dans l'ordre)",
+        "",
+        f"Jeton d'ordre requis : `{plan['order_token']}`. Aucune écriture sans lui. `main` (graine) et le ruleset {SEED_RULESET_ID} ne sont "
+        f"JAMAIS modifiés ; les PR étrangères {', '.join('#' + str(n) for n in FOREIGN_PULLS)} non plus.",
+        "",
+        "## Contrôles de lecture AVANT toute écriture (refus sinon)",
+        "",
+        f"1. `GET /repos/{REPOSITORY}` : id {REPOSITORY_ID}, public, non archivé, branche par défaut `main`.",
+        f"2. `GET /repos/{REPOSITORY}/git/ref/heads/main` : SHA `{SEED_SHA}` ; `GET /git/commits/{SEED_SHA}` : arbre `{SEED_TREE_SHA}`.",
+        f"3. `GET /repos/{REPOSITORY}/rulesets` : aucun ruleset de nom `{RULESET_NAME}` ni ciblant `{BRANCH_PATTERN}` (collision = refus) ; "
+        f"ruleset {SEED_RULESET_ID} inchangé.",
+        f"4. `GET /repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}` : absent, ou déjà au SHA `{plan['bootstrap_sha']}` (idempotence) ; autre SHA = refus ; "
+        f"idem pour la branche de préparation `{STAGING_BRANCH}`. La branche de la V1 (`{V1_BOOTSTRAP_BRANCH}` @ `{V1_BOOTSTRAP_SHA[:12]}…`) n'est ni lue pour être modifiée ni touchée.",
+        "5. `GET /apps/github-actions` : `id == 15368`.",
+        "6. Entre les écritures 3 et 4 : `GET /commits/<bootstrap_sha>/check-runs` doit montrer `Fixture tests` (application 15368) terminé en succès — "
+        "produit par le workflow `push` de la branche de PRÉPARATION (hors du motif du ruleset : aucune protection n'est contournée, la règle de création "
+        "du ruleset exige ce check à l'écriture 4). Absent, en attente au-delà du délai ou rouge : arrêt, AUCUNE branche du socle créée.",
+        "",
+        "## Écritures",
+        "",
+    ]
+    for call in api_call_log(plan):
+        out += [
+            f"### {call['n']}. `{call['method']} {call['path']}`"
+            + (f" — seulement si {call['only_if']}" if call.get("only_if") else ""),
+            "",
+            "```json",
+            json.dumps(call["payload"], ensure_ascii=False, indent=2, sort_keys=True),
+            "```",
+            f"Attendu : `{json.dumps(call['expect'])}`.",
+            "",
+        ]
+    out += [
+        "## Contrôles de lecture APRÈS (échec = arrêt et rapport, aucune réparation automatique)",
+        "",
+        "`verify` : arbre et contenu du socle (SHA-256 par fichier), workflow présent et identique, ruleset identique au payload, `main` intact, "
+        "PR étrangères inchangées.",
+        "",
+    ]
+    return "\n".join(out) + "\n"
+
+
+def render_probe_markdown(plan: Mapping[str, Any]) -> str:
+    """Contre-épreuves de ``probe`` (écritures distantes sur PR JETABLES) : scénarios, verdicts attendus, ressources créées et supprimées."""
+    out = [
+        "# Contre-épreuves du check « Fixture tests » et des protections (`probe`, sur ordre seulement)",
+        "",
+        f"Jeton d'ordre requis : `{plan['order_token']}`. Précondition : `verify` réussi (socle, check du socle, ruleset et graine conformes au plan).",
+        "Chaque scénario crée une base `collegue-business/probe-<id>-<n>` (depuis le commit du socle) et une tête `collegue-probe/<id>-<n>`, ouvre une PR "
+        "(événement `pull_request`), observe le check sur la TÊTE EXACTE (nom, application 15368, `head_sha`), tente une FUSION RÉELLE sur cette tête, "
+        "puis ferme la PR et supprime ses branches (même sur échec).",
+        "",
+        "| # | Scénario | Modification de la tête | Check attendu | Fusion attendue |",
+        "|---|---|---|---|---|",
+    ]
+    for index, scenario in enumerate(probe_scenarios(plan)):
+        touched = [f"`{path}`" for path in scenario["files"]] + [
+            f"lien `{path}` → `{t}`" for path, t in scenario.get("symlink", {}).items()
+        ]
+        base = " (base issue de la GRAINE)" if scenario.get("base") == "seed" else ""
+        out.append(
+            f"| {index} | `{scenario['id']}`{base} | {', '.join(touched) or '—'} | `{scenario['check']}` | {scenario['merge']} |"
+        )
+    out += [
+        "| S | `stale-base` (variantes `first`, `behind`, `conflict`) | fichiers `docs/probe-stale-*.md` | `success` puis périmée / aucun | `first` acceptée, `behind` refusée, `conflict` refusée |",
+        "",
+        "* **Têtes qui ALTÈRENT `.github/` ou `ci/` : NON rejouées.** Le défaut est établi (C47 : PR #10, #11, #12 fusionnées malgré CODEOWNERS et 0 approbation) ; en publier "
+        "de nouvelles n'apprendrait rien. Leur refus est de la responsabilité du chemin PRODUIT (garde de publication et de fusion de B, `.github/` ET `ci/`), "
+        "démontré à l'intégration par la VRAIE entrée publique avec un faux GitHub qui vérifie ZÉRO écriture (`tests/test_w5_integration_controls_guard.py`).",
+        "* **Garde de préparation** (tous les scénarios) : `protected_tree_violations` est évalué sur l'arbre Git RÉEL de la tête et ne doit refuser que les têtes avec lien "
+        "symbolique ou issues de la graine (jamais `green`, `red-test`, `unapproved-dependency`). Il ne démontre PAS que le garde de PRODUCTION a été traversé.",
+        "* `green` : le workflow SE DÉCLENCHE sur une PR (`pull_request`) vers une base éphémère, le check est un job réel de l'application 15368 sur la "
+        "tête exacte (`check_provenance` : check-run → job → exécution, dépôt, chemin, tête, événement ; arbre protégé intact), la fusion est ACCEPTÉE. Absence de check "
+        "dans le délai = échec (jamais un succès présumé).",
+        "* `red-test` : un vrai échec `pytest` donne un check ROUGE et une fusion refusée. Tentative de faux check `Fixture tests` vert avec le jeton de "
+        "campagne : refus de l'API (nominal) ou check d'une autre application, qui ne compte jamais.",
+        "* `unapproved-dependency` : `requirements.txt` demande `requests` : check ROUGE explicite (aucun téléchargement), fusion refusée.",
+        "* `symlink` : un lien symbolique (mode 120000) poussé par l'API Git Data : garde du workflow rouge, fusion refusée.",
+        "* `seed-base` : la règle de création refuse une base pointant la GRAINE (commit sans check).",
+        "* `stale-base` : preuve SERVEUR de la règle « base à jour » (une PR déjà verte devient périmée quand la base avance : fusion refusée) et du check manquant "
+        "(une PR en conflit ne déclenche aucun workflow : check absent, fusion refusée).",
+        "",
+        "Permissions nécessaires du jeton de campagne : contenu en écriture (branches, fichiers, objets Git), pull requests en écriture, droit de déclencher des "
+        "workflows ; les Actions de la fixture doivent être activées (observé en C47). Aucune PR étrangère (#4, #7) n'est touchée.",
+        "",
+    ]
+    return "\n".join(out) + "\n"
+
+
+def render_update_markdown(plan: Mapping[str, Any]) -> str:
+    """Commandes EXACTES de mise à jour V1 → V2 du socle : voie normale sans protection désactivée, blocage de la voie par PR, retour arrière."""
+    token, sha = plan["order_token"], plan["bootstrap_sha"]
+    cli = "python scripts/w5_fixture_bootstrap.py"
+    return f"""# Mise à jour du socle W5 : V1 → V2 (à n'exécuter QUE sur ordre du manager, après examen de ce plan)
+
+**Pourquoi.** La V1 (`{V1_BOOTSTRAP_SHA}`, branche `{V1_BOOTSTRAP_BRANCH}`) contient des commentaires faux : le workflow et le CODEOWNERS affirment que le CODEOWNERS
+protège `.github/` et `ci/`. La sonde de C47 a montré le contraire (PR #10, #11, #12 fusionnées, check vert, 0 approbation). La V2 (`{sha}`, parent unique = graine,
+branche `{BOOTSTRAP_BRANCH}`) corrige ces affirmations ; son ruleset est IDENTIQUE à celui déjà appliqué (24793056) : **aucune modification de protection**.
+Un changement de contenu change le SHA : rien n'est appliqué silencieusement ; jeton d'ordre `{token}`.
+
+**État qui reste en place pendant et après la mise à jour** : `main` = graine, ruleset 18840666, ruleset 24793056 (actif, sans bypass), la branche et le commit V1 (inchangés,
+jamais touchés par ce script), PR #4 et #7, PR #8 à #14 (historique de la sonde).
+
+## Voie retenue (sans désactiver ni contourner aucune protection)
+
+La règle de création du ruleset (`do_not_enforce_on_create: false`) n'autorise une branche `collegue-business/*` que sur un commit qui a DÉJÀ un check réussi. Le commit V2 est donc
+d'abord publié sur une branche de PRÉPARATION hors du motif (`{STAGING_BRANCH}`), où le workflow `push` du commit V2 produit le check ; la branche du socle V2 est ensuite créée
+sur ce commit, sous la règle de création intacte. Commandes (jeton GitHub dans l'environnement du processus, jamais en argv) :
+
+```
+{cli} inspect
+{cli} apply --order-token {token} --manifest-out <evidence>/w5-c48-v2-manifest.json --events <evidence>/w5-c48-v2-events.jsonl
+{cli} verify
+{cli} probe --order-token {token} --probe-id <identifiant neuf> --events <evidence>/w5-c48-v2-events.jsonl
+```
+
+`apply` : lectures de contrôle (identité du dépôt, graine, ruleset 18840666, ruleset des bases identique au payload, branches `{BOOTSTRAP_BRANCH}` / `{STAGING_BRANCH}` absentes ou déjà
+au SHA du plan) → arbre → commit → branche de préparation → ATTENTE du check réussi de l'application 15368 sur le commit → branche du socle V2 → (ruleset adopté tel quel) → suppression de
+la branche de préparation. Un check absent, rouge ou jamais terminé arrête tout (aucune branche du socle créée). `probe` rejoue les contre-épreuves SERVEUR (voir `probe-plan.md`) sur des PR jetables ;
+les têtes qui altèrent les contrôles ne sont pas rejouées. Le manifeste V2 remplace le manifeste V1 pour B (`bootstrap_sha`, `bootstrap_branch`, `plan_version`).
+
+## Voie par PR vers la branche V1 : BLOQUÉE (à trancher par le manager)
+
+Mettre à jour `{V1_BOOTSTRAP_BRANCH}` par une PR (squelette : tête hors motif → PR → check réussi sur la tête → fusion) est possible avec les protections actuelles, MAIS la fusion ajoute un commit
+(fusion ou « squash ») AU-DESSUS du commit V1 : le tip n'a plus pour parent unique la graine. Le validateur de B (`validate_bootstrap_manifest`) exige un descendant DIRECT de la graine
+(`parents == [graine]`, `ahead_by == 1`, arbre = graine + fichiers approuvés) : la voie par PR violerait ce contrat. Elle n'est utilisable que si le manager l'assouplit explicitement (par exemple « arbre approuvé identique,
+ascendance libre ») ; sinon la voie retenue ci-dessus est la seule à respecter à la fois les protections et le contrat.
+
+## Retour arrière et limites
+
+* `{cli} cleanup --order-token {token} --events <evidence>/w5-c48-v2-events.jsonl` supprime UNIQUEMENT `{BOOTSTRAP_BRANCH}` et `{STAGING_BRANCH}` (identités exactes vérifiées). Le ruleset est PARTAGÉ avec la V1 :
+  il n'est supprimé qu'avec `--with-ruleset` (jamais par défaut). La V1 n'est jamais touchée.
+* Les bases de campagne se créent depuis `bootstrap_sha` du manifeste : V1 jusqu'à l'application de la V2, V2 ensuite.
+* Ce que le plan ne prouve pas : le déclenchement du workflow `push` sur la branche de préparation et la création de la branche V2 sous la règle de création sont des comportements de GitHub observés
+  seulement à l'exécution (la V1 a prouvé le même mécanisme sur sa propre branche).
+"""
+
+
+def render_diff(plan: Mapping[str, Any], seed: Mapping[str, str]) -> str:
+    chunks: List[str] = []
+    for path in sorted(plan["files"]):
+        new = plan["files"][path]
+        old = seed.get(path)
+        if old == new:
+            continue
+        chunks.extend(
+            difflib.unified_diff(
+                (old or "").splitlines(keepends=True),
+                new.splitlines(keepends=True),
+                fromfile=f"a/{path}" if old is not None else "/dev/null",
+                tofile=f"b/{path}",
+            )
+        )
+        if chunks and not chunks[-1].endswith("\n"):
+            chunks.append("\n")
+    return "".join(chunks)
+
+
+def write_plan(
+    directory: Path, seed: Optional[Mapping[str, str]] = None, previous: Optional[Path] = None
+) -> Dict[str, Any]:
+    seed = dict(seed) if seed is not None else load_seed()
+    plan = build_plan(seed)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "plan.json").write_text(
+        json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (directory / "manifest-skeleton.json").write_text(
+        json.dumps(manifest_skeleton(plan), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (directory / "ruleset-payload.json").write_text(
+        json.dumps(plan["ruleset"], ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (directory / "tree.json").write_text(
+        json.dumps(
+            {"tree_sha": plan["bootstrap_tree_sha"], "approved_files": plan["approved_files"]}, indent=2, sort_keys=True
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (directory / "api-calls.md").write_text(render_calls_markdown(plan), encoding="utf-8")
+    (directory / "probe-plan.md").write_text(render_probe_markdown(plan), encoding="utf-8")
+    (directory / "update-v2.md").write_text(render_update_markdown(plan), encoding="utf-8")
+    (directory / "bootstrap.diff").write_text(render_diff(plan, seed), encoding="utf-8")
+    (directory / "workflow-fixture-tests.yml").write_text(TRUSTED_WORKFLOW, encoding="utf-8")
+    names = list(PLAN_FILES)
+    if previous is not None:
+        # différence entre le socle DÉJÀ appliqué (plan précédent examiné) et le socle de ce plan : ce que la mise à jour change, octet pour octet
+        before = json.loads(previous.read_text(encoding="utf-8"))["files"]
+        chunks: List[str] = []
+        for path in sorted(set(before) | set(plan["files"])):
+            if before.get(path) == plan["files"].get(path):
+                continue
+            chunks.extend(
+                difflib.unified_diff(
+                    before.get(path, "").splitlines(keepends=True),
+                    plan["files"].get(path, "").splitlines(keepends=True),
+                    fromfile=f"v1/{path}",
+                    tofile=f"v2/{path}",
+                )
+            )
+        (directory / "v1-to-v2.diff").write_text("".join(chunks), encoding="utf-8")
+        names.append("v1-to-v2.diff")
+    sums = []
+    for name in names:
+        if name == "SHA256SUMS":
+            continue
+        sums.append(f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}  {name}")
+    (directory / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
+    return plan
+
+
+# ── intégrité, évaluation des checks (fonctions pures, utilisables par B) ─────────────────────────────────────────────────
+
+
+def integrity_violations(
+    tree_sha256: Mapping[str, str],
+    approved_files: Mapping[str, str],
+    protected_prefixes: Sequence[str] = PROTECTED_PREFIXES,
+) -> List[str]:
+    """Écarts d'un arbre (chemin → sha256) avec les fichiers approuvés, sur les seuls chemins PROTÉGÉS : modifié, supprimé ou ajouté."""
+    problems = []
+    for path, digest in approved_files.items():
+        if path.startswith(tuple(protected_prefixes)):
+            if path not in tree_sha256:
+                problems.append(f"fichier protégé supprimé : {path}")
+            elif tree_sha256[path] != digest:
+                problems.append(f"fichier protégé modifié : {path}")
+    for path in tree_sha256:
+        if path.startswith(tuple(protected_prefixes)) and path not in approved_files:
+            problems.append(f"fichier protégé ajouté : {path}")
+    return problems
+
+
+def evaluate_check(
+    check_runs: Sequence[Mapping[str, Any]],
+    *,
+    head_sha: str,
+    name: str = REQUIRED_CHECK,
+    app_id: int = ACTIONS_APP_ID,
+) -> Tuple[str, str]:
+    """Verdict d'un check requis : ``("success"|"failure"|"missing"|"pending", motif)``.
+
+    Seul compte un check de ce NOM, de CETTE application (id) et de CETTE tête exacte : un succès d'une autre tête, d'une autre
+    application ou sous un autre nom ne vaut jamais le check requis ; plusieurs checks homonymes de la bonne application doivent
+    TOUS réussir."""
+    matching = [
+        run
+        for run in check_runs
+        if run.get("name") == name and (run.get("app") or {}).get("id") == app_id and run.get("head_sha") == head_sha
+    ]
+    if not matching:
+        others = [
+            f"{run.get('name')!r}@{str(run.get('head_sha'))[:7]} app={(run.get('app') or {}).get('id')}"
+            for run in check_runs
+        ]
+        return "missing", f"aucun check {name!r} de l'application {app_id} sur {head_sha[:12]} (vus : {others})"
+    if any(run.get("status") != "completed" for run in matching):
+        return "pending", "check non terminé"
+    conclusions = {run.get("conclusion") for run in matching}
+    if conclusions == {"success"}:
+        return "success", "tous les checks requis réussis"
+    return "failure", f"conclusions : {sorted(str(c) for c in conclusions)}"
+
+
+def protected_tree_violations(tree_entries: Sequence[Mapping[str, Any]], plan: Mapping[str, Any]) -> List[str]:
+    """Écarts d'un arbre Git RÉEL (entrées de ``GET /git/trees/<sha>?recursive=1``) avec le socle sur les chemins PROTÉGÉS.
+
+    Compare les SHA de blob (identiques à ``git``) : chemin protégé modifié, supprimé, ajouté, ou objet irrégulier (lien, sous-module) ;
+    partout ailleurs, tout lien symbolique est refusé. Le fusionneur de confiance l'applique à la tête de la PR avant de fusionner."""
+    expected = {
+        path: git_blob_sha(text.encode("utf-8"))
+        for path, text in plan["files"].items()
+        if path.startswith(tuple(PROTECTED_PREFIXES))
+    }
+    problems: List[str] = []
+    seen: Dict[str, str] = {}
+    for entry in tree_entries:
+        if entry.get("type") == "tree":
+            continue
+        path = str(entry.get("path"))
+        if entry.get("type") != "blob" or entry.get("mode") not in ("100644", "100755"):
+            problems.append(f"objet irrégulier : {path} ({entry.get('type')}/{entry.get('mode')})")
+        if path.startswith(tuple(PROTECTED_PREFIXES)):
+            seen[path] = str(entry.get("sha"))
+    for path, sha in expected.items():
+        if path not in seen:
+            problems.append(f"fichier protégé supprimé : {path}")
+        elif seen[path] != sha:
+            problems.append(f"fichier protégé modifié : {path}")
+    problems.extend(f"fichier protégé ajouté : {path}" for path in sorted(set(seen) - set(expected)))
+    return problems
+
+
+def check_provenance(api: Api, head_sha: str, plan: Mapping[str, Any]) -> Tuple[bool, str]:
+    """Le check ``Fixture tests`` d'une tête vient-il VRAIMENT du workflow approuvé ? (``(ok, motif)``, lectures seules)
+
+    Un check de même nom et de la même application ne prouve pas le contenu du workflow : le check-run doit être un job réel d'une exécution
+    du fichier approuvé (``GET /actions/jobs/<id>`` puis ``/actions/runs/<id>``, tête et chemin concordants) et l'arbre de la tête doit
+    garder les chemins protégés identiques au socle. Un faux check publié par l'API des checks n'est pas un job : refusé."""
+    runs = api("GET", f"/repos/{REPOSITORY}/commits/{head_sha}/check-runs", None).get("check_runs", [])
+    state, reason = evaluate_check(runs, head_sha=head_sha)
+    if state != "success":
+        return False, f"check non réussi ({state}) : {reason}"
+    candidates = [
+        r for r in runs if r.get("name") == REQUIRED_CHECK and (r.get("app") or {}).get("id") == ACTIONS_APP_ID
+    ]
+    for run in candidates:
+        # check-run (application Actions) → JOB réel → EXÉCUTION du workflow : chaque maillon doit concorder (tête, dépôt, chemin, événement)
+        job = _get(api, f"/repos/{REPOSITORY}/actions/jobs/{run.get('id')}", missing_ok=True)
+        if not job or job.get("head_sha") != head_sha:
+            return False, "le check n'est pas un job d'une exécution de workflow (publié par l'API des checks ?)"
+        if job.get("name") != REQUIRED_CHECK or job.get("conclusion") != "success":
+            return False, f"job inattendu : nom {job.get('name')!r}, conclusion {job.get('conclusion')!r}"
+        execution = _get(api, f"/repos/{REPOSITORY}/actions/runs/{job.get('run_id')}", missing_ok=True)
+        if not execution or execution.get("id") != job.get("run_id"):
+            return False, "l'exécution du job est introuvable ou ne correspond pas à son identifiant"
+        if execution.get("path") != WORKFLOW_PATH or execution.get("head_sha") != head_sha:
+            return False, "l'exécution du job n'est pas celle du workflow approuvé sur cette tête"
+        for field in ("repository", "head_repository"):
+            if str((execution.get(field) or {}).get("full_name", "")).lower() != REPOSITORY.lower():
+                return False, f"exécution issue d'un autre dépôt ({field})"
+        if execution.get("event") not in ("pull_request", "push"):
+            return False, f"déclencheur inattendu : {execution.get('event')}"
+        if execution.get("conclusion") != "success":
+            return False, f"exécution non réussie : {execution.get('conclusion')}"
+    tree = _get(api, f"/repos/{REPOSITORY}/git/trees/{head_sha}?recursive=1")
+    if tree.get("truncated"):
+        return False, "arbre tronqué : contenu protégé non établi"
+    problems = protected_tree_violations(tree.get("tree", []), plan)
+    if problems:
+        return False, "arbre de la tête : " + " ; ".join(problems)
+    return True, "check issu du workflow approuvé, chemins protégés intacts"
+
+
+# ── accès REST ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(f"HTTP {status} : {message}")
+        self.status = status
+
+
+class NetworkError(Exception):
+    """Résultat INCONNU : le transport a échoué (DNS, connexion, délai) sans réponse de l'API. Volontairement distinct d'``ApiError`` : ce n'est PAS un refus
+    (une création de base « refusée » par la règle de dépôt ne doit jamais se confondre avec une coupure réseau). Une écriture n'est jamais rejouée à
+    l'aveugle : l'identité est relue (réconciliation) ; seules les lectures sont retentées."""
+
+
+def _api_message(exc: "urllib.error.HTTPError") -> str:
+    """Motif renvoyé par l'API (``message`` + ``errors``), borné : utile au diagnostic (règle de dépôt refusée…), sans jamais contenir le jeton."""
+    try:
+        body = json.loads(exc.read().decode("utf-8", "replace"))
+        text = str(body.get("message", ""))
+        if body.get("errors"):
+            text += " " + json.dumps(body["errors"], ensure_ascii=False)[:300]
+        return text[:500] or str(exc.reason)
+    except Exception:  # noqa: BLE001 - un corps illisible ne masque pas le statut
+        return exc.reason if isinstance(exc.reason, str) else "erreur"
+
+
+class GitHubApi:
+    """Client REST minimal (stdlib) ; le jeton vient de l'environnement et n'apparaît jamais dans un message."""
+
+    def __init__(self, token: str, base: str = "https://api.github.com"):
+        if not token:
+            raise FixtureError("GITHUB_TOKEN (ou GH_TOKEN) absent de l'environnement")
+        self._token, self._base = token, base.rstrip("/")
+
+    def request(self, method: str, path: str, payload: Optional[Mapping[str, Any]] = None) -> Any:
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self._base + path,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "collegue-w5-fixture",
+                **({"Content-Type": "application/json"} if data is not None else {}),
+            },
+        )
+        attempts = 4 if method == "GET" else 1  # lecture idempotente : retentée ; écriture : jamais rejouée à l'aveugle
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as response:  # noqa: S310 - hôte fixe https://api.github.com
+                    body = response.read()
+                return json.loads(body) if body else None
+            except urllib.error.HTTPError as exc:
+                raise ApiError(exc.code, _api_message(exc)) from None
+            except (
+                urllib.error.URLError,
+                OSError,
+            ) as exc:  # DNS, connexion, délai : le message ne contient jamais le jeton
+                if attempt == attempts:
+                    reason = getattr(exc, "reason", exc)
+                    raise NetworkError(f"{method} {path} : {type(exc).__name__} ({reason})") from None
+                time.sleep(3 * 2 ** (attempt - 1))
+        raise AssertionError("inaccessible")  # pragma: no cover
+
+
+Api = Callable[[str, str, Optional[Mapping[str, Any]]], Any]
+
+
+class EventLog:
+    """Journal APPEND-ONLY (JSON par ligne, ``fsync``) des identités distantes créées : écrit AVANT la requête (intention) puis APRÈS (réponse :
+    SHA, numéro, URL, identifiants) ou en erreur (statut + motif). Jamais de contenu de fichier, de jeton ni de charge utile : seulement
+    méthode, chemin, clés de la charge et identités renvoyées. Un résultat inconnu laisse l'intention sans réponse : relire l'identité avant de retenter."""
+
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time):
+        self.path, self._clock = path, clock
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(self, **fields: Any) -> None:
+        line = json.dumps(
+            {"ts": datetime.fromtimestamp(self._clock(), tz=timezone.utc).isoformat(timespec="seconds"), **fields},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, (line + "\n").encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+_IDENTITY_KEYS = ("id", "number", "html_url", "sha", "name", "enforcement", "merged", "state", "node_id")
+
+
+def _identity(result: Any) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    out = {key: result[key] for key in _IDENTITY_KEYS if key in result and not isinstance(result[key], (dict, list))}
+    for nested in ("object", "commit"):
+        if isinstance(result.get(nested), dict) and "sha" in result[nested]:
+            out[f"{nested}.sha"] = result[nested]["sha"]
+    return out
+
+
+def journaling(api: Api, log: EventLog) -> Api:
+    """Enveloppe ``api`` : chaque écriture (tout sauf GET) est journalisée en intention, puis en réponse ou en erreur."""
+
+    def call(method: str, path: str, payload: Optional[Mapping[str, Any]] = None) -> Any:
+        if method == "GET":
+            return api(method, path, payload)
+        keys = sorted(payload) if isinstance(payload, Mapping) else []
+        log.record(event="request", method=method, path=path, payload_keys=keys)
+        try:
+            result = api(method, path, payload)
+        except ApiError as exc:
+            log.record(event="error", method=method, path=path, status=exc.status, message=str(exc)[:300])
+            raise
+        except NetworkError as exc:
+            log.record(event="unknown_result", method=method, path=path, message=str(exc)[:300])
+            raise
+        log.record(event="response", method=method, path=path, **_identity(result))
+        return result
+
+    return call
+
+
+def _get(api: Api, path: str, *, missing_ok: bool = False) -> Any:
+    try:
+        return api("GET", path, None)
+    except ApiError as exc:
+        if missing_ok and exc.status == 404:
+            return None
+        raise
+
+
+# ── lecture seule : inspect / verify ──────────────────────────────────────────────────────────────────────────────────────
+
+
+def inspect_remote(api: Api, plan: Mapping[str, Any]) -> Dict[str, Any]:
+    repo = _get(api, f"/repos/{REPOSITORY}")
+    main = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{DEFAULT_BRANCH}")
+    boot = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}", missing_ok=True)
+    rulesets = _get(api, f"/repos/{REPOSITORY}/rulesets") or []
+    return {
+        "repository": {k: repo.get(k) for k in ("id", "full_name", "private", "archived", "default_branch")},
+        "main_sha": (main or {}).get("object", {}).get("sha"),
+        "bootstrap_ref_sha": (boot or {}).get("object", {}).get("sha") if boot else None,
+        "rulesets": [{"id": r.get("id"), "name": r.get("name"), "enforcement": r.get("enforcement")} for r in rulesets],
+        "pulls": {
+            n: (_get(api, f"/repos/{REPOSITORY}/pulls/{n}", missing_ok=True) or {}).get("state") for n in FOREIGN_PULLS
+        },
+    }
+
+
+def _check_identity(api: Api) -> None:
+    repo = _get(api, f"/repos/{REPOSITORY}")
+    if int(repo.get("id") or 0) != REPOSITORY_ID or str(repo.get("full_name", "")).lower() != REPOSITORY.lower():
+        raise FixtureError("identité du dépôt fixture inattendue")
+    if repo.get("private") or repo.get("archived") or repo.get("default_branch") != DEFAULT_BRANCH:
+        raise FixtureError("le dépôt fixture doit être public, non archivé, branche par défaut main")
+    main = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{DEFAULT_BRANCH}")
+    if (main.get("object") or {}).get("sha") != SEED_SHA:
+        raise FixtureError("main n'est plus la graine immuable : aucune écriture")
+    commit = _get(api, f"/repos/{REPOSITORY}/git/commits/{SEED_SHA}")
+    if (commit.get("tree") or {}).get("sha") != SEED_TREE_SHA:
+        raise FixtureError("l'arbre de la graine a changé : aucune écriture")
+
+
+def _find_rulesets(api: Api) -> List[Mapping[str, Any]]:
+    listed = _get(api, f"/repos/{REPOSITORY}/rulesets") or []
+    return [_get(api, f"/repos/{REPOSITORY}/rulesets/{item['id']}") for item in listed]
+
+
+def _ruleset_collisions(rulesets: Sequence[Mapping[str, Any]]) -> Tuple[Optional[Mapping[str, Any]], List[str]]:
+    """``(notre ruleset s'il existe, collisions)`` : tout autre ruleset de même nom ou ciblant le motif est une collision."""
+    ours, collisions = None, []
+    for ruleset in rulesets:
+        include = ((ruleset.get("conditions") or {}).get("ref_name") or {}).get("include") or []
+        if ruleset.get("name") == RULESET_NAME:
+            ours = ruleset
+        elif BRANCH_PATTERN in include:
+            collisions.append(f"ruleset {ruleset.get('id')} ({ruleset.get('name')!r}) cible déjà {BRANCH_PATTERN}")
+    return ours, collisions
+
+
+#: Paramètres que GitHub AJOUTE avec leur valeur par défaut à la création d'un ruleset (observés le 2026-10-09 sur ``POST /rulesets`` : le plan ne les
+#: porte pas). Ils sont ignorés SEULEMENT s'ils ont exactement cette valeur ; toute autre valeur, tout autre paramètre ajouté reste un écart.
+SERVER_DEFAULT_PARAMETERS = {
+    "pull_request": {"require_extra_approval_for_unattributed_changes": True, "required_reviewers": []},
+}
+
+
+def _normalize_parameters(rule_type: Any, parameters: Any) -> Any:
+    if not parameters:
+        return None
+    defaults = SERVER_DEFAULT_PARAMETERS.get(str(rule_type), {})
+    return {k: v for k, v in parameters.items() if not (k in defaults and v == defaults[k])}
+
+
+def _normalize_ruleset(ruleset: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": ruleset.get("name"),
+        "target": ruleset.get("target"),
+        "enforcement": ruleset.get("enforcement"),
+        "bypass_actors": list(ruleset.get("bypass_actors") or []),
+        "include": ((ruleset.get("conditions") or {}).get("ref_name") or {}).get("include"),
+        "exclude": ((ruleset.get("conditions") or {}).get("ref_name") or {}).get("exclude") or [],
+        "rules": sorted(
+            [
+                {"type": r.get("type"), "parameters": _normalize_parameters(r.get("type"), r.get("parameters"))}
+                for r in ruleset.get("rules") or []
+            ],
+            key=lambda r: str(r["type"]),
+        ),
+    }
+
+
+def verify_remote(api: Api, plan: Mapping[str, Any]) -> Dict[str, Any]:
+    """Compare l'état distant au plan (aucune écriture) ; ``ok`` seulement si TOUT correspond."""
+    problems: List[str] = []
+    try:
+        _check_identity(api)
+    except FixtureError as exc:
+        problems.append(str(exc))
+    boot = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}", missing_ok=True)
+    if not boot:
+        problems.append("branche du socle absente")
+    elif boot["object"]["sha"] != plan["bootstrap_sha"]:
+        problems.append(f"branche du socle au SHA {boot['object']['sha']} au lieu de {plan['bootstrap_sha']}")
+    else:
+        commit = _get(api, f"/repos/{REPOSITORY}/git/commits/{plan['bootstrap_sha']}")
+        if commit["tree"]["sha"] != plan["bootstrap_tree_sha"] or [p["sha"] for p in commit["parents"]] != [SEED_SHA]:
+            problems.append("commit du socle : arbre ou parent inattendus")
+        for path in plan["files"]:
+            blob = _get(api, f"/repos/{REPOSITORY}/contents/{path}?ref={plan['bootstrap_sha']}", missing_ok=True)
+            if blob is None:
+                problems.append(f"fichier du socle absent : {path}")
+                continue
+            digest = hashlib.sha256(base64.b64decode(blob["content"])).hexdigest()
+            if digest != hashlib.sha256(plan["files"][path].encode("utf-8")).hexdigest():
+                problems.append(f"contenu différent : {path}")
+    if boot and boot["object"]["sha"] == plan["bootstrap_sha"]:
+        runs = api("GET", f"/repos/{REPOSITORY}/commits/{plan['bootstrap_sha']}/check-runs", None).get("check_runs", [])
+        state, reason = evaluate_check(runs, head_sha=plan["bootstrap_sha"])
+        if state != "success":
+            problems.append(f"check du socle non réussi ({state}) : {reason}")
+    ours, collisions = _ruleset_collisions(_find_rulesets(api))
+    problems.extend(collisions)
+    if ours is None:
+        problems.append("ruleset des bases éphémères absent")
+    elif _normalize_ruleset(ours) != _normalize_ruleset(plan["ruleset"]):
+        problems.append("ruleset différent du payload du plan")
+    seed_ruleset = _get(api, f"/repos/{REPOSITORY}/rulesets/{SEED_RULESET_ID}", missing_ok=True)
+    if not seed_ruleset or seed_ruleset.get("enforcement") != "active":
+        problems.append("ruleset de la graine modifié ou absent")
+    app = _get(api, "/apps/github-actions", missing_ok=True)
+    if not app or app.get("id") != ACTIONS_APP_ID:
+        problems.append("l'application github-actions n'a pas l'identifiant attendu")
+    return {"ok": not problems, "problems": problems, "ruleset_id": (ours or {}).get("id")}
+
+
+# ── écritures : apply / cleanup (jeton d'ordre obligatoire) ───────────────────────────────────────────────────────────────
+
+
+def _require_order(plan: Mapping[str, Any], token: Optional[str]) -> None:
+    if token != plan["order_token"]:
+        raise FixtureError("jeton d'ordre absent ou inexact : aucune écriture distante")
+
+
+def wait_for_bootstrap_check(
+    api: Api,
+    plan: Mapping[str, Any],
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    timeout: float = 600.0,
+) -> None:
+    """Attend le check ``Fixture tests`` (application Actions) RÉUSSI sur le commit du socle ; sinon refuse (jamais un succès présumé)."""
+    started = clock()
+    while True:
+        runs = api("GET", f"/repos/{REPOSITORY}/commits/{plan['bootstrap_sha']}/check-runs", None).get("check_runs", [])
+        state, reason = evaluate_check(runs, head_sha=plan["bootstrap_sha"])
+        if state == "success":
+            return
+        if state == "failure":
+            raise FixtureError(f"le check du socle est rouge ({reason}) : aucun ruleset créé, état à examiner")
+        if clock() - started >= timeout:
+            raise FixtureError(
+                f"aucun check réussi sur le socle après {timeout:.0f} s ({state} : {reason}) : le workflow ne s'est pas déclenché "
+                "ou n'a pas terminé ; aucun ruleset créé (les bases ne pourraient pas être créées sous la règle de création)"
+            )
+        sleep(10)
+
+
+def apply_plan(
+    api: Api,
+    plan: Mapping[str, Any],
+    *,
+    order_token: Optional[str],
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    check_timeout: float = 600.0,
+) -> Dict[str, Any]:
+    """Crée la branche du socle, ATTEND son check réussi, puis crée le ruleset. Idempotent ; refuse toute collision ; ne touche ni ``main`` ni les ressources étrangères."""
+    _require_order(plan, order_token)
+    _check_identity(api)
+    app = _get(api, "/apps/github-actions")
+    if app.get("id") != ACTIONS_APP_ID:
+        raise FixtureError("l'application github-actions n'a pas l'identifiant attendu")
+    seed_ruleset = _get(api, f"/repos/{REPOSITORY}/rulesets/{SEED_RULESET_ID}", missing_ok=True)
+    if not seed_ruleset or seed_ruleset.get("enforcement") != "active":
+        raise FixtureError("ruleset de la graine absent ou inactif : aucune écriture")
+    ours, collisions = _ruleset_collisions(_find_rulesets(api))
+    if collisions:
+        raise FixtureError("collision de ruleset : " + " ; ".join(collisions))
+    if ours is not None and _normalize_ruleset(ours) != _normalize_ruleset(plan["ruleset"]):
+        # AVANT toute écriture : un ruleset homonyme au contenu différent n'est pas possédé (aucun état partiel).
+        raise FixtureError(f"le ruleset {RULESET_NAME!r} existe avec un autre contenu : ressource non possédée")
+    boot = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{BOOTSTRAP_BRANCH}", missing_ok=True)
+    staging = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{STAGING_BRANCH}", missing_ok=True)
+    created: List[str] = []
+    for label, ref in ((BOOTSTRAP_BRANCH, boot), (STAGING_BRANCH, staging)):
+        if ref is not None and ref["object"]["sha"] != plan["bootstrap_sha"]:
+            raise FixtureError(
+                f"la branche {label} existe à un autre SHA ({ref['object']['sha']}) : ressource non possédée"
+            )
+    calls = {call["name"]: call for call in api_call_log(plan)}
+
+    def send(name: str) -> Any:
+        return api(calls[name]["method"], calls[name]["path"], calls[name]["payload"])
+
+    if boot is None:
+        if staging is None:
+            tree = send("tree")
+            if tree.get("sha") != plan["bootstrap_tree_sha"]:
+                raise FixtureError("l'arbre créé n'est pas celui du plan : arrêt avant tout commit")
+            commit = send("commit")
+            if commit.get("sha") != plan["bootstrap_sha"]:
+                raise FixtureError("le commit créé n'est pas celui du plan : arrêt avant toute branche")
+            ref = send("staging_ref")
+            if (ref.get("object") or {}).get("sha") != plan["bootstrap_sha"]:
+                raise FixtureError("la branche de préparation ne pointe pas sur le commit du plan")
+            staging = ref
+            created.append("staging")
+        # La règle de création du ruleset exige un commit qui a DÉJÀ passé le check : on l'attend sur la branche de préparation (hors motif).
+        wait_for_bootstrap_check(api, plan, sleep=sleep, clock=clock, timeout=check_timeout)
+        ref = send("branch_ref")
+        if (ref.get("object") or {}).get("sha") != plan["bootstrap_sha"]:
+            raise FixtureError("la branche créée ne pointe pas sur le commit du plan")
+        created.append("branch")
+    if ours is None:
+        wait_for_bootstrap_check(api, plan, sleep=sleep, clock=clock, timeout=check_timeout)
+        made = send("ruleset")
+        if made.get("enforcement") != "active" or made.get("bypass_actors"):
+            raise FixtureError("le ruleset créé n'est pas actif sans bypass : à corriger avant toute campagne")
+        ours = made
+        created.append("ruleset")
+    if staging is not None:
+        send(
+            "staging_delete"
+        )  # ressource PRÉPARATOIRE de ce plan, identité vérifiée : n'a plus d'utilité une fois la branche du socle créée
+        created.append("staging_removed")
+    manifest = manifest_skeleton(plan)
+    manifest["ruleset_id"] = ours.get("id")
+    return {"created": created, "manifest": manifest, "idempotent": not [c for c in created if c != "staging_removed"]}
+
+
+def cleanup_bootstrap(
+    api: Api, plan: Mapping[str, Any], *, order_token: Optional[str], with_ruleset: bool = False
+) -> Dict[str, Any]:
+    """Supprime UNIQUEMENT la branche du socle de CE plan et sa branche de préparation (identités exactes vérifiées).
+
+    Le ruleset des bases éphémères est PARTAGÉ avec la V1 : il n'est supprimé qu'avec ``with_ruleset`` (jamais par défaut), contenu vérifié."""
+    _require_order(plan, order_token)
+    _check_identity(api)
+    removed: List[str] = []
+    if with_ruleset:
+        ours, _ = _ruleset_collisions(_find_rulesets(api))
+        if ours is not None:
+            if _normalize_ruleset(ours) != _normalize_ruleset(plan["ruleset"]):
+                raise FixtureError("le ruleset a un contenu inattendu : non possédé, non supprimé")
+            api("DELETE", f"/repos/{REPOSITORY}/rulesets/{ours['id']}", None)
+            removed.append(f"ruleset {ours['id']}")
+    for label in (BOOTSTRAP_BRANCH, STAGING_BRANCH):
+        ref = _get(api, f"/repos/{REPOSITORY}/git/ref/heads/{label}", missing_ok=True)
+        if ref is not None:
+            if ref["object"]["sha"] != plan["bootstrap_sha"]:
+                raise FixtureError(f"la branche {label} a un autre SHA : non possédée, non supprimée")
+            api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{label}", None)
+            removed.append(f"branche {label}")
+    return {"removed": removed}
+
+
+# ── contre-épreuves du check (probe) ──────────────────────────────────────────────────────────────────────────────────────
+
+PROBE_TEST_GREEN = "def test_probe_green() -> None:\n    assert True\n"
+PROBE_TEST_RED = "def test_probe_red() -> None:\n    assert False, 'rouge volontaire (contre-épreuve du check)'\n"
+PROBE_SYMLINK_PATH = "docs/lien-sonde"
+
+
+def probe_scenarios(plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Scénarios SERVEUR des contre-épreuves. ``check`` : verdict attendu du check requis ; ``merge`` : ``accepted`` ou ``refused`` (tentative RÉELLE
+    de fusion dans la base jetable, sur la tête exacte). Les têtes qui ALTÈRENT ``.github/`` ou ``ci/`` ne sont PAS rejouées : le défaut est établi (C47 :
+    PR #10, #11, #12 fusionnées, CODEOWNERS inefficace à 0 approbation) et seul le garde de fusion du PRODUIT peut le couvrir (preuve d'intégration, faux GitHub
+    à zéro écriture) ; le scénario « base périmée / conflit » (``run_stale_base``) complète ces scénarios."""
+    files = plan["files"]
+    green = {"tests/test_probe.py": PROBE_TEST_GREEN}
+    scenarios = [
+        {"id": "green", "files": green, "check": "success", "merge": "accepted", "provenance": True},
+        {
+            "id": "red-test",
+            "files": {"tests/test_probe.py": PROBE_TEST_RED},
+            "check": "failure",
+            "merge": "refused",
+            "spoof": True,
+        },
+        {
+            "id": "unapproved-dependency",
+            "files": {**green, REQUIREMENTS_PATH: files[REQUIREMENTS_PATH] + "requests==2.32.3\n"},
+            "check": "failure",
+            "merge": "refused",
+        },
+        {
+            "id": "symlink",
+            "files": {},
+            "symlink": {PROBE_SYMLINK_PATH: REQUIREMENTS_PATH},
+            "check": "failure",
+            "merge": "refused",
+        },
+        {
+            "id": "seed-base",
+            "files": green,
+            "base": "seed",
+            "check": "missing",
+            "merge": "refused",
+            "creation": "refused",
+        },
+    ]
+    for scenario in scenarios:
+        # Le garde de fusion de confiance (arbre Git réel de la tête) doit REFUSER toute tête qui touche un chemin protégé ou ajoute un lien,
+        # même quand le check est vert (workflow altéré qui s'est lui-même validé) ; il ne doit rien refuser d'autre.
+        scenario["guard_refuses"] = (
+            bool(scenario.get("symlink"))
+            or scenario.get("base") == "seed"  # une base issue de la graine n'a pas les contrôles du socle
+            or any(path.startswith(tuple(PROTECTED_PREFIXES)) for path in scenario["files"])
+        )
+    return scenarios
+
+
+def _attempt_spoof(api: Api, head_sha: str, before: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Tente de publier un faux check « Fixture tests » vert avec le jeton de la campagne (une PAT n'est pas l'application Actions).
+
+    Le refus de l'API est le cas nominal ; si elle accepte, le faux check ne doit tout de même PAS compter (autre application)."""
+    try:
+        api(
+            "POST",
+            f"/repos/{REPOSITORY}/check-runs",
+            {"name": REQUIRED_CHECK, "head_sha": head_sha, "status": "completed", "conclusion": "success"},
+        )
+        accepted = True
+    except ApiError as exc:
+        accepted = False
+        refusal = str(exc)
+    runs = api("GET", f"/repos/{REPOSITORY}/commits/{head_sha}/check-runs", None).get("check_runs", [])
+    state, _reason = evaluate_check(runs, head_sha=head_sha)
+
+    def authentic(items: Sequence[Mapping[str, Any]]) -> int:
+        return sum(
+            1
+            for run in items
+            if run.get("name") == REQUIRED_CHECK
+            and (run.get("app") or {}).get("id") == ACTIONS_APP_ID
+            and run.get("head_sha") == head_sha
+        )
+
+    # « compte » : un check de l'application Actions est apparu du fait de la tentative, ou le verdict est devenu un succès.
+    counted = authentic(runs) > authentic(before) or state == "success"
+    result: Dict[str, Any] = {"accepted_by_api": accepted, "state_after": state, "counted": counted}
+    if not accepted:
+        result["refusal"] = refusal
+    return result
+
+
+def _put_files(api: Api, head: str, files: Mapping[str, str], message: str) -> str:
+    head_sha = ""
+    for path, text in files.items():
+        existing = _get(api, f"/repos/{REPOSITORY}/contents/{path}?ref={head}", missing_ok=True)
+        body: Dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(text.encode()).decode(),
+            "branch": head,
+        }
+        if existing:
+            body["sha"] = existing["sha"]
+        head_sha = api("PUT", f"/repos/{REPOSITORY}/contents/{path}", body)["commit"]["sha"]
+    return head_sha
+
+
+def _commit_symlinks(api: Api, head: str, head_sha: str, links: Mapping[str, str], message: str) -> str:
+    """Pousse un commit contenant des LIENS SYMBOLIQUES (mode 120000) par l'API Git Data (l'API Contents ne sait pas en écrire)."""
+    parent = api("GET", f"/repos/{REPOSITORY}/git/commits/{head_sha}", None)
+    entries = []
+    for path, target in links.items():
+        blob = api("POST", f"/repos/{REPOSITORY}/git/blobs", {"content": target, "encoding": "utf-8"})
+        entries.append({"path": path, "mode": "120000", "type": "blob", "sha": blob["sha"]})
+    tree = api("POST", f"/repos/{REPOSITORY}/git/trees", {"base_tree": parent["tree"]["sha"], "tree": entries})
+    commit = api(
+        "POST",
+        f"/repos/{REPOSITORY}/git/commits",
+        {"message": message, "tree": tree["sha"], "parents": [head_sha]},
+    )
+    api("PATCH", f"/repos/{REPOSITORY}/git/refs/heads/{head}", {"sha": commit["sha"], "force": False})
+    return commit["sha"]
+
+
+def _try_merge(api: Api, pr_number: int, head_sha: str) -> Dict[str, Any]:
+    """Tentative RÉELLE de fusion dans la base jetable, sur la tête exacte : acceptée, ou refusée avec le statut et le motif de l'API."""
+    try:
+        result = api(
+            "PUT",
+            f"/repos/{REPOSITORY}/pulls/{pr_number}/merge",
+            {"sha": head_sha, "merge_method": "merge"},
+        )
+    except ApiError as exc:
+        return {"accepted": False, "status": exc.status, "message": str(exc)[:300]}
+    return {"accepted": bool(result.get("merged")), "status": 200, "message": str(result.get("message", ""))[:200]}
+
+
+def _workflow_runs(api: Api, head_sha: str) -> List[Dict[str, Any]]:
+    """Exécutions de workflow rattachées à la tête (identité, événement, chemin, conclusion, URL) : lecture seule, jamais bloquante."""
+    try:
+        listing = api("GET", f"/repos/{REPOSITORY}/actions/runs?head_sha={head_sha}", None) or {}
+    except ApiError as exc:
+        return [{"error": exc.status}]
+    return [
+        {key: run.get(key) for key in ("id", "event", "path", "head_sha", "status", "conclusion", "html_url")}
+        for run in listing.get("workflow_runs", [])
+    ]
+
+
+def _reconcile_cleanup(
+    api: Api,
+    outcome: Dict[str, Any],
+    *,
+    prs: Sequence[int],
+    heads: Sequence[str],
+    refs: Sequence[str],
+    attempted: Sequence[str],
+) -> None:
+    """Nettoyage PAR IDENTITÉ exacte (noms propres à CETTE sonde) : ferme les PR connues, ferme celles dont la création a pu réussir sans réponse (lecture
+    des PR ouvertes de la tête), supprime les branches confirmées PUIS celles dont la création a pu réussir sans réponse (404 = déjà absente, sans erreur).
+    Un échec réseau est consigné (``cleanup_errors``), jamais avalé ni rejoué à l'aveugle."""
+
+    def note_error(what: str) -> None:
+        outcome.setdefault("cleanup_errors", []).append(what)
+
+    owner = REPOSITORY.split("/")[0]
+    closed = set()
+    for number in prs:
+        try:
+            api("PATCH", f"/repos/{REPOSITORY}/pulls/{number}", {"state": "closed"})
+            closed.add(number)
+        except (ApiError, NetworkError):
+            pass
+    for head in heads:
+        try:
+            for pr in api("GET", f"/repos/{REPOSITORY}/pulls?state=open&head={owner}:{head}", None) or []:
+                if pr["number"] not in closed and pr.get("head", {}).get("ref") == head:
+                    api("PATCH", f"/repos/{REPOSITORY}/pulls/{pr['number']}", {"state": "closed"})
+                    outcome.setdefault("reconciled_prs", []).append(pr["number"])
+        except (ApiError, NetworkError):
+            note_error(f"pr:{head}")
+    for ref in reversed(list(refs)):
+        try:
+            api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
+        except (ApiError, NetworkError):
+            note_error(ref)
+    for ref in reversed([r for r in attempted if r not in refs]):
+        try:
+            api("DELETE", f"/repos/{REPOSITORY}/git/refs/heads/{ref}", None)
+        except ApiError as exc:
+            if exc.status not in (404, 422):  # absente : rien à nettoyer
+                note_error(ref)
+        except NetworkError:
+            note_error(ref)
+
+
+def run_stale_base(
+    api: Api,
+    plan: Mapping[str, Any],
+    *,
+    probe_id: str,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+    timeout: float,
+    observe_missing_seconds: float,
+    log: Optional[EventLog] = None,
+) -> Dict[str, Any]:
+    """Protections SERVEUR « base à jour » et « check manquant » : la base avance, une PR déjà verte devient périmée (fusion refusée par la règle
+    « à jour »), une PR qui entre en conflit ne déclenche aucun workflow (check manquant, fusion refusée). Toutes les ressources sont supprimées."""
+    base = f"collegue-business/probe-{probe_id}-stale"
+    heads = {name: f"collegue-probe/{probe_id}-stale-{name}" for name in ("first", "behind", "conflict")}
+    files = {
+        "first": {"docs/probe-stale-a.md": "# A\n", "tests/test_probe.py": PROBE_TEST_GREEN},
+        "behind": {"docs/probe-stale-c.md": "# C\n", "tests/test_probe_behind.py": PROBE_TEST_GREEN},
+        "conflict": {"docs/probe-stale-a.md": "# B (conflit)\n"},
+    }
+    outcome: Dict[str, Any] = {
+        "scenario": "stale-base",
+        "check_expected": "success puis périmée / conflit sans check",
+        "merge_expected": "first accepted, behind refused, conflict refused",
+    }
+    owned: List[str] = []
+    attempted: List[str] = []
+    prs: Dict[str, int] = {}
+    head_shas: Dict[str, str] = {}
+    note = (lambda **kw: log.record(probe_id=probe_id, scenario="stale-base", **kw)) if log else (lambda **kw: None)
+
+    def open_pr(name: str) -> int:
+        pr = api(
+            "POST",
+            f"/repos/{REPOSITORY}/pulls",
+            {"title": f"sonde W5 stale-{name}", "head": heads[name], "base": base, "body": "Contre-épreuve (jetable)."},
+        )
+        prs[name] = pr["number"]
+        note(event="pull_request", variant=name, number=pr["number"], url=pr.get("html_url"))
+        return pr["number"]
+
+    def wait_state(name: str, *, expect_missing: bool = False) -> str:
+        started = clock()
+        while True:
+            runs = api("GET", f"/repos/{REPOSITORY}/commits/{head_shas[name]}/check-runs", None).get("check_runs", [])
+            state, _reason = evaluate_check(runs, head_sha=head_shas[name])
+            elapsed = clock() - started
+            if expect_missing:
+                if state != "missing" or elapsed >= observe_missing_seconds:
+                    return state
+            elif state in ("success", "failure") or elapsed >= timeout:
+                return state
+            sleep(10)
+
+    try:
+        attempted.append(base)
+        api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{base}", "sha": plan["bootstrap_sha"]})
+        owned.append(base)
+        for name, ref in heads.items():
+            attempted.append(ref)
+            api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{ref}", "sha": plan["bootstrap_sha"]})
+            owned.append(ref)
+            head_shas[name] = _put_files(api, ref, files[name], f"sonde stale-{name}")
+        open_pr("first")
+        open_pr("behind")
+        states = {name: wait_state(name) for name in ("first", "behind")}
+        first_merge = _try_merge(api, prs["first"], head_shas["first"])
+        # la base AVANCE : la PR « behind », verte sur l'ancienne base, est périmée → la règle « à jour avant fusion » doit refuser
+        behind_merge = _try_merge(api, prs["behind"], head_shas["behind"])
+        open_pr("conflict")  # entre en conflit avec la base avancée : GitHub ne lance AUCUN workflow pull_request
+        conflict_state = wait_state("conflict", expect_missing=True)
+        conflict_merge = _try_merge(api, prs["conflict"], head_shas["conflict"])
+        outcome.update(
+            pull_requests=prs,
+            states=states,
+            first_merge=first_merge,
+            behind_merge=behind_merge,
+            conflict_check=conflict_state,
+            conflict_merge=conflict_merge,
+        )
+        outcome["ok"] = (
+            states == {"first": "success", "behind": "success"}
+            and first_merge["accepted"] is True
+            and behind_merge["accepted"] is False
+            and conflict_state == "missing"
+            and conflict_merge["accepted"] is False
+        )
+    except ApiError as exc:
+        outcome.update(ok=False, error=str(exc)[:300])
+    except NetworkError as exc:
+        outcome.update(ok=False, error=f"résultat inconnu (réseau), réconciliation par identité : {exc}"[:300])
+    finally:
+        _reconcile_cleanup(
+            api, outcome, prs=list(prs.values()), heads=list(heads.values()), refs=owned, attempted=attempted
+        )
+        note(event="scenario_result", outcome=json.loads(json.dumps(outcome, default=str)))
+    return outcome
+
+
+def run_probe(
+    api: Api,
+    plan: Mapping[str, Any],
+    *,
+    order_token: Optional[str],
+    probe_id: str,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    timeout: float = 600.0,
+    observe_missing_seconds: float = 120.0,
+    log: Optional[EventLog] = None,
+    only: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """PR jetables vers des bases éphémères de sonde ; toutes les ressources créées sont supprimées, même sur échec. ``only`` : ne rejoue que ces scénarios
+    (par identifiant, ``stale-base`` compris) en conservant la NUMÉROTATION d'origine des branches : sert à terminer une sonde interrompue sans rejouer ni
+    dupliquer ce qui est déjà établi dans le journal."""
+    _require_order(plan, order_token)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,30}", probe_id):
+        raise FixtureError("identifiant de sonde invalide")
+    verdict = verify_remote(api, plan)
+    if not verdict["ok"]:
+        raise FixtureError("l'état distant n'est pas celui du plan (verify) : " + " ; ".join(verdict["problems"]))
+    known = [scenario["id"] for scenario in probe_scenarios(plan)] + ["stale-base"]
+    if only is not None and (not only or any(name not in known for name in only)):
+        raise FixtureError("scénario inconnu (attendus : " + ", ".join(known) + ")")
+    results = []
+    for index, scenario in enumerate(probe_scenarios(plan)):
+        name = scenario["id"]
+        if only is not None and name not in only:
+            continue
+        base = f"collegue-business/probe-{probe_id}-{index}"
+        head = f"collegue-probe/{probe_id}-{index}"
+        base_sha = SEED_SHA if scenario.get("base") == "seed" else plan["bootstrap_sha"]
+        owned_refs: List[str] = []
+        attempted_refs: List[str] = []
+        pr_number: Optional[int] = None
+        outcome: Dict[str, Any] = {
+            "scenario": name,
+            "check_expected": scenario["check"],
+            "merge_expected": scenario["merge"],
+        }
+        try:
+            try:
+                attempted_refs.append(base)
+                api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{base}", "sha": base_sha})
+                owned_refs.append(base)
+                outcome["creation"] = "accepted"
+            except ApiError as exc:
+                outcome["creation"] = "refused"
+                outcome["creation_error"] = str(exc)[:300]
+                outcome["ok"] = scenario.get("creation") == "refused"
+                continue
+            if scenario.get("creation") == "refused":
+                # la règle de création devait refuser une base sans check : acceptée, on observe alors la PR (le refus de fusion suffit)
+                outcome["note"] = "création acceptée : la règle de création n'a pas refusé la base issue de la graine"
+            attempted_refs.append(head)
+            api("POST", f"/repos/{REPOSITORY}/git/refs", {"ref": f"refs/heads/{head}", "sha": base_sha})
+            owned_refs.append(head)
+            head_sha = base_sha
+            if scenario["files"]:
+                head_sha = _put_files(api, head, scenario["files"], f"sonde {name}")
+            if scenario.get("symlink"):
+                head_sha = _commit_symlinks(api, head, head_sha, scenario["symlink"], f"sonde {name}")
+            pr = api(
+                "POST",
+                f"/repos/{REPOSITORY}/pulls",
+                {"title": f"sonde W5 {name}", "head": head, "base": base, "body": "Contre-épreuve du check (jetable)."},
+            )
+            pr_number = pr["number"]
+            if log:
+                log.record(
+                    event="pull_request", probe_id=probe_id, scenario=name, number=pr_number, url=pr.get("html_url")
+                )
+            started = clock()
+            state, reason = "missing", "non observé"
+            runs: List[Mapping[str, Any]] = []
+            while True:
+                runs = api("GET", f"/repos/{REPOSITORY}/commits/{head_sha}/check-runs", None).get("check_runs", [])
+                state, reason = evaluate_check(runs, head_sha=head_sha)
+                elapsed = clock() - started
+                if scenario["check"] == "missing":
+                    if state != "missing" or elapsed >= observe_missing_seconds:
+                        break  # un check apparu avant la fin de la fenêtre = échec de la contre-épreuve
+                elif state in ("success", "failure") or elapsed >= timeout:
+                    break
+                sleep(10)
+            outcome.update(
+                check_observed=state,
+                reason=reason,
+                head_sha=head_sha,
+                checks_seen=[
+                    {"name": r.get("name"), "app_id": (r.get("app") or {}).get("id"), "head_sha": r.get("head_sha")}
+                    for r in runs
+                ],
+            )
+            if scenario.get("spoof"):
+                outcome["spoof"] = _attempt_spoof(api, head_sha, runs)
+            if log:
+                log.record(
+                    event="observed_checks",
+                    probe_id=probe_id,
+                    scenario=name,
+                    head_sha=head_sha,
+                    check_runs=[
+                        {
+                            "id": r.get("id"),
+                            "name": r.get("name"),
+                            "app_id": (r.get("app") or {}).get("id"),
+                            "status": r.get("status"),
+                            "conclusion": r.get("conclusion"),
+                            "url": r.get("html_url"),
+                        }
+                        for r in runs
+                    ],
+                    workflow_runs=_workflow_runs(api, head_sha),
+                )
+            # garde de fusion de confiance sur l'arbre Git RÉEL de la tête, pour chaque scénario
+            tree = api("GET", f"/repos/{REPOSITORY}/git/trees/{head_sha}?recursive=1", None)
+            violations = ["arbre tronqué : contenu protégé non établi"] if tree.get("truncated") else []
+            violations += protected_tree_violations(tree.get("tree", []), plan)
+            outcome["guard"] = {"refuses": bool(violations), "violations": violations[:5]}
+            if scenario.get("provenance"):
+                ok, why = check_provenance(api, head_sha, plan)
+                outcome["provenance"] = {"ok": ok, "reason": why}
+            merge = _try_merge(api, pr_number, head_sha)
+            outcome["merge"] = merge
+            merged_as_expected = merge["accepted"] == (scenario["merge"] == "accepted")
+            outcome["ok"] = (
+                state == scenario["check"]
+                and merged_as_expected
+                and outcome.get("spoof", {}).get("counted", False) is False
+                and outcome.get("provenance", {"ok": True})["ok"] is True
+                and outcome["guard"]["refuses"] is scenario["guard_refuses"]
+            )
+        except ApiError as exc:
+            outcome.update(ok=False, error=str(exc)[:300])
+        except NetworkError as exc:
+            outcome.update(ok=False, error=f"résultat inconnu (réseau), réconciliation par identité : {exc}"[:300])
+        finally:
+            _reconcile_cleanup(
+                api,
+                outcome,
+                prs=[] if pr_number is None else [pr_number],
+                heads=[head] if head in attempted_refs else [],
+                refs=owned_refs,
+                attempted=attempted_refs,
+            )
+            if log:
+                log.record(
+                    event="scenario_result",
+                    probe_id=probe_id,
+                    scenario=name,
+                    outcome=json.loads(json.dumps(outcome, default=str)),
+                )
+            results.append(outcome)
+    if only is None or "stale-base" in only:
+        results.append(
+            run_stale_base(
+                api,
+                plan,
+                probe_id=probe_id,
+                sleep=sleep,
+                clock=clock,
+                timeout=timeout,
+                observe_missing_seconds=observe_missing_seconds,
+                log=log,
+            )
+        )
+    return {"ok": all(r.get("ok") for r in results), "results": results}
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _api_from_env() -> Api:
+    client = GitHubApi(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "")
+    return client.request
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    plan_cmd = sub.add_parser("plan", help="plan HORS LIGNE (aucun accès réseau)")
+    plan_cmd.add_argument("directory", type=Path)
+    plan_cmd.add_argument("--previous", type=Path, help="plan.json du socle DÉJÀ appliqué : écrit v1-to-v2.diff")
+    for name in ("inspect", "verify"):
+        sub.add_parser(name, help="lecture seule")
+    for name in ("apply", "probe", "cleanup"):
+        cmd = sub.add_parser(name, help="écritures distantes, sur ordre")
+        cmd.add_argument("--order-token", required=True)
+        cmd.add_argument(
+            "--events", type=Path, required=True, help="journal append-only des identités distantes créées (JSONL)"
+        )
+        if name == "probe":
+            cmd.add_argument("--probe-id", required=True)
+            cmd.add_argument(
+                "--only",
+                help="scénarios à rejouer, séparés par des virgules (terminer une sonde interrompue ; numérotation conservée)",
+            )
+        if name == "apply":
+            cmd.add_argument("--manifest-out", type=Path, required=True)
+        if name == "cleanup":
+            cmd.add_argument(
+                "--with-ruleset", action="store_true", help="supprime AUSSI le ruleset partagé (jamais par défaut)"
+            )
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "plan":
+            plan = write_plan(args.directory, previous=args.previous)
+            print(json.dumps({"bootstrap_sha": plan["bootstrap_sha"], "order_token": plan["order_token"]}, indent=1))
+            return 0
+        plan = build_plan()
+        api = _api_from_env()
+        log = EventLog(args.events) if getattr(args, "events", None) else None
+        if log:
+            api = journaling(api, log)
+            log.record(event="command", command=args.command, bootstrap_sha=plan["bootstrap_sha"])
+        if args.command == "inspect":
+            print(json.dumps(inspect_remote(api, plan), indent=1, sort_keys=True))
+            return 0
+        if args.command == "verify":
+            result = verify_remote(api, plan)
+            print(json.dumps(result, indent=1, sort_keys=True))
+            return 0 if result["ok"] else 1
+        if args.command == "apply":
+            result = apply_plan(api, plan, order_token=args.order_token)
+            args.manifest_out.write_text(
+                json.dumps(result["manifest"], indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            print(json.dumps({k: v for k, v in result.items() if k != "manifest"}, indent=1))
+            return 0
+        if args.command == "probe":
+            only = [name for name in args.only.split(",") if name] if args.only else None
+            result = run_probe(api, plan, order_token=args.order_token, probe_id=args.probe_id, log=log, only=only)
+            print(json.dumps(result, indent=1, sort_keys=True))
+            return 0 if result["ok"] else 1
+        result = cleanup_bootstrap(api, plan, order_token=args.order_token, with_ruleset=args.with_ruleset)
+        print(json.dumps(result, indent=1))
+        return 0
+    except (FixtureError, ApiError) as exc:
+        print(f"REFUS: {exc}", file=sys.stderr)
+        return 1
+    except NetworkError as exc:
+        print(
+            f"RÉSULTAT INCONNU (réseau) : {exc} ; relire l'état distant (inspect) avant toute reprise", file=sys.stderr
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,52 @@
+{
+  "added_files": [
+    ".github/CODEOWNERS",
+    ".github/workflows/fixture-tests.yml",
+    "ci/requirements-approved.lock",
+    "docs/deploiement.md",
+    "docs/runbook-ops.md"
+  ],
+  "approved_files": {
+    ".github/CODEOWNERS": "d9a7bd5e547f1016929b49fe7691df4fbe8098ed31fa8bae25d0f8f185cf774d",
+    ".github/workflows/fixture-tests.yml": "b5ceb2d2a8ebdd3f278ce5109fbadef0e2a1d756386fd7d68e054a4d636a5244",
+    "ci/requirements-approved.lock": "2a4b485ab72e52498ea420fa133575ebb02925a9d4567f4e1c887d80a6b237c6",
+    "docs/deploiement.md": "7df682d4d42ea3da1a1c430c58c66396c29aa3b4014f3ebf3cf4c66e68a9d7a0",
+    "docs/runbook-ops.md": "f0eb2352399dea63e6cb33600f9091328c6467ce4833c929bb0ac8f0c11c7f76",
+    "requirements.txt": "1243a6fb8bf0e04f55eb9ee29d38af0d59464ddbca2e05a18d9d32a29d8db235"
+  },
+  "bootstrap_branch": "collegue-business/bootstrap-w5-v2",
+  "bootstrap_sha": "ad56c0fa03066b1f6efb3cf6a5aa26cb496372ca",
+  "branch_pattern": "refs/heads/collegue-business/*",
+  "check_app_id": 15368,
+  "check_workflow": {
+    "candidate_execution": "docker --network none, utilisateur non root, aucun secret",
+    "dependency_source": "ci/requirements-approved.lock",
+    "job": "Fixture tests",
+    "triggers": [
+      "pull_request",
+      "push"
+    ],
+    "workflow": ".github/workflows/fixture-tests.yml"
+  },
+  "code_owner": "@VynoDePal",
+  "modified_seed_files": [
+    "requirements.txt"
+  ],
+  "modified_seed_hashes": {
+    "requirements.txt": {
+      "approved_sha256": "1243a6fb8bf0e04f55eb9ee29d38af0d59464ddbca2e05a18d9d32a29d8db235",
+      "seed_sha256": "d73000bb6a43fb8a4f5cbdb8e645725712236b8ce692c63df739640a57395a93"
+    }
+  },
+  "plan_version": "v2",
+  "protected_prefixes": [
+    ".github/",
+    "ci/"
+  ],
+  "repository": "VynoDePal/collegue-e2e-fixture",
+  "repository_id": 1298596453,
+  "required_check": "Fixture tests",
+  "ruleset_id": 24793056,
+  "schema": "collegue-fixture-bootstrap/1",
+  "seed_sha": "8e3691d8e4f311e00d620c9c2ca2d9edbd8b136a"
+}

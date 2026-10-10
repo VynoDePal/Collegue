@@ -101,6 +101,9 @@ class AgentResult:
     # interrompu / rapport absent après armement : le budget CONSERVE la réservation et bloque la suite stricte.
     usage_status: str = "reported"
     usage_reason: str = ""
+    # W5 : d'où vient l'usage. ``agent`` (défaut) = auto-déclaré ; ``broker`` = consommation ÉTABLIE par le courtier budgétaire
+    # (autorité unique, déjà consolidée dans la réservation parent à la fermeture de session — jamais les journaux de l'agent).
+    usage_source: str = "agent"
 
     @property
     def total_tokens(self) -> int:
