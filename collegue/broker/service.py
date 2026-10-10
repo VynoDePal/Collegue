@@ -490,7 +490,11 @@ class BrokerService:
             detail = f"countTokens indisponible ({type(exc).__name__})"
             self._release(attempt, "count_tokens_failed", detail)
             retry = isinstance(exc, UpstreamHTTPError) and exc.status == 429
-            raise BrokerUnsupported(detail, code="count_tokens_failed", status=429 if retry else 502) from None
+            refused = BrokerUnsupported(detail, code="count_tokens_failed", status=429 if retry else 502)
+            refused.retryable = (
+                True  # countTokens ne génère ni ne dépense rien : renvoyer la même requête est sans risque
+            )
+            raise refused from None
 
         # 5. réservation ATOMIQUE dans le scope concerné (CAS du registre) — refus ⇒ rien n'est émis.
         reserve_tokens = counted + nr.output_cap

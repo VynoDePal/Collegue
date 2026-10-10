@@ -272,3 +272,17 @@ flottante pouvait arrêter près de 2 s trop tôt.
 **Journal des refus avant tentative (revue A31).** Il ne recopie plus rien de ce que le client a fourni : ni le texte de l'exception, ni un nom de champ arbitraire, ni une valeur
 de rôle / modèle. Il porte `code` (liste fermée `LOGGABLE_REFUSAL_CODES`, sinon « autre »), `statut`, les noms de paramètres CONNUS (liste fermée `KNOWN_REFUSED_PARAMETERS`, ex.
 `reasoning_effort`) et le NOMBRE des autres. Le client reçoit toujours le refus explicite complet.
+
+## Retries cachés du client `openai` et repli réel (A34)
+
+**Constat (preuve Docker PR 613, run 38018264390).** Les deux derniers scénarios de repli échouaient parce que le 31B était réessayé en silence : `models_seen == [31B, 31B, 31B]` (runner) et
+`primary ok=True` (SDK direct). Chaîne établie sur les sources épinglées (hash vérifié) : le SDK OpenHands appelle LiteLLM 1.83.0 SANS `max_retries` ⇒
+`inference_params.pop("max_retries", 2)` (`llms/openai/openai.py`) ⇒ client `openai` 2.8.0 avec 2 retries ; `_base_client._should_retry` réessaie TOUT 408/409/429/5xx, sauf si la réponse
+porte `X-Should-Retry` — quel que soit `num_retries=0` du SDK. Un refus ÉTABLI du fournisseur (400, `upstream_rejected`) est renvoyé par le courtier en **502** : le client le réémettait,
+la 2ᵉ tentative réussissait, et l'appelant ne voyait jamais le refus (aucun repli possible). Ni budget ni politique n'étaient violés (le refus ne consomme rien, la réservation est libérée,
+le serveur arbitre chaque envoi) : c'était une contradiction avec le contrat « seul un 429 est réessayé par le client ».
+
+**Correction.** Chaque réponse d'ERREUR du courtier porte `X-Should-Retry` : `true` seulement pour ce qui est démontrablement sans effet ni usage inconnu — limite de débit du fournisseur (429) et échec de
+countTokens (429/5xx, rien n'est généré) — et `false` pour tout le reste (refus établi 400→502, échec ambigu après émission, champ inconnu, modèle interdit, projet bloqué, génération en vol 429, erreur interne).
+Un succès n'en porte pas. Le relais est un tuyau d'octets : l'en-tête traverse inchangé. Statuts, codes et corps inchangés. Retries permis : 429 fournisseur et countTokens ; retries interdits : tout le reste.
+Les réponses perdues (timeout client) restent réessayées par le client `openai` lui-même, mais le serveur sérialise (une génération en vol par session) et refuse tout renvoi : une seule émission.

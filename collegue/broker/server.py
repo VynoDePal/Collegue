@@ -39,7 +39,10 @@ READ_TIMEOUT = 30.0
 _IDEMPOTENCY = re.compile(r"^[A-Za-z0-9._:\-]{1,96}$")
 
 
-def _response(status: int, payload: dict) -> bytes:
+def _response(status: int, payload: dict, *, retry: Optional[bool] = None) -> bytes:
+    """Réponse HTTP. ``retry`` (erreurs seulement) pose ``X-Should-Retry`` : le client ``openai`` — sous LiteLLM, donc sous le SDK OpenHands, qui ne lui
+    passe pas ``max_retries`` et laisse le défaut de 2 — réessaie SINON tout 408/409/429/5xx tout seul, quel que soit ``num_retries=0`` du SDK. Seul ce qui
+    est démontrablement sans effet ni usage inconnu (429 du fournisseur, échec de countTokens) peut être renvoyé tel quel ; tout autre refus ne doit pas l'être."""
     reason = {
         200: "OK",
         400: "Bad Request",
@@ -55,9 +58,10 @@ def _response(status: int, payload: dict) -> bytes:
         502: "Bad Gateway",
     }.get(status, "Error")
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    should_retry = "" if retry is None else f"X-Should-Retry: {'true' if retry else 'false'}\r\n"
     head = (
         f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
-        "Connection: close\r\nCache-Control: no-store\r\n\r\n"
+        f"{should_retry}Connection: close\r\nCache-Control: no-store\r\n\r\n"
     ).encode("ascii")
     return head + body
 
@@ -176,18 +180,22 @@ class BrokerSocketServer:
         return parts[0], parts[1], headers
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        retry: Optional[bool] = None  # succès : pas d'en-tête
         try:
             status, payload = await self._dispatch(reader)
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError):
+            retry = False
             status, payload = (
                 408,
                 {"error": {"message": "requête incomplète", "type": "collegue_broker_error", "code": "timeout"}},
             )
         except BrokerError as exc:
             status, payload = exc.status, exc.to_openai_error()
+            retry = bool(exc.retryable)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:  # noqa: BLE001 - jamais de trace ni de secret vers le client
+            retry = False
             status = 500
             payload = {
                 "error": {
@@ -197,7 +205,7 @@ class BrokerSocketServer:
                 }
             }
         try:
-            writer.write(_response(status, payload))
+            writer.write(_response(status, payload, retry=retry))
             await writer.drain()
         except ConnectionError:
             pass
