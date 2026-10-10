@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import time
 import uuid
@@ -88,6 +89,8 @@ from collegue.state.models import (
 # Rejets AVANT traitement (même ensemble que ``budget_guard`` de la vague 2) : le fournisseur n'a rien exécuté.
 PROVEN_REJECTED_STATUS = frozenset({400, 401, 403, 404, 405, 413, 415, 422, 429})
 TRANSPORT = "broker"
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -286,13 +289,20 @@ class BrokerService:
                 ) from exc
         else:
             raw = bytes(body)
-        payload = parse_json_strict(raw, max_bytes=self.config.max_request_bytes)
-        return normalize_chat_request(
-            payload,
-            allowed_models=allowed,
-            default_output_tokens=min(self.config.default_output_tokens, cap),
-            max_output_tokens=cap,
-        )
+        try:
+            payload = parse_json_strict(raw, max_bytes=self.config.max_request_bytes)
+            return normalize_chat_request(
+                payload,
+                allowed_models=allowed,
+                default_output_tokens=min(self.config.default_output_tokens, cap),
+                max_output_tokens=cap,
+            )
+        except BrokerError as exc:
+            # Trace DIAGNOSTIQUE d'un refus AVANT toute tentative (rien n'est journalisé en base pour lui) : code et motif seulement
+            # (noms de champs, jamais le contenu de la requête, jamais un secret), bornés. Un client qui n'affiche que la classe
+            # de l'exception (ex. ``LLMBadRequestError``) laisse ainsi la cause lisible dans le journal du service.
+            logger.warning("courtier : requête refusée avant tentative [%s] %.300s", getattr(exc, "code", "?"), exc)
+            raise
 
     def _check_global_deadline(self, root_scope_key: str, now: datetime) -> None:
         deadline = self.store.clock_deadline(root_scope_key)

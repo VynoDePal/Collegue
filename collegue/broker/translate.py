@@ -56,6 +56,14 @@ _ALLOWED_TOP_LEVEL = frozenset(
         "parallel_tool_calls",
     }
 )
+#: Métadonnées de TRANSPORT inertes : le SDK OpenHands 1.19.1 épingle ``prompt_cache_key`` (= identifiant de conversation, chaîne) sur la
+#: requête Chat Completions (``LocalConversation._pin_prompt_cache_key`` → ``select_chat_options``), sans option publique pour l'ôter. C'est
+#: une indication de routage de cache propre à OpenAI : elle ne change ni le modèle, ni le contenu, ni les bornes, ni l'usage. Le courtier la
+#: VALIDE (chaîne imprimable bornée) puis la RETIRE avant toute traduction : elle n'entre ni dans le corps compté (countTokens), ni dans le
+#: corps émis, ni dans l'empreinte, ni dans le journal, et n'active AUCUN cache hébergé. Tout autre champ inconnu reste refusé.
+INERT_TRANSPORT_FIELDS = frozenset({"prompt_cache_key"})
+_INERT_FIELD_MAX_CHARS = 128
+
 _MESSAGE_KEYS = {
     "system": {"role", "content", "name"},
     "developer": {"role", "content", "name"},
@@ -352,6 +360,21 @@ def _convert_tool_choice(choice: Any, names: Tuple[str, ...]) -> Optional[dict]:
     raise BrokerRequestRefused("tool_choice invalide ou nommant un outil inconnu", code="invalid_tools")
 
 
+def _without_inert_transport_fields(payload: dict) -> dict:
+    """Copie de ``payload`` sans les métadonnées de transport inertes (validées d'abord : forme invalide ⇒ refus nommant le champ)."""
+    present = INERT_TRANSPORT_FIELDS & set(payload)
+    if not present:
+        return payload
+    for name in sorted(present):
+        value = payload[name]
+        if not isinstance(value, str) or not value or len(value) > _INERT_FIELD_MAX_CHARS or not value.isprintable():
+            raise BrokerRequestRefused(
+                f"{name} : chaîne imprimable de 1 à {_INERT_FIELD_MAX_CHARS} caractères attendue (métadonnée de transport)",
+                code="invalid_parameter",
+            )
+    return {key: value for key, value in payload.items() if key not in present}
+
+
 def normalize_chat_request(
     payload: Any,
     *,
@@ -362,6 +385,7 @@ def normalize_chat_request(
     """Valide ``payload`` (déjà décodé par :func:`parse_json_strict`) et construit l'objet Google normalisé."""
     if not isinstance(payload, dict):
         raise BrokerRequestRefused("le corps doit être un objet JSON", code="invalid_json")
+    payload = _without_inert_transport_fields(payload)
     unknown = sorted(set(payload) - _ALLOWED_TOP_LEVEL)
     if unknown:
         raise BrokerRequestRefused(
