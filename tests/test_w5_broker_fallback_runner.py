@@ -23,6 +23,8 @@ from collegue.broker.runtime import BrokerRuntime, install_runtime_for_tests
 from collegue.broker.server import BrokerSocketServer
 from collegue.state import ProjectStateManager
 
+CONVERSATION_ID = "6f1c3a52-8c1e-4d5e-9a57-0d6c1f3b2a10"
+
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
@@ -112,6 +114,9 @@ def run_runner(rig, *, client_timeout=20, transport=None):
                     model=llm.model.split("/", 1)[1],
                     messages=[{"role": "user", "content": "x"}],
                     max_tokens=llm.max_output_tokens,
+                    # Ce que le SDK 1.19.1 joint à CHAQUE requête d'une conversation (``LocalConversation._pin_prompt_cache_key`` →
+                    # ``select_chat_options``) : refusé par le courtier tant que la métadonnée de transport n'est pas tenue pour inerte.
+                    extra_body={"prompt_cache_key": CONVERSATION_ID},
                 )
             except Exception as exc:
                 failures.append(exc)

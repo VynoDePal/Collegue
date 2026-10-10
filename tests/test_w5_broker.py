@@ -6,6 +6,7 @@ import pytest
 from w5_broker_contract import *  # noqa: F401,F403  (les tests du contrat sont collectés ici)
 from w5_broker_fallback_contract import *  # noqa: F401,F403  (séquencement des modèles d'une session)
 from w5_broker_review_contract import *  # noqa: F401,F403  (contrat de la revue indépendante)
+from w5_broker_sdk_contract import *  # noqa: F401,F403  (raccord SDK OpenHands : prompt_cache_key)
 
 from collegue.state import ProjectStateManager
 

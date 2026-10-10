@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import time
 import uuid
@@ -88,6 +89,70 @@ from collegue.state.models import (
 # Rejets AVANT traitement (même ensemble que ``budget_guard`` de la vague 2) : le fournisseur n'a rien exécuté.
 PROVEN_REJECTED_STATUS = frozenset({400, 401, 403, 404, 405, 413, 415, 422, 429})
 TRANSPORT = "broker"
+
+logger = logging.getLogger(__name__)
+
+#: Codes de refus AVANT tentative que le journal peut nommer (liste fermée ; tout autre code est journalisé « autre »).
+LOGGABLE_REFUSAL_CODES = frozenset(
+    {
+        "contradictory_output_limit",
+        "duplicate_json_key",
+        "invalid_json",
+        "invalid_message",
+        "invalid_parameter",
+        "invalid_tools",
+        "model_not_allowed",
+        "output_limit_exceeds_ceiling",
+        "payload_too_large",
+        "request_refused",
+        "unsupported",
+        "unsupported_field",
+    }
+)
+#: Paramètres Chat Completions / SDK CONNUS dont le nom peut apparaître dans le journal (liste fermée, noms publics des API OpenAI et du
+#: SDK OpenHands — jamais un nom choisi par le client). Sert à identifier ce qu'un client légitime envoie et que le courtier refuse.
+KNOWN_REFUSED_PARAMETERS = frozenset(
+    {
+        "audio",
+        "extra_body",
+        "extra_headers",
+        "frequency_penalty",
+        "function_call",
+        "functions",
+        "logit_bias",
+        "logprobs",
+        "metadata",
+        "modalities",
+        "parallel_tool_calls",
+        "prediction",
+        "presence_penalty",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning_effort",
+        "safety_identifier",
+        "service_tier",
+        "stream_options",
+        "store",
+        "thinking",
+        "top_k",
+        "top_logprobs",
+        "user",
+        "verbosity",
+        "web_search_options",
+    }
+)
+
+
+def safe_refusal_code(exc: BaseException) -> str:
+    code = getattr(exc, "code", "")
+    return code if code in LOGGABLE_REFUSAL_CODES else "autre"
+
+
+def refusal_log_fields(exc: BaseException) -> Tuple[list, int]:
+    """``(noms connus triés, nombre d'autres)`` : seuls les noms de ``KNOWN_REFUSED_PARAMETERS`` sont retenus, jamais ceux du client."""
+    names = tuple(getattr(exc, "fields", ()) or ())
+    known = sorted({name for name in names if name in KNOWN_REFUSED_PARAMETERS})
+    return known, len(set(names)) - len(known)
 
 
 def _utcnow() -> datetime:
@@ -286,13 +351,28 @@ class BrokerService:
                 ) from exc
         else:
             raw = bytes(body)
-        payload = parse_json_strict(raw, max_bytes=self.config.max_request_bytes)
-        return normalize_chat_request(
-            payload,
-            allowed_models=allowed,
-            default_output_tokens=min(self.config.default_output_tokens, cap),
-            max_output_tokens=cap,
-        )
+        try:
+            payload = parse_json_strict(raw, max_bytes=self.config.max_request_bytes)
+            return normalize_chat_request(
+                payload,
+                allowed_models=allowed,
+                default_output_tokens=min(self.config.default_output_tokens, cap),
+                max_output_tokens=cap,
+            )
+        except BrokerError as exc:
+            # Trace DIAGNOSTIQUE d'un refus AVANT toute tentative (rien n'est journalisé en base pour lui). Le journal ne recopie JAMAIS
+            # ce que le client a fourni : ni le texte de l'exception (noms de champs arbitraires, valeurs de rôle / modèle…), ni un
+            # identifiant, ni un contenu. Il ne porte que : un code d'une liste fermée, le statut, les noms de paramètres CONNUS (liste
+            # fermée, ex. ``reasoning_effort``) et le NOMBRE des autres. Le client, lui, reçoit toujours le refus explicite complet.
+            known, other = refusal_log_fields(exc)
+            logger.warning(
+                "courtier : requête refusée avant tentative code=%s statut=%s parametres_connus=%s autres_parametres=%d",
+                safe_refusal_code(exc),
+                int(getattr(exc, "status", 0) or 0),
+                ",".join(known) or "-",
+                other,
+            )
+            raise
 
     def _check_global_deadline(self, root_scope_key: str, now: datetime) -> None:
         deadline = self.store.clock_deadline(root_scope_key)

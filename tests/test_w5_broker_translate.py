@@ -327,3 +327,62 @@ def test_count_tokens_without_a_total_is_an_explicit_refusal_not_an_estimate():
     for bad in ({}, {"totalTokens": "12"}, {"totalTokens": -1}, {"totalTokens": True}, None, []):
         with pytest.raises(BrokerUnsupported):
             parse_count_tokens(bad)
+
+
+# ── métadonnée de transport inerte du SDK OpenHands 1.19.1 : ``prompt_cache_key`` (A31) ──────────────────────────────────────
+
+CONVERSATION_ID = (
+    "6f1c3a52-8c1e-4d5e-9a57-0d6c1f3b2a10"  # forme exacte : str(uuid) de la conversation (``_pin_prompt_cache_key``)
+)
+
+
+def test_the_sdk_prompt_cache_key_is_inert_and_changes_nothing_that_is_counted_or_emitted():
+    without = norm(temperature=0.2)
+    with_key = norm(temperature=0.2, prompt_cache_key=CONVERSATION_ID)
+    assert (
+        with_key.body == without.body and with_key.sha256 == without.sha256
+    )  # mêmes octets comptés / émis / empreinte
+    assert with_key.output_cap == without.output_cap and with_key.model == without.model
+    assert with_key.count_tokens_body() == without.count_tokens_body()
+    assert with_key.generate_body() == without.generate_body()
+    assert CONVERSATION_ID not in json.dumps([with_key.body, with_key.count_tokens_body(), with_key.generate_body()])
+    # aucun cache hébergé n'est activé : rien de ``cachedContent`` dans ce qui part chez Google
+    assert "cachedContent" not in json.dumps(with_key.generate_body())
+
+
+def test_the_inert_field_does_not_widen_the_policy_for_any_other_field():
+    for field, value in (
+        ("prompt_cache_retention", "24h"),  # cache hébergé facturable / de rétention : refusé
+        ("reasoning_effort", "high"),  # change la génération (raisonnement compté) : refusé
+        ("user", "u"),
+        ("store", False),
+        ("extra_body", {}),
+        ("safety_identifier", "x"),
+    ):
+        with pytest.raises(BrokerRequestRefused) as caught:
+            norm(prompt_cache_key=CONVERSATION_ID, **{field: value})
+        assert caught.value.code == "unsupported_field" and field in str(caught.value)
+        assert "prompt_cache_key" not in str(caught.value)  # seul le vrai champ inconnu est nommé
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", 7, True, ["a"], {"k": "v"}, "x" * 129, "a\nb", "a\x00b", "tab\there"],
+    ids=["null", "empty", "int", "bool", "list", "object", "too-long", "newline", "nul", "tab"],
+)
+def test_a_malformed_prompt_cache_key_is_refused_naming_the_field(value):
+    with pytest.raises(BrokerRequestRefused) as caught:
+        norm(prompt_cache_key=value)
+    assert caught.value.code == "invalid_parameter" and "prompt_cache_key" in str(caught.value)
+
+
+def test_the_inert_field_is_stripped_from_the_strict_json_path_too_and_duplicates_stay_refused():
+    raw = json.dumps(
+        {"model": "gemma-4-31b-it", "messages": [{"role": "user", "content": "x"}], "prompt_cache_key": "k1"}
+    )
+    nr = normalize_chat_request(parse_json_strict(raw.encode()), allowed_models=BOTH)
+    assert "k1" not in json.dumps(nr.body)
+    duplicate = b'{"model":"gemma-4-31b-it","messages":[{"role":"user","content":"x"}],"prompt_cache_key":"a","prompt_cache_key":"b"}'
+    with pytest.raises(BrokerRequestRefused) as caught:
+        parse_json_strict(duplicate)
+    assert caught.value.code == "duplicate_json_key"
