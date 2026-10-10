@@ -8,12 +8,14 @@ ici dans le nombre d'émissions du fournisseur. Aucun réseau, aucune clé.
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from types import SimpleNamespace
 
+import httpx
 import openai
 import pytest
-from w5_broker_fallback_contract import FALLBACK, PRIMARY, ModelGatedUpstream
+from w5_broker_fallback_contract import FALLBACK, PRIMARY, ModelGatedUpstream, _attempts
 from w5_broker_support import http_error
 
 from collegue.broker import BrokerConfig
@@ -35,14 +37,53 @@ def rig(tmp_path, monkeypatch):
     session = service.open_session(parent_scope_key=scope, parent_reservation_id=parent.reservation_id, role="coder")
     server = BrokerSocketServer(service, session.session_id, run_root=str(runtime.run_root)).start()
     yield SimpleNamespace(
-        upstream=upstream, ledger=ledger, scope=scope, session=session, server=server, monkeypatch=monkeypatch
+        upstream=upstream,
+        ledger=ledger,
+        scope=scope,
+        session=session,
+        server=server,
+        service=service,
+        monkeypatch=monkeypatch,
     )
     upstream.release.set()
     server.stop()
     install_runtime_for_tests(None)
 
 
-def run_runner(rig, *, client_timeout=20):
+class LoseTheResponseAfterEmission(httpx.BaseTransport):
+    """Le client abandonne SEULEMENT une fois l'émission observée côté fournisseur — jamais sur un délai fixe.
+
+    Un délai fixe court (0,5 s) mêlait « réponse perdue » et « le courtier n'a pas encore émis » : sous charge (GC d'un gros processus,
+    couverture), l'abandon pouvait précéder l'émission et le test constatait zéro émission (diagnostic A30). Ici l'attente de l'émission est
+    bornée largement (``patience``) mais jamais devinée ; l'état au moment de l'abandon est consigné pour être affirmé par le test.
+    """
+
+    def __init__(self, upstream, *, grace=0.2, patience=30.0):
+        self._upstream, self._grace, self._patience = upstream, grace, patience
+        self._inner = httpx.HTTPTransport()
+        self.emission_seen = False
+        self.at_abandon = None
+
+    def handle_request(self, request):
+        box = {}
+
+        def send():
+            try:
+                box["response"] = self._inner.handle_request(request)
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+        self.emission_seen = self._upstream.emitted_threadsafe.wait(self._patience)
+        sender.join(self._grace)  # la porte du fournisseur est fermée : aucune réponse ne doit venir
+        self.at_abandon = {"models": list(self._upstream.models), "gate_open": self._upstream.release.is_set()}
+        if "response" in box:  # ne devrait pas arriver : la réponse n'est pas perdue
+            return box["response"]
+        raise httpx.ReadTimeout("réponse perdue : le client abandonne après l'émission", request=request)
+
+
+def run_runner(rig, *, client_timeout=20, transport=None):
     from test_w4_routing_sdk import StrictLLM
 
     from collegue.executor import oh_runner
@@ -64,6 +105,7 @@ def run_runner(rig, *, client_timeout=20):
                 api_key=llm.api_key,
                 max_retries=llm.kwargs["num_retries"],  # ce que le SDK réel appliquerait
                 timeout=client_timeout,
+                http_client=None if transport is None else httpx.Client(transport=transport),
             )
             try:
                 client.chat.completions.create(
@@ -95,12 +137,32 @@ def run_runner(rig, *, client_timeout=20):
     return SimpleNamespace(code=code, llms=StrictLLM.instances, failures=failures)
 
 
-def test_the_sdk_never_retries_by_itself_and_a_lost_primary_response_is_not_followed_by_a_fallback(rig):
-    """Délai client dépassé pendant que le fournisseur traite encore : ni retry du SDK, ni repli — une seule émission."""
-    result = run_runner(rig, client_timeout=0.5)  # le fournisseur ne répond pas (porte fermée)
-    assert result.code == 4  # fin sans repli : la consommation du principal n'est pas connue
+@pytest.mark.parametrize("pre_emission_stall", [0.0, 0.8], ids=["no-stall", "stall-before-emission"])
+def test_the_sdk_never_retries_by_itself_and_a_lost_primary_response_is_not_followed_by_a_fallback(
+    rig, pre_emission_stall
+):
+    """Réponse perdue APRÈS émission : le primaire est émis, encore en vol quand le client abandonne, et il n'y a ni retry ni repli.
+
+    L'abandon est déclenché par l'émission observée (pas par un délai), et un ralentissement injecté avant l'émission (0,8 s, plus que
+    l'ancien délai fixe de 0,5 s) ne change pas le verdict.
+    """
+    rig.upstream.count_delay = pre_emission_stall
+    transport = LoseTheResponseAfterEmission(rig.upstream)
+    result = run_runner(rig, transport=transport)
+
+    # 1. la requête primaire a EFFECTIVEMENT été émise, et elle était encore en vol quand le client a abandonné
+    assert transport.emission_seen, (
+        "le client a abandonné sans que le primaire n'ait été émis : la preuve n'établit rien"
+    )
+    assert transport.at_abandon == {"models": [PRIMARY], "gate_open": False}
+    assert [a[:2] for a in _attempts(rig.service, rig.session)] == [
+        (PRIMARY, "emitting")
+    ]  # toujours en vol côté courtier
+    assert rig.ledger.snapshot(rig.session.scope_key).reserved_tokens > 0  # sa réserve est conservée
+    # 2. ni retry du SDK, ni repli : une seule émission, une seule instance LLM, fin du runner sans repli
+    assert result.code == 4
     assert [llm.kwargs["num_retries"] for llm in result.llms] == [0] and len(result.llms) == 1
-    assert rig.upstream.models == [PRIMARY]  # UNE émission : ni retry, ni 26B
+    assert rig.upstream.models == [PRIMARY]
     assert isinstance(result.failures[0], openai.APITimeoutError)
 
 
