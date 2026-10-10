@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import os
 import shutil
@@ -345,9 +346,56 @@ WORKER = """\
     print("WORKER_DONE")
 """
 
+#: Noms PUBLICS (API OpenAI / SDK OpenHands) dont un refus du courtier peut être rapporté : liste FERMÉE, miroir de ``collegue.broker.service.KNOWN_REFUSED_PARAMETERS``
+#: (test de dérive dans ``tests/test_w5_ci_general.py``). Un nom hors de cette liste n'est JAMAIS recopié : il est seulement compté.
+KNOWN_PUBLIC_PARAMETERS = frozenset(
+    {
+        "audio",
+        "extra_body",
+        "extra_headers",
+        "frequency_penalty",
+        "function_call",
+        "functions",
+        "logit_bias",
+        "logprobs",
+        "metadata",
+        "modalities",
+        "parallel_tool_calls",
+        "prediction",
+        "presence_penalty",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning_effort",
+        "safety_identifier",
+        "service_tier",
+        "stream_options",
+        "store",
+        "thinking",
+        "top_k",
+        "top_logprobs",
+        "user",
+        "verbosity",
+        "web_search_options",
+    }
+)
+
+
+def safe_refused_fields(message, known):
+    """``(noms connus triés, nombre d'autres)`` de la phrase fixe du courtier « champ(s) non pris en charge : [...] ». Rien d'autre du message n'est retenu :
+    ni le texte, ni un nom hors de la liste fermée ``known`` (seulement compté). Fonction autonome : son source est injecté dans le worker du conteneur."""
+    import re
+
+    found = re.search(r"champ\(s\) non pris en charge : \[([A-Za-z0-9_', ]{0,400})\]", str(message))
+    if not found:
+        return [], 0
+    names = set(re.findall(r"[A-Za-z0-9_]+", found.group(1)))
+    shown = sorted(name for name in names if name in known)
+    return shown, len(names) - len(shown)
+
+
 #: Worker du VRAI SDK OpenHands (``openhands.sdk.LLM``) : texte libre, sortie JSON structurée, repli et retries contrôlés, concurrence de connexions.
 #: Tout passe par le vrai relais et le vrai courtier ; les faits rapportés sont CONTRÔLÉS côté hôte contre le fournisseur simulé et le registre.
-SDK_WORKER = """\
+SDK_WORKER_TEMPLATE = """\
     import importlib.util, json, os, re, sys, threading, time
     from pydantic import SecretStr
     from openhands.sdk import LLM, Message, TextContent
@@ -359,8 +407,9 @@ SDK_WORKER = """\
     PRIMARY, FALLBACK = "gemma-4-31b-it", "gemma-4-26b-a4b-it"
 
     def make(model, **kw):
-        # Options EXPLICITES du runner du produit en mode courtier (oh_runner.run_with) : sans ``reasoning_effort=None`` le SDK émet son défaut
-        # (« high ») dans la requête, champ que le courtier REFUSE (il change la génération et l'usage) ; la limite de sortie est posée explicitement.
+        # Options EXPLICITES du runner du produit en mode courtier (oh_runner.run_with) : ``reasoning_effort=None`` et une limite de sortie. C'est un
+        # ALIGNEMENT sur le contrat de production, pas la preuve que le SDK émettrait ``reasoning_effort="high"`` pour chaque appel LiteLLM : l'effet
+        # réel est à établir par la CI (image, vrai SDK) ; un champ refusé restant est rapporté par son nom public (liste fermée), jamais recopié.
         return LLM(model=f"openai/{model}", base_url=base, api_key=SecretStr(token), usage_id="coder", reasoning_effort=None,
                    num_retries=kw.pop("num_retries", 0), timeout=kw.pop("timeout", 60), max_output_tokens=64, **kw)
 
@@ -369,18 +418,19 @@ SDK_WORKER = """\
         blocks = getattr(response.message, "content", None) or []
         return "".join(getattr(block, "text", "") or "" for block in blocks)
 
-    # Diagnostic SÛR d'un refus du courtier : SEULS les NOMS de champs de la phrase fixe « champ(s) non pris en charge : [...] » (jamais un contenu, un
-    # jeton ni le reste du message) ; aucun appel supplémentaire.
-    REFUSED = re.compile(r"champ\(s\) non pris en charge : \[([A-Za-z0-9_', ]{0,200})\]")
+    KNOWN = frozenset(__KNOWN_PARAMETERS__)
+    __SAFE_REFUSED_FIELDS__
 
     def attempt(label, fn):
         try:
             facts[label] = {"ok": True, "text": fn()}
-        except BaseException as exc:  # noqa: BLE001 - on rapporte la classe (et les noms de champs refusés) seulement, jamais le message
+        except BaseException as exc:  # noqa: BLE001 - on rapporte la classe, les noms PUBLICS connus refusés et un compte : jamais le message
             entry = {"ok": False, "error": type(exc).__name__}
-            found = REFUSED.search(str(exc))
-            if found:
-                entry["refused_fields"] = sorted(set(re.findall(r"[A-Za-z0-9_]+", found.group(1))))
+            shown, others = safe_refused_fields(str(exc), KNOWN)
+            if shown:
+                entry["refused_fields"] = shown
+            if others:
+                entry["other_refused_field_count"] = others
             facts[label] = entry
 
     facts = {}
@@ -404,6 +454,10 @@ SDK_WORKER = """\
         holder.join(timeout=20)
     print("SDK_FACTS=" + json.dumps(facts))
 """
+
+SDK_WORKER = SDK_WORKER_TEMPLATE.replace("__KNOWN_PARAMETERS__", repr(sorted(KNOWN_PUBLIC_PARAMETERS))).replace(
+    "    __SAFE_REFUSED_FIELDS__\n", textwrap.indent(inspect.getsource(safe_refused_fields), "    ") + "\n"
+)
 
 #: Code HOSTILE exécuté dans le conteneur : il appelle le socket du courtier avec ce qu'il veut, sans passer par le SDK, puis sonde son isolation.
 HOSTILE = """\

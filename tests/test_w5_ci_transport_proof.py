@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "ci_w5_broker_transport.py"
+MARKER_FIELD = "zz_synthetic_marker_field_not_a_public_name"  # nom factice hors de toute liste publique : ne doit JAMAIS être recopié
 
 
 @pytest.fixture(scope="module")
@@ -145,11 +146,16 @@ class FakeSdk(types.ModuleType):
                     token = "autre"
                 payload = {"model": self.kwargs["model"].split("/", 1)[1], "messages": [{"role": "user"}]}
                 if "reasoning_effort" not in self.kwargs:
-                    payload["reasoning_effort"] = (
-                        "high"  # défaut supposé du SDK réel quand l'option n'est pas posée explicitement
+                    # HYPOTHÈSE de test (non prouvée pour tous les appels LiteLLM) : le défaut du SDK serait émis si l'option n'est pas posée
+                    payload["reasoning_effort"] = "high"
+                if behaviour == "cache-key":
+                    payload["prompt_cache_key"] = (
+                        "uuid-de-conversation"  # métadonnée de transport du SDK : acceptée, inerte, retirée par le courtier
                     )
-                if behaviour == "extra-field":
-                    payload["prompt_cache_key"] = "uuid-de-conversation"
+                if behaviour == "unsupported-field":
+                    payload["prompt_cache_retention"] = "24h"  # champ public NON supporté : le courtier le refuserait
+                if behaviour == "unknown-field":
+                    payload[MARKER_FIELD] = "valeur-secrete-synthetique"
                 body = json.dumps(payload)
                 conn.request(
                     "POST",
@@ -254,12 +260,19 @@ def test_the_whole_proof_passes_with_a_healthy_relay_and_fails_for_each_fault(pr
         "aucun champ au-delà de ce que le courtier accepte : le script pose reasoning_effort=None comme le runner du produit"
     )
 
-    fake_sdk("extra-field")
+    fake_sdk("cache-key")  # témoin POSITIF : le même SDK avec sa clé de cache inerte est accepté par le courtier
+    cached = proof.run_checks(write_relay(tmp_path), None)
+    assert cached["failures"] == [], cached
+    assert cached["sdk"]["request_fields"] == ["messages", "model", "prompt_cache_key"]
+
+    fake_sdk("unsupported-field")  # témoin ROUGE : un champ public NON supporté reste refusé et nommé
     refused = proof.run_checks(write_relay(tmp_path), None)["failures"]
-    assert any("prompt_cache_key" in m and "refuserait" in m for m in refused), (
-        refused
-    )  # NOMS de champs seulement, jamais de contenu
-    assert not any("uuid-de-conversation" in m for m in refused)
+    assert any("prompt_cache_retention" in m and "refuserait" in m for m in refused), refused
+
+    fake_sdk("unknown-field")  # nom inconnu arbitraire : compté, JAMAIS recopié (ni dans l'échec, ni dans le rapport)
+    unknown = proof.run_checks(write_relay(tmp_path), None)
+    assert any("autres champs" in m and ": 1" in m for m in unknown["failures"]), unknown["failures"]
+    assert MARKER_FIELD not in json.dumps(unknown, default=str) and unknown["sdk"]["unknown_field_count"] == 1
 
     fake_sdk("bad-token")
     assert any(
@@ -341,18 +354,24 @@ def test_the_image_contents_check_refuses_the_legacy_web_application_and_jose(pr
 
 
 def test_the_unaccepted_fields_helper_names_only_what_the_broker_would_refuse(proof):
-    assert proof.unaccepted_fields(["model", "messages", "max_completion_tokens"]) == []
-    assert proof.unaccepted_fields(["model", "reasoning_effort", "prompt_cache_key", "messages"]) == [
-        "prompt_cache_key",
+    assert proof.unaccepted_fields(["model", "messages", "max_completion_tokens", "prompt_cache_key"]) == []
+    assert proof.unaccepted_fields(
+        ["model", "reasoning_effort", "prompt_cache_retention", "prompt_cache_key", "messages"]
+    ) == [
+        "prompt_cache_retention",
         "reasoning_effort",
     ]
 
 
 def test_the_accepted_field_set_of_the_script_is_exactly_the_one_of_the_real_broker_translation(proof):
-    """Le script tourne dans l'image sans le produit : son miroir de la liste blanche du courtier ne doit jamais dériver du code réel."""
-    from collegue.broker import translate
+    """Le script tourne dans l'image sans le produit : ses miroirs de la liste blanche et de la liste fermée des noms publics ne doivent jamais dériver."""
+    from collegue.broker import service, translate
 
-    real = set(translate._ALLOWED_TOP_LEVEL) | set(getattr(translate, "INERT_TRANSPORT_FIELDS", ()))
+    real = set(translate._ALLOWED_TOP_LEVEL) | set(translate.INERT_TRANSPORT_FIELDS)
+    assert "prompt_cache_key" in real, "la métadonnée de transport du SDK est acceptée puis retirée par le courtier"
+    assert set(proof.KNOWN_PUBLIC_PARAMETERS) == set(service.KNOWN_REFUSED_PARAMETERS), (
+        "miroir de collegue.broker.service.KNOWN_REFUSED_PARAMETERS"
+    )
     assert set(proof.BROKER_ACCEPTED_FIELDS) == real, (
         sorted(set(proof.BROKER_ACCEPTED_FIELDS) ^ real),
         "mettre à jour BROKER_ACCEPTED_FIELDS (scripts/ci_w5_broker_transport.py) avec la liste blanche du courtier",

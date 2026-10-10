@@ -397,7 +397,7 @@ def test_the_sdk_workers_of_the_proofs_use_the_explicit_llm_options_of_the_produ
     )
     assert 'common["reasoning_effort"] = None' in broker_block
     harness = (ROOT / "tests" / "w5_integration_harness.py").read_text(encoding="utf-8")
-    sdk_worker = harness.split("SDK_WORKER = ", 1)[1].split('"""', 2)[1]
+    sdk_worker = harness.split("SDK_WORKER_TEMPLATE = ", 1)[1].split('"""', 2)[1]
     code = "\n".join(
         line.split("#", 1)[0] for line in sdk_worker.splitlines()
     )  # hors commentaires : l'option doit être dans l'appel LLM(...)
@@ -410,3 +410,27 @@ def test_the_sdk_workers_of_the_proofs_use_the_explicit_llm_options_of_the_produ
         keywords = {k.arg: k.value for k in call.keywords}
         assert {"reasoning_effort", "max_output_tokens"} <= set(keywords)
         assert isinstance(keywords["reasoning_effort"], ast.Constant) and keywords["reasoning_effort"].value is None
+
+
+def test_the_sdk_worker_reports_only_closed_list_public_field_names_and_counts_the_others():
+    """Le diagnostic d'un refus du courtier ne recopie JAMAIS un nom arbitraire ni le message : noms publics connus + un compte."""
+    import ast
+    import textwrap
+
+    from w5_integration_harness import KNOWN_PUBLIC_PARAMETERS, SDK_WORKER, safe_refused_fields
+
+    from collegue.broker import service
+
+    assert set(KNOWN_PUBLIC_PARAMETERS) == set(service.KNOWN_REFUSED_PARAMETERS), (
+        "miroir de la liste fermée du service du courtier"
+    )
+    marker = "zz_synthetic_marker_field_not_a_public_name"
+    message = f"Erreur champ(s) non pris en charge : ['reasoning_effort', '{marker}', 'prompt_cache_retention'] (aucun paramètre) secret-synthetique"
+    shown, others = safe_refused_fields(message, KNOWN_PUBLIC_PARAMETERS)
+    assert shown == ["prompt_cache_retention", "reasoning_effort"] and others == 1
+    assert marker not in repr((shown, others)) and "secret" not in repr((shown, others))
+    assert safe_refused_fields("autre erreur sans la phrase du courtier", KNOWN_PUBLIC_PARAMETERS) == ([], 0)
+    source = textwrap.dedent(SDK_WORKER)
+    ast.parse(source)  # le worker injecté est un programme valide, sans espace réservé résiduel
+    assert "__KNOWN_PARAMETERS__" not in source and "__SAFE_REFUSED_FIELDS__" not in source
+    assert "def safe_refused_fields(" in source and "REFUSED = re.compile" not in source

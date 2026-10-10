@@ -116,9 +116,12 @@ class FakeBroker:
                     return
                 record["model"] = body.get("model")
                 record["messages"] = len(body.get("messages") or [])
-                record["fields"] = (
-                    sorted(str(key) for key in body) if isinstance(body, dict) else []
-                )  # NOMS seulement, jamais de contenu
+                # NOMS de champs seulement, jamais de contenu : les noms PUBLICS connus (listes fermées plus bas) sont gardés, tout autre nom est
+                # COMPTÉ, jamais recopié.
+                names = {str(key) for key in body} if isinstance(body, dict) else set()
+                shown = names & (BROKER_ACCEPTED_FIELDS | KNOWN_PUBLIC_PARAMETERS)
+                record["fields"] = sorted(shown)
+                record["unknown_field_count"] = len(names) - len(shown)
                 self._send(
                     200,
                     {
@@ -214,8 +217,9 @@ def message_text(response: Any) -> str:
     return "".join(str(getattr(block, "text", "") or "") for block in (content or []))
 
 
-#: Champs de premier niveau que le courtier accepte (miroir de ``collegue.broker.translate._ALLOWED_TOP_LEVEL``, plus ses champs inertes) : le script
-#: tourne dans l'image, où le produit n'est pas installé ; ``tests/test_w5_ci_transport_proof.py`` garde l'égalité des deux ensembles.
+#: Champs de premier niveau que le courtier accepte (miroir de ``collegue.broker.translate._ALLOWED_TOP_LEVEL`` plus ``INERT_TRANSPORT_FIELDS`` : le
+#: ``prompt_cache_key`` du SDK est une métadonnée de transport VALIDÉE puis RETIRÉE par le courtier) : le script tourne dans l'image, où le produit n'est
+#: pas installé ; ``tests/test_w5_ci_transport_proof.py`` garde l'égalité des ensembles.
 BROKER_ACCEPTED_FIELDS = frozenset(
     {
         "model",
@@ -232,12 +236,46 @@ BROKER_ACCEPTED_FIELDS = frozenset(
         "stream",
         "seed",
         "parallel_tool_calls",
+        "prompt_cache_key",
+    }
+)
+
+#: Noms PUBLICS (API OpenAI / SDK OpenHands) que le diagnostic peut citer : liste FERMÉE, miroir de ``collegue.broker.service.KNOWN_REFUSED_PARAMETERS``
+#: (test de dérive). Un nom hors de ces deux listes n'est jamais recopié dans un message ni dans le rapport : il est seulement compté.
+KNOWN_PUBLIC_PARAMETERS = frozenset(
+    {
+        "audio",
+        "extra_body",
+        "extra_headers",
+        "frequency_penalty",
+        "function_call",
+        "functions",
+        "logit_bias",
+        "logprobs",
+        "metadata",
+        "modalities",
+        "parallel_tool_calls",
+        "prediction",
+        "presence_penalty",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning_effort",
+        "safety_identifier",
+        "service_tier",
+        "stream_options",
+        "store",
+        "thinking",
+        "top_k",
+        "top_logprobs",
+        "user",
+        "verbosity",
+        "web_search_options",
     }
 )
 
 
 def unaccepted_fields(fields: Any) -> List[str]:
-    """Noms de champs d'une requête que le courtier ne reconnaît pas (liste vide = tous acceptés)."""
+    """Noms (déjà filtrés par liste fermée) de champs d'une requête que le courtier ne reconnaît pas (liste vide = tous acceptés)."""
     return sorted(str(name) for name in fields if name not in BROKER_ACCEPTED_FIELDS)
 
 
@@ -256,7 +294,7 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
         num_retries=0,
         timeout=30,
         max_output_tokens=64,
-        reasoning_effort=None,
+        reasoning_effort=None,  # alignement sur le runner du produit ; l'effet réel du défaut du SDK est à établir par cette preuve en CI
     )
     before = len(broker.requests)
     response = llm.completion(
@@ -271,9 +309,11 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
     )
     failures.check(MODEL in str(request.get("model")), f"modèle transmis inattendu : {request.get('model')!r}")
     refused = unaccepted_fields(request.get("fields") or [])
+    others = int(request.get("unknown_field_count") or 0)
     failures.check(
-        not refused,
-        f"champ(s) de la requête du SDK que le courtier refuserait (noms seulement) : {refused} ; vus : {request.get('fields')}",
+        not refused and not others,
+        f"champ(s) de la requête du SDK que le courtier refuserait : noms publics {refused}, autres champs (noms non recopiés) : {others} ; "
+        f"vus : {request.get('fields')}",
     )
     failures.check(
         message_text(response) == ANSWER, f"réponse du courtier non relue par le SDK : {message_text(response)!r}"
@@ -287,6 +327,7 @@ def check_sdk_through_relay(port: int, broker: FakeBroker, failures: Failures) -
     return {
         "requests": seen,
         "request_fields": request.get("fields"),
+        "unknown_field_count": request.get("unknown_field_count", 0),
         "usage": [prompt, completion],
         "usage_id": getattr(llm, "usage_id", None),
     }
