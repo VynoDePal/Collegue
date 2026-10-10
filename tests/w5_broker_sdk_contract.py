@@ -15,7 +15,7 @@ from w5_broker_contract import chat, open_worker, service_for
 from w5_broker_fallback_contract import _attempts
 from w5_broker_support import FakeUpstream, chat_request
 
-from collegue.broker import BrokerRequestRefused
+from collegue.broker import BrokerError, BrokerRequestRefused
 
 CONVERSATION_ID = "6f1c3a52-8c1e-4d5e-9a57-0d6c1f3b2a10"
 
@@ -96,3 +96,84 @@ async def test_every_other_unknown_field_stays_refused_and_the_refusal_names_it_
     logged = " ".join(record.getMessage() for record in caplog.records)
     assert "unsupported_field" in logged and field in logged  # cause lisible même si le client n'affiche que la classe
     assert CONVERSATION_ID not in logged
+
+
+# ── le diagnostic de refus ne recopie JAMAIS ce que le client a fourni (revue A31) ──────────────────────────────────────────
+
+MARKER = "FAKE_PRIVATE_CONTENT_739a"
+
+
+def _payload_with_marker(where):
+    body = chat_request()
+    if where == "unknown_field_name":
+        body[MARKER] = "x"
+    elif where == "role_value":
+        body["messages"][0]["role"] = MARKER
+    elif where == "model_value":
+        body["model"] = MARKER
+    elif where == "tool_name":
+        body["tools"] = [{"type": "function", "function": {"name": MARKER, "parameters": 7}}]
+    elif where == "response_format":
+        body["response_format"] = {"type": MARKER}
+    elif where == "message_key":
+        body["messages"][0][MARKER] = "x"
+    elif where == "content_part":
+        body["messages"][0]["content"] = [{"type": MARKER, "text": "x"}]
+    elif where == "stop":
+        body["stop"] = [MARKER, 7]
+    return body
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "unknown_field_name",
+        "role_value",
+        "model_value",
+        "tool_name",
+        "response_format",
+        "message_key",
+        "content_part",
+        "stop",
+    ],
+)
+async def test_the_pre_attempt_diagnostic_never_copies_what_the_client_supplied(manager, caplog, where):
+    upstream = FakeUpstream()
+    service, _, ledger, scope, rid = service_for(manager, upstream)
+    worker = open_worker(service, scope, rid)
+    with caplog.at_level(logging.DEBUG):  # TOUS les niveaux, TOUS les journaux
+        with pytest.raises(BrokerError) as caught:
+            await chat(service, worker, _payload_with_marker(where))
+    assert upstream.count_calls == [] and upstream.generate_calls == [] and _attempts(service, worker) == []
+    assert MARKER not in caplog.text, f"contenu client recopié dans le journal ({where})"
+    assert "requête refusée avant tentative" in caplog.text  # le diagnostic existe, sans le contenu
+    # le refus explicite reste complet CÔTÉ CLIENT : la raison (champ nommé) n'est pas perdue pour lui
+    if where == "unknown_field_name":
+        assert MARKER in str(caught.value) and caught.value.code == "unsupported_field"
+
+
+async def test_the_diagnostic_identifies_known_sdk_parameters_by_name_and_counts_the_others(manager, caplog):
+    service, upstream, ledger, scope, rid = service_for(manager, FakeUpstream())
+    worker = open_worker(service, scope, rid)
+    body = chat_request(reasoning_effort="high", prompt_cache_retention="24h")
+    body[MARKER] = 1
+    body["autre_inconnu"] = 2
+    with caplog.at_level(logging.WARNING, logger="collegue.broker.service"):
+        with pytest.raises(BrokerRequestRefused):
+            await chat(service, worker, body)
+    line = next(r.getMessage() for r in caplog.records if "refusée avant tentative" in r.getMessage())
+    assert "code=unsupported_field" in line and "statut=400" in line
+    assert "parametres_connus=prompt_cache_retention,reasoning_effort" in line and "autres_parametres=2" in line
+    assert MARKER not in line and "autre_inconnu" not in line
+
+
+async def test_a_duplicate_key_in_the_raw_body_does_not_copy_the_key_either(manager, caplog):
+    service, upstream, ledger, scope, rid = service_for(manager, FakeUpstream())
+    worker = open_worker(service, scope, rid)
+    raw = (
+        '{"model":"gemma-4-31b-it","messages":[{"role":"user","content":"x"}],"%s":1,"%s":2}' % (MARKER, MARKER)
+    ).encode()
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(BrokerRequestRefused):
+            await chat(service, worker, raw)
+    assert MARKER not in caplog.text and "code=duplicate_json_key" in caplog.text

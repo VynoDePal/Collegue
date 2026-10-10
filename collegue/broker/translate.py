@@ -391,6 +391,7 @@ def normalize_chat_request(
         raise BrokerRequestRefused(
             f"champ(s) non pris en charge : {unknown} (aucun paramètre n'est transféré librement)",
             code="unsupported_field",
+            fields=unknown,
         )
     requested = payload.get("model")
     try:

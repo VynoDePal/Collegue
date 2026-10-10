@@ -7,7 +7,7 @@ n'est jamais réduite (min/clamp) ni présentée comme un succès.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 
 class BrokerError(Exception):
@@ -17,12 +17,24 @@ class BrokerError(Exception):
     status = 500
     retryable = False
 
-    def __init__(self, message: str, *, code: Optional[str] = None, status: Optional[int] = None):
+    #: Noms de champs (fournis par le CLIENT) à l'origine d'un refus : pour le message renvoyé au client UNIQUEMENT. Un journal ne doit
+    #: jamais les recopier tels quels ; il ne retient que ceux d'une liste fermée (voir ``service.KNOWN_REFUSED_PARAMETERS``).
+    fields: tuple = ()
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: Optional[str] = None,
+        status: Optional[int] = None,
+        fields: Sequence[str] = (),
+    ):
         super().__init__(message)
         if code is not None:
             self.code = code
         if status is not None:
             self.status = status
+        self.fields = tuple(str(name) for name in fields)
 
     def to_openai_error(self) -> dict:
         """Corps d'erreur au format OpenAI (compatible clients/SDK) ; le message ne contient jamais de secret."""
