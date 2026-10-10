@@ -29,7 +29,13 @@ from collegue.executor.agent import IssueSpec
 from collegue.executor.openhands_sdk_agent import OHSdkAgent
 from collegue.executor.runner import _run_agent_under_budget
 from collegue.executor.worker_budget import allocate_worker
-from collegue.sandbox.executor import DEADLINE_HOST_MARGIN, DockerSandbox, SandboxRefused
+from collegue.sandbox.executor import (
+    DEADLINE_HOST_MARGIN,
+    DEADLINE_OUTER_MARGIN,
+    TIMEOUT_EXIT_CODE,
+    DockerSandbox,
+    SandboxRefused,
+)
 from collegue.state import BudgetRefused, ProjectStateManager
 
 REPO = Path(__file__).resolve().parents[1]
@@ -37,7 +43,8 @@ REPO = Path(__file__).resolve().parents[1]
 FAKE_DOCKER = textwrap.dedent(
     """\
     #!{python}
-    import json, os, subprocess, sys, time
+    import ctypes, json, os, subprocess, sys, time
+    ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)   # PR_SET_CHILD_SUBREAPER : les orphelins du "conteneur" nous reviennent
     argv = sys.argv[1:]
     log = os.environ["FAKE_DOCKER_LOG"]
     def record(entry):
@@ -89,13 +96,58 @@ FAKE_DOCKER = textwrap.dedent(
     proc = subprocess.Popen(inner, env=child_env, cwd=cwd, start_new_session=True)
     with open(log + "." + name, "w") as handle:
         handle.write(str(proc.pid))
-    sys.exit(proc.wait())
+    raw = proc.wait()
+    # Démontage du PID namespace d'un conteneur : quand son PID 1 meurt, le noyau tue TOUT ce qui reste. On l'émule (sous-réaperçeur) et on
+    # COMPTE les survivants : un worker encore vivant à ce moment-là n'a pas été arrêté par la supervision du produit, seulement par ce démontage.
+    def descendants():
+        me, table = os.getpid(), {{}}
+        for entry in os.listdir("/proc"):
+            if entry.isdigit():
+                try:
+                    table[int(entry)] = int(open("/proc/" + entry + "/stat").read().rsplit(")", 1)[1].split()[1])
+                except (OSError, IndexError, ValueError):
+                    pass
+        found, frontier = set(), {{me}}
+        while frontier:
+            frontier = {{pid for pid, parent in table.items() if parent in frontier and pid not in found}}
+            found |= frontier
+        return found
+    def alive(pid):
+        try:
+            return open("/proc/" + str(pid) + "/stat").read().rsplit(")", 1)[1].split()[0] != "Z"   # un zombie est MORT (non réaperçu)
+        except (OSError, IndexError):
+            return False
+    survivors, survivor_commands = 0, []
+    for _ in range(20):
+        pids = descendants()
+        if not pids:
+            break
+        for pid in pids:
+            if alive(pid):
+                survivors += 1
+                try:
+                    survivor_commands.append(open("/proc/" + str(pid) + "/cmdline").read().replace("\\0", " ")[:120])
+                except OSError:
+                    pass
+            try:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            except (OSError, ChildProcessError):
+                pass
+    # Comme Docker (et un shell) : un processus mort du signal N rend 128+N. ``sys.exit(-9)`` rendrait 247, un code que le VRAI Docker
+    # ne produit pas : avec le ``timeout`` de GNU coreutils (CI), le conteneur est tué par SIGKILL et ``docker run`` rend 137.
+    code = raw if raw >= 0 else 128 - raw
+    with open(log + ".exits", "a") as handle:
+        handle.write(json.dumps({{"name": name, "raw": raw, "code": code, "survivors": survivors, "survivor_commands": survivor_commands, "at": time.time()}}) + "\\n")
+    sys.exit(code)
     """
 )
 
 WORKER = textwrap.dedent(
     """\
     import importlib.util, os, sys, time
+    with open(os.environ["W5_PIDFILE"], "w") as _pid:
+        _pid.write(str(os.getpid()))   # preuve d'ABSENCE de processus orphelin : ce pid ne doit plus exister après l'arrêt
     import openai
     spec = importlib.util.spec_from_file_location("oh_broker_relay", os.environ["W5_RELAY_PATH"])
     relay = importlib.util.module_from_spec(spec); spec.loader.exec_module(relay)
@@ -166,6 +218,7 @@ class Rig:
             env={
                 "W5_BEHAVIOUR": behaviour,
                 "W5_HEARTBEAT": str(self.heartbeat),
+                "W5_PIDFILE": str(tmp_path / "worker.pid"),
                 "W5_RELAY_PATH": str(REPO / "collegue" / "executor" / "oh_broker_relay.py"),
             },
         )
@@ -199,15 +252,24 @@ class Rig:
     def last_heartbeat(self):
         return float(self.heartbeat.read_text()) if self.heartbeat.exists() and self.heartbeat.read_text() else None
 
+    def docker_exits(self):
+        """Fin observée de chaque conteneur simulé : code BRUT du processus (négatif = signal) et code rendu comme Docker."""
+        path = self.log.with_name(self.log.name + ".exits")
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def worker_pid(self):
+        path = self.log.with_name("worker.pid")
+        return int(path.read_text()) if path.exists() and path.read_text() else None
+
     def docker_calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
 
 def timeout_seconds_of(call) -> int:
-    """Délai imposé au processus interne : KILL (jamais TERM, qu'un worker peut ignorer) et AUCUN délai de grâce ``--kill-after``."""
+    """Plafond hôte du ``timeout`` EXTERNE (hors marge de filet) : KILL (jamais TERM, qu'un worker peut ignorer), AUCUN ``--kill-after``."""
     inner = call["inner"]
     assert inner[:2] == ["timeout", "--signal=KILL"] and not any(a.startswith("--kill-after") for a in inner[:3])
-    return int(inner[2])
+    return int(inner[2]) - DEADLINE_OUTER_MARGIN
 
 
 def test_the_worker_process_is_stopped_at_the_persisted_deadline_even_when_it_sleeps_after_its_last_call(
@@ -217,15 +279,35 @@ def test_the_worker_process_is_stopped_at_the_persisted_deadline_even_when_it_sl
     rig.service.open_clock(rig.scope)  # le temps global a commencé AVANT ce run (planification / canaris)
     persisted = rig.service.persisted_deadline(rig.scope)
 
+    emissions = []
+    rig.upstream.on_generate = lambda: emissions.append(time.time())
+
     started = time.monotonic()
     result = rig.run(window=3600)  # fenêtre locale d'un nouveau run : une heure
     elapsed = time.monotonic() - started
 
     (call,) = rig.docker_calls()
     assert 1 <= timeout_seconds_of(call) <= 3  # délai du conteneur ≤ échéance persistée, pas 3600
-    assert (
-        elapsed < 20 and not result.success
-    )  # le processus a été ARRÊTÉ (il dormait 120 s) : exit 124 / délai dépassé
+    assert elapsed < 20 and not result.success  # le processus a été ARRÊTÉ (il dormait 120 s)
+    # Observations DÉCISIVES de l'arrêt, indépendantes du texte du diagnostic :
+    # 1. fin du conteneur bornée par l'échéance PERSISTÉE (pas par la fenêtre de 3600 s), mesurée à la supervision du processus
+    (finished,) = rig.docker_exits()
+    assert finished["at"] <= persisted.timestamp() + SCHEDULING_TOLERANCE, (
+        "le worker a vécu au-delà de l'échéance persistée"
+    )
+    # 2. il a été TUÉ à l'échéance (convention du sandbox : 124 du timeout, ou 137 = SIGKILL selon l'implémentation de timeout),
+    #    et NON terminé de lui-même (il dormait 120 s)
+    assert finished["code"] in (TIMEOUT_EXIT_CODE, 137), finished
+    # 3. aucun processus orphelin : la supervision du produit a elle-même tué le worker (aucun survivant au démontage du conteneur)
+    #    et son pid n'existe plus
+    assert finished["survivors"] == 0, "le worker a survécu à l'arrêt : seul le démontage du conteneur l'aurait tué"
+    pid = rig.worker_pid()
+    assert pid is not None
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    # 4. aucune émission après l'échéance (une seule, avant)
+    assert len(emissions) == 1 and emissions[0] <= persisted.timestamp()
+    # 5. la raison de l'arrêt reste lisible dans le rapport (note du sandbox sur code 124/137)
     assert "délai dépassé" in result.logs
     assert datetime.now(timezone.utc) >= persisted - timedelta(seconds=1)
     # l'appel fait avant l'arrêt est réglé UNE fois ; la session est close et consolidée ; rien n'est resté réservé
@@ -419,12 +501,14 @@ def test_a_worker_ignoring_term_is_dead_at_the_deadline_with_no_grace(manager, t
 def test_a_slow_docker_start_does_not_extend_the_worker_life_beyond_the_deadline(manager, tmp_path, monkeypatch):
     """L'échéance ABSOLUE est portée dans le conteneur : un démarrage tardif réduit le temps de travail, il ne le décale pas."""
     monkeypatch.setenv("FAKE_DOCKER_START_DELAY", "2.5")  # le conteneur démarre 2,5 s APRÈS la décision de lancement
-    rig = Rig(manager, tmp_path, monkeypatch, behaviour="stubborn_heartbeat", deadline=5)
+    rig = Rig(manager, tmp_path, monkeypatch, behaviour="stubborn_heartbeat", deadline=6)
     rig.service.open_clock(rig.scope)
     deadline = rig.service.persisted_deadline(rig.scope).timestamp()
     rig.run(window=7200)
     beat = rig.last_heartbeat()
-    assert beat is not None  # il restait ~2 s : le worker a bien travaillé
+    assert (
+        beat is not None
+    )  # il restait ~3 s (la garde en réserve 1 : voir DEADLINE_GUARD_SCRIPT) : le worker a bien travaillé
     # un délai relatif figé avant le démarrage l'aurait laissé vivre jusqu'à ~ échéance + 2,5 s
     assert beat <= deadline + SCHEDULING_TOLERANCE, f"vie après échéance : {beat - deadline:.2f}s"
 

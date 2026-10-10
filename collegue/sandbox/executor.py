@@ -102,11 +102,17 @@ SELF_LIMIT_HOST_MARGIN = 30
 # hôte (kill du conteneur par nom) ne tolère que cette marge d'ordonnancement/démarrage, jamais le délai de grâce ci-dessus.
 DEADLINE_HOST_MARGIN = 2.0
 # Garde exécutée DANS le conteneur au démarrage effectif du travail : l'échéance ABSOLUE (epoch, secondes entières par défaut) y est relue
-# avec l'horloge du conteneur (même noyau que l'hôte). Échéance atteinte ⇒ rien n'est exécuté (code 124) ; sinon le travail est lancé
-# sous ``timeout --signal=KILL <reste>``. Un démon qui démarre le conteneur en retard ne peut donc pas faire travailler après l'échéance.
+# avec l'horloge du conteneur (même noyau que l'hôte). Reste = ``échéance − maintenant − 1`` (``date +%s`` tronque l'heure courante : sans ce
+# « −1 », le travail pourrait finir jusqu'à 1 s APRÈS l'échéance ; avec lui, l'arrêt tombe dans ``[échéance_entière − 1 s, échéance_entière[`` —
+# jamais en retard, au prix de ≤ 1 s de travail utile). Reste < 1 s ⇒ rien n'est exécuté (code 124) ; sinon le travail est lancé sous
+# ``timeout --signal=KILL <reste>``. Un démon qui démarre le conteneur en retard ne peut donc pas faire travailler après l'échéance.
 DEADLINE_GUARD_SCRIPT = (
-    'r=$(( $1 - $(date +%s) )) || exit 124; [ "$r" -ge 1 ] || exit 124; shift; exec timeout --signal=KILL "$r" "$@"'
+    'r=$(( $1 - $(date +%s) - 1 )) || exit 124; [ "$r" -ge 1 ] || exit 124; shift; exec timeout --signal=KILL "$r" "$@"'
 )
+# Le ``timeout`` EXTERNE (plafond calculé par l'hôte) n'est qu'un filet : il ne doit JAMAIS précéder la garde interne. Sinon (GNU coreutils,
+# CI) il tuerait seulement le ``timeout`` interne — chacun crée son propre groupe de processus — et laisserait le worker orphelin (ce que le
+# démontage du PID namespace de Docker rattrape, pas un conteneur réel sans ce filet), avec un arrêt jusqu'à 1 s trop tôt. Marge en secondes :
+DEADLINE_OUTER_MARGIN = 2
 
 # Préfixe de la note ajoutée à stderr quand le conteneur est tué au timeout —
 # consommé par le moteur (#461 : classification infra ; #464 : usage perdu).
@@ -659,7 +665,9 @@ class DockerSandbox:
                     guarded = [
                         "timeout",
                         "--signal=KILL",
-                        str(max(ceiling, 1)),  # plafond hôte (filet) ; la borne ABSOLUE est celle de la garde interne
+                        str(
+                            max(ceiling, 1) + DEADLINE_OUTER_MARGIN
+                        ),  # filet : ne précède jamais la garde interne (voir plus haut)
                         "sh",
                         "-c",
                         DEADLINE_GUARD_SCRIPT,

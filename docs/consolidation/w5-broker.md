@@ -253,3 +253,24 @@ l'émission et sa réserve est libérée).
 moins d'une seconde ; il n'est pas vrai qu'il ne puisse « jamais gagner » du temps. Mesure (12 exécutions, faux docker + vrai `DockerSandbox`, worker qui ignore TERM, dernier battement −
 échéance) : sans retard de démarrage −1,00 s à −0,97 s ; démarrage retardé de 2,5 s −0,50 s à +0,50 s (`evidence/w5-a29-guard-measure.json`). Critère retenu, étroit et explicite :
 `SCHEDULING_TOLERANCE = 1,0 s` dans les tests (le filet hôte à `+DEADLINE_HOST_MARGIN` = 2 s ne couvre que le conteneur qui ne démarre pas). Hypothèse non vérifiée ici : horloge du conteneur = horloge de l'hôte.
+
+## Arrêt à l'échéance : course entre les deux `timeout`, précision réelle, journal (A32)
+
+**Course (cause du rouge distant sur Python 3.11 ET 3.12).** La commande sous échéance imbrique deux `timeout` : l'EXTERNE (plafond calculé par l'hôte au
+montage de l'argv) et l'INTERNE (reste calculé par la garde au démarrage du travail). Le plafond externe valait `floor(échéance − maintenant_hôte)` alors que
+le reste interne pouvait atteindre `échéance_entière − floor(maintenant)` : l'externe pouvait donc partir EN PREMIER, jusqu'à 1 s avant l'échéance. Or chaque
+`timeout` crée son propre groupe de processus : l'externe tuait le `timeout` interne seulement et laissait le worker orphelin (Docker le rattrape par le démontage du
+PID namespace quand le PID 1 meurt ; un faux docker sans namespace non). Avec le `timeout` de GNU coreutils (CI), l'externe meurt en plus de SIGKILL (code brut −9) ;
+le faux docker de test rendait `sys.exit(-9)` = 247 au lieu du 137 que Docker rend, donc le sandbox ne reconnaissait pas l'arrêt (`timed_out` faux, journal vide).
+Avec `timeout` d'uutils (poste local), l'externe rend 124 : le défaut ne se voyait pas.
+
+**Correction produit.** (1) Le plafond externe n'est plus qu'un filet qui NE PRÉCÈDE JAMAIS la garde interne : `+ DEADLINE_OUTER_MARGIN` (2 s). (2) La garde retranche 1 s de
+plus (`reste = échéance_entière − date +%s − 1`) : `date +%s` tronque l'heure courante, donc l'arrêt tombe dans `[échéance_entière − 1 s, échéance_entière[` —
+JAMAIS après l'échéance (correction de l'affirmation A29 « ±1 s » : le retard possible est supprimé au prix de ≤ 1 s de travail utile ; un reste < 1 s ⇒ rien n'est lancé).
+**Fidélité du banc.** Le faux `docker` rend désormais 128+N pour un processus mort du signal N (comme Docker), consigne le code BRUT et le code rendu, émule le démontage du
+PID namespace (sous-réaperçeur) et COMPTE les survivants vivants au moment du démontage : un worker encore vivant à ce moment-là n'a pas été arrêté par la supervision du produit.
+La suite d'échéance tourne sur `timeout` d'uutils ET sur `timeout` de GNU coreutils 9.7 (PATH).
+
+**Journal des refus avant tentative (revue A31).** Il ne recopie plus rien de ce que le client a fourni : ni le texte de l'exception, ni un nom de champ arbitraire, ni une valeur
+de rôle / modèle. Il porte `code` (liste fermée `LOGGABLE_REFUSAL_CODES`, sinon « autre »), `statut`, les noms de paramètres CONNUS (liste fermée `KNOWN_REFUSED_PARAMETERS`, ex.
+`reasoning_effort`) et le NOMBRE des autres. Le client reçoit toujours le refus explicite complet.
