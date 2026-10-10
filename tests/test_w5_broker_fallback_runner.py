@@ -85,7 +85,7 @@ class LoseTheResponseAfterEmission(httpx.BaseTransport):
         raise httpx.ReadTimeout("réponse perdue : le client abandonne après l'émission", request=request)
 
 
-def run_runner(rig, *, client_timeout=20, transport=None):
+def run_runner(rig, *, client_timeout=20, transport=None, client_max_retries=None):
     from test_w4_routing_sdk import StrictLLM
 
     from collegue.executor import oh_runner
@@ -105,7 +105,8 @@ def run_runner(rig, *, client_timeout=20, transport=None):
             client = openai.OpenAI(
                 base_url=llm.base_url,
                 api_key=llm.api_key,
-                max_retries=llm.kwargs["num_retries"],  # ce que le SDK réel appliquerait
+                # ``num_retries`` du SDK seul, SAUF si l'on rejoue le client que LiteLLM construit réellement : ``max_retries`` laissé à son défaut (2)
+                max_retries=llm.kwargs["num_retries"] if client_max_retries is None else client_max_retries,
                 timeout=client_timeout,
                 http_client=None if transport is None else httpx.Client(transport=transport),
             )
@@ -179,6 +180,33 @@ def test_a_refusal_established_before_processing_allows_the_fallback_which_the_s
     assert [llm.model for llm in result.llms] == [f"openai/{PRIMARY}", f"openai/{FALLBACK}"]
     assert rig.upstream.models == [PRIMARY, FALLBACK]
     assert all(llm.kwargs["num_retries"] == 0 for llm in result.llms)
+
+
+def test_the_default_retries_litellm_leaves_to_the_openai_client_do_not_mask_an_established_refusal(rig):
+    """Rejeu de PR 613 : le SDK a ``num_retries=0`` mais LiteLLM laisse au client ``openai`` son défaut de 2 retries. Un refus établi du 31B (502) était réémis en
+    silence et réussissait : le runner ne voyait jamais le refus, le 26B n'était JAMAIS exercé (``models_seen == [31B, 31B, 31B]``). Il doit le voir, une seule fois."""
+    rig.upstream.first_rejections = 1
+    rig.upstream.release.set()
+    result = run_runner(rig, client_max_retries=2)
+    assert result.code == 0 and len(result.llms) == 2  # le principal a ÉCHOUÉ une fois, le runner a basculé
+    assert rig.upstream.models == [PRIMARY, FALLBACK], (
+        rig.upstream.models
+    )  # une tentative du 31B (refusée), puis le 26B réellement exercé
+    snapshot = rig.ledger.snapshot(rig.session.scope_key)
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (
+        15,
+        0,
+        0,
+    )  # seule la génération réglée compte
+    assert not rig.ledger.snapshot(rig.scope).blocked
+
+
+def test_the_default_client_retries_never_resend_a_lost_response_nor_a_fallback_after_it(rig):
+    """Même client par défaut (2 retries) face à une réponse perdue : une seule émission, aucun repli, aucun retry du client qui compterait deux fois."""
+    transport = LoseTheResponseAfterEmission(rig.upstream)
+    result = run_runner(rig, transport=transport, client_max_retries=2)
+    assert transport.emission_seen and result.code == 4 and len(result.llms) == 1
+    assert rig.upstream.models == [PRIMARY]
 
 
 def test_a_definitive_broker_refusal_is_not_followed_by_a_fallback(rig):

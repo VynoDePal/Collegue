@@ -33,6 +33,10 @@ class ModelGatedUpstream(FakeUpstream):
         self.release = asyncio.Event()
         self.models = []
         self.primary_error = None
+        self.first_rejections = (
+            0  # refus ÉTABLIS (400 avant traitement) des n premières générations du principal, puis comportement normal
+        )
+        self.rejected = 0
         self.count_delay = 0.0  # latence injectée AVANT l'émission (charge, GC…) : aucun test ne doit en dépendre
 
     async def count_tokens(self, request):
@@ -43,6 +47,9 @@ class ModelGatedUpstream(FakeUpstream):
     async def generate(self, request):
         self.models.append(request.model)
         self.emitted_threadsafe.set()
+        if request.model == PRIMARY and self.rejected < self.first_rejections:
+            self.rejected += 1
+            raise http_error(400)
         if request.model == PRIMARY:
             self.sent.set()
             await self.release.wait()

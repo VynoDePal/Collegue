@@ -19,7 +19,7 @@ from pathlib import Path
 import openai
 import pytest
 from w5_broker_contract import open_worker, service_for
-from w5_broker_support import FakeUpstream, chat_request, google_response
+from w5_broker_support import FakeUpstream, chat_request, google_response, http_error
 
 from collegue.broker.server import BrokerSocketServer
 from collegue.sandbox.executor import DockerSandbox, SandboxRefused
@@ -451,3 +451,110 @@ def test_a_socket_path_too_long_for_af_unix_is_an_explicit_refusal(manager, tmp_
     with pytest.raises(RuntimeError, match="trop long"):
         BrokerSocketServer(service, session.session_id, run_root=str(deep)).start()
     assert not any(deep.parent.parent.parent.rglob("cbk-*"))  # rien ne reste sur le disque
+
+
+# ── retries cachés du client ``openai`` (A34) ────────────────────────────────────────────────────────────────────────────────
+#
+# Le SDK OpenHands appelle LiteLLM, qui construit un client ``openai`` SANS ``max_retries`` ⇒ défaut 2 (litellm 1.83.0 ``llms/openai/openai.py`` ``inference_params.pop
+# ("max_retries", 2)``) ; ``openai`` 2.8.0 (``_base_client._should_retry``) réessaie alors tout 408/409/429/5xx, sauf si ``X-Should-Retry`` dit le contraire, quel que
+# soit ``num_retries=0`` du SDK. Un refus ÉTABLI renvoyé en 502 était donc réémis en silence : le runner ne voyait jamais le refus et ne basculait pas sur le 26B.
+
+
+def header_of(response: bytes, name: str):
+    head = response.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")[1:]
+    values = {line.split(":", 1)[0].strip().lower(): line.split(":", 1)[1].strip() for line in head if ":" in line}
+    return values.get(name.lower())
+
+
+class FirstFailures(FakeUpstream):
+    """Échecs scénarisés des ``n`` premiers appels (countTokens / generate), puis réponses normales."""
+
+    def __init__(self, *, count_errors=(), generate_errors=()):
+        super().__init__()
+        self._count_errors, self._generate_errors = list(count_errors), list(generate_errors)
+
+    async def count_tokens(self, request):
+        if self._count_errors:
+            self.count_calls.append({"url_model": request.model, "body": {}})
+            raise self._count_errors.pop(0)
+        return await super().count_tokens(request)
+
+    async def generate(self, request):
+        if self._generate_errors:
+            self.generate_calls.append({"url_model": request.model, "body": {}})
+            raise self._generate_errors.pop(0)
+        return await super().generate(request)
+
+
+@pytest.mark.parametrize(
+    "name, upstream_kwargs, body, status, retry",
+    [
+        ("refus établi du fournisseur (400)", dict(generate_errors=[http_error(400)]), {}, 502, "false"),
+        ("limite de débit du fournisseur (429)", dict(generate_errors=[http_error(429)]), {}, 429, "true"),
+        ("échec ambigu après émission (500)", dict(generate_errors=[http_error(500)]), {}, 502, "false"),
+        ("countTokens limité (429)", dict(count_errors=[http_error(429)]), {}, 429, "true"),
+        ("countTokens indisponible (503)", dict(count_errors=[http_error(503)]), {}, 502, "true"),
+        ("champ inconnu", {}, {"reasoning_effort": "high"}, 400, "false"),
+        ("modèle interdit", {}, {"model": "gpt-5.4"}, 403, "false"),
+        ("succès", {}, {}, 200, None),
+    ],
+)
+def test_every_error_tells_the_openai_client_whether_it_may_resend_and_a_success_says_nothing(
+    stack, name, upstream_kwargs, body, status, retry
+):
+    built = stack(FirstFailures(**upstream_kwargs))
+    response = post(built, chat_request(**body))
+    assert status_of(response) == status, name
+    assert header_of(response, "X-Should-Retry") == retry, name
+
+
+def test_a_blocked_project_and_an_in_flight_generation_are_never_resent_by_the_client(stack):
+    built = stack()
+    other = built.ledger.reserve(built.scope_key, tokens=1, kind="call")
+    built.ledger.mark_unknown(other.reservation_id, reason="un autre rôle a perdu sa réponse")
+    response = post(built, chat_request())
+    assert status_of(response) == 403 and header_of(response, "X-Should-Retry") == "false"
+
+
+def default_client(built):
+    """Le client tel que LiteLLM le construit pour le SDK : ``max_retries`` laissé à son défaut (2)."""
+    return openai.OpenAI(base_url=built.base_url, api_key=built.session.token, timeout=20)
+
+
+def test_an_established_refusal_is_not_silently_resent_by_the_default_client_so_the_caller_sees_it(stack):
+    built = stack(FirstFailures(generate_errors=[http_error(400)]))
+    with pytest.raises(openai.APIStatusError) as caught:
+        default_client(built).chat.completions.create(
+            model="gemma-4-31b-it", messages=[{"role": "user", "content": "x"}], max_tokens=8
+        )
+    assert caught.value.status_code == 502 and "upstream_rejected" in str(caught.value.body)
+    assert (
+        len(built.upstream.generate_calls) == 1
+    )  # UNE seule tentative auprès du fournisseur : le refus est remonté à l'appelant (repli possible)
+    snapshot = built.ledger.snapshot(built.session.scope_key)
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (0, 0, 0)
+
+
+def test_known_retries_stay_allowed_a_provider_rate_limit_and_a_failed_count_are_resent_once_the_cause_is_gone(stack):
+    built = stack(FirstFailures(generate_errors=[http_error(429)], count_errors=[http_error(503)]))
+    reply = default_client(built).chat.completions.create(
+        model="gemma-4-31b-it", messages=[{"role": "user", "content": "x"}], max_tokens=8
+    )
+    assert reply.choices[0].message.content == "ok"
+    assert len(built.upstream.count_calls) >= 2  # le countTokens en échec a été renvoyé
+    assert (
+        len(built.upstream.generate_calls) == 2
+    )  # 429 puis réussite : refus établi sans consommation, donc renvoi légitime
+    snapshot = built.ledger.snapshot(built.session.scope_key)
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (15, 0, 0)
+
+
+def test_an_ambiguous_failure_after_emission_is_not_resent_by_the_default_client(stack):
+    built = stack(FirstFailures(generate_errors=[http_error(500)]))
+    with pytest.raises(openai.APIStatusError):
+        default_client(built).chat.completions.create(
+            model="gemma-4-31b-it", messages=[{"role": "user", "content": "x"}], max_tokens=8
+        )
+    assert len(built.upstream.generate_calls) == 1
+    snapshot = built.ledger.snapshot(built.session.scope_key)
+    assert snapshot.unknown_tokens > 0 and snapshot.consumed_tokens == 0  # usage inconnu conservé, projet bloqué
