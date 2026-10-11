@@ -45,6 +45,23 @@ Un `workflow_dispatch` n'est déclenchable que si le fichier est sur la **branch
 Tester d'abord le dispatch depuis la branche (`--ref <branche>`) est une hypothèse GitHub non éprouvée et n'est pas retenue. Le produit testé est celui de `GITHUB_SHA` ; `provenance.json` consigne ce SHA, les arbres
 `collegue/`, `locks/`, `docker/sandbox/` et les blobs du harnais (à comparer avec `main`) : **une identité de contenu absente interdit le verdict complet**.
 
+## Inventaire des sous-processus hôte du harnais (AGENTS.md, frontière Git)
+
+Le harnais `scripts/w5_product_preflight.py` est un script CI hors du paquet `collegue/` ; il est néanmoins inventorié et couvert par le test statique
+`test_host_subprocess_usage_is_inventoried` (`tests/test_executor_git_boundary.py`, périmètre étendu à ce seul script par `_INVENTORIED_CI_SCRIPTS`, sans balayer les autres scripts).
+**Source de confiance commune** : le checkout GitHub Actions du SHA testé (`persist-credentials: false`), qui est le code sous test lui-même ; aucun workspace d'agent ni de tests n'y est
+monté ou exécuté (classe F de `w1-isolation.md`). `cwd` est explicite (`ROOT` = racine du dépôt du script) et les chemins de sortie sont résolus en absolu AVANT le lancement, pour ne
+dépendre pas du répertoire de l'appelant (le produit refuse déjà un `.env` présent dans son répertoire de lancement : le checkout n'en contient pas).
+
+| # | Usage | Argv (liste fixe, aucun shell) | cwd | Pourquoi c'est de confiance |
+|---|---|---|---|---|
+| 1 | préflight du produit | `[sys.executable, -m, collegue.pilot.w4_business, preflight, --stage static\|full, --campaign-id ID, --output F, --human F]` | `ROOT` | c'est le produit testé, action `preflight` seule (liste fermée testée), identifiant validé par motif, fichiers sous la racine éphémère du runner |
+| 2 | scanner de fuite | `[sys.executable, ROOT/scripts/w5_leak_scan.py, --env GITHUB_TOKEN, --quarantine D, --stage D, --report F, --source report=D]` | `ROOT` | script de confiance du même checkout ; le jeton est lu de l'environnement par le scanner, jamais passé en argv (testé) |
+| 3 | identité git | `["git", "rev-parse", "HEAD:<chemin>"]` via `git_value`, chemins issus des constantes `PRODUCT_TREES` / `HARNESS_FILES`, délai 30 s | `ROOT` (défaut explicite) | lecture seule des arbres/blobs du checkout ; aucune écriture, aucun hook, sortie validée comme SHA |
+
+Garde-fous testés (`tests/test_w5_ci_product_preflight.py`) : analyse AST du harnais (seul `subprocess.run`, `cwd` explicite sur chaque lancement, aucun `shell=True`, `Popen`, `os.system`,
+`check_output`…), `cwd` identique quel que soit le répertoire de l'appelant, argv absolu et sans jeton. Un nouvel usage non listé fait échouer le test d'inventaire.
+
 ## Déroulement du job (un seul job, une étape qui échoue arrête les suivantes sauf dépôt des preuves)
 
 1. Chemins éphémères : `COLLEGUE_HOME` neuf, `STATE_DATABASE_URL` SQLite du run, identifiant **`w5-preflight-<run_id>`** (jamais revendiqué : P12 vérifie seulement

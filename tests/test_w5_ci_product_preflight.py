@@ -8,6 +8,7 @@ deux étapes de lecture, propagation des échecs (code rouge pour garde rouge), 
 
 from __future__ import annotations
 
+import ast
 import base64
 import importlib.util
 import json
@@ -445,7 +446,9 @@ def test_the_real_scanner_excludes_a_report_that_contains_the_token_and_the_stag
             assert TOKEN.encode() not in path.read_bytes(), path
 
 
-def test_the_real_product_entry_refuses_a_non_dispatch_context_at_p01_with_no_network_and_stays_incomplete(tmp_path):
+def test_the_real_product_entry_refuses_a_non_dispatch_context_at_p01_with_no_network_and_stays_incomplete(
+    tmp_path, monkeypatch
+):
     """VRAIE entrée publique du produit, sans fabriquer le contexte : hors ``workflow_dispatch``, P01 la refuse et RIEN d'autre ne joue."""
     home = tmp_path / "home"
     home.mkdir()
@@ -459,6 +462,11 @@ def test_the_real_product_entry_refuses_a_non_dispatch_context_at_p01_with_no_ne
         "GITHUB_RUN_ATTEMPT": "1",
         "PYTHONPATH": str(ROOT),
     }
+    elsewhere = (
+        tmp_path / "elsewhere"
+    )  # répertoire appelant sans rapport : le produit tourne quand même depuis la racine du dépôt
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
     rc = harness.run_stage("static", root=tmp_path / "root", campaign_id="w5-preflight-1", env=env)
     assert rc == 3
     report = json.loads((tmp_path / "root" / "report" / "static" / "preflight-static.json").read_text())
@@ -904,3 +912,112 @@ def test_the_real_git_identity_resolves_for_the_committed_harness_files():
     for path in (*harness.PRODUCT_TREES, *harness.HARNESS_FILES):
         value = harness.git_value("rev-parse", f"HEAD:{path}")
         assert value is None or len(value) == 40  # None tant que le fichier n'est pas commité (travail en cours)
+
+
+# ── C72 : inventaire des sous-processus hôte du harnais (source, argv, cwd) ───────────────────────────────────────────────
+
+
+def test_both_subprocesses_run_from_the_repository_root_whatever_the_callers_directory(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    runner = FakeRunner()
+    rc = harness.run_stage(
+        "static", root=Path("relatif"), campaign_id="w5-preflight-1", env=env_with_token(), runner=runner
+    )
+    assert rc == 1 or rc == 0  # le faux produit n'écrit pas dans ce dossier relatif : seul le cwd importe ici
+    assert len(runner.calls) == 2
+    for call in runner.calls:
+        assert call["cwd"] == str(harness.ROOT) and call["cwd"] != str(elsewhere)
+        assert Path(call["argv"][0]).is_absolute() and call["argv"][0] == sys.executable
+        assert all(isinstance(part, str) for part in call["argv"]) and call.get("shell") is not True
+    product, scan = (call["argv"] for call in runner.calls)
+    paths = [product[product.index(flag) + 1] for flag in ("--output", "--human")]
+    paths += [scan[scan.index(flag) + 1] for flag in ("--quarantine", "--stage", "--report")]
+    assert all(Path(path).is_absolute() and path.startswith(str(elsewhere / "relatif")) for path in paths), (
+        "les chemins relatifs sont résolus contre l'appelant AVANT que le cwd ne devienne la racine du dépôt"
+    )
+
+
+def harness_tree() -> "ast.Module":
+    return ast.parse(UNDER_TEST.read_text(encoding="utf-8"))
+
+
+def test_static_scan_of_the_harness_lists_exactly_the_inventoried_process_usages():
+    tree = harness_tree()
+    uses = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "subprocess":
+            uses.append(node.attr)
+    # `subprocess.run` : lanceur par défaut (produit, scanner) et appel de git_value ; `SubprocessError` : seule exception interceptée
+    assert sorted(set(uses)) == ["SubprocessError", "run"]
+    assert uses.count("run") == 2
+    imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert not [n for n in imports if isinstance(n, ast.ImportFrom) and n.module == "subprocess"]
+    names = {a.name for n in imports if isinstance(n, ast.Import) for a in n.names}
+    assert "subprocess" in names and not {"pty", "shlex"} & names
+    source = (ROOT / "scripts" / "w5_product_preflight.py").read_text(encoding="utf-8")
+    for forbidden in (
+        "shell=True",
+        "os.system",
+        "os.popen",
+        "Popen",
+        "check_output",
+        "check_call",
+        "os.exec",
+        "os.spawn",
+    ):
+        assert forbidden not in source, forbidden
+
+
+def test_every_process_call_of_the_harness_has_an_explicit_working_directory_and_a_fixed_argument_list():
+    tree = harness_tree()
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    launches = [n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "runner"]
+    assert len(launches) == 2, "produit puis scanner : seuls deux lancements par le lanceur injectable"
+    git = [
+        n
+        for n in calls
+        if isinstance(n.func, ast.Attribute)
+        and n.func.attr == "run"
+        and getattr(n.func.value, "id", "") == "subprocess"
+    ]
+    assert len(git) == 1
+    for node in [*launches, *git]:
+        keywords = {k.arg: k.value for k in node.keywords}
+        assert "cwd" in keywords and keywords.get("shell") is None
+        assert keywords["cwd"] is not None
+    for node in launches:
+        assert ast.unparse({k.arg: k.value for k in node.keywords}["cwd"]) == "str(ROOT)"
+    assert ast.unparse({k.arg: k.value for k in git[0].keywords}["cwd"]) == "cwd"
+    default = next(a for a in ast.walk(tree) if isinstance(a, ast.FunctionDef) and a.name == "git_value")
+    assert ast.unparse(default.args.kw_defaults[0]) == "ROOT", "git_value : cwd par défaut explicite = racine du dépôt"
+    git_argv = ast.unparse(git[0].args[0])
+    assert git_argv == "['git', *args]"
+    # les seuls appelants de git_value passent des chemins fixes de constantes du harnais
+    callers = [n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "git_value"]
+    assert all(ast.unparse(n.args[0]) == "'rev-parse'" for n in callers)
+    assert not [
+        n
+        for n in calls
+        if isinstance(n.func, ast.Attribute) and n.func.attr == "tree" and n.args and isinstance(n.args[0], ast.Name)
+    ]
+
+
+def test_the_git_boundary_inventory_covers_the_harness_with_its_three_usages():
+    text = (ROOT / "tests" / "test_executor_git_boundary.py").read_text(encoding="utf-8")
+    assert '_INVENTORIED_CI_SCRIPTS = ("scripts/w5_product_preflight.py",)' in text
+    block = text[text.index('"scripts/w5_product_preflight.py": (') :]
+    block = block[: block.index('"collegue/autonomous/proactive_monitor.py"')]
+    for needed in (
+        "checkout Actions du SHA testé",
+        "(1)",
+        "(2)",
+        "(3)",
+        "cwd",
+        "w4_business",
+        "w5_leak_scan.py",
+        "git rev-parse",
+        "aucun shell",
+    ):
+        assert needed in block, needed

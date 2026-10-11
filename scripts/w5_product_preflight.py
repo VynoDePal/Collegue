@@ -207,6 +207,9 @@ def run_stage(
     if len(token) < MIN_TOKEN_LENGTH:
         print(f"w5_product_preflight: ${TOKEN_ENV} absent ou trop court : aucune commande lancée", file=sys.stderr)
         return 2
+    root = (
+        root.resolve()
+    )  # chemins ABSOLUS : le cwd des sous-processus est la racine du dépôt, jamais celui de l'appelant
     paths = layout(root)
     for name in ("report", "publish", "quarantine", "diag"):
         (paths[name]).mkdir(parents=True, exist_ok=True)
@@ -214,14 +217,14 @@ def run_stage(
     report_dir.mkdir(parents=True, exist_ok=True)
     output, human = report_dir / f"preflight-{stage}.json", report_dir / f"preflight-{stage}.txt"
     argv = product_argv(stage, campaign_id, output, human)
-    done = runner(argv, env=dict(env), capture_output=True, text=True, check=False)
+    done = runner(argv, env=dict(env), cwd=str(ROOT), capture_output=True, text=True, check=False)
     stderr_class = exception_class(done.stderr)
     product_rc = int(done.returncode)
     (paths["diag"] / f"rc-{stage}.json").write_text(
         json.dumps({"stage": stage, "action": PRODUCT_ACTION, "rc": product_rc}, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    scan = runner(scanner_argv(stage, root), env=dict(env), capture_output=True, text=True, check=False)
+    scan = runner(scanner_argv(stage, root), env=dict(env), cwd=str(ROOT), capture_output=True, text=True, check=False)
     scan_rc = int(scan.returncode)
     for line in summary_lines(stage, root, product_rc, scan_rc, stderr_class):
         print(safe_text(line, token))
