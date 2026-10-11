@@ -239,7 +239,30 @@ def safe_headers(headers: Mapping[str, str]) -> Dict[str, Any]:
     return out
 
 
-def classify_message(payload: Any) -> Dict[str, Any]:
+def docs_url(value: Any) -> Optional[str]:
+    """``documentation_url`` reconstruite si, et seulement si, l'hôte est exactement ``docs.github.com`` ; ``None`` sinon.
+
+    ``urlsplit`` et ``.port`` lèvent ``ValueError`` (IPv6 mal formée, port non numérique ou hors plage) avec un texte qui CONTIENT l'entrée :
+    l'exception est absorbée ici et son texte n'est jamais lu.
+    """
+    if not isinstance(value, str) or len(value) > 500:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "docs.github.com"
+            or parsed.port is not None
+            or parsed.username
+        ):
+            return None
+        path = parsed.path + (f"#{parsed.fragment}" if parsed.fragment else "")
+    except ValueError:
+        return None
+    return f"https://docs.github.com{path}" if _DOC_PATH.fullmatch(path) else None
+
+
+def classify_message(payload: Any, *, with_documentation_url: bool = True) -> Dict[str, Any]:
     """Classe le message d'erreur parmi des phrases connues ; ``documentation_url`` seulement si l'hôte est ``docs.github.com``."""
     if not isinstance(payload, dict):
         return {}
@@ -248,18 +271,12 @@ def classify_message(payload: Any) -> Dict[str, Any]:
     if isinstance(message, str):
         lowered = message.lower()
         out["message_class"] = next((label for phrase, label in KNOWN_MESSAGES if phrase in lowered), "unclassified")
-    doc = payload.get("documentation_url")
-    if isinstance(doc, str):
-        parsed = urllib.parse.urlsplit(doc)
-        if (
-            parsed.scheme == "https"
-            and parsed.hostname == "docs.github.com"
-            and parsed.port is None
-            and not parsed.username
-        ):
-            path = parsed.path + (f"#{parsed.fragment}" if parsed.fragment else "")
-            if _DOC_PATH.fullmatch(path):
-                out["documentation_url"] = f"https://docs.github.com{path}"
+    if with_documentation_url and "documentation_url" in payload:
+        url = docs_url(payload.get("documentation_url"))
+        if url:
+            out["documentation_url"] = url
+        else:
+            out["documentation_url_class"] = "rejected"  # absente de confiance : ni texte ni hôte recopiés
     return out
 
 
@@ -494,6 +511,49 @@ def build_url(path: str) -> str:
 # ── exécution ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
+def payload_contains_token(payload: Any, token: str) -> bool:
+    """Cherche le jeton dans les DONNÉES DÉCODÉES (clés et chaînes) : un corps échappé en ``\\uXXXX`` échappe au filtre sur les octets bruts.
+
+    Parcours itératif borné ; un document trop gros pour être balayé est traité comme suspect (jamais extrait).
+    """
+    stack, seen = [payload], 0
+    while stack:
+        item = stack.pop()
+        seen += 1
+        if seen > 200_000:
+            return True
+        if isinstance(item, str):
+            if contains_token(item, token):
+                return True
+        elif isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def rate_limit_state(status: int, remaining: Optional[int], message_class: Optional[str]) -> Optional[str]:
+    """État de limite de débit d'une réponse 403/429 ; ``None`` pour les autres statuts.
+
+    ``remaining == 0`` = quota primaire épuisé ; ``4979`` = non épuisé ; absent ou invalide = ``unknown`` (jamais présenté comme « non épuisé »).
+    """
+    if status not in (403, 429):
+        return None
+    if remaining == 0:
+        return "primary_exhausted"
+    if message_class == "secondary_rate_limit":
+        return "secondary"
+    if message_class == "primary_rate_limit":
+        return "primary_message"
+    if status == 429:
+        return "too_many_requests"
+    return "unknown" if remaining is None else "not_exhausted"
+
+
+RATE_LIMIT_ESTABLISHED = ("primary_exhausted", "secondary", "primary_message", "too_many_requests")
+
+
 def probe_endpoint(
     endpoint: Endpoint, token: str, transport: Callable[[str, Mapping[str, str], float], Reply]
 ) -> Dict[str, Any]:
@@ -504,26 +564,47 @@ def probe_endpoint(
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "collegue-w5-fixture-token-diagnostic",
     }
-    reply = transport(url, headers, REQUEST_TIMEOUT)
-    entry: Dict[str, Any] = {"key": endpoint.key, "method": "GET", "path": endpoint.path, "status": reply.status}
+    entry: Dict[str, Any] = {"key": endpoint.key, "method": "GET", "path": endpoint.path, "status": None}
+    try:
+        reply = transport(url, headers, REQUEST_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 - classé par nom de classe, jamais par message
+        entry.update(outcome="network_failure", error_class=classify_exception(exc))
+        return entry
+    entry["status"] = reply.status
     if reply.error:
         entry.update(outcome="network_failure", error_class=reply.error)
         return entry
-    echoed = contains_token(reply.body.decode("utf-8", "replace"), token) or any(
-        contains_token(f"{key}: {value}", token) for key, value in reply.headers.items()
-    )
-    if echoed:  # la réponse renvoie le jeton : rien n'en est extrait, seul le fait est consigné
-        entry.update(outcome="failure", token_echo_detected=True)
+    if any(contains_token(f"{key}: {value}", token) for key, value in reply.headers.items()):
+        entry.update(outcome="failure", token_echo_detected=True)  # en-têtes suspects : rien n'en est extrait
         return entry
     entry.update(safe_headers(reply.headers))
+    try:
+        return _interpret(entry, endpoint, reply, token)
+    except Exception as exc:  # noqa: BLE001 - une réponse mal formée ne doit ni lever, ni empêcher les autres lectures
+        for key in ("data", "message_class", "documentation_url", "documentation_url_class", "body_class"):
+            entry.pop(key, None)
+        entry.update(outcome="failure", extraction_error=type(exc).__name__)  # nom de classe seulement, jamais le texte
+        return entry
+
+
+def _interpret(entry: Dict[str, Any], endpoint: Endpoint, reply: Reply, token: str) -> Dict[str, Any]:
+    raw = reply.body.decode("utf-8", "replace")
+    echoed = contains_token(raw, token)
     payload: Any = None
     try:
-        payload = json.loads(reply.body.decode("utf-8")) if reply.body else None
-    except (ValueError, UnicodeDecodeError):
+        payload = json.loads(raw) if reply.body else None
+    except ValueError:
         entry["body_class"] = "not_json"
+    if not echoed and payload_contains_token(payload, token):
+        echoed = True  # le jeton n'apparaît qu'après décodage (échappements \\uXXXX)
     status = int(reply.status or 0)
-    remaining = entry.get("x_ratelimit_remaining")
-    if 200 <= status < 300:
+    if (
+        echoed
+    ):  # corps qui renvoie le jeton : aucune donnée ni URL extraite, seule la classe du message (étiquette fixe)
+        entry["token_echo_detected"] = True
+        payload_view = classify_message(payload, with_documentation_url=False) if isinstance(payload, dict) else {}
+        entry.update(outcome="failure", **payload_view)
+    elif 200 <= status < 300:
         entry["outcome"] = "ok"
         entry["data"] = endpoint.extractor(payload)
     elif status == 404 and endpoint.expected_404:
@@ -534,8 +615,11 @@ def probe_endpoint(
     else:
         entry["outcome"] = "failure"
         entry.update(classify_message(payload))
-        if status in (403, 429):
-            entry["primary_rate_limit_exhausted"] = bool(remaining == 0)
+    state = rate_limit_state(status, entry.get("x_ratelimit_remaining"), entry.get("message_class"))
+    if state is not None:
+        entry["rate_limit_state"] = state
+        if isinstance(entry.get("x_ratelimit_remaining"), int):
+            entry["primary_rate_limit_exhausted"] = entry["x_ratelimit_remaining"] == 0
     return entry
 
 
@@ -555,6 +639,10 @@ def contains_token(text: str, token: str) -> bool:
     return any(form in text for form in token_forms(token))
 
 
+def skipped(endpoint: Endpoint, outcome: str) -> Dict[str, Any]:
+    return {"key": endpoint.key, "method": "GET", "path": endpoint.path, "status": None, "outcome": outcome}
+
+
 def run(
     token: str,
     transport: Callable[[str, Mapping[str, str], float], Reply] = default_transport,
@@ -563,28 +651,26 @@ def run(
     started = clock()
     entries: List[Dict[str, Any]] = []
     login: Optional[str] = None
+    stopped_after: Optional[str] = None
     # « /user » d'abord : son login valide débloque la lecture des permissions du collaborateur
     pending = plan(None)[:1]
     done = 0
-    while done < len(pending):
+    while done < len(pending) and stopped_after is None:
         endpoint = pending[done]
         done += 1
         if clock() - started >= GLOBAL_BUDGET:
-            entries.append(
-                {
-                    "key": endpoint.key,
-                    "method": "GET",
-                    "path": endpoint.path,
-                    "status": None,
-                    "outcome": "skipped_global_deadline",
-                }
-            )
-        else:
-            entries.append(probe_endpoint(endpoint, token, transport))
+            entries.append(skipped(endpoint, "skipped_global_deadline"))
+            continue
+        entries.append(probe_endpoint(endpoint, token, transport))
+        if entries[-1].get("rate_limit_state") in RATE_LIMIT_ESTABLISHED:
+            stopped_after = endpoint.key  # limite de débit établie : plus aucune émission, ni retry ni attente
         if endpoint.key == "user":
             candidate = (entries[-1].get("data") or {}).get("login")
             login = candidate if isinstance(candidate, str) and _LOGIN.fullmatch(candidate) else None
             pending = pending + plan(login)[1:]
+    if stopped_after is not None:
+        executed = {e["key"] for e in entries}
+        entries += [skipped(e, "not_executed_rate_limited") for e in plan(login) if e.key not in executed]
     failures = [e["key"] for e in entries if e["outcome"] not in ("ok", "expected_not_found")]
     return {
         "schema": SCHEMA,
@@ -594,6 +680,7 @@ def run(
         "login": login,
         "endpoints": entries,
         "failures": failures,
+        "stopped_after_rate_limit": stopped_after,
         "verdict": "all_reads_answered" if not failures else "failures",
     }
 
@@ -609,11 +696,18 @@ def summary_lines(report: Mapping[str, Any]) -> List[str]:
                 "error_class",
                 "x_ratelimit_remaining",
                 "primary_rate_limit_exhausted",
+                "rate_limit_state",
+                "token_echo_detected",
+                "extraction_error",
                 "x_accepted_github_permissions",
             )
             if key in entry
         ]
         lines.append(f"{entry['key']}: GET {entry['path']} -> {entry['status']} {entry['outcome']} " + " ".join(extra))
+    if report.get("stopped_after_rate_limit"):
+        lines.append(
+            f"arrêt après limite de débit établie sur {report['stopped_after_rate_limit']} : lectures restantes non exécutées"
+        )
     lines.append(
         f"verdict: {report['verdict']} (échecs : {report['failures'] or 'aucun'}) — diagnostic des droits seulement"
     )
@@ -643,8 +737,15 @@ def main(
     if not token or not _TOKEN_SHAPE.fullmatch(token):
         print("fixture_token_diagnostic: jeton absent ou malformé : aucune requête émise (code 2)", file=sys.stderr)
         return 2
-    report = run(token, transport, clock)
-    text, lines = finalize(report, token)
+    try:
+        report = run(token, transport, clock)
+        text, lines = finalize(report, token)
+    except Exception as exc:  # noqa: BLE001 - jamais de traceback brut : le texte d'une exception peut contenir une entrée hostile
+        print(
+            f"fixture_token_diagnostic: erreur interne ({type(exc).__name__}) : aucun rapport écrit (code 2)",
+            file=sys.stderr,
+        )
+        return 2
     if text is None:
         print(
             "fixture_token_diagnostic: le rapport contenait le jeton sous une forme usuelle : REFUSÉ, rien n'est écrit (code 2)",

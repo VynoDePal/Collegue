@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -16,9 +17,9 @@ from typing import Any, Dict, List, Mapping, Optional
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location(
-    "fixture_token_diagnostic", ROOT / "scripts" / "fixture_token_diagnostic.py"
-)
+# DIAGNOSTIC_SOURCE : rejouer ces tests sur un autre état de la sonde (preuve rouge→vert)
+SOURCE = Path(os.environ.get("DIAGNOSTIC_SOURCE") or ROOT / "scripts" / "fixture_token_diagnostic.py")
+SPEC = importlib.util.spec_from_file_location("fixture_token_diagnostic", SOURCE)
 assert SPEC and SPEC.loader
 diag = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = diag
@@ -499,3 +500,193 @@ def test_probe_script_is_stdlib_get_only_and_reads_no_credential_file():
     assert 'method="GET"' in source and not re.search(r'method="(POST|PUT|PATCH|DELETE)"', source)
     assert "os.environ" in source and "environ.items" not in source and "os.environ.copy" not in source
     assert "netrc" not in source and ".git-credentials" not in source and "getenv" not in source
+
+
+# ── C66 : frontière d'extraction (données décodées, URL invalides, limites de débit) ─────────────────────────────────────────
+
+
+def escaped(text: str) -> bytes:
+    return "".join("\\u%04x" % ord(c) for c in text).encode()
+
+
+def plain_403(remaining: Optional[str] = "4979", extra: Optional[Dict[str, str]] = None, body: Any = None):
+    headers = {"X-Accepted-GitHub-Permissions": "administration=read", **(extra or {})}
+    if remaining is not None:
+        headers["X-RateLimit-Remaining"] = remaining
+    return (403, headers, body or {"message": "Resource not accessible by personal access token"})
+
+
+@pytest.mark.parametrize("encode", [False, True])
+def test_token_in_decoded_documentation_url_never_raises_nor_leaks(encode, tmp_path, capsys):
+    routes = healthy_routes()
+    url = f"https://docs.github.com:{TOKEN}/rest"
+    body = json.dumps(
+        {"message": "Resource not accessible by personal access token", "documentation_url": url}
+    ).encode()
+    if encode:
+        body = body.replace(TOKEN.encode(), escaped(TOKEN))
+        assert TOKEN.encode() not in body
+    routes[f"/repos/{diag.REPOSITORY}/branches/main/protection"] = (403, rights_headers(), body)
+    out = tmp_path / "r.json"
+    rc = diag.main(["--output", str(out)], environ={diag.TOKEN_ENV: TOKEN}, transport=FakeApi(routes))
+    captured = capsys.readouterr()
+    assert rc == 1 and TOKEN not in out.read_text() + captured.out + captured.err
+    report = json.loads(out.read_text())
+    entry = by_key(report)["protection_main"]
+    assert entry["token_echo_detected"] is True and "documentation_url" not in entry and "data" not in entry
+    assert entry["message_class"] == "resource_not_accessible_by_personal_access_token"  # étiquette fixe conservée
+    assert entry["x_accepted_github_permissions"] == "administration=read"
+    assert by_key(report)["ruleset_24793056"]["outcome"] == "ok"  # les autres lectures ne sont pas empêchées
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://docs.github.com:99999/rest",  # port hors plage
+        "https://docs.github.com:abc/rest",  # port non numérique
+        "https://docs.github.com:-1/rest",
+        "http://[::1/rest",  # IPv6 mal formée
+        "https://[docs.github.com/rest",
+        "https://docs.github.com@evil.example/rest",
+        "https://docs.github.com.evil.example/rest",
+        "http://docs.github.com/rest",
+        "https://evil.example/rest",
+        "https://docs.github.com/" + "a" * 600,
+        12345,
+    ],
+)
+def test_invalid_or_foreign_documentation_url_is_classified_not_copied(url):
+    assert diag.docs_url(url) is None
+    routes = healthy_routes()
+    routes["/user"] = (403, rights_headers(), {"message": "Requires authentication", "documentation_url": url})
+    api = FakeApi(routes)
+    report = diag.run(TOKEN, api)
+    entry = by_key(report)["user"]
+    assert entry["message_class"] == "requires_authentication" and entry["documentation_url_class"] == "rejected"
+    assert "documentation_url" not in entry and str(url) not in json.dumps(report)
+    assert len(api.calls) == len(diag.plan(None))  # 403 de droits : les autres lectures continuent
+
+
+def test_valid_documentation_url_is_kept():
+    assert diag.docs_url("https://docs.github.com/rest/branches/branch-protection#get") == (
+        "https://docs.github.com/rest/branches/branch-protection#get"
+    )
+
+
+def test_extractor_failure_is_contained_and_reported_without_its_text(tmp_path, capsys):
+    def boom(data):
+        raise RuntimeError(f"extractor exploded with {TOKEN}")
+
+    api = FakeApi(healthy_routes())
+    steps = diag.plan("fixture-bot")
+    original = diag.plan
+    broken = [
+        diag.Endpoint(e.key, e.path, boom if e.key == "repository" else e.extractor, e.expected_404) for e in steps
+    ]
+    diag.plan = lambda login: broken if login else original(login)
+    try:
+        out = tmp_path / "r.json"
+        rc = diag.main(["--output", str(out)], environ={diag.TOKEN_ENV: TOKEN}, transport=api)
+    finally:
+        diag.plan = original
+    captured = capsys.readouterr()
+    assert rc == 1 and TOKEN not in out.read_text() + captured.out + captured.err
+    report = json.loads(out.read_text())
+    assert by_key(report)["repository"]["extraction_error"] == "RuntimeError" and "repository" in report["failures"]
+    assert by_key(report)["rate_limit"]["outcome"] == "ok"
+
+
+def test_transport_raising_arbitrary_exception_is_contained():
+    def transport(url, headers, timeout):
+        raise RuntimeError(f"Authorization: Bearer {TOKEN}")
+
+    report = diag.run(TOKEN, transport)
+    assert TOKEN not in json.dumps(report) and by_key(report)["user"]["error_class"] == "network_error"
+
+
+def test_unexpected_internal_error_prints_no_traceback_and_no_token(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(diag, "run", lambda *a, **k: (_ for _ in ()).throw(ValueError(f"boom {TOKEN}")))
+    out = tmp_path / "r.json"
+    assert diag.main(["--output", str(out)], environ={diag.TOKEN_ENV: TOKEN}) == 2
+    captured = capsys.readouterr()
+    assert TOKEN not in captured.out + captured.err and "Traceback" not in captured.err and not out.exists()
+
+
+@pytest.mark.parametrize("remaining", [None, "", "abc", "-1", "1.5"])
+def test_missing_or_invalid_remaining_is_unknown_not_proof_of_non_exhaustion(remaining):
+    routes = healthy_routes()
+    routes["/user"] = plain_403(remaining)
+    api = FakeApi(routes)
+    entry = by_key(diag.run(TOKEN, api))["user"]
+    assert "primary_rate_limit_exhausted" not in entry and entry["rate_limit_state"] == "unknown"
+    assert len(api.calls) == len(diag.plan(None))  # inconnu ≠ limite établie : on continue
+
+
+def test_remaining_4979_is_not_exhausted_and_reads_continue():
+    api = FakeApi({"/user": plain_403("4979")})
+    report = diag.run(TOKEN, api)
+    entry = by_key(report)["user"]
+    assert entry["primary_rate_limit_exhausted"] is False and entry["rate_limit_state"] == "not_exhausted"
+    assert report["stopped_after_rate_limit"] is None and len(api.calls) == len(diag.plan(None))
+
+
+@pytest.mark.parametrize(
+    ("route", "state"),
+    [
+        (plain_403("0"), "primary_exhausted"),
+        (plain_403("0", body={"message": "texte quelconque"}), "primary_exhausted"),
+        ((429, {"X-RateLimit-Remaining": "12"}, {"message": "Too Many Requests"}), "too_many_requests"),
+        (
+            plain_403("4000", {"Retry-After": "60"}, {"message": "You have exceeded a secondary rate limit."}),
+            "secondary",
+        ),
+        (plain_403("4000", body={"message": "API rate limit exceeded for user ID 7."}), "primary_message"),
+    ],
+)
+def test_established_rate_limit_stops_further_emissions_and_lists_the_rest(route, state, monkeypatch):
+    monkeypatch.setattr(diag.time, "sleep", lambda *a: pytest.fail("aucune attente automatique"))
+    repo = f"/repos/{diag.REPOSITORY}"
+    routes = healthy_routes()
+    routes[f"{repo}/collaborators/fixture-bot/permission"] = route
+    api = FakeApi(routes)
+    report = diag.run(TOKEN, api)
+    assert [urllib.parse.urlsplit(c["url"]).path for c in api.calls] == [
+        "/user",
+        repo,
+        f"{repo}/collaborators/fixture-bot/permission",
+    ]
+    assert by_key(report)["collaborator_permission"]["rate_limit_state"] == state
+    assert report["stopped_after_rate_limit"] == "collaborator_permission" and report["verdict"] == "failures"
+    not_run = [e["key"] for e in report["endpoints"] if e["outcome"] == "not_executed_rate_limited"]
+    assert not_run == [
+        "protection_main", "protection_bootstrap_v2", "protection_absent_branch", "rules_bootstrap_v2",
+        "rules_absent_branch", "ruleset_18840666", "ruleset_24793056", "rate_limit",
+    ]  # fmt: skip
+    assert all(k in report["failures"] for k in not_run) and all(
+        e["status"] is None for e in report["endpoints"] if e["key"] in not_run
+    )
+    assert len(report["endpoints"]) == len(diag.plan("fixture-bot"))
+
+
+def test_rate_limit_on_first_read_lists_all_remaining_without_collaborator():
+    api = FakeApi({"/user": plain_403("0")})
+    report = diag.run(TOKEN, api)
+    assert len(api.calls) == 1 and report["stopped_after_rate_limit"] == "user"
+    assert [e["key"] for e in report["endpoints"]] == [e.key for e in diag.plan(None)]
+    assert all(e["outcome"] == "not_executed_rate_limited" for e in report["endpoints"][1:])
+
+
+def test_permission_403_with_rate_headers_does_not_stop():
+    api = FakeApi(default=plain_403("4979"))
+    report = diag.run(TOKEN, api)
+    assert len(api.calls) == len(diag.plan(None)) and report["stopped_after_rate_limit"] is None
+    assert all(e["rate_limit_state"] == "not_exhausted" for e in report["endpoints"])
+
+
+def test_summary_mentions_rate_limit_stop(tmp_path, capsys):
+    out = tmp_path / "r.json"
+    assert (
+        diag.main(["--output", str(out)], environ={diag.TOKEN_ENV: TOKEN}, transport=FakeApi({"/user": plain_403("0")}))
+        == 1
+    )
+    assert "arrêt après limite de débit établie sur user" in capsys.readouterr().out
