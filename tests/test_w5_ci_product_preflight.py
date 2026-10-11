@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -30,7 +31,9 @@ TOKEN = "github_pat_FAKE0123456789abcdefghijKLMNOP_0123456789"
 SHA = "a" * 40
 IMAGE = "sha256:" + "b" * 64
 
-SPEC = importlib.util.spec_from_file_location("w5_product_preflight", ROOT / "scripts" / "w5_product_preflight.py")
+# W5_PREFLIGHT_UNDER_TEST : rejouer ces tests sur un autre état du harnais (preuve rouge→vert), même convention que les sondes du manager
+UNDER_TEST = Path(os.environ.get("W5_PREFLIGHT_UNDER_TEST") or ROOT / "scripts" / "w5_product_preflight.py")
+SPEC = importlib.util.spec_from_file_location("w5_product_preflight", UNDER_TEST)
 assert SPEC and SPEC.loader
 harness = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = harness
@@ -353,24 +356,71 @@ def test_invalid_campaign_id_or_unknown_stage_refuses(tmp_path, campaign_id):
     assert runner.calls == []
 
 
-def test_product_output_is_redacted_of_every_usual_token_form_before_it_reaches_the_log(tmp_path, capsys):
-    forms = [
+def token_forms() -> List[str]:
+    return [
         TOKEN,
         urllib.parse.quote(TOKEN, safe=""),
         base64.b64encode(TOKEN.encode()).decode(),
         base64.b64encode(b"x" + TOKEN.encode()).decode(),
         json.dumps(TOKEN)[1:-1],
     ]
-    runner = FakeRunner(product_out="\n".join(f"sortie {f}" for f in forms), product_err=f"Traceback ... {TOKEN} ...")
-    harness.run_stage("static", root=tmp_path, campaign_id="w5-preflight-1", env=env_with_token(), runner=runner)
-    captured = capsys.readouterr()
-    shown = captured.out + captured.err
-    assert "[REDACTED]" in shown
-    assert (
-        TOKEN not in shown
-        and urllib.parse.quote(TOKEN, safe="") not in shown
-        and base64.b64encode(TOKEN.encode()).decode() not in shown
+
+
+def test_raw_subprocess_output_is_never_printed_only_a_typed_summary_whatever_it_contains(tmp_path, capsys):
+    runner = FakeRunner(
+        product_out="\n".join(f"SORTIE-BRUTE {f}" for f in token_forms()),
+        product_err=f"Traceback (most recent call last):\n  File x\nRuntimeError: {TOKEN}",
+        scan_out=f"SCAN-BRUT {TOKEN}",
     )
+    harness.run_stage("static", root=tmp_path, campaign_id="w5-preflight-1", env=env_with_token(), runner=runner)
+    shown = capsys.readouterr()
+    text = shown.out + shown.err
+    assert "SORTIE-BRUTE" not in text and "SCAN-BRUT" not in text and "Traceback" not in text
+    assert all(form not in text for form in token_forms()) and "REDACTED" not in text, (
+        "rien d'arbitraire n'est affiché, donc rien à expurger"
+    )
+    assert "code produit 0" in text and "aucun rapport machine lisible" in text
+    assert "(classe d'exception : RuntimeError)" in text, (
+        "seul le NOM de classe de l'exception est conservé, jamais son message"
+    )
+
+
+def test_the_summary_is_derived_from_the_typed_report_not_from_free_text(tmp_path, capsys):
+    def runner(argv, **kwargs):
+        if "w5_leak_scan.py" in argv[1]:
+            return subprocess.CompletedProcess(argv, 0, "brut", "")
+        report = Path(argv[argv.index("--output") + 1])
+        report.write_text(
+            json.dumps(
+                make_report(
+                    "static",
+                    overrides={"P07-base-protection": "incomplete_validation"},
+                    verdict="incomplete_validation",
+                    exit_code=3,
+                )
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 3, f"détail libre {TOKEN}", "")
+
+    rc = harness.run_stage("static", root=tmp_path, campaign_id="w5-preflight-1", env=env_with_token(), runner=runner)
+    out = capsys.readouterr().out
+    assert rc == 3 and "verdict produit : incomplete_validation (code 3)" in out
+    assert "P07-base-protection : incomplete_validation" in out and "P08-oracle-environment : not_executed" in out
+    assert "titre libre" not in out and "détail libre" not in out and TOKEN not in out
+
+
+def test_redaction_happens_before_truncation_so_a_token_cut_at_the_limit_leaves_no_prefix():
+    for cut in range(8, len(TOKEN)):  # le jeton franchit la borne à chaque position possible
+        text = "x" * (200 - cut) + TOKEN + "y" * 50
+        shown = harness.safe_text(text, TOKEN, limit=200)
+        assert TOKEN[:8] not in shown, cut
+
+
+def test_exception_class_keeps_only_the_class_name():
+    assert harness.exception_class(f"Traceback...\nValueError: {TOKEN}") == "ValueError"
+    assert harness.exception_class("a\nb\nhttpx.ConnectError: msg") == "httpx.ConnectError"
+    assert harness.exception_class(f"rien de reconnaissable {TOKEN}") is None and harness.exception_class(None) is None
 
 
 def test_the_real_scanner_excludes_a_report_that_contains_the_token_and_the_stage_is_red(tmp_path):
@@ -427,34 +477,52 @@ def test_the_real_product_entry_refuses_a_non_dispatch_context_at_p01_with_no_ne
 # ── harnais : provenance ────────────────────────────────────────────────────────────────────────────────────────────────
 
 
+DECLARED = (  # ordre de déclaration du produit (run_preflight) : P01 à P07, contrôles W5 P09 à P12, puis P08
+    "P01-launch-context",
+    "P02-environment",
+    "P03-secret-scope",
+    "P04-fixture-identity",
+    "P05-role-routes",
+    "P06-worker-capacity",
+    "P07-base-protection",
+    "P09-gemma-models",
+    "P10-budget-broker",
+    "P11-bootstrap",
+    "P12-campaign-identity",
+    "P08-oracle-environment",
+)
+OPTIONAL_STATIC = "P08-oracle-environment"
+
+
+def make_steps(stage: str, overrides=None) -> List[Dict[str, Any]]:
+    """Étapes d'un rapport RÉALISTE : tout réussit sauf ``overrides`` ; après la première étape non réussie, le reste est ``not_executed``."""
+    overrides, halted, steps = overrides or {}, False, []
+    for step_id in DECLARED:
+        optional = stage == "static" and step_id == OPTIONAL_STATIC
+        if optional or halted:
+            state = "not_executed"
+        else:
+            state = overrides.get(step_id, "succeeded")
+            halted = state != "succeeded"
+        steps.append(
+            {
+                "id": step_id,
+                "state": state,
+                "required": not optional,
+                "title": "titre libre",
+                "detail": "détail libre",
+                "evidence": {"x": TOKEN},
+            }
+        )
+    return steps
+
+
 def make_report(
-    stage: str, *, verdict="validated", exit_code=0, states=None, emitted=(0, 0), extra=None
+    stage: str, *, verdict="validated", exit_code=0, overrides=None, emitted=(0, 0), mutate=None
 ) -> Dict[str, Any]:
-    states = states or {
-        "P01-launch-context": "succeeded",
-        "P02-environment": "succeeded",
-        "P12-campaign-identity": "succeeded",
-    }
-    steps = [
-        {
-            "id": k,
-            "state": v,
-            "required": True,
-            "title": "titre libre",
-            "detail": "détail libre",
-            "evidence": {"x": TOKEN},
-        }
-        for k, v in states.items()
-    ]
-    steps.append(
-        {
-            "id": "P08-oracle-environment",
-            "state": "succeeded"
-            if stage == "full" and all(v == "succeeded" for v in states.values())
-            else "not_executed",
-            "required": stage != "static",
-        }
-    )
+    steps = make_steps(stage, overrides)
+    if mutate:
+        steps = mutate(steps)
     return {
         "schema": "w4-business-report/1",
         "kind": "preflight",
@@ -468,7 +536,6 @@ def make_report(
             "billable_actions_emitted": emitted[1],
             "libre": TOKEN,
         },
-        **(extra or {}),
     }
 
 
@@ -518,8 +585,8 @@ def test_provenance_is_validated_only_when_everything_is_established(tmp_path):
         {"stage": "static", "argv": ["collegue.pilot.w4_business", "preflight", "--stage", "static"], "rc": 0},
         {"stage": "full", "argv": ["collegue.pilot.w4_business", "preflight", "--stage", "full"], "rc": 0},
     ]
-    assert record["played_steps"]["static"] == ["P01-launch-context", "P02-environment", "P12-campaign-identity"]
-    assert record["played_steps"]["full"][-1] == "P08-oracle-environment"
+    assert record["played_steps"]["static"] == [s for s in DECLARED if s != OPTIONAL_STATIC]
+    assert record["played_steps"]["full"] == list(DECLARED) and record["played_steps"]["full"][-1] == OPTIONAL_STATIC
     assert record["llm_calls_emitted"] == 0 and record["billable_actions_emitted"] == 0
     assert "NI BUILD" in record["scope"]
 
@@ -572,35 +639,28 @@ def test_a_red_product_stage_makes_the_record_failed(tmp_path):
             "full",
             verdict="failed",
             exit_code=1,
-            states={"P01-launch-context": "succeeded", "P07-base-protection": "failed"},
+            overrides={"P07-base-protection": "failed"},
         ),
     )
     record = provenance(tmp_path)
     assert record["verdict"] == "failed" and "full:failed" in record["reasons"]
-    assert record["played_steps"]["full"] == [
-        "P01-launch-context",
-        "P07-base-protection",
-    ]
+    assert record["played_steps"]["full"] == list(DECLARED[:7])  # P01 à P07 : les contrôles suivants n'ont pas tourné
 
 
 def test_an_incomplete_product_report_stays_incomplete_and_names_the_steps_actually_played(tmp_path):
-    states = {
-        "P01-launch-context": "succeeded",
-        "P07-base-protection": "incomplete_validation",
-        "P12-campaign-identity": "not_executed",
-    }
+    states = {"P07-base-protection": "incomplete_validation"}
     lay_down(
         tmp_path,
         "static",
         rc=3,
-        report=make_report("static", verdict="incomplete_validation", exit_code=3, states=states),
+        report=make_report("static", verdict="incomplete_validation", exit_code=3, overrides=states),
     )
     record = provenance(tmp_path)
     assert (
         record["verdict"] == "incomplete_validation"
         and record["reasons"][-2:] == ["static:incomplete_validation", "full:incomplete_validation"][-2:]
     )
-    assert record["played_steps"]["static"] == ["P01-launch-context", "P07-base-protection"]
+    assert record["played_steps"]["static"] == list(DECLARED[:7])
     assert record["commands"][0]["rc"] == 3
 
 
@@ -622,7 +682,7 @@ def test_a_product_that_claims_success_with_a_non_zero_code_or_emissions_or_a_le
 
 
 def test_a_required_step_that_did_not_succeed_blocks_a_validated_verdict_even_if_the_product_says_validated(tmp_path):
-    report = make_report("static", states={"P01-launch-context": "succeeded", "P07-base-protection": "not_executed"})
+    report = make_report("static", overrides={"P07-base-protection": "not_executed"})
     lay_down(tmp_path, "static", report=report)
     lay_down(tmp_path, "full", report=make_report("full"))
     assert provenance(tmp_path)["stages"]["static"]["status"] != "validated"
@@ -670,3 +730,177 @@ def test_cli_stage_subcommand_rejects_unknown_stages_at_parse_time(tmp_path):
             environ=env_with_token(),
         )
     assert exc.value.code == 2
+
+
+# ── C70 : contrôles attendus complets et preuve d'identité du contenu testé ──────────────────────────────────────────────────
+
+
+def outcome_of(stage: str, report: Dict[str, Any], *, rc=0, scan="clean") -> Dict[str, Any]:
+    return {
+        "executed": True,
+        "product_rc": rc,
+        "leak_scan": scan,
+        "published_files": [f"preflight-{stage}.json", f"preflight-{stage}.txt"],
+        "report": harness.typed_report(report, stage),
+    }
+
+
+def test_the_expected_controls_are_exactly_those_the_product_declares_in_both_stages():
+    from types import SimpleNamespace
+
+    from collegue.pilot import w4_business as business
+    from collegue.pilot import w5_business as w5
+
+    for stage in ("static", "full"):
+        extra = w5.w5_preflight_checks({}, settings=None, clients=SimpleNamespace(), campaign_id="w5-x", run_tag="1-1")
+        report = business.run_preflight(
+            {},
+            clients=SimpleNamespace(),
+            campaign_id="w5-x",
+            run_tag="1-1",
+            image_runner=lambda argv: None,
+            stage=stage,
+            settings=object(),
+            extra_checks=extra,
+        )
+        declared = {step.id: step.required for step in report.steps}
+        assert set(declared) == set(harness.EXPECTED_STEPS) and len(report.steps) == len(harness.EXPECTED_STEPS)
+        assert declared == {
+            sid: not (stage == "static" and sid == harness.OPTIONAL_IN_STATIC) for sid in harness.EXPECTED_STEPS
+        }
+        assert harness.step_problems(stage, harness.typed_report(report.to_machine(), stage)) == []
+
+
+@pytest.mark.parametrize("stage", ["static", "full"])
+def test_a_complete_report_has_no_problem(stage):
+    assert harness.step_problems(stage, harness.typed_report(make_report(stage), stage)) == []
+    assert harness.stage_status(outcome_of(stage, make_report(stage)), stage) == "validated"
+
+
+@pytest.mark.parametrize("missing", harness.EXPECTED_STEPS)
+@pytest.mark.parametrize("stage", ["static", "full"])
+def test_a_report_missing_any_control_is_never_validated(stage, missing):
+    report = make_report(stage, mutate=lambda steps: [s for s in steps if s["id"] != missing])
+    outcome = outcome_of(stage, report)
+    assert f"missing:{missing}" in harness.step_problems(stage, outcome["report"])
+    assert harness.stage_status(outcome, stage) == "incomplete_validation"
+
+
+def test_a_duplicated_control_is_never_validated_even_if_both_copies_succeeded():
+    report = make_report("full", mutate=lambda steps: steps + [dict(steps[2])])
+    outcome = outcome_of("full", report)
+    assert "duplicate:P03-secret-scope" in harness.step_problems("full", outcome["report"])
+    assert harness.stage_status(outcome, "full") != "validated"
+
+
+def test_an_unexpected_or_unreadable_control_is_never_validated():
+    extra = make_report(
+        "full", mutate=lambda steps: steps + [{"id": "P13-surprise", "state": "succeeded", "required": True}]
+    )
+    assert "unexpected_step" in harness.step_problems("full", harness.typed_report(extra, "full"))
+    assert harness.stage_status(outcome_of("full", extra), "full") != "validated"
+    garbled = make_report(
+        "full", mutate=lambda steps: steps + [{"id": "n'importe quoi", "state": "succeeded"}, "pas un objet"]
+    )
+    typed = harness.typed_report(garbled, "full")
+    assert typed["dropped_steps"] == 2 and "malformed_steps" in harness.step_problems("full", typed)
+    assert typed["unexpected_steps"] == 0
+    assert harness.stage_status(outcome_of("full", garbled), "full") != "validated"
+    bad_state = make_report(
+        "full", mutate=lambda steps: [{**s, "state": "ok"} if s["id"] == "P05-role-routes" else s for s in steps]
+    )
+    assert harness.stage_status(outcome_of("full", bad_state), "full") != "validated"
+
+
+@pytest.mark.parametrize(
+    ("stage", "step_id", "required"),
+    [
+        ("full", "P08-oracle-environment", False),  # P08 déclaré facultatif à l'étape complète : falsifié
+        ("full", "P01-launch-context", False),
+        ("static", "P07-base-protection", False),
+        ("static", "P08-oracle-environment", True),  # P08 obligatoire à l'étape statique : falsifié
+    ],
+)
+def test_a_falsified_required_flag_is_never_validated(stage, step_id, required):
+    report = make_report(
+        stage, mutate=lambda steps: [{**s, "required": required} if s["id"] == step_id else s for s in steps]
+    )
+    outcome = outcome_of(stage, report)
+    assert f"required_flag:{step_id}" in harness.step_problems(stage, outcome["report"])
+    assert harness.stage_status(outcome, stage) != "validated"
+
+
+def test_the_optional_oracle_control_must_not_be_played_in_the_static_stage():
+    report = make_report(
+        "static",
+        mutate=lambda steps: [
+            {**s, "state": "succeeded", "required": False} if s["id"] == OPTIONAL_STATIC else s for s in steps
+        ],
+    )
+    assert "optional_step_played:P08-oracle-environment" in harness.step_problems(
+        "static", harness.typed_report(report, "static")
+    )
+
+
+def test_a_full_report_that_claims_the_static_shape_is_refused_when_the_stage_is_known(tmp_path):
+    forged = make_report("static")
+    forged["facts"]["stage"] = "full"  # P08 « facultatif et non joué » présenté comme rapport complet
+    outcome = outcome_of("full", forged)
+    assert harness.stage_status(outcome, "full") != "validated"
+    lay_down(tmp_path, "static", report=make_report("static"))
+    lay_down(tmp_path, "full", report=forged)
+    record = provenance(tmp_path)
+    assert (
+        record["verdict"] == "incomplete_validation"
+        and "full:required_flag:P08-oracle-environment" in record["reasons"]
+    )
+
+
+def test_an_unknown_stage_defaults_to_the_strictest_full_expectations():
+    outcome = outcome_of("full", make_report("static"))
+    outcome["published_files"] = []
+    outcome.pop("stage", None)
+    assert harness.infer_stage(outcome) == "full" and harness.stage_status(outcome) != "validated"
+
+
+def test_provenance_reports_the_control_problems_by_expected_id_only(tmp_path):
+    lay_down(
+        tmp_path,
+        "static",
+        report=make_report(
+            "static",
+            mutate=lambda steps: (
+                [s for s in steps if s["id"] != "P11-bootstrap"] + [{"id": "P99-" + "x" * 30, "state": "succeeded"}]
+            ),
+        ),
+    )
+    lay_down(tmp_path, "full", report=make_report("full"))
+    record = provenance(tmp_path)
+    assert "static:missing:P11-bootstrap" in record["reasons"] and "static:unexpected_step" in record["reasons"]
+    assert "P99" not in json.dumps(record)
+
+
+@pytest.mark.parametrize("which", [*harness.PRODUCT_TREES, *harness.HARNESS_FILES])
+def test_any_absent_git_identity_forbids_the_complete_verdict(tmp_path, which):
+    root = validated_root(tmp_path)
+    record = harness.build_provenance(
+        root, DISPATCH, image_id=IMAGE, tree=lambda spec: None if spec == f"HEAD:{which}" else "c" * 40
+    )
+    reason = "product_tree_absent" if which in harness.PRODUCT_TREES else "harness_blob_absent"
+    assert record["verdict"] == "incomplete_validation" and reason in record["reasons"]
+
+
+def test_all_git_identities_absent_or_malformed_is_incomplete(tmp_path):
+    root = validated_root(tmp_path)
+    for tree in (lambda spec: None, lambda spec: "", lambda spec: "pas-un-sha", lambda spec: "C" * 40):
+        record = harness.build_provenance(root, DISPATCH, image_id=IMAGE, tree=tree)
+        assert record["verdict"] == "incomplete_validation"
+        assert {"product_tree_absent", "harness_blob_absent"} <= set(record["reasons"])
+        assert all(value is None for value in record["product"]["trees"].values())
+
+
+def test_the_real_git_identity_resolves_for_the_committed_harness_files():
+    """Dans un checkout de ce dépôt, les arbres et blobs HEAD existent (le workflow s'exécute dans un checkout complet)."""
+    for path in (*harness.PRODUCT_TREES, *harness.HARNESS_FILES):
+        value = harness.git_value("rev-parse", f"HEAD:{path}")
+        assert value is None or len(value) == 40  # None tant que le fichier n'est pas commité (travail en cours)

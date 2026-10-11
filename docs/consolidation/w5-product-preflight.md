@@ -28,16 +28,22 @@ la récurrence nightly inactive ; sur tout autre contexte il rend `incomplete_va
   `GITHUB_EVENT_NAME` ou `GITHUB_RUN_ATTEMPT` pour passer serait exactement ce qui est interdit ;
 * il faut donc un **vrai `workflow_dispatch`**, première tentative, avec la phrase saisie par l'humain : fait ici, sans rien fabriquer. Une **relance Actions**
   (tentative 2) est refusée par P01 : un nouveau préflight = un nouveau dispatch ;
-* la phrase d'enveloppe est celle que le produit exige du déclenchement ; ce workflow ne lance rien (aucune clé, aucune commande `run`, aucun environnement). Le choisir
-  autrement demanderait un changement de P01 chez B — non nécessaire.
+* la phrase d'enveloppe est celle que le produit exige du déclenchement en P01. **Portée explicite : elle n'est acceptée que comme paramètre P01 de CE workflow**, qui n'a ni clé de
+  modèle, ni environnement GitHub, ni commande `run`/`cleanup`/claim/activate : elle ne lance et ne consomme rien. Elle n'autorise jamais le workflow de campagne, ne le remplace
+  pas et ne vaut pas ordre de campagne (qui exige un identifiant neuf, un environnement et un secret à recréer, sur ordre distinct). Aucun changement de P01 (propriété B) ;
 
-### Enregistrement GitHub (mécanisme)
+### Publication et déclenchement manuel dédié (requis)
 
-Un `workflow_dispatch` n'est déclenchable que si le fichier est sur la **branche par défaut**. Chemin certain : une **petite PR vers `main`** contenant ce workflow, le
-harnais, le test et ce document (aucun fichier produit), fusionnée sur ordre du manager, puis `gh workflow run w5-product-preflight.yml --ref main -f confirm=<phrase>`
-sur ordre exact. Chemin facultatif non éprouvé (à tester par le manager, sans risque car sans clé) : pousser la branche puis tenter le dispatch avec `--ref <branche>` ;
-si GitHub répond 404 (« workflow not found on the default branch »), revenir à la PR. Dans les deux cas l'événement est un vrai dispatch. Le produit testé est celui de
-`GITHUB_SHA` ; `provenance.json` consigne ce SHA et les arbres `collegue/`, `locks/`, `docker/sandbox/` à comparer avec `main` = `734c7f5`.
+Un `workflow_dispatch` n'est déclenchable que si le fichier est sur la **branche par défaut**. Séquence retenue (chacune sur ordre exact du manager) :
+
+1. **Petite PR autonome vers `main`** contenant exactement ces fichiers (workflow, harnais, test, ce document) : aucun fichier produit, aucun workflow de campagne ou nightly modifié. Les **cinq
+   checks de livraison** de la PR (Ruff, audit des dépendances, Pytest 3.11, Pytest 3.12, build Docker) restent exigés ; revues absentes ou check manquant ne sont pas un succès.
+2. Fusion sur ordre ; les cinq checks du push sur `main` sont observés à leur tour.
+3. **Déclenchement manuel dédié** : `gh workflow run w5-product-preflight.yml --ref main -f confirm=<phrase P01>` — jamais le workflow de campagne, jamais d'essai opportuniste. Un seul dispatch
+   par préflight ; une relance Actions donne la tentative 2 et P01 la refuse.
+
+Tester d'abord le dispatch depuis la branche (`--ref <branche>`) est une hypothèse GitHub non éprouvée et n'est pas retenue. Le produit testé est celui de `GITHUB_SHA` ; `provenance.json` consigne ce SHA, les arbres
+`collegue/`, `locks/`, `docker/sandbox/` et les blobs du harnais (à comparer avec `main`) : **une identité de contenu absente interdit le verdict complet**.
 
 ## Déroulement du job (un seul job, une étape qui échoue arrête les suivantes sauf dépôt des preuves)
 
@@ -61,15 +67,20 @@ l'enveloppe réelle.
 * **Pas de mutation.** La seule action du produit construite est `preflight` (liste fermée, testée : ni `run`, `cleanup`, `capacity`, ni claim/activate) ; les contrôles du produit
   sont des lectures. Aucune commande `gh`, `curl`, `docker run/login`, `git push` dans le workflow.
 * **Jeton confiné.** `secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN` n'apparaît que dans l'`env` des deux étapes de préflight (sans action tierce) ; jamais au niveau du job. Les
-  sorties du produit et du scanner sont relues puis **expurgées** de toutes les formes usuelles du jeton avant d'atteindre le journal (erreurs et URLs mal formées comprises) ;
-  aucun débogage HTTP, aucune copie d'environnement général. Le scanner de confiance (`scripts/w5_leak_scan.py`, inchangé) cherche le jeton dans le contenu et les noms de tout
+  sorties brutes du produit et du scanner ne sont **jamais** affichées (journal minimal typé, voir plus bas : erreurs et URLs mal formées ne peuvent donc rien révéler) ; tout texte court
+  affiché est expurgé AVANT toute troncature ; aucun débogage HTTP, aucune copie d'environnement général. Le scanner de confiance (`scripts/w5_leak_scan.py`, inchangé) cherche le jeton dans le contenu et les noms de tout
   ce qui est publié ; un fichier contaminé n'est jamais déposé et rend l'étape rouge.
 * **Propagation des échecs.** Le code du produit est conservé (1 échec, 3 validation incomplète) ; le scanner ne peut que l'aggraver ; un 0 sans rapport machine est rouge.
   Les rapports partiels restent déposés : un préflight arrêté en P07 laisse P09 à P12 `not_executed`, jamais « succès ».
 * **Provenance typée** (`diag/provenance.json`, schéma `w5-product-preflight-provenance/1`) : SHA testé et du harnais, arbres/blobs, empreinte du manifeste, nom et id de l'image,
-  commandes et codes RÉELS, étapes réellement jouées (ids et états), émissions, contexte de lancement. Seuls des champs typés sont recopiés (jamais détail, message ni preuve libre).
-  Verdict `validated` (0) seulement si : dispatch, tentative 1, SHA, manifeste, id d'image valide, **les deux étapes** validées (code 0, rapport sain `validated`, étapes requises réussies,
-  zéro émission, scanner `clean`) ; `failed` (1) si un rapport est rouge ou incohérent ; sinon `incomplete_validation` (3), avec `partial: true` si le complet n'a pas été joué.
+  commandes et codes RÉELS, étapes réellement jouées (ids et états), émissions, contexte de lancement. Seuls des champs typés sont recopiés (jamais détail, message ni preuve libre ; un
+  identifiant de contrôle inconnu n'est jamais recopié). Verdict `validated` (0) seulement si : dispatch, tentative 1, SHA, manifeste, id d'image valide, **arbres produit ET blobs du harnais
+  tous prouvés (SHA git valides)**, et **les deux étapes** validées : code 0, rapport sain `validated`, **liste de contrôles COMPLÈTE** (les douze `P01` à `P12`, chacun une fois, aucun inconnu,
+  aucun élément illisible), drapeaux `required` conformes à l'étape (P08 facultatif et non joué à l'étape statique seulement, obligatoire à l'étape complète — une omission ou un drapeau falsifié
+  n'est jamais cru), étapes requises réussies, zéro émission, scanner `clean`. `failed` (1) si un rapport est rouge ou incohérent ; sinon `incomplete_validation` (3), avec `partial: true` si le
+  complet n'a pas été joué. Les écarts sont listés par identifiant attendu (`full:missing:P08-oracle-environment`, `static:required_flag:P01-launch-context`, `product_tree_absent`…).
+* **Journal minimal.** Aucune sortie brute du produit ni du scanner n'est affichée ni déposée : le journal ne contient que des lignes **dérivées du rapport typé** (codes, verdict, `id : état`) et, si
+  aucun rapport n'a été écrit, le seul NOM de classe de la dernière exception. Le détail est dans le rapport complet, scanné puis déposé. (Toute expurgation de texte se fait avant troncature.)
 
 ## Preuve locale (C69) et limites
 
