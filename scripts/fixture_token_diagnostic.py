@@ -54,6 +54,12 @@ REPOSITORY_ID = 1298596453
 BOOTSTRAP_BRANCH = "collegue-business/bootstrap-w5-v2"
 ABSENT_BRANCH = "collegue-business/38027369635-1"  # branche de l'ancien run : ABSENTE, jamais créée ici
 RULESET_IDS = (18840666, 24793056)
+# Lectures utilisées APRÈS P07 (contrôles du socle V2) : identifiants issus de GET indépendants du manager, jamais devinés.
+BOOTSTRAP_COMMIT = "ad56c0fa03066b1f6efb3cf6a5aa26cb496372ca"
+CHECKS_APP_ID = 15368
+WORKFLOW_JOB_ID = 113869164089
+WORKFLOW_RUN_ID = 37945085226
+WORKFLOW_PATH = ".github/workflows/fixture-tests.yml"
 TOKEN_ENV = "FIXTURE_DIAG_TOKEN"
 SCHEMA = "w5-fixture-token-diagnostic/1"
 REQUEST_TIMEOUT = 10.0
@@ -99,6 +105,28 @@ RULE_TYPES = (
     "workflows",
     "commit_message_pattern",
     "branch_name_pattern",
+)
+CHECK_STATUSES = ("queued", "in_progress", "completed", "waiting", "requested", "pending")
+CHECK_CONCLUSIONS = (
+    "success",
+    "failure",
+    "neutral",
+    "cancelled",
+    "skipped",
+    "timed_out",
+    "action_required",
+    "stale",
+    "startup_failure",
+)
+COMMIT_STATES = ("error", "failure", "pending", "success")
+RUN_EVENTS = (
+    "push",
+    "pull_request",
+    "pull_request_target",
+    "workflow_dispatch",
+    "schedule",
+    "workflow_run",
+    "merge_group",
 )
 ENFORCEMENT = ("active", "disabled", "evaluate")
 TARGETS = ("branch", "tag", "push")
@@ -447,6 +475,93 @@ def extract_rate_limit(data: Any) -> Dict[str, Any]:
     return {"resources": out} if out else {}
 
 
+def _sha_is_expected(value: Any) -> Optional[bool]:
+    return value == BOOTSTRAP_COMMIT if isinstance(value, str) else None
+
+
+def _nested_id(data: Mapping[str, Any], key: str) -> Optional[int]:
+    item = data.get(key)
+    return _int(item.get("id")) if isinstance(item, dict) else None
+
+
+def extract_check_runs(data: Any) -> Dict[str, Any]:
+    """Checks d'un commit : compteurs, énumérations fermées, ``app_id`` numérique, SHA attendu en booléen (aucun nom libre)."""
+    if not isinstance(data, dict):
+        return {}
+    items = data.get("check_runs") if isinstance(data.get("check_runs"), list) else None
+    runs = (
+        [
+            _drop_none(
+                {
+                    "id": _int(item.get("id")),
+                    "status": _enum(item.get("status"), CHECK_STATUSES),
+                    "conclusion": _enum(item.get("conclusion"), CHECK_CONCLUSIONS),
+                    "app_id": _nested_id(item, "app"),
+                    "app_id_is_expected": _nested_id(item, "app") == CHECKS_APP_ID
+                    if _nested_id(item, "app") is not None
+                    else None,
+                    "head_sha_is_expected": _sha_is_expected(item.get("head_sha")),
+                }
+            )
+            for item in items[:20]
+            if isinstance(item, dict)
+        ]
+        if items is not None
+        else None
+    )
+    return _drop_none(
+        {
+            "total_count": _int(data.get("total_count")),
+            "listed_count": len(items) if items is not None else None,
+            "check_runs": runs,
+        }
+    )
+
+
+def extract_commit_statuses(data: Any) -> Dict[str, Any]:
+    """Statuts commit (liste) : longueur et états de l'énumération fermée seulement."""
+    if not isinstance(data, list):
+        return {}
+    states = [_enum(item.get("state"), COMMIT_STATES) for item in data[:20] if isinstance(item, dict)]
+    return {"count": len(data), "states": [state for state in states if state]}
+
+
+def extract_workflow_job(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    run_id = _int(data.get("run_id"))
+    return _drop_none(
+        {
+            "id": _int(data.get("id")),
+            "run_id": run_id,
+            "run_id_is_expected": run_id == WORKFLOW_RUN_ID if run_id is not None else None,
+            "status": _enum(data.get("status"), CHECK_STATUSES),
+            "conclusion": _enum(data.get("conclusion"), CHECK_CONCLUSIONS),
+            "head_sha_is_expected": _sha_is_expected(data.get("head_sha")),
+        }
+    )
+
+
+def extract_workflow_run(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    path = data.get("path")
+    repository_id = _nested_id(data, "repository")
+    return _drop_none(
+        {
+            "id": _int(data.get("id")),
+            "run_attempt": _int(data.get("run_attempt")),
+            "status": _enum(data.get("status"), CHECK_STATUSES),
+            "conclusion": _enum(data.get("conclusion"), CHECK_CONCLUSIONS),
+            "event": _enum(data.get("event"), RUN_EVENTS),
+            "head_sha_is_expected": _sha_is_expected(data.get("head_sha")),
+            "path_is_expected": path == WORKFLOW_PATH if isinstance(path, str) else None,
+            "repository_id": repository_id,
+            "repository_id_is_expected": repository_id == REPOSITORY_ID if repository_id is not None else None,
+        }
+    )
+
+
 # ── plan ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -459,7 +574,7 @@ class Endpoint:
 
 
 def plan(login: Optional[str]) -> List[Endpoint]:
-    """Liste FERMÉE des lectures. L'entrée collaborateur n'existe que si ``login`` est un login valide (renvoyé par ``/user``)."""
+    """Liste FERMÉE des lectures (15 avec login valide, 14 sinon). L'entrée collaborateur n'existe que si ``login`` est un login valide (renvoyé par ``/user``)."""
     repo = f"/repos/{REPOSITORY}"
     steps = [
         Endpoint("user", "/user", extract_user),
@@ -487,6 +602,12 @@ def plan(login: Optional[str]) -> List[Endpoint]:
         Endpoint("rules_absent_branch", f"{repo}/rules/branches/{ABSENT_BRANCH}", extract_rules),
     ]
     steps += [Endpoint(f"ruleset_{rid}", f"{repo}/rulesets/{rid}", extract_ruleset) for rid in RULESET_IDS]
+    steps += [
+        Endpoint("commit_check_runs", f"{repo}/commits/{BOOTSTRAP_COMMIT}/check-runs", extract_check_runs),
+        Endpoint("commit_statuses", f"{repo}/commits/{BOOTSTRAP_COMMIT}/statuses", extract_commit_statuses),
+        Endpoint("workflow_job", f"{repo}/actions/jobs/{WORKFLOW_JOB_ID}", extract_workflow_job),
+        Endpoint("workflow_run", f"{repo}/actions/runs/{WORKFLOW_RUN_ID}", extract_workflow_run),
+    ]
     steps.append(Endpoint("rate_limit", "/rate_limit", extract_rate_limit))
     return steps
 

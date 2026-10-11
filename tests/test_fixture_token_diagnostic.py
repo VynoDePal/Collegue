@@ -63,6 +63,62 @@ def rights_headers(remaining: int = 4979, **extra: str) -> Dict[str, str]:
     }
 
 
+def post_p07_routes() -> Dict[str, Any]:
+    """Réponses réalistes (avec champs libres hostiles) des quatre lectures utilisées après P07."""
+    repo = f"/repos/{diag.REPOSITORY}"
+    sha = diag.BOOTSTRAP_COMMIT
+    check = {
+        "id": 501,
+        "name": "Fixture tests",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": sha,
+        "app": {"id": 15368, "slug": "github-actions", "name": "libre"},
+        "output": {"summary": "texte libre"},
+        "details_url": "https://evil.example/x",
+    }
+    return {
+        f"{repo}/commits/{sha}/check-runs": (
+            200,
+            rights_headers(),
+            {"total_count": 2, "check_runs": [check, {**check, "id": 502}]},
+        ),
+        f"{repo}/commits/{sha}/statuses": (
+            200,
+            rights_headers(),
+            [{"id": 9, "state": "success", "context": "libre", "target_url": "https://evil.example/s"}],
+        ),
+        f"{repo}/actions/jobs/{diag.WORKFLOW_JOB_ID}": (
+            200,
+            rights_headers(),
+            {
+                "id": diag.WORKFLOW_JOB_ID,
+                "run_id": diag.WORKFLOW_RUN_ID,
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": sha,
+                "name": "libre",
+                "steps": [{"name": "libre"}],
+            },
+        ),
+        f"{repo}/actions/runs/{diag.WORKFLOW_RUN_ID}": (
+            200,
+            rights_headers(),
+            {
+                "id": diag.WORKFLOW_RUN_ID,
+                "run_attempt": 1,
+                "status": "completed",
+                "conclusion": "success",
+                "event": "push",
+                "head_sha": sha,
+                "path": diag.WORKFLOW_PATH,
+                "repository": {"id": diag.REPOSITORY_ID, "full_name": "libre"},
+                "head_commit": {"message": "libre"},
+            },
+        ),
+    }
+
+
 def healthy_routes() -> Dict[str, Any]:
     repo = f"/repos/{diag.REPOSITORY}"
     return {
@@ -93,6 +149,7 @@ def healthy_routes() -> Dict[str, Any]:
             ],
         ),
         f"{repo}/rules/branches/{diag.ABSENT_BRANCH}": (200, rights_headers(), []),
+        **post_p07_routes(),
         f"{repo}/rulesets/18840666": (
             200,
             rights_headers(),
@@ -136,8 +193,13 @@ def test_nominal_run_reads_closed_list_with_get_only():
         f"{repo}/rules/branches/{diag.ABSENT_BRANCH}",
         f"{repo}/rulesets/18840666",
         f"{repo}/rulesets/24793056",
+        f"{repo}/commits/ad56c0fa03066b1f6efb3cf6a5aa26cb496372ca/check-runs",
+        f"{repo}/commits/ad56c0fa03066b1f6efb3cf6a5aa26cb496372ca/statuses",
+        f"{repo}/actions/jobs/113869164089",
+        f"{repo}/actions/runs/37945085226",
         "/rate_limit",
     ]
+    assert len(paths) == 15 and len(diag.plan(None)) == 14
     assert all(c["url"].startswith("https://api.github.com/") and c["timeout"] <= 15 for c in api.calls)
     assert all(e["method"] == "GET" for e in report["endpoints"])
     assert by_key(report)["repository"]["data"]["id_matches_expected"] is True
@@ -660,7 +722,8 @@ def test_established_rate_limit_stops_further_emissions_and_lists_the_rest(route
     not_run = [e["key"] for e in report["endpoints"] if e["outcome"] == "not_executed_rate_limited"]
     assert not_run == [
         "protection_main", "protection_bootstrap_v2", "protection_absent_branch", "rules_bootstrap_v2",
-        "rules_absent_branch", "ruleset_18840666", "ruleset_24793056", "rate_limit",
+        "rules_absent_branch", "ruleset_18840666", "ruleset_24793056", "commit_check_runs",
+        "commit_statuses", "workflow_job", "workflow_run", "rate_limit",
     ]  # fmt: skip
     assert all(k in report["failures"] for k in not_run) and all(
         e["status"] is None for e in report["endpoints"] if e["key"] in not_run
@@ -690,3 +753,130 @@ def test_summary_mentions_rate_limit_stop(tmp_path, capsys):
         == 1
     )
     assert "arrêt après limite de débit établie sur user" in capsys.readouterr().out
+
+
+# ── C67 : lectures utilisées après P07 (check-runs, statuses, job, run) ────────────────────────────────────────────────────
+
+
+POST_P07 = ("commit_check_runs", "commit_statuses", "workflow_job", "workflow_run")
+
+
+def test_post_p07_reads_extract_minimal_typed_fields_only():
+    report = diag.run(TOKEN, FakeApi(healthy_routes()))
+    entries = by_key(report)
+    checks = entries["commit_check_runs"]["data"]
+    assert checks["total_count"] == 2 and checks["listed_count"] == 2
+    assert checks["check_runs"][0] == {
+        "id": 501,
+        "status": "completed",
+        "conclusion": "success",
+        "app_id": 15368,
+        "app_id_is_expected": True,
+        "head_sha_is_expected": True,
+    }
+    assert entries["commit_statuses"]["data"] == {"count": 1, "states": ["success"]}
+    assert entries["workflow_job"]["data"] == {
+        "id": diag.WORKFLOW_JOB_ID,
+        "run_id": diag.WORKFLOW_RUN_ID,
+        "run_id_is_expected": True,
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha_is_expected": True,
+    }
+    assert entries["workflow_run"]["data"] == {
+        "id": diag.WORKFLOW_RUN_ID,
+        "run_attempt": 1,
+        "status": "completed",
+        "conclusion": "success",
+        "event": "push",
+        "head_sha_is_expected": True,
+        "path_is_expected": True,
+        "repository_id": diag.REPOSITORY_ID,
+        "repository_id_is_expected": True,
+    }
+    text = json.dumps(report)
+    for free in ("libre", "evil.example", "texte libre", "github-actions", "Fixture tests"):
+        assert free not in text  # aucun nom libre, URL ni corps brut supplémentaire
+
+
+def test_post_p07_identifiers_are_the_manager_provided_ones_not_guessed():
+    assert diag.BOOTSTRAP_COMMIT == "ad56c0fa03066b1f6efb3cf6a5aa26cb496372ca"
+    assert (diag.WORKFLOW_JOB_ID, diag.WORKFLOW_RUN_ID, diag.CHECKS_APP_ID) == (113869164089, 37945085226, 15368)
+    assert diag.WORKFLOW_PATH == ".github/workflows/fixture-tests.yml"
+
+
+def test_post_p07_unexpected_values_are_flagged_false_not_copied():
+    routes = healthy_routes()
+    repo = f"/repos/{diag.REPOSITORY}"
+    run = routes[f"{repo}/actions/runs/{diag.WORKFLOW_RUN_ID}"][2]
+    routes[f"{repo}/actions/runs/{diag.WORKFLOW_RUN_ID}"] = (
+        200,
+        rights_headers(),
+        {
+            **run,
+            "head_sha": "0" * 40,
+            "path": ".github/workflows/autre.yml",
+            "event": "pull_request_target?x",
+            "repository": {"id": 1},
+        },
+    )
+    data = by_key(diag.run(TOKEN, FakeApi(routes)))["workflow_run"]["data"]
+    assert data["head_sha_is_expected"] is False and data["path_is_expected"] is False
+    assert data["repository_id_is_expected"] is False and "event" not in data
+    assert "autre.yml" not in json.dumps(data) and "0" * 40 not in json.dumps(data)
+
+
+@pytest.mark.parametrize("key", POST_P07)
+@pytest.mark.parametrize("status", [404, 403, 401])
+def test_post_p07_404_403_401_are_failures_never_success(key, status):
+    routes = healthy_routes()
+    path = next(e.path for e in diag.plan("fixture-bot") if e.key == key)
+    routes[path] = (
+        status,
+        rights_headers(),
+        {"message": "Not Found" if status == 404 else "Resource not accessible by personal access token"},
+    )
+    api = FakeApi(routes)
+    report = diag.run(TOKEN, api)
+    entry = by_key(report)[key]
+    assert entry["outcome"] == "failure" and key in report["failures"] and report["verdict"] == "failures"
+    assert len(api.calls) == len(diag.plan("fixture-bot"))  # un refus de droits ne coupe pas les autres lectures
+    assert "x_accepted_github_permissions" in entry
+
+
+def test_post_p07_malformed_bodies_do_not_break_the_report():
+    routes = healthy_routes()
+    for path in [e.path for e in diag.plan("fixture-bot") if e.key in POST_P07]:
+        routes[path] = (200, rights_headers(), [1, "x", None, {"check_runs": "nope"}])
+    report = diag.run(TOKEN, FakeApi(routes))
+    assert by_key(report)["rate_limit"]["outcome"] == "ok" and len(report["endpoints"]) == 15
+    for key in POST_P07:
+        assert by_key(report)[key]["outcome"] == "ok"  # statut 2xx : seules les valeurs typées valides sont extraites
+
+
+def test_post_p07_reads_are_get_only_and_in_the_closed_list():
+    paths = [e.path for e in diag.plan("fixture-bot") if e.key in POST_P07]
+    assert paths == [
+        f"/repos/{diag.REPOSITORY}/commits/{diag.BOOTSTRAP_COMMIT}/check-runs",
+        f"/repos/{diag.REPOSITORY}/commits/{diag.BOOTSTRAP_COMMIT}/statuses",
+        f"/repos/{diag.REPOSITORY}/actions/jobs/113869164089",
+        f"/repos/{diag.REPOSITORY}/actions/runs/37945085226",
+    ]
+    assert all(diag.build_url(p).startswith("https://api.github.com/repos/") for p in paths)
+
+
+def test_post_p07_echo_of_token_in_run_payload_is_dropped(tmp_path, capsys):
+    routes = healthy_routes()
+    repo = f"/repos/{diag.REPOSITORY}"
+    routes[f"{repo}/actions/jobs/{diag.WORKFLOW_JOB_ID}"] = (200, rights_headers(), {"id": 1, "name": TOKEN})
+    out = tmp_path / "r.json"
+    rc = diag.main(["--output", str(out)], environ={diag.TOKEN_ENV: TOKEN}, transport=FakeApi(routes))
+    captured = capsys.readouterr()
+    assert rc == 1 and TOKEN not in out.read_text() + captured.out + captured.err
+    assert by_key(json.loads(out.read_text()))["workflow_job"]["token_echo_detected"] is True
+
+
+def test_closed_list_total_without_valid_login_is_fourteen():
+    api = FakeApi({"/user": (403, rights_headers(), {"message": "Bad credentials"})})
+    diag.run(TOKEN, api)
+    assert len(api.calls) == len(diag.plan(None)) == 14  # /user refusé (4xx hors limite) : les 13 autres suivent
