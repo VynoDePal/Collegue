@@ -1,0 +1,43 @@
+name: Fixture token diagnostic
+
+# Sonde TEMPORAIRE des droits du jeton de la fixture (C65) : lectures GET seulement, aucune campagne, aucun appel modèle.
+# Déclenchement UNIQUE : push de la branche exacte ci-dessous qui touche l'un des deux fichiers de la sonde.
+# Ni pull_request, ni schedule, ni workflow_dispatch : pas de relance automatique. Diagnostic des droits seulement.
+on:
+  push:
+    branches:
+      - codex/w5-fixture-token-diagnostic-c
+    paths:
+      - scripts/fixture_token_diagnostic.py
+      - .github/workflows/fixture-token-diagnostic.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fixture-token-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    name: Fixture token diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Probe fixture token rights (read-only)
+        env:
+          FIXTURE_DIAG_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: python3 scripts/fixture_token_diagnostic.py --output "$RUNNER_TEMP/fixture-token-diagnostic.json"
+
+      - name: Upload filtered report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-token-diagnostic
+          path: ${{ runner.temp }}/fixture-token-diagnostic.json
+          if-no-files-found: ignore
+          retention-days: 3
