@@ -341,3 +341,8 @@ Points d'attaque propres à cette vague (à rejouer sur le SHA figé, depuis le 
 - **Campagne** : un seul lancement, identifiant neuf consommé, canaris des deux Gemma dans l'enveloppe commune ; en cas d'incompatibilité `countTokens`/borne : aucune estimation de secours, aucune seconde campagne ; run ID et SHA capturés aussitôt ; clé temporaire retirée même sur refus ; journaux sans valeur de clé.
 
 Limites à citer sans les arrondir : celles de W2, W3 et W4 (§§ 10 à 12) restent valables ; Gemma est gratuit selon l'affichage de Google mais la garantie repose sur l'identité exacte du modèle et l'endpoint officiel, jamais sur une clé « non facturable » supposée ; le déclenchement du check de la fixture, le comportement du code owner avec 0 approbation requise et la règle de création des bases sont des comportements de GitHub établis seulement par la contre-épreuve distante ; le verrou historique `sandbox-openhands` reste rouge à l'audit strict (non réparé).
+
+### 13.1 Après la PR #615 : lot de diagnostic Google, puis campagne neuve (autorisée, non lancée)
+
+État courant : `docs/consolidation/w5-post500.md` ; lot de diagnostic, responsabilités (A transport, B tests adverses, C intégration), critères d'intégration, collecte du diagnostic fermé (qui classe l'erreur sans en établir la cause), revue des workflows, intégrité de la fixture V2, secret temporaire, revendication durable de l'identifiant et **plan de commandes exact** : `docs/consolidation/w5-google-campaign-plan.md`.
+Règles inchangées : aucun appel Google (`countTokens` compris), clé, secret/environnement/variable, dispatch ni rerun sans l'ordre exact du manager ; C intègre A/B sur SHA acceptés ; publication, fusion et dispatch sont trois ordres distincts.
