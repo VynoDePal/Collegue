@@ -1,0 +1,170 @@
+# Préflight PRODUIT distant de la campagne W5, SANS modèle (C69) : exécute les vraies entrées publiques du produit
+# (``python -m collegue.pilot.w4_business preflight --stage static|full``) contre les API GitHub réelles de la fixture, avec l'image du courtier
+# réellement construite, pour établir que les contrôles P01 à P12 (dont P07, P09 à P12 et l'image des oracles) passent AVANT tout lancement.
+#
+# Ce que ce workflow N'EST PAS : une campagne. Il n'a ni environnement GitHub, ni secret de modèle, ni variable de clé ; il n'appelle jamais ``run``,
+# ``cleanup``, ``claim`` ni ``activate`` ; il ne mute rien (lectures seules sous le jeton de la fixture, contrôlées par le produit) ; il ne lit
+# aucun fichier de clé. Il n'active pas la campagne ni le nightly et ne consomme aucun identifiant de campagne : l'identifiant ``w5-preflight-<run>``
+# n'est jamais revendiqué (le préflight vérifie seulement qu'il ne l'est pas). Une exécution validée ne prouve NI BUILD, NI R04/R05, NI la campagne.
+#
+# Honnêteté du contexte de lancement (P01) : l'événement est un VRAI ``workflow_dispatch`` et la tentative est la VRAIE (« 1 » au premier lancement ; une
+# relance Actions donne « 2 » et P01 la refuse). Rien n'est fabriqué : ni ``GITHUB_EVENT_NAME``, ni ``GITHUB_RUN_ATTEMPT``. La confirmation saisie est la
+# phrase d'enveloppe que le produit exige du déclenchement (``LAUNCH_CONFIRMATION``) ; ici elle ne lance rien, faute de clé et de commande ``run``.
+# Un ``workflow_dispatch`` n'est déclenchable que si ce fichier est sur la branche par défaut : il suppose donc une publication sur ``main``.
+#
+# Jeton de la fixture (secret de dépôt INTEGRATION_FIXTURE_GITHUB_TOKEN) : présent UNIQUEMENT dans les deux étapes de préflight (lectures GitHub du
+# produit) ; le scanner de confiance cherche ce jeton dans tout ce qui sera publié, aucun fichier contaminé n'est déposé.
+
+name: W5 product preflight (sans modèle)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Phrase d'enveloppe exigée par le produit en P01 (exactement LANCER-UNE-FOIS-2USD-250000TOKENS-900S). Ce workflow ne lance AUCUNE campagne : pas de clé de modèle, pas de commande run."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: w5-product-preflight
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Préflight produit (statique, image, complet)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm == 'LANCER-UNE-FOIS-2USD-250000TOKENS-900S' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      W4_BUSINESS_CONFIRM: ${{ inputs.confirm }}
+      # La récurrence du nightly reste désactivée : le préflight refuse si elle est active.
+      INTEGRATION_E2E_ENABLED: ${{ vars.INTEGRATION_E2E_ENABLED }}
+      # Mêmes réglages que le workflow de campagne (un test en compare les valeurs : aucune dérive possible sans rouge).
+      MAX_COST_USD: "2"
+      MAX_TOKENS_BUDGET: "250000"
+      COLLEGUE_RUN_DEADLINE_SECONDS: "900"
+      BUDGET_MODE: strict
+      BUDGET_EXHAUSTED_ACTION: pause
+      REQUIRE_COST_PRICING: "true"
+      BUILD_AUTO_MERGE: "true"
+      AUTO_MERGE_ENABLED: "true"
+      AUTO_REVERT_ENABLED: "true"
+      DEPS_REQUIRE_MERGED: "true"
+      STRICT_MAX_INFLIGHT_PRS: "1"
+      TASK_MAX_ATTEMPTS: "1"
+      TASK_RETRY_BACKOFF_SECONDS: "0"
+      GATE_ACCEPTANCE_TESTS: "true"
+      GATE_TEST_COMMAND: python -m pytest -q
+      GATE_FRONTEND: "false"
+      LLM_TRANSPORT: budget_broker
+      LLM_PROVIDER: gemini
+      LLM_MODEL: gemma-4-31b-it
+      CODER_FALLBACK_MODELS: gemma-4-26b-a4b-it
+      BROKER_GLOBAL_DEADLINE_SECONDS: "900"
+      BROKER_RUN_DIR: /tmp/cbk
+      SANDBOX_IMAGE: collegue-sandbox-broker:ci
+      SANDBOX_NETWORK: none
+      SANDBOX_MEMORY: 6g
+      SANDBOX_CPUS: "2.0"
+      SANDBOX_TIMEOUT: "720"
+      LLM_CALL_TIMEOUT: "180"
+      CODER_LLM_NUM_RETRIES: "3"
+      CODER_LLM_RETRY_MIN_WAIT: "5"
+      CODER_LLM_RETRY_MAX_WAIT: "30"
+    steps:
+      - name: Initialiser les chemins éphémères du runner
+        shell: bash
+        run: |
+          # Identifiant de préflight : jamais revendiqué (le préflight ne revendique rien), distinct de toute campagne.
+          campaign_id="w5-preflight-${GITHUB_RUN_ID}"
+          root="$RUNNER_TEMP/w5-preflight"
+          mkdir -p "$root/home" "$root/diag" "$BROKER_RUN_DIR"
+          chmod 700 "$BROKER_RUN_DIR"
+          {
+            printf 'W4_BUSINESS_CAMPAIGN_ID=%s\n' "$campaign_id"
+            printf 'W5_PREFLIGHT_ROOT=%s\n' "$root"
+            printf 'COLLEGUE_HOME=%s/home\n' "$root"
+            printf 'STATE_DATABASE_URL=sqlite:///%s/home/%s.sqlite3\n' "$root" "$campaign_id"
+            printf 'COLLEGUE_NIGHTLY_MANIFEST=%s/manifest.json\n' "$root"
+            printf 'W4_REPORT_DIR=%s/report\n' "$root"
+            printf 'W5_BOOTSTRAP_MANIFEST=%s/tests/fixtures/w5-business/manifest.v2.json\n' "$GITHUB_WORKSPACE"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: locks/dev.txt
+
+      - name: Installer les dépendances verrouillées
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes --no-deps -r locks/dev.txt
+
+      # Santé indépendante de Phase 5 : lue de l'API publique du produit (P02 l'exige telle quelle), sans secret ni réseau.
+      - name: Exporter la commande de santé indépendante de Phase 5 (API publique du produit)
+        shell: bash
+        run: python scripts/w5_workflow_env.py >> "$GITHUB_ENV"
+
+      - name: Initialiser le registre durable local (migrations, base vierge du préflight)
+        shell: bash
+        run: python -m collegue.migrations upgrade
+
+      - name: Préflight produit statique (lectures GitHub seules, sans clé de modèle)
+        id: preflight_static
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: python scripts/w5_product_preflight.py stage --stage static --root "$W5_PREFLIGHT_ROOT" --campaign-id "$W4_BUSINESS_CAMPAIGN_ID"
+
+      - name: Construire l'image du sandbox (courtier)
+        id: image
+        if: steps.preflight_static.outcome == 'success'
+        shell: bash
+        run: docker build -f docker/sandbox/Dockerfile.broker -t "$SANDBOX_IMAGE" .
+
+      - name: Préflight produit complet (pile des oracles et lecteur PDF réel, sans clé de modèle)
+        id: preflight_full
+        if: steps.preflight_static.outcome == 'success' && steps.image.outcome == 'success'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: python scripts/w5_product_preflight.py stage --stage full --root "$W5_PREFLIGHT_ROOT" --campaign-id "$W4_BUSINESS_CAMPAIGN_ID"
+
+      # Aucun secret ici : provenance typée relue des rapports et codes enregistrés (SHA, arbres, manifeste, image, commandes, codes, étapes jouées).
+      # Un préflight complet non joué ou une preuve manquante donne « incomplet » (code 3), jamais « validé ».
+      - name: Provenance du préflight (sans secret)
+        id: provenance
+        if: always()
+        shell: bash
+        run: |
+          image_id="$(docker image inspect --format '{{.Id}}' "$SANDBOX_IMAGE" 2>/dev/null || true)"
+          python scripts/w5_product_preflight.py provenance --root "$W5_PREFLIGHT_ROOT" --image-id "$image_id" \
+            --output "$W5_PREFLIGHT_ROOT/diag/provenance.json"
+
+      - name: Déposer les rapports du préflight (ensemble scanné, sans jeton)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-product-preflight-report
+          path: ${{ env.W5_PREFLIGHT_ROOT }}/publish
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Déposer la provenance et les rapports du scanner (noms expurgés)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-product-preflight-diagnostic
+          path: ${{ env.W5_PREFLIGHT_ROOT }}/diag
+          if-no-files-found: warn
+          retention-days: 14

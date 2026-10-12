@@ -1375,10 +1375,23 @@ _HOST_PROCESS_INVENTORY = {
         "produit et du clone public de la fixture (comme nightly_e2e), aucune commande après l'échéance globale ; "
         "(4) trusted_local_runner : hôte, réservé aux fixtures écrites par les tests, jamais le chemin par défaut"
     ),
+    "scripts/w5_product_preflight.py": (
+        "script CI hors paquet (préflight produit distant sans modèle), exécuté seulement dans le checkout Actions du SHA testé, jamais un workspace "
+        "modifiable par un codeur ou des tests. Trois usages, tous en liste d'arguments fixe (aucun shell), cwd = racine du dépôt (ROOT, explicite) : "
+        "(1) `python -m collegue.pilot.w4_business preflight --stage static|full --campaign-id ID --output F --human F` — le code testé lui-même, action "
+        "preflight seule ; (2) `python scripts/w5_leak_scan.py --env GITHUB_TOKEN --quarantine D --stage D --report F --source report=D` — scanner de "
+        "confiance du dépôt ; (3) `git rev-parse HEAD:<chemin fixe>` (git_value) — lecture seule des arbres/blobs du checkout, délai 30 s. Sources de confiance : "
+        "le checkout lui-même ; classe F"
+    ),
     "collegue/autonomous/proactive_monitor.py": "ChangeDetector sur repo_path configuré par l'opérateur ; jamais un workspace",
     "collegue/core/llm/sampling_ctx.py": "CLI de sampling LLM ; sans rapport avec git/workspace",
     "collegue/tools/clients/kubernetes.py": "kubectl ; sans rapport avec git/workspace",
 }
+
+
+# Scripts CI HORS du paquet dont l'usage de sous-process hôte est inventorié (périmètre ciblé, pas un balayage de ``scripts/``) : le harnais
+# du préflight produit distant (C69-C72) lance le produit, le scanner de fuite et git, sous le checkout Actions du SHA testé.
+_INVENTORIED_CI_SCRIPTS = ("scripts/w5_product_preflight.py",)
 
 
 def test_host_subprocess_usage_is_inventoried():
@@ -1386,9 +1399,10 @@ def test_host_subprocess_usage_is_inventoried():
 
     root = Path(__file__).resolve().parent.parent / "collegue"
     pattern = re.compile(r"^\s*(?:import subprocess|from subprocess import)|\bos\.system\(|\bos\.popen\(", re.M)
+    candidates = [*root.rglob("*.py"), *(root.parent / relative for relative in _INVENTORIED_CI_SCRIPTS)]
     found = {
         str(path.relative_to(root.parent)): path
-        for path in root.rglob("*.py")
+        for path in candidates
         if pattern.search(path.read_text(encoding="utf-8"))
     }
     unknown = sorted(set(found) - set(_HOST_PROCESS_INVENTORY))
