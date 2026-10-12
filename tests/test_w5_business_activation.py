@@ -193,7 +193,7 @@ def broken(model, role, **changes):
 REFUSALS = {
     "not-ok": (dict(ok=False, reason="gemma-4-26b-a4b-it/tools: appel d'outil absent"), "qualification non réussie"),
     "wrong-scope": (dict(scope_key="planning:cycle:autre"), "scope qualifié"),
-    "no-consumption": (dict(consumed_tokens=0), "aucune consommation établie"),
+    "no-consumption": (dict(consumed_tokens=0), "aucune consommation réglée établie"),
     "foreign-destination": (dict(destination="api.openai.com"), "destination non native Google"),
     "single-model": (dict(models=(model_result(business.MODEL_PRIMARY, "default"),)), "identités qualifiées"),
     "third-model": (

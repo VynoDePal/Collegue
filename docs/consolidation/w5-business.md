@@ -26,6 +26,28 @@ réelle n'est faite par ces modules à l'import ni par les tests.
 
 Le verdict est `validated` seulement si **toutes** les étapes requises ont réussi. Exit : 0 validé, 1 échec, 3 validation incomplète, 4 arrêt budget.
 
+### Contrat des champs d'émission et de portée du rapport de campagne (B28)
+
+Le registre budgétaire dit ce qui est **réglé / réservé / inconnu**, pas combien d'appels sont partis ni combien de renvois ont eu lieu. Le rapport ne devine donc
+jamais un nombre d'émissions à partir d'un verdict ou de `consumed_tokens` (cas réel du 12 octobre : 10 tokens comptés, 266 réservés, une génération émise, HTTP 500,
+usage inconnu, règlement nul).
+
+| Champ | Portée et valeurs |
+|---|---|
+| `facts.preflight_emissions` | `{scope: "preflight", llm_calls_emitted, billable_actions_emitted}` : compteurs du PRÉFLIGHT (zéro autorisé). Jamais un total de campagne. *(nouveau)* |
+| `facts.emissions` | `{scope, llm_calls_emitted, billable_actions_emitted, measured, started_emitting_steps, reason}`. `scope = "preflight"` (préflight non validé) ou `"campagne"`. *(nouveau)* |
+| `facts.llm_calls_emitted`, `facts.billable_actions_emitted` (rapport de **campagne**) | `0` seulement si le zéro est démontré : préflight non validé, ou aucune étape émettrice démarrée (échéance dépassée avant R01, lancement refusé avant l'activation : `facts.launch.emission_possible = false`). Sinon **`null` = non mesuré** (portée : toute la campagne). Les rapports de **préflight** gardent `0` (rien n'y émet). |
+| `facts.launch.emission_possible` | `false` jusqu'à la fin de la garde fixture et de la revendication ; `true` ensuite (activation = canaris, puis planification, BUILD). *(nouveau)* |
+| `facts.scope.played` | phases dont le **callback a été appelé** (admission accordée et appelant fourni) — *pas* « la phase a réussi » ni « ses tâches ont abouti » : l'entrée dans R01 comprend les canaris de qualification, avant toute tâche BUILD. Une étape refusée à l'admission (échéance, budget, usage inconnu) ou sans appelant n'y figure pas. `registry` = lecture R03 entamée ; `cleanup` = callback de R06 appelé. *(nouveau)* |
+| `facts.scope.wired_not_played`, `not_wired` | câblées dont le callback n'a pas été appelé (arrêt amont, refus à l'admission) / phases R04-R05 sans appelant. `wired` ne contient `cleanup` que s'il est fourni. |
+| `facts.scope.stop_step`, `stop_point`, `cleanup_state` | calculés **après le nettoyage** (R06 compte) : PREMIÈRE étape en échec / arrêt budget / incomplète ; un arrêt métier n'est jamais remplacé par une erreur de nettoyage ultérieure, et `cleanup_state` (issue de R06) est toujours indiqué. `stop_point` : `"preflight"` ; `"… refus à l'admission, callback jamais appelé"` ; (réservé à R01 / R04 / R05, seules passées par la garde d'admission) ; `"R02-business … aucun appelant fourni, callback jamais appelé (appelant absent : ni budget ni échéance en cause)"` si aucune vérification métier n'est fournie ; `"… NON CÂBLÉE …"` ; `"R06-cleanup (failed) : phases métier jouées, le nettoyage a échoué"` ; `"aucun : parcours complet joué"` seulement si **toutes** les étapes (R06 compris) ont réussi, sinon `"aucune étape en échec, mais non exécutée(s) : …"` (un nettoyage absent reste non exécuté et requis). *(nouveau / sémantique corrigée)* |
+| rendu humain (`to_human`) | affiche, pour un rapport de campagne, les lignes « Émissions … » (NON MESURÉES ou zéro démontré), « Point d'arrêt : … » et « Phases appelées … ». *(nouveau)* |
+| message de qualification « aucune consommation réglée établie par le registre » | absence de **preuve de règlement**, jamais preuve d'absence d'émission ; scope bloqué ⇒ « usage inconnu après une émission possible ». La qualification et le budget restent bloqués. |
+
+Compatibilité : les clés existantes restent présentes (`null` n'est écrit que là où `0` était faux) ; aucun consommateur de CI ne lit ces clés sur un rapport de campagne
+(`scripts/w5_product_preflight.py` ne lit que des rapports de préflight). Le nombre exact d'émissions exigerait une lecture de `broker_attempts.emitted_at` que
+l'interface publique `BrokerStore` (`AttemptRecord`) n'expose pas : interface proposée au manager, non écrite ici.
+
 ## 2. Socle (manifeste `collegue-fixture-bootstrap/1`) et garde de fusion — jamais une preuve à lui seul
 
 ### Socle

@@ -197,6 +197,25 @@ class CampaignReport:
             lines.append(f"  [{marks[item.state]}] {item.id} — {item.title}{optional}")
             if item.detail:
                 lines.append(f"      {item.detail}")
+        emissions, scope = self.facts.get("emissions"), self.facts.get("scope")
+        if isinstance(emissions, Mapping):
+            if emissions.get("measured"):
+                lines.append(
+                    f"  Émissions ({emissions.get('scope')}) : {emissions.get('llm_calls_emitted')} appel(s) de modèle, "
+                    f"{emissions.get('billable_actions_emitted')} action(s) facturable(s) — zéro démontré"
+                )
+            else:
+                lines.append(
+                    f"  Émissions ({emissions.get('scope')}) : NON MESURÉES (appels de modèle : non mesuré ; actions facturables : "
+                    f"non mesuré) — étapes émettrices appelées : {', '.join(emissions.get('started_emitting_steps') or [])}"
+                )
+        if isinstance(scope, Mapping) and scope.get("stop_point"):
+            lines.append(f"  Point d'arrêt : {scope['stop_point']}")
+            lines.append(
+                f"  Phases appelées : {', '.join(scope.get('played') or []) or 'aucune'} ; câblées non jouées : "
+                f"{', '.join(scope.get('wired_not_played') or []) or 'aucune'} ; non câblées : "
+                f"{', '.join(scope.get('not_wired') or []) or 'aucune'}"
+            )
         counts = {state: sum(1 for s in self.steps if s.state == state) for state in STEP_STATES}
         lines.append("  Bilan : " + ", ".join(f"{state}={counts[state]}" for state in STEP_STATES))
         return self._redact("\n".join(lines)) + "\n"
@@ -1640,11 +1659,13 @@ def launch_campaign(
     # Identité du projet/scope conservée DÈS sa création et jusqu'aux sorties d'erreur, de budget ou d'échéance : le rapport
     # lit le MÊME registre après un arrêt, sans dépendre de la valeur de retour (absente quand l'exécution lève).
     context: Dict[str, Any] = report.facts.setdefault("launch", {})
-    context.update(base_branch=cfg.base_branch)
+    context.update(base_branch=cfg.base_branch, emission_possible=False)
     manifest.root_sha = adapter.guard_fixture()
     _write_manifest(cfg.manifest_path, manifest)
     if claim is not None:
         claim(report)
+    # Garde, socle et revendication ne génèrent rien : à partir d'ici (activation = canaris, puis planification, BUILD), un appel peut partir.
+    context["emission_possible"] = True
     if activate is not None:
         activate(report)
     # Pile approuvée relue par l'API juste avant (socle revalidé) : annoncée au codeur, qui travaille hors ligne.
@@ -1732,6 +1753,108 @@ NOT_WIRED_STOP_POINT = (
     "contrôlé avec rollback Phase 5 ; un BUILD réussi n'est pas la validation finale"
 )
 
+_PHASE_OF_STEP = {
+    "R01-run": "build",
+    "R02-business": "business",
+    "R04-improvement": "improvement",
+    "R05-incident-rollback": "incident_rollback",
+    "R03-registry": "registry",
+    "R06-cleanup": "cleanup",
+}
+_PHASE_LABELS = {
+    "R04-improvement": "la passe d'amélioration (handoff BUILD→IMPROVE)",
+    "R05-incident-rollback": "l'incident contrôlé avec rollback Phase 5",
+}
+_STOP_STATES = (STEP_FAILED, STEP_BUDGET_STOP, STEP_INCOMPLETE)
+
+
+def _finalize_scope(report: CampaignReport, executed: List[str]) -> None:
+    """Portée et émissions de la campagne d'après ce qui a RÉELLEMENT été appelé et les états réels des étapes (jamais un message écrit
+    d'avance). Appelée UNE fois, après le nettoyage : R06 compte dans l'arrêt effectif.
+
+    ``executed`` = étapes dont le callback a été APPELÉ (admission accordée) ; une étape refusée à l'admission (échéance, budget) ou sans
+    appelant n'y figure pas. ``scope.played`` = les phases correspondantes : « le callback a été appelé », pas « la phase a réussi » ni
+    « ses tâches ont abouti » (l'entrée dans R01 comprend les canaris de qualification, avant toute tâche BUILD).
+
+    ``scope.not_wired`` = phases sans appelant ; ``scope.wired_not_played`` = phases câblées dont le callback n'a pas été appelé
+    (arrêt amont ou refus à l'admission) ; ``scope.stop_step`` = PREMIÈRE étape qui a arrêté le parcours (un arrêt métier n'est jamais
+    remplacé par une erreur de nettoyage ultérieure) ; ``scope.cleanup_state`` = issue de R06, toujours indiquée.
+
+    ``facts.emissions`` : le zéro n'est affirmé que si AUCUNE étape émettrice (R01, R04, R05) n'a été appelée. Sinon le total d'appels et
+    d'actions facturables n'est PAS mesuré (le registre dit ce qui est réglé, pas ce qui a été émis) : ``null``, jamais 0 ni 1 déduit d'un
+    verdict ou d'une consommation. ``llm_calls_emitted`` / ``billable_actions_emitted`` de premier niveau suivent la même règle."""
+    scope = report.facts["scope"]
+    launch_reached = (report.facts.get("launch") or {}).get("emission_possible", True) is not False
+    started = [i for i in executed if i in EMITTING_STEPS and (i != "R01-run" or launch_reached)]
+    order = ["R01-run", "R02-business", "R04-improvement", "R05-incident-rollback", "R03-registry", "R06-cleanup"]
+    played = [_PHASE_OF_STEP[i] for i in order if i in executed]
+    scope["played"] = played
+    scope["wired_not_played"] = [n for n in scope["wired"] if n not in played]
+    cleanup_state = report.step("R06-cleanup").state
+    scope["cleanup_state"] = cleanup_state
+    stop = next((i for i in order if report.step(i).state in _STOP_STATES), None)
+    scope["stop_step"] = stop
+    launch_facts = report.facts.get("launch") or {}
+    if stop is None:
+        pending = [i for i in order if report.step(i).state != STEP_SUCCEEDED]
+        scope["stop_point"] = (
+            "aucun : parcours complet joué"
+            if not pending
+            else "aucune étape en échec, mais non exécutée(s) : " + ", ".join(pending)
+        )
+    else:
+        state = report.step(stop).state
+        if _PHASE_OF_STEP[stop] in scope["not_wired"]:
+            scope["stop_point"] = f"{stop} : phase NON CÂBLÉE dans cette invocation ({state})"
+        elif _PHASE_OF_STEP[stop] not in played and stop in EMITTING_STEPS:
+            # Seules R01 / R04 / R05 passent par la garde d'admission (échéance, budget, usage inconnu, preuve de dépense).
+            scope["stop_point"] = f"{stop} ({state}) : refus à l'admission, callback jamais appelé"
+        elif _PHASE_OF_STEP[stop] not in played:
+            # R02 ne passe pas par la garde d'émission : appelant absent (aucune vérification métier fournie), jamais un refus.
+            scope["stop_point"] = (
+                f"{stop} ({state}) : aucun appelant fourni, callback jamais appelé (appelant absent : ni budget ni échéance en cause)"
+            )
+        elif stop == "R01-run" and not launch_facts.get("project_id") and "qualification_registry" in report.facts:
+            scope["stop_point"] = (
+                f"{stop} ({state}) : arrêt pendant l'activation budgétaire et les canaris de qualification, "
+                "avant planification, BUILD, amélioration et incident"
+            )
+        elif stop == "R06-cleanup":
+            scope["stop_point"] = f"{stop} ({state}) : phases métier jouées, le nettoyage a échoué"
+        else:
+            scope["stop_point"] = f"{stop} ({state})"
+        others = [n for n in scope["wired_not_played"] if n != "cleanup" or stop != "R06-cleanup"]
+        if others:
+            scope["stop_point"] += " ; câblées et non jouées : " + ", ".join(others)
+        if stop != "R06-cleanup":
+            scope["stop_point"] += f" ; nettoyage : {cleanup_state}"
+    if started:
+        report.facts["llm_calls_emitted"] = None
+        report.facts["billable_actions_emitted"] = None
+        report.facts["emissions"] = {
+            "scope": "campagne",
+            "llm_calls_emitted": None,
+            "billable_actions_emitted": None,
+            "measured": False,
+            "started_emitting_steps": list(started),
+            "reason": (
+                "total non mesuré : le registre budgétaire donne le règlement (réglé / réservé / inconnu), pas le nombre d'émissions "
+                "ni de renvois ; une consommation réglée nulle ne prouve pas l'absence d'émission"
+            ),
+        }
+    else:
+        report.facts["llm_calls_emitted"] = 0
+        report.facts["billable_actions_emitted"] = 0
+        report.facts["emissions"] = {
+            "scope": "campagne",
+            "llm_calls_emitted": 0,
+            "billable_actions_emitted": 0,
+            "measured": True,
+            "started_emitting_steps": [],
+            "reason": "aucune étape émettrice (R01, R04, R05) n'a été appelée : ni génération ni action facturable possibles",
+        }
+
+
 #: Étapes qui peuvent émettre (modèle) : aucune ne démarre après l'expiration de l'échéance globale, ni sur un usage inconnu.
 EMITTING_STEPS = ("R01-run", "R04-improvement", "R05-incident-rollback")
 
@@ -1771,6 +1894,14 @@ def run_campaign(
         copy = report.declare(item.id, item.title, required=item.required)
         copy.state, copy.detail, copy.evidence = item.state, item.detail, dict(item.evidence)
     report.facts.update(preflight.facts)
+    # Les compteurs d'émission du préflight ont la portée du PRÉFLIGHT (zéro autorisé, rien n'y émet) : ils ne sont jamais recopiés comme
+    # total de la campagne. Ils restent lisibles ici, sous leur portée ; le total de campagne est établi plus bas (``facts.emissions``).
+    preflight_emissions = {
+        "scope": "preflight",
+        "llm_calls_emitted": report.facts.pop("llm_calls_emitted", None),
+        "billable_actions_emitted": report.facts.pop("billable_actions_emitted", None),
+    }
+    report.facts["preflight_emissions"] = preflight_emissions
     report.facts["preflight_verdict"] = preflight.verdict()
     report.declare(
         "R01-run", "Planification, approbation, exécution et fusions sur la base éphémère (enveloppe globale)"
@@ -1787,18 +1918,36 @@ def run_campaign(
     )
     report.declare("R03-registry", "Compteurs du registre durable dans l'enveloppe (après chaque phase et à la sortie)")
     report.declare("R06-cleanup", "Nettoyage unique des ressources éphémères, après toutes les phases")
-    wired = ["build", "business", "registry", "cleanup"] + (["improvement"] if improve else [])
+    wired = ["build", "business", "registry"] + (["cleanup"] if cleanup else []) + (["improvement"] if improve else [])
     wired += ["incident_rollback"] if incident else []
     report.facts["scope"] = {
         "announced": ["build", "business", "registry", "improvement", "incident_rollback", "cleanup"],
         "wired": wired,
         "not_wired": [name for name in ("improvement", "incident_rollback") if name not in wired],
-        "stop_point": NOT_WIRED_STOP_POINT,
+        # Renseignés à la sortie, d'après les états RÉELS des étapes : phases jouées, phases câblées mais non jouées (arrêt amont) et
+        # point d'arrêt effectif. « Non câblée » (absence d'appelant) et « câblée, non jouée » (arrêt avant elle) sont deux choses distinctes.
+        "played": [],
+        "wired_not_played": [],
+        "stop_step": None,
+        "stop_point": None,
+        "cleanup_state": None,
     }
     if preflight.verdict() != VERDICT_VALIDATED:
         report.halted = True
         report.facts["billable_actions_emitted"] = 0
+        report.facts["llm_calls_emitted"] = 0
+        report.facts["emissions"] = {
+            "scope": "preflight",
+            "llm_calls_emitted": 0,
+            "billable_actions_emitted": 0,
+            "measured": True,
+            "started_emitting_steps": [],
+            "reason": "préflight non validé : aucune étape émettrice n'a démarré",
+        }
         report.facts["stop_point"] = "preflight"
+        report.facts["scope"]["stop_point"] = "preflight"
+        report.facts["scope"]["wired_not_played"] = list(wired)
+        report.facts["scope"]["cleanup_state"] = report.step("R06-cleanup").state
         return report
 
     now = clock or time.monotonic
@@ -1848,6 +1997,8 @@ def run_campaign(
             gate["budget"] = f"enveloppe atteinte ({used_usd:.6f} $ / {used_tokens} tokens) : aucune nouvelle émission"
         return counters
 
+    executed: List[str] = []  # étapes dont le callback a été APPELÉ (voir ``_finalize_scope``)
+
     def _before_emission(step: Step) -> None:
         deadline = _deadline_of(deadline_monotonic)
         if deadline is not None and deadline - now() <= 0:
@@ -1859,9 +2010,11 @@ def run_campaign(
             raise IncompleteValidation(f"{refusal} (avant {step.id})")
         proof.note_emission()
 
-    def _phase(step_id: str, fn: Callable[[Step], Any]) -> bool:
+    def _phase(step_id: str, fn: Callable[[Step], Any], *, present: bool = True) -> bool:
         def guarded(step: Step) -> None:
             _before_emission(step)
+            if present:
+                executed.append(step_id)  # admission accordée ET callback fourni : à partir d'ici l'étape PEUT émettre
             try:
                 fn(step)
             finally:
@@ -1878,6 +2031,7 @@ def run_campaign(
     def _verify(step: Step) -> None:
         if verify is None:
             raise IncompleteValidation("aucune vérification métier fournie")
+        executed.append("R02-business")
         verify(report, context)
 
     def _judge_proof() -> None:
@@ -1892,6 +2046,7 @@ def run_campaign(
             )
 
     def _registry(step: Step) -> None:
+        executed.append("R03-registry")
         if read_registry is None:
             raise IncompleteValidation("registre durable illisible")
         if not (context.get("project_id") or context.get("scope_key")):
@@ -1907,7 +2062,10 @@ def run_campaign(
         assert_registry_within_bounds(counters)
 
     def _not_wired(step: Step) -> None:
-        raise IncompleteValidation(NOT_WIRED_STOP_POINT)
+        raise IncompleteValidation(
+            f"point d'arrêt documenté : {_PHASE_LABELS[step.id]} n'est pas câblée dans cette invocation (aucun appelant fourni) ; "
+            "un BUILD réussi n'est pas la validation finale"
+        )
 
     try:
         _phase("R01-run", _launch)
@@ -1915,8 +2073,14 @@ def run_campaign(
         report.run("R02-business", _verify)
         if report.step("R02-business").state != STEP_NOT_EXECUTED:
             _snapshot("after-R02-business")
-        _phase("R04-improvement", (lambda s: improve(report, context)) if improve else _not_wired)
-        _phase("R05-incident-rollback", (lambda s: incident(report, context)) if incident else _not_wired)
+        _phase(
+            "R04-improvement", (lambda s: improve(report, context)) if improve else _not_wired, present=bool(improve)
+        )
+        _phase(
+            "R05-incident-rollback",
+            (lambda s: incident(report, context)) if incident else _not_wired,
+            present=bool(incident),
+        )
         # Le registre est relu après TOUT arrêt dès que le lancement a eu lieu (projet/scope créé ou non) ; l'arrêt d'origine
         # n'est jamais masqué.
         halted_before = report.halted
@@ -1940,12 +2104,20 @@ def run_campaign(
         cleanup_step.required = False  # le verdict « avant nettoyage » ne dépend pas du nettoyage lui-même
         report.facts["verdict_before_cleanup"] = report.verdict()
         cleanup_step.required = True
-        if cleanup is not None:
-            report.halted = False
-            report.run("R06-cleanup", lambda step: cleanup(report))
-            report.facts["cleanup_calls"] = 1
-        else:
-            report.step("R06-cleanup").detail = "aucun nettoyage fourni"
+        try:
+            if cleanup is not None:
+                report.halted = False
+
+                def _cleanup(step: Step) -> None:
+                    executed.append("R06-cleanup")
+                    cleanup(report)
+
+                report.run("R06-cleanup", _cleanup)
+                report.facts["cleanup_calls"] = 1
+            else:
+                report.step("R06-cleanup").detail = "aucun nettoyage fourni"
+        finally:
+            _finalize_scope(report, executed)  # APRÈS le nettoyage : R06 compte dans l'arrêt effectif
     return report
 
 
