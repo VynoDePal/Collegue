@@ -18,17 +18,30 @@ from typing import Any, Callable, Optional, Protocol
 
 import httpx
 
+from collegue.broker.diagnostics import http_diagnostic, sanitize_diagnostic
 from collegue.broker.policy import GOOGLE_API_BASE, MAX_RESPONSE_BYTES, OFFICIAL_MODELS
 from collegue.broker.translate import NormalizedRequest, parse_json_strict
 
 
 class UpstreamHTTPError(Exception):
-    """Le fournisseur a RÉPONDU avec un statut non 2xx (ou une redirection)."""
+    """Le fournisseur a RÉPONDU avec un statut non 2xx (ou une redirection).
 
-    def __init__(self, status: int, detail: str = ""):
+    ``diagnostic`` est un dictionnaire de valeurs FERMÉES (voir :mod:`collegue.broker.diagnostics`), ``{}`` pour un double qui n'en fournit pas.
+    Le texte amont n'est JAMAIS conservé : ``detail`` (argument historique, toujours accepté) est ignoré, aucun canal de représentation de
+    l'exception (``str``, ``repr``, ``args``, ``__dict__``, pickle, traceback) ne porte donc ni corps, ni message, ni URL, ni valeur d'en-tête.
+    """
+
+    def __init__(self, status: int, detail: str = "", *, diagnostic: Optional[dict] = None):
         super().__init__(f"HTTP {status}")
         self.status = status
-        self.detail = detail[:300]
+        self.diagnostic = sanitize_diagnostic(diagnostic)
+
+    def __reduce__(self):
+        return (_rebuild_http_error, (self.status, dict(self.diagnostic)))
+
+
+def _rebuild_http_error(status: int, diagnostic: dict) -> "UpstreamHTTPError":
+    return UpstreamHTTPError(status, diagnostic=diagnostic)
 
 
 class UpstreamTransportError(Exception):
@@ -42,6 +55,13 @@ class UpstreamTransportError(Exception):
 
 class UpstreamBadBody(Exception):
     """Réponse 2xx dont le corps n'est pas un objet JSON exploitable (la génération a pu avoir lieu)."""
+
+
+class _HeadersOnly:
+    """Ne donne au classifieur que les en-têtes (jamais la réponse entière)."""
+
+    def __init__(self, headers: Any):
+        self.headers = headers
 
 
 class Upstream(Protocol):
@@ -75,32 +95,49 @@ class GoogleUpstream:
             raise ValueError("destination amont hors liste blanche")  # défense : jamais atteint via le service
         return f"{GOOGLE_API_BASE}/models/{model}:{method}"
 
+    def _auth_headers(self) -> dict:
+        """En-têtes d'une requête ; la clé est lue UNE fois par appel (rotation possible entre deux appels)."""
+        return {"x-goog-api-key": self._api_key(), "content-type": "application/json", "accept": "application/json"}
+
     async def _post(self, model: str, method: str, body: dict) -> dict:
-        key = self._api_key()
-        if not key:
+        headers: Any = self._auth_headers()
+        if not headers["x-goog-api-key"]:
+            headers = None
             raise UpstreamTransportError("clé fournisseur absente du service de confiance", before_send=True)
-        payload = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        headers = {"x-goog-api-key": key, "content-type": "application/json", "accept": "application/json"}
+        content: Any = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        chunks: Any = []
+        chunk: Any = b""
+        client: Any = None
+        response: Any = None
         try:
             async with self._client() as client:
                 async with client.stream(
-                    "POST", self._url(model, method), content=payload, headers=headers
+                    "POST", self._url(model, method), content=content, headers=headers
                 ) as response:
-                    chunks = []
                     size = 0
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > MAX_RESPONSE_BYTES:
                             raise UpstreamBadBody("réponse du fournisseur au-delà du plafond")
                         chunks.append(chunk)
-                    raw = b"".join(chunks)
+                    raw: Any = b"".join(chunks)
                     status = response.status_code
+                    response_headers: Any = response.headers
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.UnsupportedProtocol, httpx.InvalidURL) as exc:
             raise UpstreamTransportError(type(exc).__name__, before_send=True) from None
         except httpx.HTTPError as exc:
             raise UpstreamTransportError(type(exc).__name__, before_send=False) from None
+        finally:
+            # Sur CE chemin (levée d'une erreur HTTP diagnostiquée ou de transport), ni le prompt ni les morceaux de réponse (``chunk`` est la
+            # variable de boucle : le DERNIER morceau y resterait) ne restent dans ce cadre (Sentry, ``--showlocals``, ``capture_locals``) ; ce n'est
+            # pas une garantie pour les cadres appelants ni pour un autre type d'échec.
+            content = chunks = chunk = body = headers = client = response = None
         if status != 200:
-            raise UpstreamHTTPError(status, raw.decode("utf-8", errors="replace"))
+            failure = UpstreamHTTPError(
+                status, diagnostic=http_diagnostic(method, status, _HeadersOnly(response_headers), raw)
+            )
+            raw = response_headers = None  # le corps amont ne survit pas dans le cadre qui lève
+            raise failure
         try:
             value: Any = parse_json_strict(raw, max_bytes=MAX_RESPONSE_BYTES)
         except Exception as exc:  # noqa: BLE001 - tout corps illisible est une réponse invalide, jamais un zéro
