@@ -1,10 +1,10 @@
 # Vague 5 — organisation, contrats et checklist d'intégration (C)
 
-**État exact : les vagues 1 à 4 sont livrées sur `main` ; la validation réelle avec modèles est restée INCOMPLÈTE (campagne W4 refusée au
-préflight avant toute émission) ; la vague 5 est autorisée et en cours ; A34 (qui descend de A33, A32, A31, A30, A29) et B27 (qui descend de B24) sont intégrés LOCALEMENT dans la branche de C (voir § 9), rien n'est publié ;
-aucune campagne réelle n'a été démarrée, aucune clé n'existe.** Ce document a été rédigé AVANT les livraisons de A et B (§ 1 à § 8, conservés) ; l'état d'intégration est au § 9 : il consigne la
-répartition, les contrats du manager (`briefs/w5-common.md`), la préparation de C (CI, image, fixture, workflow) et la checklist
-d'intégration. Il ne décrit aucun résultat du travail de A ou B. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole :
+**État actuel (12 octobre 2026) : la vague 5 est LIVRÉE sur `main` (PR #613 `734c7f5`, PR #614 `b88e7bf`) ; la qualification réelle avec modèles est INCOMPLÈTE** (la campagne
+`w5-gemma-20261012-9e7c4d76` a émis une génération du 31B, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire ; la précédente s'était arrêtée au préflight P07 sans émission). L'état courant
+(dont les correctifs de compte rendu B28-B32 — B32 `121879b` corrige le P2 de la PR #615 — intégrés localement ; la PR #615 est ouverte sur l'ancienne tête `b1b8f54`), les règles en vigueur et le plan de vérification sont dans [`w5-post500.md`](w5-post500.md). **Les § 1 à 9 ci-dessous sont l'historique de la préparation et de l'intégration locale** (rédigé AVANT les
+livraisons de A et B, puis complété par l'état d'intégration du § 9, qui décrivait un candidat alors non publié) : ils sont conservés pour mémoire et ne décrivent plus l'état de `main`. Ils consignent la
+répartition, les contrats du manager (`briefs/w5-common.md`), la préparation de C (CI, image, fixture, workflow) et la checklist d'intégration ; ils ne décrivent aucun résultat réel de modèle. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole :
 [`protocole.md`](protocole.md) ; vague précédente : [`w4-integration.md`](w4-integration.md).
 
 - **Base commune** : `main` = `869ed3c8936b2bfaa72ac9c64746b1420a827825` (PR #612, arbre `2825ca3775d8f5452ce0bb946763a8b8fa0d8500`, parent
@@ -161,7 +161,7 @@ C47 (autorisée) : `inspect` → `apply` → `verify` → `probe` (V1, rc 1). C4
   logique du harnais et comportement hôte de A, PAS la mort réelle du conteneur ni l'image) ; (2) n'a vérifié que les codes de refus et le décompte de l'amont (les assertions d'isolation échouent
   logiquement hors conteneur) ; (1) n'a jamais tourné. Interfaces de A dont elle dépend : `INTERFACE_CONTRACT` du harnais (échec franc si elles changent). Un défaut comportemental révélé va à A.
 
-## 6. Campagne future (à NE PAS lancer sans ordre exact du manager)
+## 6. Campagne (préparation ; la campagne du 12 octobre est close — historique, à NE PAS relancer)
 
 Workflow `consolidation-e2e.yml` : `workflow_dispatch` seul, confirmation exacte, identifiant neuf (consommé au lancement par B ; aucun rerun), environnement GitHub `w5-gemma-campaign` propre à la
 campagne, clé temporaire `W5_GOOGLE_API_KEY` référencée **une seule fois**, dans l'étape de campagne, sous le nom **`LLM_API_KEY`** (le seul que lisent les réglages et `BrokerRuntime.from_settings`) ;
@@ -200,7 +200,7 @@ copié). Les sources vivantes (rapport, registre, espaces de travail) ne sont JA
 5. **Réseau du gate** : l'image broker satisfait le `requirements.txt` du socle sans réseau ; une dépendance supplémentaire demandée par le codeur est refusée (jamais ignorée). Le réglage de réseau
    séparé du gate reste un besoin de A seulement si un réseau restreint est un jour souhaité.
 
-## 9. État de l'intégration locale (C51/C52) — NON publiée
+## 9. État de l'intégration locale (C51/C52) — historique : publiée puis fusionnée par la PR #613
 
 **Candidat local** dans `codex/consolidation-w5-c` : base `869ed3c`, C (`7f67938`), A30 (`e0f8b8b`, courtier budgétaire : A29 `f467978` + harnais de preuve de réponse perdue sans délai fixe) et B27 (`68d50f7`, campagne : garde de publication, de fusion, branche de tête préexistante [B24], CLI trois tâches, SPEC par PR sur base protégée, propriété durable des ressources `manifest.json.owned.jsonl`, base post-fusion exacte), fusionnés par SHA exacts sans conflit (périmètres disjoints). Aucune publication, aucun appel modèle, aucun secret ; Docker, SDK OpenHands et Python 3.11 ne sont éprouvés qu'en CI distante, après l'ordre de publication du manager. Les preuves chiffrées sont dans `reports/w5-c-integration.md` (hors dépôt).
 
