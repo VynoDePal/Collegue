@@ -661,3 +661,54 @@ def test_a_missing_registry_reader_is_an_internal_validator_error_not_an_unwired
     assert "registry" in scope["wired"] and "registry" not in scope["not_wired"]
     assert "registry" in scope["played"], "le validateur interne a tourné et s'est arrêté : aucune lecture n'a réussi"
     assert report.step("R03-registry").state == STEP_INCOMPLETE and report.verdict() == "incomplete_validation"
+
+
+class FalsyCallback:
+    """Callable dont ``__bool__`` vaut ``False`` : compte ses appels réels."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, *args):
+        self.calls += 1
+
+
+@pytest.mark.parametrize(
+    "name,phase",
+    [("verify", "business"), ("cleanup", "cleanup")],
+)
+def test_a_falsey_verifier_or_cleanup_is_called_and_therefore_reported_as_wired_and_played(name, phase):
+    callback = FalsyCallback()
+    hooks = {n: (lambda *a: None) for n in ("verify", "improve", "incident", "cleanup")}
+    hooks[name] = callback
+
+    report = business.run_campaign(
+        {}, preflight=accepted(), launch=lambda r: {"project_id": 1}, read_registry=lambda c: counters(), **hooks
+    )
+
+    scope = report.facts["scope"]
+    assert callback.calls == 1 and phase in scope["played"], "appelé : la condition d'appel est `is not None`"
+    assert phase in scope["wired"] and phase not in scope["not_wired"] and phase not in scope["wired_not_played"]
+    assert set(scope["played"]) <= set(scope["wired"])
+    assert report.verdict() == business.VERDICT_VALIDATED
+
+
+@pytest.mark.parametrize("name,phase", [("improve", "improvement"), ("incident", "incident_rollback")])
+def test_a_falsey_improve_or_incident_keeps_the_historical_behaviour_not_called_and_not_wired(name, phase):
+    callback = FalsyCallback()
+    hooks = {n: (lambda *a: None) for n in ("verify", "improve", "incident", "cleanup")}
+    hooks[name] = callback
+
+    report = business.run_campaign(
+        {}, preflight=accepted(), launch=lambda r: {"project_id": 1}, read_registry=lambda c: counters(), **hooks
+    )
+
+    scope = report.facts["scope"]
+    assert callback.calls == 0, "R04 / R05 testent la vérité booléenne : comportement d'exécution inchangé"
+    assert phase in scope["not_wired"] and phase not in scope["wired"] and phase not in scope["played"]
+    assert phase not in scope["wired_not_played"]
+    assert report.verdict() != business.VERDICT_VALIDATED
+    assert sorted(scope["wired"] + scope["not_wired"]) == sorted(scope["announced"])

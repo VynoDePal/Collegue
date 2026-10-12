@@ -1924,8 +1924,16 @@ def run_campaign(
     # Partition de ``announced``. Toujours câblées : « build » (lanceur obligatoire) et « registry » (validateur interne ; un lecteur
     # absent est une ERREUR de ce validateur, jamais une phase non câblée). Optionnelles : vérification métier, R04, R05 et nettoyage —
     # câblées seulement si l'appelant est fourni, sinon dans ``not_wired``.
-    optional = {"business": verify, "improvement": improve, "incident_rollback": incident, "cleanup": cleanup}
-    wired = [name for name in announced if name not in optional or optional[name]]
+    # La condition de câblage reprend EXACTEMENT la condition d'appel de chaque callback (le rapport décrit ce qui s'exécute) :
+    # vérification et nettoyage sont appelés dès qu'ils ne sont pas ``None`` ; R04 / R05 seulement s'ils sont vrais au sens booléen
+    # (comportement historique, volontairement non normalisé ici : un callable « faux » n'est pas appelé pour R04 / R05).
+    present = {
+        "business": verify is not None,
+        "improvement": bool(improve),
+        "incident_rollback": bool(incident),
+        "cleanup": cleanup is not None,
+    }
+    wired = [name for name in announced if present.get(name, True)]
     report.facts["scope"] = {
         "announced": announced,
         "wired": wired,
