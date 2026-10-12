@@ -172,7 +172,13 @@ def test_the_stop_point_is_the_real_one_and_wired_phases_are_not_called_unwired(
     _, report = after_http_500
     scope = report.facts["scope"]
 
-    assert scope["wired"] == ["build", "business", "registry", "cleanup", "improvement", "incident_rollback"]
+    assert scope["wired"] == [
+        "build",
+        "business",
+        "registry",
+        "improvement",
+        "incident_rollback",
+    ]  # aucun nettoyage fourni ici
     assert scope["not_wired"] == []
     assert scope["stop_step"] == "R01-run" and scope["played"] == ["build", "registry"]
     assert scope["wired_not_played"] == ["business", "improvement", "incident_rollback"]
@@ -197,7 +203,14 @@ def test_the_report_serialises_the_null_counters_and_the_human_text_does_not_hid
     data = json.loads(report.to_json())
     assert data["facts"]["llm_calls_emitted"] is None and data["facts"]["emissions"]["measured"] is False
     assert data["facts"]["scope"]["stop_step"] == "R01-run"
-    assert isinstance(report.to_human(), str)
+    text = report.to_human()
+    assert "Émissions (campagne) : NON MESURÉES" in text and "étapes émettrices appelées : R01-run" in text
+    assert "Point d'arrêt : R01-run" in text and "canaris de qualification" in text
+    assert (
+        "Phases appelées : build, registry" in text
+        and "câblées non jouées : business, improvement, incident_rollback" in text
+    )
+    assert "parcours complet joué" not in text and "zéro démontré" not in text
 
 
 # ── témoins ────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -286,7 +299,9 @@ def test_a_settled_consumption_is_reported_without_turning_it_into_an_emission_c
     assert report.facts["emissions"]["measured"] is False
     assert report.step("R01-run").state == STEP_SUCCEEDED
     assert "aucune consommation réglée" not in report.step("R01-run").detail
-    assert report.facts["scope"]["stop_point"] == "aucun : parcours complet joué"
+    assert report.facts["scope"]["stop_point"] == "aucune étape en échec, mais non exécutée(s) : R06-cleanup", (
+        "sans nettoyage fourni, jamais un parcours complet"
+    )
     assert report.facts["scope"]["wired_not_played"] == [] and report.facts["scope"]["stop_step"] is None
 
 
@@ -358,3 +373,214 @@ def test_no_settled_consumption_is_an_absence_of_proof_never_a_proof_of_non_emis
 
 def test_a_positive_settled_consumption_raises_no_consumption_problem():
     assert not [p for p in _problems(_report()) if "consommation" in p]
+
+
+# ── B29 : étapes réellement appelées, et issue du nettoyage dans l'arrêt effectif ───────────────────────────────────────────
+
+
+def accepted():
+    return real_shaped_preflight()
+
+
+def counters(**changes):
+    values = dict(
+        scope="project:1", strict=True, cap_usd=2.0, cap_tokens=250_000, consumed_micro_usd=0, consumed_tokens=10,
+        reserved_micro_usd=0, reserved_tokens=0, unknown_micro_usd=0, unknown_tokens=0, blocked_reason=None, revision=1,
+    )  # fmt: skip
+    values.update(changes)
+    return values
+
+
+class Calls:
+    """Journal des callbacks RÉELLEMENT appelés par ``run_campaign``."""
+
+    def __init__(self):
+        self.called = []
+
+    def run(self, *, cleanup="ok", launch="ok", improve="ok", incident="ok", verify="ok", registry=None, **kwargs):
+        def make(name, value):
+            if value is None:
+                return None
+            if isinstance(value, BaseException):
+
+                def boom(*a):
+                    self.called.append(name)
+                    raise value
+
+                return boom
+            return lambda *a: (self.called.append(name), {"project_id": 1} if name == "build" else None)[1]
+
+        def build(report):
+            self.called.append("build")
+            if isinstance(launch, BaseException):
+                raise launch
+            return {"project_id": 1}
+
+        return business.run_campaign(
+            {},
+            preflight=accepted(),
+            launch=build,
+            verify=make("business", verify),
+            improve=make("improve", improve),
+            incident=make("incident", incident),
+            cleanup=make("cleanup", cleanup),
+            read_registry=registry or (lambda ctx: counters()),
+            **kwargs,
+        )
+
+
+def test_a_deadline_refusal_at_admission_never_marks_the_build_callback_as_played():
+    calls = Calls()
+
+    report = calls.run(deadline_monotonic=1, clock=lambda: 2)
+
+    scope = report.facts["scope"]
+    assert calls.called == ["cleanup"], "ni BUILD, ni vérification, ni R04, ni R05 : refus à l'admission"
+    assert report.step("R01-run").state == STEP_BUDGET_STOP
+    assert "build" not in scope["played"] and "build" in scope["wired_not_played"]
+    assert scope["played"] == ["registry", "cleanup"] or "improvement" not in scope["played"]
+    assert scope["wired_not_played"][:4] == ["build", "business", "improvement", "incident_rollback"]
+    assert scope["stop_step"] == "R01-run" and "refus à l'admission, callback jamais appelé" in scope["stop_point"]
+    assert report.facts["llm_calls_emitted"] == 0 and report.facts["emissions"]["started_emitting_steps"] == []
+
+
+def test_a_budget_refusal_before_r04_leaves_r04_and_r05_wired_but_not_played():
+    calls = Calls()
+    seen = []
+
+    def registry(ctx):
+        seen.append(1)
+        return counters(consumed_tokens=250_000) if len(seen) >= 2 else counters()  # enveloppe atteinte après R02
+
+    report = calls.run(registry=registry)
+
+    scope = report.facts["scope"]
+    assert calls.called == ["build", "business", "cleanup"]
+    assert report.step("R04-improvement").state == STEP_BUDGET_STOP
+    assert scope["stop_step"] == "R04-improvement" and scope["not_wired"] == []
+    assert "improvement" not in scope["played"] and "incident_rollback" not in scope["played"]
+    assert scope["wired_not_played"] == ["improvement", "incident_rollback"]
+    assert "refus à l'admission" in scope["stop_point"] and "NON CÂBLÉE" not in scope["stop_point"]
+
+
+def test_a_budget_refusal_before_r05_leaves_only_r05_wired_but_not_played():
+    calls = Calls()
+    seen = []
+
+    def registry(ctx):
+        seen.append(1)
+        return counters(consumed_tokens=250_000) if len(seen) >= 3 else counters()  # enveloppe atteinte après R04
+
+    report = calls.run(registry=registry)
+
+    scope = report.facts["scope"]
+    assert calls.called == ["build", "business", "improve", "cleanup"]
+    assert (
+        scope["stop_step"] == "R05-incident-rollback" and report.step("R05-incident-rollback").state == STEP_BUDGET_STOP
+    )
+    assert "improvement" in scope["played"] and "incident_rollback" not in scope["played"]
+    assert scope["wired_not_played"] == ["incident_rollback"]
+
+
+def test_an_absent_callback_is_not_played_not_counted_as_emitting_and_named_unwired():
+    calls = Calls()
+
+    def before_any_generation(report):
+        calls.called.append("build")
+        report.facts.setdefault("launch", {})["emission_possible"] = False
+        return {"project_id": 1}
+
+    report = business.run_campaign(
+        {}, preflight=accepted(), launch=before_any_generation, verify=lambda r, c: calls.called.append("business"),
+        improve=None, incident=lambda r, c: calls.called.append("incident"), cleanup=lambda r: calls.called.append("cleanup"),
+        read_registry=lambda ctx: counters(),
+    )  # fmt: skip
+
+    scope = report.facts["scope"]
+    assert calls.called == ["build", "business", "cleanup"], "R05 n'est pas atteint : R04 incomplet arrête le parcours"
+    assert scope["not_wired"] == ["improvement"] and "improvement" not in scope["played"]
+    assert scope["stop_step"] == "R04-improvement" and "NON CÂBLÉE" in scope["stop_point"]
+    assert report.facts["emissions"]["started_emitting_steps"] == [] and report.facts["llm_calls_emitted"] == 0
+    assert scope["wired_not_played"] == ["incident_rollback"]
+
+
+def test_played_means_the_callback_was_called_not_that_the_phase_or_its_tasks_succeeded():
+    calls = Calls()
+
+    report = calls.run(launch=RuntimeError("panne pendant R01"))
+
+    scope = report.facts["scope"]
+    assert report.step("R01-run").state == STEP_FAILED and "build" in scope["played"]
+    assert scope["stop_step"] == "R01-run" and "refus à l'admission" not in scope["stop_point"]
+    assert report.facts["llm_calls_emitted"] is None, "l'entrée dans R01 peut avoir émis (canaris) : non mesuré"
+
+
+def test_a_failed_cleanup_after_a_complete_business_run_is_the_actual_stop():
+    calls = Calls()
+
+    report = calls.run(cleanup=OSError("synthetic resource cleanup failure"))
+
+    scope = report.facts["scope"]
+    assert calls.called == ["build", "business", "improve", "incident", "cleanup"]
+    assert report.step("R06-cleanup").state == STEP_FAILED and report.verdict() == business.VERDICT_FAILED
+    assert scope["stop_step"] == "R06-cleanup" and scope["cleanup_state"] == STEP_FAILED
+    assert "parcours complet joué" not in scope["stop_point"] and "le nettoyage a échoué" in scope["stop_point"]
+    assert scope["wired_not_played"] == []
+    assert "Point d'arrêt : R06-cleanup" in report.to_human()
+
+
+def test_a_business_stop_followed_by_a_cleanup_error_keeps_the_first_stop_and_reports_the_cleanup():
+    calls = Calls()
+
+    report = calls.run(verify=AssertionError("assertions métier fausses : total"), cleanup=OSError("nettoyage cassé"))
+
+    scope = report.facts["scope"]
+    assert report.step("R02-business").state == STEP_FAILED and report.step("R06-cleanup").state == STEP_FAILED
+    assert scope["stop_step"] == "R02-business", "le premier arrêt est conservé"
+    assert scope["cleanup_state"] == STEP_FAILED and scope["stop_point"].endswith("nettoyage : failed")
+    assert scope["wired_not_played"] == ["improvement", "incident_rollback"]
+    assert "nettoyage : failed" in report.to_human()
+
+
+def test_a_business_stop_with_a_clean_cleanup_reports_the_cleanup_as_succeeded():
+    report = Calls().run(verify=AssertionError("faux"))
+
+    assert report.facts["scope"]["cleanup_state"] == STEP_SUCCEEDED
+    assert report.facts["scope"]["stop_point"].endswith("nettoyage : succeeded")
+
+
+def test_an_absent_cleanup_stays_not_executed_and_required_never_a_complete_run():
+    calls = Calls()
+
+    report = calls.run(cleanup=None)
+
+    scope = report.facts["scope"]
+    assert report.step("R06-cleanup").state == STEP_NOT_EXECUTED and report.step("R06-cleanup").required
+    assert report.verdict() == "incomplete_validation"
+    assert scope["stop_step"] is None and scope["cleanup_state"] == STEP_NOT_EXECUTED
+    assert "parcours complet joué" not in scope["stop_point"] and "R06-cleanup" in scope["stop_point"]
+    assert "cleanup" not in scope["wired"], "un nettoyage absent n'est pas annoncé comme câblé"
+
+
+def test_a_complete_run_is_the_only_one_reported_as_a_complete_run():
+    calls = Calls()
+
+    report = calls.run()
+
+    scope = report.facts["scope"]
+    assert report.verdict() == "validated" and scope["stop_step"] is None
+    assert scope["stop_point"] == "aucun : parcours complet joué" and scope["cleanup_state"] == STEP_SUCCEEDED
+    assert scope["played"] == ["build", "business", "improvement", "incident_rollback", "registry", "cleanup"]
+    assert scope["wired_not_played"] == []
+    assert "Point d'arrêt : aucun : parcours complet joué" in report.to_human()
+
+
+def test_the_human_report_states_a_demonstrated_zero_and_a_preflight_stop():
+    blocked = CampaignReport("preflight", CAMPAIGN)
+    blocked.declare("P01", "refus")
+    blocked.run("P01", lambda s: (_ for _ in ()).throw(business.IncompleteValidation("refus")))
+
+    text = business.run_campaign({}, preflight=blocked, launch=lambda r: None).to_human()
+
+    assert "Émissions (preflight) : 0 appel(s) de modèle, 0 action(s) facturable(s) — zéro démontré" in text
+    assert "Point d'arrêt : preflight" in text
