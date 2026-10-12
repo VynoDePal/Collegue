@@ -45,10 +45,10 @@ usage inconnu, règlement nul).
 | message de qualification « aucune consommation réglée établie par le registre » | absence de **preuve de règlement**, jamais preuve d'absence d'émission ; scope bloqué ⇒ « usage inconnu après une émission possible ». La qualification et le budget restent bloqués. |
 
 Compatibilité : les clés existantes restent présentes ; `scope.not_wired` peut désormais contenir `business` et `cleanup` ; `null` n'est écrit que là où `0` était faux ; aucun consommateur de CI ne lit ces clés sur un rapport de campagne
-
-Condition de câblage = condition d'appel (B32). Le rapport décrit ce qui s'exécute : `business` (vérification) et `cleanup` sont câblés dès que le callback n'est pas `None` (c'est la condition d'appel existante : un callable dont `__bool__` vaut `False` est appelé, figure dans `played` et dans `wired`) ; `improvement` et `incident_rollback` restent câblés selon la vérité booléenne du callback, comme leur appel (comportement historique, volontairement non normalisé : un callable « faux » n'y est ni appelé ni annoncé câblé). Pour les callables usuels ou `None`, aucune différence.
 (`scripts/w5_product_preflight.py` ne lit que des rapports de préflight). Le nombre exact d'émissions exigerait une lecture de `broker_attempts.emitted_at` que
 l'interface publique `BrokerStore` (`AttemptRecord`) n'expose pas : interface proposée au manager, non écrite ici.
+
+Condition de câblage = condition d'appel (B32). Le rapport décrit ce qui s'exécute : `business` (vérification) et `cleanup` sont câblés dès que le callback n'est pas `None` (c'est la condition d'appel existante : un callable dont `__bool__` vaut `False` est appelé, figure dans `played` et dans `wired`) ; `improvement` et `incident_rollback` restent câblés selon la vérité booléenne du callback, comme leur appel (comportement historique, volontairement non normalisé : un callable « faux » n'y est ni appelé ni annoncé câblé). Pour les callables usuels ou `None`, aucune différence.
 
 ## 2. Socle (manifeste `collegue-fixture-bootstrap/1`) et garde de fusion — jamais une preuve à lui seul
 

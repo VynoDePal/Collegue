@@ -1,11 +1,12 @@
-# Vague 5 après la campagne du 12 octobre — état courant (C75, mis à jour en C76)
+# Vague 5 après la campagne du 12 octobre — état courant (C75, mis à jour en C76 et C78)
 
 **État exact (12 octobre 2026).** La vague 5 est **livrée sur `main`** (PR #613 `734c7f5`, PR #614 `b88e7bf`). **La qualification réelle avec modèles reste INCOMPLÈTE** : la campagne
 `w5-gemma-20261012-9e7c4d76` a émis une seule génération, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire. **Deux choses distinctes** :
 - *la qualification réelle* : incomplète, inchangée par ce qui suit ; aucune campagne ni appel modèle n'est en cours ni autorisé ;
-- *les correctifs de compte rendu* (B28 → B29 → B30, SHA B accepté `b6a53f3321f176d002b2c52457df755daa8e9637`) : **intégrés LOCALEMENT** dans la branche de C `codex/w5-campaign-report-c` (base `b88e7bf`), en attente de
-  validation du manager puis d'un ordre de publication distinct ; ils ne corrigent aucun comportement, seulement ce que le rapport affirme (§ 4). Le diagnostic de A (A35/A36) est **terminé et accepté sans correctif
-  produit** : aucun lot expérimental de transport n'est autorisé.
+- *les correctifs de compte rendu* (B28 → B29 → B30, SHA B accepté `b6a53f3321f176d002b2c52457df755daa8e9637`, puis **B31 → B32, SHA B accepté `121879b5bab216eada7ca41052baefa1b53773b6`** qui corrige le finding P2 de la revue Codex
+  de la PR #615) : **intégrés LOCALEMENT** dans la branche de C `codex/w5-campaign-report-c` (base `b88e7bf`). La PR #615 est **ouverte sur l'ancienne tête `b1b8f54`** (cinq checks verts, mais le P2 est retenu par le manager) : **cette tête
+  n'est pas à fusionner** ; la nouvelle tête n'est pas publiée, elle attend la validation du manager puis un ordre de push distinct. Ces correctifs ne corrigent aucun comportement, seulement ce que le rapport affirme (§ 4). Le diagnostic de A
+  (A35/A36) est **terminé et accepté sans correctif produit** : aucun lot expérimental de transport n'est autorisé.
 
 Ce document est l'état courant ; l'historique de préparation et d'intégration est dans [`w5-integration.md`](w5-integration.md) (§ 1 à 9, conservés), les règles générales dans [`AGENTS.md`](../../AGENTS.md).
 
@@ -52,9 +53,9 @@ Ce document est l'état courant ; l'historique de préparation et d'intégration
 - Un préflight vert ne prouve ni BUILD, ni R04/R05, ni les modèles : il établit que le produit franchit ses contrôles contre GitHub sans émettre. Une campagne incomplète n'est pas un échec masqué ni un succès.
 - Ne jamais convertir une inconnue en succès : usage inconnu après émission ≠ absence d'émission ; point d'arrêt ≠ câblage absent.
 
-## 4. Ce qui est intégré localement (C76) et ce qui ne l'est pas
+## 4. Ce qui est intégré localement (C76, C78) et ce qui ne l'est pas
 
-**Livraison de correctifs de compte rendu, pas de qualification.** Fusion par SHA exact, sans conflit (périmètres disjoints), des commits de B : B28 `e9aedb8`, B29 `f4e9b64`, B30 `b6a53f3` (parent `b88e7bf`) — `collegue/pilot/w4_business.py`,
+**Livraison de correctifs de compte rendu, pas de qualification.** Fusion par SHA exact, sans conflit (périmètres disjoints), des commits de B : B28 `e9aedb8`, B29 `f4e9b64`, B30 `b6a53f3` (parent `b88e7bf`), puis B31 `eef0e71` et B32 `121879b` (voir plus bas) — `collegue/pilot/w4_business.py`,
 `collegue/pilot/w5_business.py`, `tests/test_w5_report_activity.py` (nouveau), `tests/test_w5_business_activation.py` (une assertion de message), `docs/consolidation/w5-business.md`. Relu depuis `b88e7bf` : **aucun changement des plafonds, réservations,
 inconnues, retries, autorisations ni du verdict**. Ce que le rapport de campagne affirme désormais :
 
@@ -63,20 +64,30 @@ inconnues, retries, autorisations ni du verdict**. Ce que le rapport de campagne
 - **Zéros du préflight scopés** : les compteurs hérités du préflight ne sont plus recopiés comme total de campagne ; ils restent lisibles sous `facts.preflight_emissions` (portée « preflight »).
 - **Absence de règlement ≠ absence d'émission** : le refus de qualification dit « aucune consommation réglée établie par le registre » et, après un usage inconnu, « le règlement est absent, l'émission n'est pas écartée » ; le
   faux message « les canaris n'ont pas traversé le pipeline réel » disparaît.
-- **Callbacks** : `scope.played` = étapes dont le callback a réellement été appelé (admission accordée), `scope.wired_not_played` = câblées mais non jouées (arrêt amont ou refus à l'admission), `scope.not_wired` = sans appelant ; un
-  R02 sans vérificateur est une validation incomplète « appelant absent », pas un refus à l'admission.
+- **Callbacks** : `scope.played` = étapes dont le callback a réellement été appelé (admission accordée) ; `scope.wired` et `scope.not_wired` **partitionnent** `scope.announced` (B31/B32, ci-dessous) ; `scope.wired_not_played` = `wired` moins `played`
+  (arrêt amont ou refus à l'admission) ; un R02 sans vérificateur est une validation incomplète « appelant absent », pas un refus à l'admission.
 - **Arrêt effectif** : `scope.stop_step` / `scope.stop_point` calculés à la sortie, **après** le nettoyage (R06 compte ; le premier arrêt métier n'est jamais masqué par une erreur de nettoyage), `scope.cleanup_state` toujours indiqué ; le rapport humain
   affiche émissions, point d'arrêt et phases appelées / câblées non jouées / non câblées.
+
+**Correction du finding P2 de la PR #615 (B31 → B32).** La revue Codex GitHub (commentaire 4247241756, `w4_business.py:1921`) relevait que, avec `verify=None`, `business` restait dans `wired` alors que `not_wired` ne regardait que R04/R05. Le manager
+**retient** ce P2 et révise explicitement la tolérance B30 pour la portée historique limitée de `not_wired` (sa matrice reproduisait 24 échecs sur 32 combinaisons ; décision et preuve : `reports/w5-manager-report-followup.md`). Résultat :
+- `wired` et `not_wired` **partitionnent** `announced` ; `build` (lanceur obligatoire) et `registry` (validateur interne, un lecteur absent est une *erreur* de ce validateur) restent toujours câblés ; `business`, `improvement`, `incident_rollback` et
+  `cleanup` sont câblés **seulement si leur callback est fourni**, sinon dans `not_wired` ; `played` reste inclus dans `wired`.
+- **B32 : la condition de câblage reprend la condition d'appel existante** de chaque callback — `verify` et `cleanup` : `is not None` ; `improve` et `incident` : vérité booléenne (comportement historique, volontairement non normalisé : un callable
+  « faux » n'y est ni appelé ni annoncé câblé). **Aucun callback effectivement invoqué ne change.**
+- Le point d'arrêt d'une phase non câblée dit « NON CÂBLÉE… aucun appelant fourni, callback jamais appelé » ; **aucun changement des admissions, émissions, budgets, inconnues, retries, autorisations ni verdicts**. Précision documentaire (C78) : dans
+  `w5-business.md`, le paragraphe « Condition de câblage = condition d'appel » a été déplacé après la fin du paragraphe « Compatibilité » (raccord mécanique, sens inchangé).
 
 **Limites de cette livraison.**
 - Éprouvée par les tests de B et les sondes du manager sur **faux fournisseur** seulement ; le nouveau format n'a jamais été produit par une campagne réelle ni contre l'API Google.
 - Le **nombre exact d'émissions n'est pas lisible** dans le modèle de données actuel (`emitted_at` absent d'`AttemptRecord`) : il reste `null`, c'est une limite documentée par B28, pas une mesure ; une interface de lecture serait une décision du manager.
 - Les artefacts de la campagne historique restent **intacts** (leurs champs hérités du préflight sont corrigés par le rapport du manager, pas réécrits) ; la campagne reste close, incomplète, jamais relancée.
-- Rien n'est publié : ni push, ni PR, ni fusion. Le diagnostic de A n'a produit **aucun commit produit**.
+- **Publication** : la PR #615 est ouverte sur l'ancienne tête `b1b8f54` (P2 non corrigé dans cette tête, ne pas fusionner) ; la nouvelle tête n'est ni poussée ni couverte par une CI. Le diagnostic de A n'a produit **aucun commit produit**. Aucun appel Google ni nouvelle campagne.
 
 | Lot | État |
 |---|---|
-| **B28 / B29 / B30** | intégrés localement (ci-dessus) ; validation du manager puis ordre de publication à venir |
+| **B28 → B30** | intégrés localement ; publiés dans la PR #615 sur `b1b8f54` (tête obsolète pour la fusion) |
+| **B31 / B32** | intégrés localement (finding P2 corrigé) ; validation du manager puis mise à jour de la PR #615 par push normal, sur ordre |
 | **A35 / A36** | terminés, acceptés, aucun changement produit ; cause du 500 indéterminée ; aucun lot expérimental de transport |
 | **C** | ce document, `AGENTS.md`, `CLAUDE.md`, `w5-integration.md` ; vérification de l'intégration (§ 5) |
 
