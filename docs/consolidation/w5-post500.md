@@ -5,7 +5,7 @@
 - *la qualification réelle* : incomplète, inchangée par la PR #615 ;
 - *les correctifs de compte rendu* (B28 → B30, puis **B31 → B32** qui corrige le finding P2 de la revue Codex de la PR #615) : **livrés par la PR #615** (les sections qui les décrivent, ci-dessous, parlent d'« intégration locale » : c'est l'état historique avant publication, conservé). Le diagnostic de A (A35/A36)
   est **terminé et accepté sans correctif produit**.
-- **Étape suivante, autorisée mais NON lancée** : un petit lot de diagnostic fermé des erreurs HTTP Google, puis UNE campagne réelle NEUVE (identifiant neuf, 2 USD / 250 000 tokens / 900 s) — préparation, responsabilités, critères et plan de commandes dans [`w5-google-campaign-plan.md`](w5-google-campaign-plan.md).
+- **Étape suivante, autorisée mais NON lancée** : un petit lot de diagnostic fermé des erreurs HTTP Google (**intégré localement, non publié** : A `a4ea9ec`, B `750b1b8`), puis UNE campagne réelle NEUVE (identifiant neuf, 2 USD / 250 000 tokens / 900 s) — préparation, responsabilités, critères et plan de commandes dans [`w5-google-campaign-plan.md`](w5-google-campaign-plan.md).
   Aucun appel Google, aucune clé, aucun secret/environnement/variable, aucun dispatch avant l'ordre exact du manager.
 
 Ce document est l'état courant ; l'historique de préparation et d'intégration est dans [`w5-integration.md`](w5-integration.md) (§ 1 à 9, conservés), les règles générales dans [`AGENTS.md`](../../AGENTS.md).
