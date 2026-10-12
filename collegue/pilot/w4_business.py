@@ -1805,15 +1805,17 @@ def _finalize_scope(report: CampaignReport, executed: List[str]) -> None:
     else:
         state = report.step(stop).state
         if _PHASE_OF_STEP[stop] in scope["not_wired"]:
-            scope["stop_point"] = f"{stop} : phase NON CÂBLÉE dans cette invocation ({state})"
-        elif _PHASE_OF_STEP[stop] not in played and stop in EMITTING_STEPS:
+            scope["stop_point"] = (
+                f"{stop} ({state}) : phase NON CÂBLÉE dans cette invocation, aucun appelant fourni, callback jamais appelé"
+                + (
+                    " (appelant absent : ni budget ni échéance en cause)"
+                    if state == STEP_INCOMPLETE
+                    else " ; refusée à l'admission avant même de constater l'absence d'appelant"
+                )
+            )
+        elif _PHASE_OF_STEP[stop] not in played:
             # Seules R01 / R04 / R05 passent par la garde d'admission (échéance, budget, usage inconnu, preuve de dépense).
             scope["stop_point"] = f"{stop} ({state}) : refus à l'admission, callback jamais appelé"
-        elif _PHASE_OF_STEP[stop] not in played:
-            # R02 ne passe pas par la garde d'émission : appelant absent (aucune vérification métier fournie), jamais un refus.
-            scope["stop_point"] = (
-                f"{stop} ({state}) : aucun appelant fourni, callback jamais appelé (appelant absent : ni budget ni échéance en cause)"
-            )
         elif stop == "R01-run" and not launch_facts.get("project_id") and "qualification_registry" in report.facts:
             scope["stop_point"] = (
                 f"{stop} ({state}) : arrêt pendant l'activation budgétaire et les canaris de qualification, "
@@ -1918,12 +1920,16 @@ def run_campaign(
     )
     report.declare("R03-registry", "Compteurs du registre durable dans l'enveloppe (après chaque phase et à la sortie)")
     report.declare("R06-cleanup", "Nettoyage unique des ressources éphémères, après toutes les phases")
-    wired = ["build", "business", "registry"] + (["cleanup"] if cleanup else []) + (["improvement"] if improve else [])
-    wired += ["incident_rollback"] if incident else []
+    announced = ["build", "business", "registry", "improvement", "incident_rollback", "cleanup"]
+    # Partition de ``announced``. Toujours câblées : « build » (lanceur obligatoire) et « registry » (validateur interne ; un lecteur
+    # absent est une ERREUR de ce validateur, jamais une phase non câblée). Optionnelles : vérification métier, R04, R05 et nettoyage —
+    # câblées seulement si l'appelant est fourni, sinon dans ``not_wired``.
+    optional = {"business": verify, "improvement": improve, "incident_rollback": incident, "cleanup": cleanup}
+    wired = [name for name in announced if name not in optional or optional[name]]
     report.facts["scope"] = {
-        "announced": ["build", "business", "registry", "improvement", "incident_rollback", "cleanup"],
+        "announced": announced,
         "wired": wired,
-        "not_wired": [name for name in ("improvement", "incident_rollback") if name not in wired],
+        "not_wired": [name for name in announced if name not in wired],
         # Renseignés à la sortie, d'après les états RÉELS des étapes : phases jouées, phases câblées mais non jouées (arrêt amont) et
         # point d'arrêt effectif. « Non câblée » (absence d'appelant) et « câblée, non jouée » (arrêt avant elle) sont deux choses distinctes.
         "played": [],
