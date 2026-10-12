@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional, Tuple, Union
 
+from collegue.broker.diagnostics import diagnostic_suffix
 from collegue.broker.errors import (
     BrokerAuthError,
     BrokerBlocked,
@@ -487,7 +488,7 @@ class BrokerService:
             self._release(attempt, exc.code, str(exc))
             raise
         except (UpstreamHTTPError, UpstreamTransportError, UpstreamBadBody) as exc:
-            detail = f"countTokens indisponible ({type(exc).__name__})"
+            detail = f"countTokens indisponible ({type(exc).__name__}){diagnostic_suffix(exc)}"
             self._release(attempt, "count_tokens_failed", detail)
             retry = isinstance(exc, UpstreamHTTPError) and exc.status == 429
             refused = BrokerUnsupported(detail, code="count_tokens_failed", status=429 if retry else 502)
@@ -561,14 +562,19 @@ class BrokerService:
         try:
             raw = await self._upstream.generate(nr)
         except UpstreamHTTPError as exc:
+            # Diagnostic FERMÉ (catégories seulement, voir ``diagnostics.py``) ajouté aux messages et à ``error_detail`` : il ne décide JAMAIS
+            # de la comptabilité, seul le statut HTTP ci-dessous tranche.
+            diag = diagnostic_suffix(exc)
             if exc.status in PROVEN_REJECTED_STATUS:
-                self._release(attempt, "upstream_rejected", f"HTTP {exc.status}")
+                self._release(attempt, "upstream_rejected", f"HTTP {exc.status}{diag}")
                 raise BrokerUpstreamRejected(
-                    f"le fournisseur a refusé la requête (HTTP {exc.status})", upstream_status=exc.status
+                    f"le fournisseur a refusé la requête (HTTP {exc.status}){diag}", upstream_status=exc.status
                 ) from None
-            self._block_unknown(attempt, scope_key, session, "upstream_ambiguous", f"HTTP {exc.status} après émission")
+            self._block_unknown(
+                attempt, scope_key, session, "upstream_ambiguous", f"HTTP {exc.status} après émission{diag}"
+            )
             raise BrokerUpstreamAmbiguous(
-                f"échec du fournisseur après émission (HTTP {exc.status}) : usage inconnu"
+                f"échec du fournisseur après émission (HTTP {exc.status}){diag} : usage inconnu"
             ) from None
         except UpstreamTransportError as exc:
             if exc.before_send:
