@@ -37,8 +37,8 @@ Un diagnostic fourni par un double est normalisé par `sanitize_diagnostic` (val
 ## Reprise : diagnostic durable d'un rejeu refusé (A38)
 Après un redémarrage ou une nouvelle instance, un même `request_id` dont la tentative est `unknown` reste un **rejeu refusé** (`BrokerBlocked`, code `replay_refused`, avant tout réseau et toute émission, aucune réécriture d'état,
 même réservation, mêmes événements). Le refus reprend le diagnostic DURABLE : `suffix_from_durable_detail` n'extrait de la fin de `error_detail` que les **cinq valeurs fermées** du suffixe, les valide contre les listes fermées et
-**reconstruit** le suffixe (` [diag http=… op=… rpc=… body=… request_id=…]`). Le `error_detail` historique n'est jamais recopié : suffixe absent, incomplet, mal formé, hors liste, non terminal ou précédé de texte libre ⇒ pas de suffixe
-(le texte libre précédant un suffixe valide est ignoré), message historique inchangé. Le rejet n'est pas présenté comme le résultat original ; une tentative réglée rejoue son résultat comme avant.
+**reconstruit** le suffixe (` [diag http=… op=… rpc=… body=… request_id=…]`). Le `error_detail` historique n'est jamais recopié : un suffixe absent, incomplet, mal formé, hors liste ou **non terminal** (du texte quelconque après lui) ne donne aucun suffixe et laisse le message historique inchangé ;
+en revanche un suffixe valide placé **en fin** de chaîne est reconstruit même si du texte libre le précède, ce préfixe libre étant simplement ignoré (jamais recopié). Le rejet n'est pas présenté comme le résultat original ; une tentative réglée rejoue son résultat comme avant.
 
 ## Fail-safe
 Corps JSON invalide / tronqué, clés dupliquées, `NaN`, types inattendus, profondeur excessive (`RecursionError` comprise), octets non UTF-8, en-têtes qui lèvent : `http_diagnostic` ne lève jamais et ne masque jamais le statut HTTP ; une ambiguïté
