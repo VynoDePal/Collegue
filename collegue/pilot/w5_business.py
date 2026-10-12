@@ -809,7 +809,16 @@ def _qualification_problems(report: Any, scope_key: str, *, now: datetime) -> Tu
         or isinstance(report.consumed_tokens, bool)
         or report.consumed_tokens <= 0
     ):
-        problems.append("aucune consommation établie par le registre : les canaris n'ont pas traversé le pipeline réel")
+        # Absence de PREUVE de règlement, jamais preuve d'absence d'émission : après une émission ambiguë (HTTP 5xx, coupure) l'usage est
+        # inconnu et le règlement nul alors que la génération a bien été envoyée.
+        problems.append(
+            "aucune consommation réglée établie par le registre"
+            + (
+                " (usage inconnu après une émission possible : le règlement est absent, l'émission n'est pas écartée)"
+                if report.blocked
+                else " (le passage des canaris par le pipeline réel n'est pas prouvé ; ceci n'écarte pas une émission)"
+            )
+        )
     if GOOGLE_DESTINATION not in str(report.destination) and OFFICIAL_GOOGLE_HOST not in str(report.destination):
         problems.append(f"destination non native Google ({report.destination!r})")
     by_model = {m.model: m for m in report.models}

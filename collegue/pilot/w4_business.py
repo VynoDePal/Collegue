@@ -1640,11 +1640,13 @@ def launch_campaign(
     # Identité du projet/scope conservée DÈS sa création et jusqu'aux sorties d'erreur, de budget ou d'échéance : le rapport
     # lit le MÊME registre après un arrêt, sans dépendre de la valeur de retour (absente quand l'exécution lève).
     context: Dict[str, Any] = report.facts.setdefault("launch", {})
-    context.update(base_branch=cfg.base_branch)
+    context.update(base_branch=cfg.base_branch, emission_possible=False)
     manifest.root_sha = adapter.guard_fixture()
     _write_manifest(cfg.manifest_path, manifest)
     if claim is not None:
         claim(report)
+    # Garde, socle et revendication ne génèrent rien : à partir d'ici (activation = canaris, puis planification, BUILD), un appel peut partir.
+    context["emission_possible"] = True
     if activate is not None:
         activate(report)
     # Pile approuvée relue par l'API juste avant (socle revalidé) : annoncée au codeur, qui travaille hors ligne.
@@ -1732,6 +1734,85 @@ NOT_WIRED_STOP_POINT = (
     "contrôlé avec rollback Phase 5 ; un BUILD réussi n'est pas la validation finale"
 )
 
+_PHASE_OF_STEP = {
+    "R01-run": "build",
+    "R02-business": "business",
+    "R04-improvement": "improvement",
+    "R05-incident-rollback": "incident_rollback",
+    "R03-registry": "registry",
+}
+_PHASE_LABELS = {
+    "R04-improvement": "la passe d'amélioration (handoff BUILD→IMPROVE)",
+    "R05-incident-rollback": "l'incident contrôlé avec rollback Phase 5",
+}
+_STOP_STATES = (STEP_FAILED, STEP_BUDGET_STOP, STEP_INCOMPLETE)
+
+
+def _finalize_scope(report: CampaignReport, started: List[str]) -> None:
+    """Portée et émissions de la campagne d'après les états RÉELS des étapes (jamais d'un message écrit d'avance).
+
+    ``scope.not_wired`` = phases sans appelant ; ``scope.wired_not_played`` = phases câblées que l'arrêt amont a empêchées ;
+    ``scope.stop_point`` = l'étape qui a réellement arrêté le parcours.
+
+    ``facts.emissions`` : le zéro n'est affirmé que si AUCUNE étape émettrice n'a démarré. Sinon le total d'appels et d'actions
+    facturables n'est PAS mesuré (le registre dit ce qui est réglé, pas ce qui a été émis) : ``null``, jamais 0 ni 1 déduit d'un
+    verdict ou d'une consommation. ``llm_calls_emitted`` / ``billable_actions_emitted`` de premier niveau suivent la même règle."""
+    scope = report.facts["scope"]
+    launch_reached = (report.facts.get("launch") or {}).get("emission_possible", True) is not False
+    started = [
+        i for i in started if i != "R01-run" or launch_reached
+    ]  # R01 arrêté avant toute génération possible : zéro démontré
+    order = ["R01-run", "R02-business", "R04-improvement", "R05-incident-rollback", "R03-registry"]
+    played = [_PHASE_OF_STEP[i] for i in order if report.step(i).state != STEP_NOT_EXECUTED]
+    scope["played"] = played
+    scope["wired_not_played"] = [n for n in scope["wired"] if n != "cleanup" and n not in played]
+    stop = next((i for i in order if report.step(i).state in _STOP_STATES), None)
+    scope["stop_step"] = stop
+    launch_facts = report.facts.get("launch") or {}
+    if stop is None:
+        scope["stop_point"] = (
+            "aucun : parcours complet joué"
+            if not scope["wired_not_played"]
+            else "parcours interrompu sans étape en échec"
+        )
+    elif _PHASE_OF_STEP[stop] in scope["not_wired"]:
+        scope["stop_point"] = f"{stop} : phase NON CÂBLÉE dans cette invocation ({report.step(stop).state})"
+    elif stop == "R01-run" and not launch_facts.get("project_id") and "qualification_registry" in report.facts:
+        scope["stop_point"] = (
+            f"{stop} ({report.step(stop).state}) : arrêt pendant l'activation budgétaire et les canaris de qualification, "
+            "avant planification, BUILD, amélioration et incident"
+        )
+    else:
+        scope["stop_point"] = f"{stop} ({report.step(stop).state})"
+    if scope["wired_not_played"] and stop is not None:
+        scope["stop_point"] += " ; câblées et non jouées : " + ", ".join(scope["wired_not_played"])
+    if started:
+        report.facts["llm_calls_emitted"] = None
+        report.facts["billable_actions_emitted"] = None
+        report.facts["emissions"] = {
+            "scope": "campagne",
+            "llm_calls_emitted": None,
+            "billable_actions_emitted": None,
+            "measured": False,
+            "started_emitting_steps": list(started),
+            "reason": (
+                "total non mesuré : le registre budgétaire donne le règlement (réglé / réservé / inconnu), pas le nombre d'émissions "
+                "ni de renvois ; une consommation réglée nulle ne prouve pas l'absence d'émission"
+            ),
+        }
+    else:
+        report.facts["llm_calls_emitted"] = 0
+        report.facts["billable_actions_emitted"] = 0
+        report.facts["emissions"] = {
+            "scope": "campagne",
+            "llm_calls_emitted": 0,
+            "billable_actions_emitted": 0,
+            "measured": True,
+            "started_emitting_steps": [],
+            "reason": "aucune étape émettrice (R01, R04, R05) n'a démarré : ni génération ni action facturable possibles",
+        }
+
+
 #: Étapes qui peuvent émettre (modèle) : aucune ne démarre après l'expiration de l'échéance globale, ni sur un usage inconnu.
 EMITTING_STEPS = ("R01-run", "R04-improvement", "R05-incident-rollback")
 
@@ -1771,6 +1852,14 @@ def run_campaign(
         copy = report.declare(item.id, item.title, required=item.required)
         copy.state, copy.detail, copy.evidence = item.state, item.detail, dict(item.evidence)
     report.facts.update(preflight.facts)
+    # Les compteurs d'émission du préflight ont la portée du PRÉFLIGHT (zéro autorisé, rien n'y émet) : ils ne sont jamais recopiés comme
+    # total de la campagne. Ils restent lisibles ici, sous leur portée ; le total de campagne est établi plus bas (``facts.emissions``).
+    preflight_emissions = {
+        "scope": "preflight",
+        "llm_calls_emitted": report.facts.pop("llm_calls_emitted", None),
+        "billable_actions_emitted": report.facts.pop("billable_actions_emitted", None),
+    }
+    report.facts["preflight_emissions"] = preflight_emissions
     report.facts["preflight_verdict"] = preflight.verdict()
     report.declare(
         "R01-run", "Planification, approbation, exécution et fusions sur la base éphémère (enveloppe globale)"
@@ -1793,12 +1882,28 @@ def run_campaign(
         "announced": ["build", "business", "registry", "improvement", "incident_rollback", "cleanup"],
         "wired": wired,
         "not_wired": [name for name in ("improvement", "incident_rollback") if name not in wired],
-        "stop_point": NOT_WIRED_STOP_POINT,
+        # Renseignés à la sortie, d'après les états RÉELS des étapes : phases jouées, phases câblées mais non jouées (arrêt amont) et
+        # point d'arrêt effectif. « Non câblée » (absence d'appelant) et « câblée, non jouée » (arrêt avant elle) sont deux choses distinctes.
+        "played": [],
+        "wired_not_played": [],
+        "stop_step": None,
+        "stop_point": None,
     }
     if preflight.verdict() != VERDICT_VALIDATED:
         report.halted = True
         report.facts["billable_actions_emitted"] = 0
+        report.facts["llm_calls_emitted"] = 0
+        report.facts["emissions"] = {
+            "scope": "preflight",
+            "llm_calls_emitted": 0,
+            "billable_actions_emitted": 0,
+            "measured": True,
+            "started_emitting_steps": [],
+            "reason": "préflight non validé : aucune étape émettrice n'a démarré",
+        }
         report.facts["stop_point"] = "preflight"
+        report.facts["scope"]["stop_point"] = "preflight"
+        report.facts["scope"]["wired_not_played"] = [n for n in wired if n != "cleanup"]
         return report
 
     now = clock or time.monotonic
@@ -1848,6 +1953,8 @@ def run_campaign(
             gate["budget"] = f"enveloppe atteinte ({used_usd:.6f} $ / {used_tokens} tokens) : aucune nouvelle émission"
         return counters
 
+    started: List[str] = []
+
     def _before_emission(step: Step) -> None:
         deadline = _deadline_of(deadline_monotonic)
         if deadline is not None and deadline - now() <= 0:
@@ -1858,6 +1965,7 @@ def run_campaign(
         if refusal:
             raise IncompleteValidation(f"{refusal} (avant {step.id})")
         proof.note_emission()
+        started.append(step.id)  # à partir d'ici l'étape PEUT émettre : zéro n'est plus démontré
 
     def _phase(step_id: str, fn: Callable[[Step], Any]) -> bool:
         def guarded(step: Step) -> None:
@@ -1907,7 +2015,10 @@ def run_campaign(
         assert_registry_within_bounds(counters)
 
     def _not_wired(step: Step) -> None:
-        raise IncompleteValidation(NOT_WIRED_STOP_POINT)
+        raise IncompleteValidation(
+            f"point d'arrêt documenté : {_PHASE_LABELS[step.id]} n'est pas câblée dans cette invocation (aucun appelant fourni) ; "
+            "un BUILD réussi n'est pas la validation finale"
+        )
 
     try:
         _phase("R01-run", _launch)
@@ -1939,6 +2050,7 @@ def run_campaign(
         cleanup_step = report.step("R06-cleanup")
         cleanup_step.required = False  # le verdict « avant nettoyage » ne dépend pas du nettoyage lui-même
         report.facts["verdict_before_cleanup"] = report.verdict()
+        _finalize_scope(report, started)
         cleanup_step.required = True
         if cleanup is not None:
             report.halted = False
