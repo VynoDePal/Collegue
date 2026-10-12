@@ -192,7 +192,9 @@ def test_a_fully_successful_campaign_validates_only_after_the_business_check_and
     assert states["R04-improvement"] == STEP_INCOMPLETE and states["R05-incident-rollback"] == STEP_NOT_EXECUTED
     assert "point d'arrêt documenté" in report.step("R04-improvement").detail
     assert report.verdict() == "incomplete_validation" and report.exit_code() == 3
-    assert report.facts["scope"]["not_wired"] == ["improvement", "incident_rollback"]
+    assert report.facts["scope"]["not_wired"] == ["improvement", "incident_rollback", "cleanup"], (
+        "R04, R05 et le nettoyage n'ont pas d'appelant dans cette invocation ; la vérification métier est fournie"
+    )
 
 
 @pytest.mark.parametrize(

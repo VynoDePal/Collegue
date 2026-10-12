@@ -179,7 +179,7 @@ def test_the_stop_point_is_the_real_one_and_wired_phases_are_not_called_unwired(
         "improvement",
         "incident_rollback",
     ]  # aucun nettoyage fourni ici
-    assert scope["not_wired"] == []
+    assert scope["not_wired"] == ["cleanup"], "seul le nettoyage n'est pas fourni par ce montage"
     assert scope["stop_step"] == "R01-run" and scope["played"] == ["build", "registry"]
     assert scope["wired_not_played"] == ["business", "improvement", "incident_rollback"]
     assert scope["stop_point"].startswith("R01-run")
@@ -309,9 +309,9 @@ def test_without_callbacks_the_stop_point_names_the_unwired_phase(rig):
     report = rig.campaign(improve=None, incident=None)
 
     scope = report.facts["scope"]
-    assert scope["not_wired"] == ["improvement", "incident_rollback"] and scope["wired_not_played"] == []
+    assert scope["not_wired"] == ["improvement", "incident_rollback", "cleanup"] and scope["wired_not_played"] == []
     assert scope["stop_step"] == "R04-improvement"
-    assert scope["stop_point"].startswith("R04-improvement : phase NON CÂBLÉE")
+    assert scope["stop_point"].startswith("R04-improvement (incomplete_validation) : phase NON CÂBLÉE")
     assert "point d'arrêt documenté" in report.step("R04-improvement").detail
     assert report.verdict() == "incomplete_validation"
 
@@ -323,7 +323,7 @@ def test_with_callbacks_a_stop_before_them_is_not_reported_as_unwired(rig):
     report = rig.campaign(verify=false_assertion)
 
     scope = report.facts["scope"]
-    assert scope["not_wired"] == [] and scope["stop_step"] == "R02-business"
+    assert scope["not_wired"] == ["cleanup"] and scope["stop_step"] == "R02-business"
     assert scope["wired_not_played"] == ["improvement", "incident_rollback"]
     assert "NON CÂBLÉE" not in scope["stop_point"]
     assert scope["stop_point"].startswith("R02-business (failed)")
@@ -614,3 +614,101 @@ def test_the_real_admission_refusals_of_r01_r04_r05_stay_admission_refusals():
     assert "refus à l'admission, callback jamais appelé" in first.facts["scope"]["stop_point"]
     assert second.facts["scope"]["stop_step"] == "R04-improvement"
     assert "refus à l'admission, callback jamais appelé" in second.facts["scope"]["stop_point"]
+
+
+def test_wired_and_not_wired_partition_announced_for_every_combination_of_optional_callbacks():
+    import itertools
+
+    names = ("verify", "improve", "incident", "cleanup")
+    phases = ("business", "improvement", "incident_rollback", "cleanup")
+    for enabled in itertools.product([False, True], repeat=4):
+        hooks = {n: ((lambda *a: None) if on else None) for n, on in zip(names, enabled)}
+        report = business.run_campaign(
+            {}, preflight=accepted(), launch=lambda r: {"project_id": 1}, read_registry=lambda c: counters(), **hooks
+        )
+        scope = report.facts["scope"]
+        assert sorted(scope["wired"] + scope["not_wired"]) == sorted(scope["announced"]) and not set(
+            scope["wired"]
+        ) & set(scope["not_wired"])
+        assert {"build", "registry"} <= set(scope["wired"]), "lanceur obligatoire et validateur interne toujours câblés"
+        assert {p for p, on in zip(phases, enabled) if not on} == set(scope["not_wired"])
+        assert set(scope["wired_not_played"]) == set(scope["wired"]) - set(scope["played"])
+        assert not set(scope["not_wired"]) & (set(scope["played"]) | set(scope["wired_not_played"]))
+
+
+def test_an_absent_verifier_and_an_absent_cleanup_are_reported_as_unwired_in_scope_and_in_the_human_report():
+    report = Calls().run(verify=None, cleanup=None)
+
+    scope = report.facts["scope"]
+    assert scope["not_wired"] == ["business", "cleanup"]
+    assert "business" not in scope["wired"] and "business" not in scope["wired_not_played"]
+    assert "cleanup" not in scope["wired"] and "cleanup" not in scope["wired_not_played"]
+    assert scope["stop_step"] == "R02-business" and "NON CÂBLÉE" in scope["stop_point"]
+    assert "refus à l'admission" not in scope["stop_point"] and "budget" not in scope["stop_point"].replace(
+        "ni budget ni", ""
+    )
+    text = report.to_human()
+    assert "non câblées : business, cleanup" in text and "câblées non jouées : improvement, incident_rollback" in text
+
+
+def test_a_missing_registry_reader_is_an_internal_validator_error_not_an_unwired_phase():
+    report = business.run_campaign(
+        {}, preflight=accepted(), launch=lambda r: {"project_id": 1}, verify=lambda r, c: None,
+        improve=lambda r, c: None, incident=lambda r, c: None, cleanup=lambda r: None, read_registry=None,
+    )  # fmt: skip
+
+    scope = report.facts["scope"]
+    assert "registry" in scope["wired"] and "registry" not in scope["not_wired"]
+    assert "registry" in scope["played"], "le validateur interne a tourné et s'est arrêté : aucune lecture n'a réussi"
+    assert report.step("R03-registry").state == STEP_INCOMPLETE and report.verdict() == "incomplete_validation"
+
+
+class FalsyCallback:
+    """Callable dont ``__bool__`` vaut ``False`` : compte ses appels réels."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __bool__(self):
+        return False
+
+    def __call__(self, *args):
+        self.calls += 1
+
+
+@pytest.mark.parametrize(
+    "name,phase",
+    [("verify", "business"), ("cleanup", "cleanup")],
+)
+def test_a_falsey_verifier_or_cleanup_is_called_and_therefore_reported_as_wired_and_played(name, phase):
+    callback = FalsyCallback()
+    hooks = {n: (lambda *a: None) for n in ("verify", "improve", "incident", "cleanup")}
+    hooks[name] = callback
+
+    report = business.run_campaign(
+        {}, preflight=accepted(), launch=lambda r: {"project_id": 1}, read_registry=lambda c: counters(), **hooks
+    )
+
+    scope = report.facts["scope"]
+    assert callback.calls == 1 and phase in scope["played"], "appelé : la condition d'appel est `is not None`"
+    assert phase in scope["wired"] and phase not in scope["not_wired"] and phase not in scope["wired_not_played"]
+    assert set(scope["played"]) <= set(scope["wired"])
+    assert report.verdict() == business.VERDICT_VALIDATED
+
+
+@pytest.mark.parametrize("name,phase", [("improve", "improvement"), ("incident", "incident_rollback")])
+def test_a_falsey_improve_or_incident_keeps_the_historical_behaviour_not_called_and_not_wired(name, phase):
+    callback = FalsyCallback()
+    hooks = {n: (lambda *a: None) for n in ("verify", "improve", "incident", "cleanup")}
+    hooks[name] = callback
+
+    report = business.run_campaign(
+        {}, preflight=accepted(), launch=lambda r: {"project_id": 1}, read_registry=lambda c: counters(), **hooks
+    )
+
+    scope = report.facts["scope"]
+    assert callback.calls == 0, "R04 / R05 testent la vérité booléenne : comportement d'exécution inchangé"
+    assert phase in scope["not_wired"] and phase not in scope["wired"] and phase not in scope["played"]
+    assert phase not in scope["wired_not_played"]
+    assert report.verdict() != business.VERDICT_VALIDATED
+    assert sorted(scope["wired"] + scope["not_wired"]) == sorted(scope["announced"])
