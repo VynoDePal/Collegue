@@ -46,3 +46,16 @@ Les absences de contrat (`diagnostic` manquant) échouent par **assertion explic
 * `request_id_present` n'est vérifié que comme booléen (les noms d'en-têtes reconnus relèvent d'A) ; la non-recopie de la valeur et de ses hachages est, elle, exigée.
 * Les doublons et la profondeur sont testés par comportement observable (statut conservé, diagnostic fermé, aucune recopie), sans imposer l'algorithme de A.
 * Aucune preuve contre le vrai Google : la cause interne du HTTP 500 historique reste indéterminée.
+
+## Résultat sur le lot A accepté (B34)
+
+Fusion locale `--no-ff` du SHA A accepté `65a2fe92850df9b50818141e9c79a4c9f404f04a` dans la branche B (commit de fusion `838c7dd`, aucun changement fonctionnel ; les fichiers importés de A — `collegue/broker/diagnostics.py`,
+`collegue/broker/upstream.py`, `collegue/broker/service.py`, `tests/test_w5_broker_diagnostics.py`, `docs/consolidation/w5-google-diagnostics.md` — gardent A pour auteur et n'ont pas été édités). Les **mêmes 119 tests**, fichier inchangé
+(SHA256 `f66999e67d584cc25090b981b54f46945cad531eb3770a4949f97cfa46a857cc`, avant et après la fusion), sont rejoués depuis ce worktree :
+
+| Base | Cas | Résultat |
+|---|---|---|
+| `ed54868` (sans A) | 119 | 83 rouges (assertions) / 36 témoins verts |
+| `ed54868` + A `65a2fe9` | 119 | **119 verts**, 0 échec, 0 erreur, 0 saut |
+
+Aucun test n'a été affaibli ni modifié ; les deux familles (nouveau diagnostic, témoins comptables) sont vertes.
