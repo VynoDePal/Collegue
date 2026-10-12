@@ -1,12 +1,12 @@
-# Vague 5 après la campagne du 12 octobre — état courant (C75, mis à jour en C76 et C78)
+# Vague 5 après la campagne du 12 octobre — état courant (C75, mis à jour en C76, C78 et C81)
 
-**État exact (12 octobre 2026).** La vague 5 est **livrée sur `main`** (PR #613 `734c7f5`, PR #614 `b88e7bf`). **La qualification réelle avec modèles reste INCOMPLÈTE** : la campagne
-`w5-gemma-20261012-9e7c4d76` a émis une seule génération, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire. **Deux choses distinctes** :
-- *la qualification réelle* : incomplète, inchangée par ce qui suit ; aucune campagne ni appel modèle n'est en cours ni autorisé ;
-- *les correctifs de compte rendu* (B28 → B29 → B30, SHA B accepté `b6a53f3321f176d002b2c52457df755daa8e9637`, puis **B31 → B32, SHA B accepté `121879b5bab216eada7ca41052baefa1b53773b6`** qui corrige le finding P2 de la revue Codex
-  de la PR #615) : **intégrés LOCALEMENT** dans la branche de C `codex/w5-campaign-report-c` (base `b88e7bf`). La PR #615 est **ouverte sur l'ancienne tête `b1b8f54`** (cinq checks verts, mais le P2 est retenu par le manager) : **cette tête
-  n'est pas à fusionner** ; la nouvelle tête n'est pas publiée, elle attend la validation du manager puis un ordre de push distinct. Ces correctifs ne corrigent aucun comportement, seulement ce que le rapport affirme (§ 4). Le diagnostic de A
-  (A35/A36) est **terminé et accepté sans correctif produit** : aucun lot expérimental de transport n'est autorisé.
+**État exact (12 octobre 2026, après la PR #615).** La vague 5 est **livrée sur `main`** (PR #613 `734c7f5`, PR #614 `b88e7bf`, **PR #615 `ed548683175fdc88967e2e116d41b66071da76f2`**, arbre `028bbee2…`, parent unique `b88e7bf`, cinq checks du push verts, run `38249841619`).
+**La qualification réelle avec modèles reste INCOMPLÈTE** : la campagne `w5-gemma-20261012-9e7c4d76` a émis une seule génération, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire. **Deux choses distinctes** :
+- *la qualification réelle* : incomplète, inchangée par la PR #615 ;
+- *les correctifs de compte rendu* (B28 → B30, puis **B31 → B32** qui corrige le finding P2 de la revue Codex de la PR #615) : **livrés par la PR #615** (les sections qui les décrivent, ci-dessous, parlent d'« intégration locale » : c'est l'état historique avant publication, conservé). Le diagnostic de A (A35/A36)
+  est **terminé et accepté sans correctif produit**.
+- **Étape suivante, autorisée mais NON lancée** : un petit lot de diagnostic fermé des erreurs HTTP Google (**intégré localement, non publié** : A `a4ea9ec`, B `750b1b8`), puis UNE campagne réelle NEUVE (identifiant neuf, 2 USD / 250 000 tokens / 900 s) — préparation, responsabilités, critères et plan de commandes dans [`w5-google-campaign-plan.md`](w5-google-campaign-plan.md).
+  Aucun appel Google, aucune clé, aucun secret/environnement/variable, aucun dispatch avant l'ordre exact du manager.
 
 Ce document est l'état courant ; l'historique de préparation et d'intégration est dans [`w5-integration.md`](w5-integration.md) (§ 1 à 9, conservés), les règles générales dans [`AGENTS.md`](../../AGENTS.md).
 
@@ -46,14 +46,14 @@ Ce document est l'état courant ; l'historique de préparation et d'intégration
 
 ## 3. Règles en vigueur
 
-- **Cette campagne est close et ne se relance jamais** (identifiant consommé). Une nouvelle campagne réelle exige un accord explicite, un identifiant neuf et une enveloppe explicite, et la remise en place
-  temporaire de l'environnement, du secret et de la variable, sur ordre exact du manager.
+- **Les campagnes `w5-gemma-20261010-dcf645da` et `w5-gemma-20261012-9e7c4d76` sont closes et ne se relancent jamais** (identifiants consommés). **Une campagne NEUVE est autorisée** (« Vas y » de l'utilisateur : identifiant neuf, 2 USD / 250 000 tokens / 900 s) **mais n'est pas lancée** : elle exige, sur ordre exact et distinct du manager, la remise en place
+  temporaire de l'environnement, du secret et de la variable, puis le dispatch (plan : [`w5-google-campaign-plan.md`](w5-google-campaign-plan.md)). Toute autre campagne exigerait un nouvel accord explicite.
 - Aucun appel modèle, **`countTokens` compris**, aucun dispatch ni rerun de `consolidation-e2e.yml`, de `w5-product-preflight.yml` ou du nightly sans ordre exact ; aucun accès à un fichier de clé ; aucun
   changement de secret, de protection ou de ruleset ; aucune mutation de la fixture (`scripts/w5_fixture_bootstrap.py apply|probe|cleanup`) sans le jeton d'ordre.
 - Un préflight vert ne prouve ni BUILD, ni R04/R05, ni les modèles : il établit que le produit franchit ses contrôles contre GitHub sans émettre. Une campagne incomplète n'est pas un échec masqué ni un succès.
 - Ne jamais convertir une inconnue en succès : usage inconnu après émission ≠ absence d'émission ; point d'arrêt ≠ câblage absent.
 
-## 4. Ce qui est intégré localement (C76, C78) et ce qui ne l'est pas
+## 4. Ce qui a été intégré (C76, C78) puis livré par la PR #615 — état historique avant publication
 
 **Livraison de correctifs de compte rendu, pas de qualification.** Fusion par SHA exact, sans conflit (périmètres disjoints), des commits de B : B28 `e9aedb8`, B29 `f4e9b64`, B30 `b6a53f3` (parent `b88e7bf`), puis B31 `eef0e71` et B32 `121879b` (voir plus bas) — `collegue/pilot/w4_business.py`,
 `collegue/pilot/w5_business.py`, `tests/test_w5_report_activity.py` (nouveau), `tests/test_w5_business_activation.py` (une assertion de message), `docs/consolidation/w5-business.md`. Relu depuis `b88e7bf` : **aucun changement des plafonds, réservations,
@@ -82,12 +82,12 @@ inconnues, retries, autorisations ni du verdict**. Ce que le rapport de campagne
 - Éprouvée par les tests de B et les sondes du manager sur **faux fournisseur** seulement ; le nouveau format n'a jamais été produit par une campagne réelle ni contre l'API Google.
 - Le **nombre exact d'émissions n'est pas lisible** dans le modèle de données actuel (`emitted_at` absent d'`AttemptRecord`) : il reste `null`, c'est une limite documentée par B28, pas une mesure ; une interface de lecture serait une décision du manager.
 - Les artefacts de la campagne historique restent **intacts** (leurs champs hérités du préflight sont corrigés par le rapport du manager, pas réécrits) ; la campagne reste close, incomplète, jamais relancée.
-- **Publication** : la PR #615 est ouverte sur l'ancienne tête `b1b8f54` (P2 non corrigé dans cette tête, ne pas fusionner) ; la nouvelle tête n'est ni poussée ni couverte par une CI. Le diagnostic de A n'a produit **aucun commit produit**. Aucun appel Google ni nouvelle campagne.
+- **Publication (historique)** : la PR #615 avait été ouverte sur la tête `b1b8f54` (P2 non encore corrigé), puis mise à jour avec B31/B32 (`e0321a3`) et **fusionnée** en `ed54868` (cinq checks verts, Copilot indisponible par quota, aucune revue Codex sur la dernière tête, limite acceptée par le manager). Le diagnostic de A n'a produit **aucun commit produit**. Aucun appel Google ni nouvelle campagne.
 
 | Lot | État |
 |---|---|
-| **B28 → B30** | intégrés localement ; publiés dans la PR #615 sur `b1b8f54` (tête obsolète pour la fusion) |
-| **B31 / B32** | intégrés localement (finding P2 corrigé) ; validation du manager puis mise à jour de la PR #615 par push normal, sur ordre |
+| **B28 → B30** | livrés par la PR #615 (`ed54868`) |
+| **B31 / B32** | livrés par la PR #615 (finding P2 corrigé et éprouvé indépendamment) |
 | **A35 / A36** | terminés, acceptés, aucun changement produit ; cause du 500 indéterminée ; aucun lot expérimental de transport |
 | **C** | ce document, `AGENTS.md`, `CLAUDE.md`, `w5-integration.md` ; vérification de l'intégration (§ 5) |
 
@@ -118,5 +118,5 @@ Propriété inchangée : A (`collegue/broker/**`, runtime, transport), B (`pilot
 
 ## 6. Suite
 
-Le manager valide le SHA intégré depuis son checkout QA propre et décide de la publication (push, PR, cinq checks requis inchangés, revues, fusion : un ordre distinct à chaque étape). Toute nouvelle campagne réelle reste soumise à un accord explicite,
-un identifiant neuf et une enveloppe explicite ; la campagne `w5-gemma-20261012-9e7c4d76` ne se relance jamais.
+La PR #615 est livrée et `main` validé. Prochaine étape, autorisée et non lancée : le lot de diagnostic Google (A, B) puis, sur ordres distincts du manager, publication, fusion sur SHA précis, préflight dédié sans clé, préparation temporaire de la configuration et dispatch unique d'une campagne neuve ;
+tout le détail (responsabilités, critères, commandes exactes, prérequis et critères d'arrêt) est dans [`w5-google-campaign-plan.md`](w5-google-campaign-plan.md). Les campagnes closes ne se relancent jamais.
