@@ -1806,8 +1806,14 @@ def _finalize_scope(report: CampaignReport, executed: List[str]) -> None:
         state = report.step(stop).state
         if _PHASE_OF_STEP[stop] in scope["not_wired"]:
             scope["stop_point"] = f"{stop} : phase NON CÂBLÉE dans cette invocation ({state})"
-        elif _PHASE_OF_STEP[stop] not in played:
+        elif _PHASE_OF_STEP[stop] not in played and stop in EMITTING_STEPS:
+            # Seules R01 / R04 / R05 passent par la garde d'admission (échéance, budget, usage inconnu, preuve de dépense).
             scope["stop_point"] = f"{stop} ({state}) : refus à l'admission, callback jamais appelé"
+        elif _PHASE_OF_STEP[stop] not in played:
+            # R02 ne passe pas par la garde d'émission : appelant absent (aucune vérification métier fournie), jamais un refus.
+            scope["stop_point"] = (
+                f"{stop} ({state}) : aucun appelant fourni, callback jamais appelé (appelant absent : ni budget ni échéance en cause)"
+            )
         elif stop == "R01-run" and not launch_facts.get("project_id") and "qualification_registry" in report.facts:
             scope["stop_point"] = (
                 f"{stop} ({state}) : arrêt pendant l'activation budgétaire et les canaris de qualification, "

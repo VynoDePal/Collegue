@@ -584,3 +584,33 @@ def test_the_human_report_states_a_demonstrated_zero_and_a_preflight_stop():
 
     assert "Émissions (preflight) : 0 appel(s) de modèle, 0 action(s) facturable(s) — zéro démontré" in text
     assert "Point d'arrêt : preflight" in text
+
+
+def test_a_missing_verifier_is_an_absent_caller_never_an_admission_refusal():
+    calls = Calls()
+
+    report = calls.run(verify=None)
+
+    scope = report.facts["scope"]
+    assert report.step("R02-business").detail == "aucune vérification métier fournie"
+    assert report.step("R02-business").state == STEP_INCOMPLETE and report.verdict() == "incomplete_validation"
+    assert calls.called == ["build", "cleanup"], "aucun callback manquant n'est appelé"
+    assert "business" not in scope["played"] and scope["stop_step"] == "R02-business"
+    assert "refus à l'admission" not in scope["stop_point"]
+    assert "aucun appelant fourni" in scope["stop_point"] and "ni budget ni échéance en cause" in scope["stop_point"]
+    assert "aucun appelant fourni" in report.to_human()
+
+
+def test_the_real_admission_refusals_of_r01_r04_r05_stay_admission_refusals():
+    first = Calls().run(deadline_monotonic=1, clock=lambda: 2)
+    seen = []
+
+    def registry(ctx):
+        seen.append(1)
+        return counters(consumed_tokens=250_000) if len(seen) >= 2 else counters()
+
+    second = Calls().run(registry=registry)
+
+    assert "refus à l'admission, callback jamais appelé" in first.facts["scope"]["stop_point"]
+    assert second.facts["scope"]["stop_step"] == "R04-improvement"
+    assert "refus à l'admission, callback jamais appelé" in second.facts["scope"]["stop_point"]
