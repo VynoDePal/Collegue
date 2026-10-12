@@ -5,7 +5,7 @@ Il ne change NI le corps Google, NI l'endpoint, NI les modèles, NI les allocati
 corps compté = corps émis. **Le diagnostic ne décide jamais de la comptabilité** : seul le statut HTTP (`PROVEN_REJECTED_STATUS`, `service.py`) tranche.
 
 ## Ce qui est conservé (valeurs fermées, rien de recopié)
-`UpstreamHTTPError.diagnostic` — `{}` pour un double qui n'en fournit pas ; pour une réponse HTTP non-200 observée par le vrai `GoogleUpstream` :
+`UpstreamHTTPError.diagnostic` — `{}` pour un double qui n'en fournit pas ; pour une réponse HTTP non-200 **lue dans les bornes existantes** par le vrai `GoogleUpstream` (au-delà de `MAX_RESPONSE_BYTES` la réponse reste une `UpstreamBadBody`, sans diagnostic) :
 
 | Champ | Valeurs |
 |---|---|
@@ -28,10 +28,17 @@ comme garantie : la sécurité vient de la fermeture des valeurs (liste écrite 
 
 ## Canaux de représentation de l'exception inspectés
 `str`, `repr`, `args` (`("HTTP 500",)`), `__dict__` (seulement `status`, `diagnostic`), `pickle` (`__reduce__` explicite : statut + diagnostic, jamais le détail), `traceback` normal et **avec variables locales**
-(`capture_locals`, ce que font Sentry ou `--showlocals`). L'ancien `detail` (300 caractères du corps amont) est supprimé ; l'argument est encore accepté et ignoré (doubles existants). Dans `_post`, le
-corps, le dernier morceau (variable de boucle `chunk`), les en-têtes de la requête (clé), le client et la réponse sont remis à `None` avant toute levée : un test échoue si un marqueur de réponse,
-d'URL de redirection, d'identifiant ou la clé apparaît dans l'un de ces canaux. Le prompt reste visible dans les cadres APPELANTS (`request`) : c'est la requête, pas la réponse, hors de ce lot.
+(`capture_locals`, ce que font Sentry ou `--showlocals`). L'ancien `detail` (300 caractères du corps amont) est supprimé ; l'argument est encore accepté et ignoré (doubles existants). **Sur le chemin HTTP diagnostiqué
+(`GoogleUpstream._post` levant `UpstreamHTTPError`)**, le corps, le dernier morceau (variable de boucle `chunk`), les en-têtes de la requête (clé), le client et la réponse sont remis à `None` avant la levée ;
+un test échoue si un marqueur de réponse, d'URL de redirection, d'identifiant ou la clé apparaît dans l'un de ces canaux. **Ce n'est PAS une garantie** que n'importe quel traceback d'un appelant, ou d'un autre
+type d'échec (transport, 200 illisible, autre exception), soit exempt de données sensibles : le prompt, en particulier, reste visible dans les cadres appelants (`request`).
 Un diagnostic fourni par un double est normalisé par `sanitize_diagnostic` (valeurs hors liste → `other`, structure non fiable → `{}`).
+
+## Reprise : diagnostic durable d'un rejeu refusé (A38)
+Après un redémarrage ou une nouvelle instance, un même `request_id` dont la tentative est `unknown` reste un **rejeu refusé** (`BrokerBlocked`, code `replay_refused`, avant tout réseau et toute émission, aucune réécriture d'état,
+même réservation, mêmes événements). Le refus reprend le diagnostic DURABLE : `suffix_from_durable_detail` n'extrait de la fin de `error_detail` que les **cinq valeurs fermées** du suffixe, les valide contre les listes fermées et
+**reconstruit** le suffixe (` [diag http=… op=… rpc=… body=… request_id=…]`). Le `error_detail` historique n'est jamais recopié : suffixe absent, incomplet, mal formé, hors liste, non terminal ou précédé de texte libre ⇒ pas de suffixe
+(le texte libre précédant un suffixe valide est ignoré), message historique inchangé. Le rejet n'est pas présenté comme le résultat original ; une tentative réglée rejoue son résultat comme avant.
 
 ## Fail-safe
 Corps JSON invalide / tronqué, clés dupliquées, `NaN`, types inattendus, profondeur excessive (`RecursionError` comprise), octets non UTF-8, en-têtes qui lèvent : `http_diagnostic` ne lève jamais et ne masque jamais le statut HTTP ; une ambiguïté

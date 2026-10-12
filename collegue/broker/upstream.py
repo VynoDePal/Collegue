@@ -128,8 +128,9 @@ class GoogleUpstream:
         except httpx.HTTPError as exc:
             raise UpstreamTransportError(type(exc).__name__, before_send=False) from None
         finally:
-            # Ni le prompt, ni les morceaux de réponse (``chunk`` est la variable de boucle : le DERNIER morceau y resterait) ne restent dans un
-            # cadre de traceback (Sentry, ``--showlocals``, ``capture_locals``).
+            # Sur CE chemin (levée d'une erreur HTTP diagnostiquée ou de transport), ni le prompt ni les morceaux de réponse (``chunk`` est la
+            # variable de boucle : le DERNIER morceau y resterait) ne restent dans ce cadre (Sentry, ``--showlocals``, ``capture_locals``) ; ce n'est
+            # pas une garantie pour les cadres appelants ni pour un autre type d'échec.
             content = chunks = chunk = body = headers = client = response = None
         if status != 200:
             failure = UpstreamHTTPError(

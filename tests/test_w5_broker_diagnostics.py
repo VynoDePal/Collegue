@@ -614,3 +614,181 @@ async def test_a_positive_200_through_the_service_is_unchanged(manager):
         0,
     ) and not snapshot.blocked
     assert attempts(ledger)[0][1:4] == ("settled", None, None)
+
+
+# ── 8. REPRISE (A38) : le diagnostic DURABLE est repris dans le refus de rejeu, sans recopier le détail historique ───────────────
+
+
+def raw_state(manager):
+    """Octets logiques du registre : toutes les lignes de tentatives / réservations / événements / scopes (comparaison avant/après)."""
+    import sqlite3
+
+    path = manager._session_factory.kw["bind"].url.database
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {
+            table: db.execute(f"select * from {table} order by 1").fetchall()
+            for table in ("broker_attempts", "budget_reservations", "budget_events", "budget_scopes", "broker_clocks")
+        }
+    finally:
+        db.close()
+
+
+BODY = {"model": "gemma-4-31b-it", "max_tokens": 64, "messages": [{"role": "user", "content": "x"}]}
+GOOD_SUFFIX = " [diag http=500 op=generateContent rpc=INTERNAL body=json request_id=absent]"
+
+
+async def test_a_replay_after_reopening_keeps_the_durable_category_and_changes_nothing(manager):
+    from collegue.broker.errors import BrokerBlocked
+
+    wire = Wire(lambda r: error_response(500, "INTERNAL"))
+    service, ledger, scope = build(manager, wire)
+    first = await service.qualify_models(scope)
+    assert "rpc=INTERNAL" in first.reason
+    request_id = f"qualify:{scope}:gemma-4-31b-it:text"
+    before, requests_before = raw_state(manager), len(wire.requests)
+
+    url = str(manager._session_factory.kw["bind"].url)
+    reopened = ProjectStateManager.from_url(url)  # NOUVEAU gestionnaire, NOUVEAU moteur SQLAlchemy sur le même fichier
+    service2 = BrokerService(reopened.budget_ledger, upstream_with(wire), config=BrokerConfig())  # NOUVELLE instance
+    text_body = [
+        c
+        for c in __import__("collegue.broker.service", fromlist=["_canaries"])._canaries("gemma-4-31b-it")
+        if c[0] == "text"
+    ][0][1]
+    with pytest.raises(BrokerBlocked) as caught:
+        await service2.sampling_completion(scope, "default", text_body, request_id=request_id)
+    # même exception, même code, même début de message : seul le suffixe fermé est repris
+    assert caught.value.code == "replay_refused"
+    assert (
+        str(caught.value)
+        == "rejeu refusé : la tentative est unknown (émission possible, résultat inconnu)" + GOOD_SUFFIX
+    )
+    again = await service2.qualify_models(scope)
+    assert again.ok is False and "rpc=INTERNAL" in again.models[0].capabilities[0].detail and "http=500" in again.reason
+    # aucune requête de plus, aucune ligne réécrite, même réservation de 266 jetons `unknown`
+    assert len(wire.requests) == requests_before and len(wire.generations) == 1
+    assert raw_state(manager) == before
+    snapshot = reopened.budget_ledger.snapshot(scope)
+    assert (snapshot.consumed_tokens, snapshot.reserved_tokens, snapshot.unknown_tokens) == (0, WORKER_RESERVE, 266)
+    assert snapshot.blocked
+
+
+def historic_attempt(service, ledger, scope, detail, *, request_id="a38-historic", state="unknown"):
+    """Tentative `unknown` écrite avec un détail HISTORIQUE arbitraire (ancien code, ancienne version, base altérée…)."""
+    from datetime import datetime, timezone
+
+    from collegue.broker.policy import MAX_OUTPUT_TOKENS_CEILING, models_for_role
+
+    nr = service._normalize(
+        BODY, models_for_role("default"), min(service.config.max_output_tokens, MAX_OUTPUT_TOKENS_CEILING)
+    )
+    attempt, _ = service.store.create_attempt(
+        attempt_id=f"hist-{abs(hash(detail)) % 10**8}",
+        request_id=request_id,
+        session_id=None,
+        scope_key=scope,
+        role="default",
+        model="gemma-4-31b-it",
+        request_sha256=nr.sha256,
+        output_cap=nr.output_cap,
+        owner_id=None,
+    )
+    rid = f"broker:{attempt.attempt_id}"
+    ledger.reserve(scope, tokens=74, kind="call", reservation_id=rid)
+    service.store.attach_reservation(attempt.attempt_id, reservation_id=rid, counted_tokens=10, reserved_tokens=74)
+    service.store.mark_emitting(attempt.attempt_id, datetime.now(timezone.utc))
+    service.store.mark_unknown(
+        attempt.attempt_id, now=datetime.now(timezone.utc), code="upstream_ambiguous", detail=detail
+    )
+    return attempt
+
+
+BASE_MESSAGE = "rejeu refusé : la tentative est unknown (émission possible, résultat inconnu)"
+HISTORIC = [
+    ("no suffix, free text", f"HTTP 500 après émission {PRIVATE} http://evil.example/{PROMPT}", ""),
+    ("free text before a valid suffix", f"{PRIVATE} \n\x1b[31m {PROMPT}" + GOOD_SUFFIX, GOOD_SUFFIX),
+    ("clean legacy detail", "HTTP 500 après émission", ""),
+    ("empty", "", ""),
+    ("incomplete: no request_id", " [diag http=500 op=generateContent rpc=INTERNAL body=json]", ""),
+    ("incomplete: truncated", f"{PRIVATE} [diag http=500 op=generateContent rpc=INTE", ""),
+    (
+        "incomplete: no closing bracket",
+        f"{PRIVATE} [diag http=500 op=generateContent rpc=INTERNAL body=json request_id=absent",
+        "",
+    ),
+    ("unknown rpc", f" [diag http=500 op=generateContent rpc=TEAPOT_{PRIVATE} body=json request_id=absent]", ""),
+    ("lower-case rpc", " [diag http=500 op=generateContent rpc=internal body=json request_id=absent]", ""),
+    ("unknown operation", " [diag http=500 op=streamGenerateContent rpc=INTERNAL body=json request_id=absent]", ""),
+    ("unknown body kind", " [diag http=500 op=generateContent rpc=INTERNAL body=xml request_id=absent]", ""),
+    ("unknown request_id", " [diag http=500 op=generateContent rpc=INTERNAL body=json request_id=maybe]", ""),
+    ("status out of range", " [diag http=99 op=generateContent rpc=INTERNAL body=json request_id=absent]", ""),
+    ("status 600", " [diag http=600 op=generateContent rpc=INTERNAL body=json request_id=absent]", ""),
+    ("non-ascii digits", " [diag http=٥٠٠ op=generateContent rpc=INTERNAL body=json request_id=absent]", ""),
+    (
+        "extra field",
+        " [diag http=500 op=generateContent rpc=INTERNAL body=json request_id=absent extra=" + PRIVATE + "]",
+        "",
+    ),
+    ("fields reordered", " [diag op=generateContent http=500 rpc=INTERNAL body=json request_id=absent]", ""),
+    ("text after the suffix", GOOD_SUFFIX + " " + PRIVATE, ""),
+    ("suffix inside the text only", f"x{GOOD_SUFFIX}x", ""),
+    ("no leading space", GOOD_SUFFIX.lstrip(), ""),
+    ("newline inside the suffix", " [diag http=500 op=generateContent\nrpc=INTERNAL body=json request_id=absent]", ""),
+    (
+        "two suffixes, the last one wins",
+        GOOD_SUFFIX + " [diag http=429 op=countTokens rpc=RESOURCE_EXHAUSTED body=html request_id=present]",
+        " [diag http=429 op=countTokens rpc=RESOURCE_EXHAUSTED body=html request_id=present]",
+    ),
+    ("very long free text", "A" * 450 + PRIVATE + GOOD_SUFFIX[:40], ""),
+    ("long free text and a valid suffix", ("B" * 380 + PRIVATE)[:380] + GOOD_SUFFIX, GOOD_SUFFIX),
+]
+
+
+@pytest.mark.parametrize("label, detail, expected_suffix", HISTORIC, ids=[h[0] for h in HISTORIC])
+async def test_a_replay_never_propagates_free_text_from_a_historic_detail(manager, label, detail, expected_suffix):
+    from collegue.broker.errors import BrokerBlocked
+
+    service, ledger, scope = build(manager, Wire(lambda r: pytest.fail("aucune requête au rejeu")))
+    historic_attempt(service, ledger, scope, detail)
+    before = raw_state(manager)
+    with pytest.raises(BrokerBlocked) as caught:
+        await service.sampling_completion(scope, "default", BODY, request_id="a38-historic")
+    message = str(caught.value)
+    assert caught.value.code == "replay_refused" and message == BASE_MESSAGE + expected_suffix, label
+    for marker in (PRIVATE, PROMPT, "evil.example", "\x1b"):
+        assert marker not in message
+    assert message.isascii() or "émission" in message  # seule la partie historique du message contient des accents
+    assert raw_state(manager) == before  # aucune réécriture d'état
+
+
+def test_the_durable_suffix_is_rebuilt_from_closed_values_only():
+    from collegue.broker.diagnostics import suffix_from_durable_detail
+
+    for rpc in sorted(RPC_STATUSES) + ["absent", "other"]:
+        for op in OPERATIONS:
+            for kind in BODY_KINDS:
+                for present in ("present", "absent"):
+                    suffix = f" [diag http=503 op={op} rpc={rpc} body={kind} request_id={present}]"
+                    assert suffix_from_durable_detail("HTTP 503 après émission" + suffix) == suffix
+    assert suffix_from_durable_detail(None) == suffix_from_durable_detail(7) == suffix_from_durable_detail(b"x") == ""
+    assert suffix_from_durable_detail("x" * 1_000_000) == ""  # borné : seule la fin est examinée
+
+
+async def test_the_replay_of_a_settled_attempt_and_of_a_released_one_is_unchanged(manager):
+    def generate(request):
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"role": "model", "parts": [{"text": "OK"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2, "totalTokenCount": 12},
+            },
+        )
+
+    wire = Wire(generate)
+    service, ledger, scope = build(manager, wire)
+    first = await service.sampling_completion(scope, "default", BODY, request_id="same")
+    again = await service.sampling_completion(scope, "default", BODY, request_id="same")
+    assert (
+        again == first and len(wire.generations) == 1
+    )  # le résultat déjà obtenu est rendu tel quel, sans suffixe ni réémission

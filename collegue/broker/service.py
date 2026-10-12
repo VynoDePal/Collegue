@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional, Tuple, Union
 
-from collegue.broker.diagnostics import diagnostic_suffix
+from collegue.broker.diagnostics import diagnostic_suffix, suffix_from_durable_detail
 from collegue.broker.errors import (
     BrokerAuthError,
     BrokerBlocked,
@@ -640,8 +640,10 @@ class BrokerService:
         """Même ``request_id`` : le résultat déjà obtenu est rendu, JAMAIS une seconde génération."""
         if attempt.state == BROKER_ATTEMPT_SETTLED and attempt.response_json:
             return json.loads(attempt.response_json)
+        # Le diagnostic DURABLE de la tentative (catégories fermées) est repris dans le refus ; jamais le ``error_detail`` historique entier.
         raise BrokerBlocked(
-            f"rejeu refusé : la tentative est {attempt.state} (émission possible, résultat inconnu)",
+            f"rejeu refusé : la tentative est {attempt.state} (émission possible, résultat inconnu)"
+            f"{suffix_from_durable_detail(attempt.error_detail)}",
             code="replay_refused",
         )
 
