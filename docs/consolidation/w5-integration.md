@@ -1,8 +1,8 @@
 # Vague 5 — organisation, contrats et checklist d'intégration (C)
 
 **État actuel (12 octobre 2026) : la vague 5 est LIVRÉE sur `main` (PR #613 `734c7f5`, PR #614 `b88e7bf`) ; la qualification réelle avec modèles est INCOMPLÈTE** (la campagne
-`w5-gemma-20261012-9e7c4d76` a émis une génération du 31B, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire ; la précédente s'était arrêtée au préflight P07 sans émission). L'état courant,
-les règles en vigueur et le plan de vérification sont dans [`w5-post500.md`](w5-post500.md). **Les § 1 à 9 ci-dessous sont l'historique de la préparation et de l'intégration locale** (rédigé AVANT les
+`w5-gemma-20261012-9e7c4d76` a émis une génération du 31B, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire ; la précédente s'était arrêtée au préflight P07 sans émission). L'état courant
+(dont les correctifs de compte rendu B28-B30, intégrés localement et non publiés), les règles en vigueur et le plan de vérification sont dans [`w5-post500.md`](w5-post500.md). **Les § 1 à 9 ci-dessous sont l'historique de la préparation et de l'intégration locale** (rédigé AVANT les
 livraisons de A et B, puis complété par l'état d'intégration du § 9, qui décrivait un candidat alors non publié) : ils sont conservés pour mémoire et ne décrivent plus l'état de `main`. Ils consignent la
 répartition, les contrats du manager (`briefs/w5-common.md`), la préparation de C (CI, image, fixture, workflow) et la checklist d'intégration ; ils ne décrivent aucun résultat réel de modèle. Règles générales : [`AGENTS.md`](../../AGENTS.md) ; protocole :
 [`protocole.md`](protocole.md) ; vague précédente : [`w4-integration.md`](w4-integration.md).

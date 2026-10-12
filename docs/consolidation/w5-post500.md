@@ -1,8 +1,13 @@
-# Vague 5 après la campagne du 12 octobre — état courant (C75)
+# Vague 5 après la campagne du 12 octobre — état courant (C75, mis à jour en C76)
 
 **État exact (12 octobre 2026).** La vague 5 est **livrée sur `main`** (PR #613 `734c7f5`, PR #614 `b88e7bf`). **La qualification réelle avec modèles reste INCOMPLÈTE** : la campagne
-`w5-gemma-20261012-9e7c4d76` a émis une seule génération, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire. Aucune campagne ni appel modèle n'est en cours ni autorisé. Ce document est
-l'état courant ; l'historique de préparation et d'intégration est dans [`w5-integration.md`](w5-integration.md) (§ 1 à 9, conservés), les règles générales dans [`AGENTS.md`](../../AGENTS.md).
+`w5-gemma-20261012-9e7c4d76` a émis une seule génération, reçu un HTTP 500 et s'est arrêtée sur la protection budgétaire. **Deux choses distinctes** :
+- *la qualification réelle* : incomplète, inchangée par ce qui suit ; aucune campagne ni appel modèle n'est en cours ni autorisé ;
+- *les correctifs de compte rendu* (B28 → B29 → B30, SHA B accepté `b6a53f3321f176d002b2c52457df755daa8e9637`) : **intégrés LOCALEMENT** dans la branche de C `codex/w5-campaign-report-c` (base `b88e7bf`), en attente de
+  validation du manager puis d'un ordre de publication distinct ; ils ne corrigent aucun comportement, seulement ce que le rapport affirme (§ 4). Le diagnostic de A (A35/A36) est **terminé et accepté sans correctif
+  produit** : aucun lot expérimental de transport n'est autorisé.
+
+Ce document est l'état courant ; l'historique de préparation et d'intégration est dans [`w5-integration.md`](w5-integration.md) (§ 1 à 9, conservés), les règles générales dans [`AGENTS.md`](../../AGENTS.md).
 
 ## 1. Chronologie vérifiée
 
@@ -27,9 +32,12 @@ l'état courant ; l'historique de préparation et d'intégration est dans [`w5-i
   (hérité du préflight, resté à 0) n'est pas un total de campagne ; c'est le registre (`broker_attempts.emitted_at`) qui fait foi.
 - Verdict : workflow `failure`, rapport produit `failed` (code 1), **qualification globale : validation incomplète**. Les capacités JSON/outils du 31B et les trois capacités du 26B, la borne de sortie réelle et
   la compatibilité complète restent **non prouvées**.
-- **Cause du HTTP 500 : indéterminée.** Le statut ne prouve ni panne transitoire, ni quota épuisé, ni clé invalide ; le corps de l'erreur n'est pas conservé dans les preuves. Le diagnostic hors ligne de A (A35,
-  calibré par A36) est en cours : **ses conclusions ne sont pas reprises ici** et ne justifient, à ce jour, aucune modification de transport ; en particulier ni « aucune authentification n'est possible » ni
-  « un champ `model` dans le corps est interdit » ne sont établis.
+- **Cause du HTTP 500 : indéterminée.** Le statut ne prouve ni panne transitoire, ni quota épuisé, ni clé invalide ; le corps de l'erreur, le statut RPC et les en-têtes de la réponse ne sont pas conservés, et
+  aucun appel supplémentaire n'est autorisé pour les retrouver. **Le budget et l'échéance ne sont pas la cause de l'arrêt** (horloge à 26,6 s sur 900 s ; 266 tokens réservés sur 250 000). Le diagnostic hors ligne de A
+  (A35, calibré par A36, **accepté**) conclut : **cause interne indéterminée, aucun changement produit justifié**, aucune modification de transport. Hypothèses abandonnées, à ne pas reprendre : un `countTokens` réussi
+  n'établit que l'acceptation de cette opération (ni la validité de la clé pour `generateContent`, ni la santé du service) ; la présence du champ `model` dans le corps n'est qu'une *différence* avec les exemples
+  documentés (tolérance indéterminée, ni cause supposée ni correctif : le retirer serait une variation expérimentale non justifiée) ; aucun classement de vraisemblance des pistes ; la forme du corps d'erreur ne prouve pas
+  l'origine. Une instrumentation du corps d'erreur n'est ni développée ni autorisée.
 - Clôture vérifiée par le manager : secret temporaire `W5_GOOGLE_API_KEY`, environnement `w5-gemma-campaign` et variable `W5_BOOTSTRAP_MANIFEST_JSON` **supprimés** ; état initial des secrets/environnements/variables rétabli ;
   scanner du runner et scan indépendant sans fuite ; aucune ressource de campagne (projet, branche, PR, issue) créée ; seule référence conservée volontairement :
   `collegue-business-claims/w5-gemma-20261012-9e7c4d76` (la revendication durable, qui interdit la réutilisation de l'identifiant). Fixture (graine, socle V2, rulesets) et `main` inchangés.
@@ -44,17 +52,37 @@ l'état courant ; l'historique de préparation et d'intégration est dans [`w5-i
 - Un préflight vert ne prouve ni BUILD, ni R04/R05, ni les modèles : il établit que le produit franchit ses contrôles contre GitHub sans émettre. Une campagne incomplète n'est pas un échec masqué ni un succès.
 - Ne jamais convertir une inconnue en succès : usage inconnu après émission ≠ absence d'émission ; point d'arrêt ≠ câblage absent.
 
-## 4. Travaux en cours (aucun intégré à ce jour)
+## 4. Ce qui est intégré localement (C76) et ce qui ne l'est pas
 
-| Lot | Objet | État |
-|---|---|---|
-| **B28** (branche séparée depuis `b88e7bf`) | corriger le compte rendu hérité du préflight : compteur d'émissions exact ou explicitement non établi, usage inconnu distingué d'une absence d'émission, point d'arrêt et callbacks « non atteints » distingués d'un câblage absent ; **aucun** changement des plafonds, autorisations, retries, inconnues ni du verdict | patch **non accepté** : C n'intègre qu'avec le SHA accepté communiqué par le manager. Sondes immuables du manager : `test_w5_manager_post500_report.py` (3 échecs par assertion et 2 témoins sur `b88e7bf`) |
-| **A35 / A36** | diagnostic hors ligne du HTTP 500 (requête reconstruite sans appel, faux fournisseur), calibration des conclusions | cause indéterminée ; décisions du manager attendues sur toute évolution du transport (champ `model`, politique de retry 5xx, diagnostic sûr du corps d'erreur) |
-| **C** | ce document, préparation de l'intégration et plan de vérification (§ 5) | local |
+**Livraison de correctifs de compte rendu, pas de qualification.** Fusion par SHA exact, sans conflit (périmètres disjoints), des commits de B : B28 `e9aedb8`, B29 `f4e9b64`, B30 `b6a53f3` (parent `b88e7bf`) — `collegue/pilot/w4_business.py`,
+`collegue/pilot/w5_business.py`, `tests/test_w5_report_activity.py` (nouveau), `tests/test_w5_business_activation.py` (une assertion de message), `docs/consolidation/w5-business.md`. Relu depuis `b88e7bf` : **aucun changement des plafonds, réservations,
+inconnues, retries, autorisations ni du verdict**. Ce que le rapport de campagne affirme désormais :
 
-Propriété inchangée : A (`collegue/broker/**`, runtime, transport), B (`pilot/w4_business.py`, `pilot/w5_business*`, tests et `w5-business.md`), C (workflows, scripts CI, documents généraux). C ne touche pas aux fichiers de A/B.
+- **Total d'émissions non mesuré = `null`**, jamais 0 : dès qu'une étape émettrice (R01, R04, R05) a été appelée, `llm_calls_emitted` et `billable_actions_emitted` (premier niveau et `facts.emissions`) valent `null` avec la liste des
+  étapes émettrices démarrées ; le zéro n'est affirmé que si aucune étape émettrice n'a été appelée (préflight non validé, ou arrêt avant l'activation).
+- **Zéros du préflight scopés** : les compteurs hérités du préflight ne sont plus recopiés comme total de campagne ; ils restent lisibles sous `facts.preflight_emissions` (portée « preflight »).
+- **Absence de règlement ≠ absence d'émission** : le refus de qualification dit « aucune consommation réglée établie par le registre » et, après un usage inconnu, « le règlement est absent, l'émission n'est pas écartée » ; le
+  faux message « les canaris n'ont pas traversé le pipeline réel » disparaît.
+- **Callbacks** : `scope.played` = étapes dont le callback a réellement été appelé (admission accordée), `scope.wired_not_played` = câblées mais non jouées (arrêt amont ou refus à l'admission), `scope.not_wired` = sans appelant ; un
+  R02 sans vérificateur est une validation incomplète « appelant absent », pas un refus à l'admission.
+- **Arrêt effectif** : `scope.stop_step` / `scope.stop_point` calculés à la sortie, **après** le nettoyage (R06 compte ; le premier arrêt métier n'est jamais masqué par une erreur de nettoyage), `scope.cleanup_state` toujours indiqué ; le rapport humain
+  affiche émissions, point d'arrêt et phases appelées / câblées non jouées / non câblées.
 
-## 5. Plan de vérification du prochain tour C (après SHA acceptés par le manager)
+**Limites de cette livraison.**
+- Éprouvée par les tests de B et les sondes du manager sur **faux fournisseur** seulement ; le nouveau format n'a jamais été produit par une campagne réelle ni contre l'API Google.
+- Le **nombre exact d'émissions n'est pas lisible** dans le modèle de données actuel (`emitted_at` absent d'`AttemptRecord`) : il reste `null`, c'est une limite documentée par B28, pas une mesure ; une interface de lecture serait une décision du manager.
+- Les artefacts de la campagne historique restent **intacts** (leurs champs hérités du préflight sont corrigés par le rapport du manager, pas réécrits) ; la campagne reste close, incomplète, jamais relancée.
+- Rien n'est publié : ni push, ni PR, ni fusion. Le diagnostic de A n'a produit **aucun commit produit**.
+
+| Lot | État |
+|---|---|
+| **B28 / B29 / B30** | intégrés localement (ci-dessus) ; validation du manager puis ordre de publication à venir |
+| **A35 / A36** | terminés, acceptés, aucun changement produit ; cause du 500 indéterminée ; aucun lot expérimental de transport |
+| **C** | ce document, `AGENTS.md`, `CLAUDE.md`, `w5-integration.md` ; vérification de l'intégration (§ 5) |
+
+Propriété inchangée : A (`collegue/broker/**`, runtime, transport), B (`pilot/w4_business.py`, `pilot/w5_business*`, tests et `w5-business.md`), C (workflows, scripts CI, documents généraux). C ne modifie pas les fichiers de A/B.
+
+## 5. Vérification de l'intégration (appliquée en C76 ; commandes, codes et résultats dans le rapport C76, hors du dépôt)
 
 1. **Entrée.** Intégrer seulement les SHA communiqués par le manager (B28, éventuellement A), par fusion de SHA exacts depuis `b88e7bf`, périmètres disjoints, sans conflit fonctionnel (à renvoyer à l'auteur). Relire les diffs (aucune
    modification de plafond, d'autorisation, de retry ni de verdict ; aucune écriture de transport sans décision du manager).
@@ -77,6 +105,7 @@ Propriété inchangée : A (`collegue/broker/**`, runtime, transport), B (`pilot
    exacte pour la tête, puis contrôle de `main` (SHA, arbre, cinq checks du push). Toute nouvelle tête invalide l'acceptation.
 6. **Interdits dans ce plan** : appel modèle (même `countTokens`), dispatch/rerun, lecture d'un fichier de clé, secret, mutation de la fixture ou des règles, relance de la campagne close.
 
-## 6. Disponibilité de C
+## 6. Suite
 
-Prêt à intégrer B28 (et A si le manager l'ordonne) dès réception des SHA acceptés ; rien n'est intégré avant.
+Le manager valide le SHA intégré depuis son checkout QA propre et décide de la publication (push, PR, cinq checks requis inchangés, revues, fusion : un ordre distinct à chaque étape). Toute nouvelle campagne réelle reste soumise à un accord explicite,
+un identifiant neuf et une enveloppe explicite ; la campagne `w5-gemma-20261012-9e7c4d76` ne se relance jamais.
