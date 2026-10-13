@@ -559,3 +559,154 @@ def test_a_key_reflected_in_the_registry_turns_the_run_red_and_the_registry_is_n
     )
     # le fichier contaminé est en quarantaine, hors de l'ensemble déposé
     assert any((run.work / "quarantine").rglob("*")), "quarantaine non vide"
+
+
+# ── reprise d'un journal FERMÉ par le vrai ``finalize`` (finding P2 de la PR #617, correctif A46) ───────────────────────────────
+#
+# Défaut établi par le manager : ``_conduct`` ferme le journal même quand une ÉCRITURE du service a échoué après l'émission (verrou SQLite, disque) ;
+# la tentative reste ``emitting`` et la réserve ouverte, et l'ancien ``finalize`` prenait « journal fermé » pour « registre réparé ». Ce n'est PAS
+# le scénario d'une annulation suivie d'une réparation en panne : là, le service a déjà marqué l'inconnue lui-même. Ici la panne tombe sur l'ÉCRITURE
+# du marquage (``_block_unknown``) ou de l'opération du registre (``_apply_ledger``), dans le seul processus de ``run`` (doublure de banc) ; le
+# ``finalize`` réel s'exécute ensuite dans un autre processus, sans clé, sans réseau et sans panne.
+
+
+def _raw_state(database: Path) -> dict:
+    """Observation indépendante du registre et du journal (SQLite en lecture seule)."""
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5.0)
+    try:
+        scope = connection.execute(
+            "select consumed_tokens, reserved_tokens, unknown_tokens, blocked_reason from budget_scopes"
+        ).fetchall()
+        return {
+            "journal": connection.execute("select state from w5_json_pair_run").fetchone()[0],
+            "variants": connection.execute("select name, state from w5_json_pair_variant order by position").fetchall(),
+            "attempts": [r[0] for r in connection.execute("select state from broker_attempts order by id")],
+            "events": connection.execute("select kind, tokens from budget_events order by id").fetchall(),
+            "consumed": sum(r[0] for r in scope),
+            "reserved": sum(r[1] for r in scope),
+            "unknown": sum(r[2] for r in scope),
+            "blocked": any(r[3] for r in scope),
+        }
+    finally:
+        connection.close()
+
+
+def _cli(run: Run, command: str, *, key: bool = False) -> subprocess.CompletedProcess:
+    """Une commande du VRAI CLI (via la doublure des services externes), avec l'environnement du runner et, pour ``run`` seulement, la clé."""
+    env = dict(run.env)
+    env["INTEGRATION_E2E_ENABLED"] = "false"
+    if key:
+        env["LLM_API_KEY"] = FAKE_KEY
+    return subprocess.run(
+        [sys.executable, str(HARNESS), command, "--root", str(run.work), "--campaign-id", CAMPAIGN],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _prepared(workflow, tmp_path, faults, behaviors=None) -> Run:
+    """Étapes du workflow jusqu'aux migrations incluses ; la paire elle-même est lancée à la main pour observer l'état AVANT ``finalize``."""
+    return play(
+        workflow,
+        tmp_path,
+        behaviors=behaviors,
+        spec={"faults": faults},
+        only={"context", "main_tip", "preflight", "claim", "migrate"},
+    )
+
+
+def _db(run: Run) -> Path:
+    return run.work / "home" / f"{CAMPAIGN}.sqlite3"
+
+
+def test_finalize_repairs_a_closed_journal_whose_possible_emission_was_never_marked_unknown(workflow, tmp_path):
+    run = _prepared(workflow, tmp_path, ["stale_repair", "block_unknown"], script(prompt_only=http(500, "INTERNAL")))
+    conducted = _cli(run, "run", key=True)
+    assert conducted.returncode == 3, conducted.stdout + conducted.stderr
+    before = _raw_state(_db(run))
+    # précondition : EXACTEMENT l'état du défaut, sinon le test ne prouve rien (une annulation donnerait déjà « unknown »)
+    assert before["journal"] == "closed" and before["attempts"] == ["emitting"], before
+    assert (before["reserved"], before["unknown"], before["blocked"]) == (270, 0, False), before
+    requests = run.wire()
+    assert [(e["op"], e["variant"]) for e in requests] == [
+        ("countTokens", "prompt_only"),
+        ("generateContent", "prompt_only"),
+    ]
+
+    first = _cli(run, "finalize")
+    assert (first.returncode, first.stdout.strip()) == (3, "status=incomplete reason=upstream_ambiguous exit=3"), (
+        first.stderr
+    )
+    repaired = _raw_state(_db(run))
+    assert repaired["attempts"] == ["unknown"] and repaired["journal"] == "closed"
+    assert (repaired["consumed"], repaired["reserved"], repaired["unknown"], repaired["blocked"]) == (0, 0, 270, True)
+    report = json.loads((run.work / "report" / "json-pair.json").read_text())
+    assert (report["status"], report["reason"]) == ("incomplete", "upstream_ambiguous")
+    assert report["budget"] | {"deadline_at": None} == {
+        "consumed_tokens": 0, "unknown_tokens": 270, "reserved_tokens": 0, "blocked": True, "deadline_at": None,
+    }  # fmt: skip
+    assert report["variants"][1]["state"] == "skipped" and report["business_validation"] == "not_executed"
+
+    # idempotent : ni double comptage (270 une seule fois), ni écriture de plus, ni octet de rapport différent, ni requête fournisseur
+    report_bytes = (run.work / "report" / "json-pair.json").read_bytes()
+    for _ in range(2):
+        again = _cli(run, "finalize")
+        assert again.returncode == 3 and again.stdout == first.stdout
+    final = _raw_state(_db(run))
+    assert final == repaired and [e for e in final["events"] if e[0] == "unknown"] == [("unknown", 0)]
+    assert (run.work / "report" / "json-pair.json").read_bytes() == report_bytes
+    assert run.wire() == requests, "finalize n'émet, ne compte et ne génère jamais"
+    assert run.calls()[-3:] == ["finalize LLM_API_KEY=absent GITHUB_TOKEN=absent"] * 3
+
+
+def test_finalize_completes_a_durable_settlement_that_was_not_applied_to_the_ledger(workflow, tmp_path):
+    run = _prepared(workflow, tmp_path, ["stale_repair", "apply_ledger_settled_once"])
+    conducted = _cli(run, "run", key=True)
+    assert conducted.returncode == 3, conducted.stdout + conducted.stderr
+    before = _raw_state(_db(run))
+    assert before["journal"] == "closed" and before["attempts"] == ["settled"], before
+    assert (before["consumed"], before["reserved"], before["unknown"]) == (0, 270, 0), (
+        "règlement établi, registre en retard"
+    )
+    requests = run.wire()
+
+    first = _cli(run, "finalize")
+    assert first.returncode == 3, "un règlement appliqué après coup ne fabrique pas un succès : l'arrêt reste incomplet"
+    repaired = _raw_state(_db(run))
+    assert (repaired["consumed"], repaired["reserved"], repaired["unknown"], repaired["blocked"]) == (37, 0, 0, False)
+    assert repaired["attempts"] == ["settled"], "ni libéré à tort, ni converti en inconnue, usage mesuré et non estimé"
+    report = json.loads((run.work / "report" / "json-pair.json").read_text())
+    assert report["status"] == "incomplete" and report["status"] != "observed"
+    assert report["budget"]["consumed_tokens"] == 37 and report["budget"]["reserved_tokens"] == 0
+    assert report["variants"][0]["state"] == "observed" and report["variants"][1]["state"] != "observed"
+
+    for _ in range(2):
+        assert _cli(run, "finalize").returncode == 3
+    assert _raw_state(_db(run)) == repaired, "idempotent : consommé 37 une seule fois"
+    assert run.wire() == requests
+
+
+@pytest.mark.parametrize(
+    ("faults", "behaviors", "expected"),
+    [
+        (["stale_repair", "block_unknown"], script(prompt_only=http(500, "INTERNAL")), (0, 0, 270, True)),
+        (["stale_repair", "apply_ledger_settled_once"], script(), (37, 0, 0, False)),
+    ],
+)
+def test_the_pair_step_publishes_the_registry_repaired_by_finalize_never_the_one_left_by_the_failed_write(
+    workflow, tmp_path, faults, behaviors, expected
+):
+    """Dans le workflow réel : ``run`` (avec la panne), puis ``finalize`` sans clé, puis le scan. Le registre déposé est celui que ``finalize`` a RÉPARÉ."""
+    run = play(workflow, tmp_path, behaviors=behaviors, spec={"faults": faults})
+    assert run.rcs["pair"] == 3, run.outputs["pair"]
+    assert [c.split()[0] for c in run.calls() if c.split()[0] in ("run", "finalize")] == ["run", "finalize"]
+    published = run.work / "publish" / "registry" / f"{CAMPAIGN}.sqlite3"
+    state = _raw_state(published)
+    assert (state["consumed"], state["reserved"], state["unknown"], state["blocked"]) == expected, state
+    report = _report(run)
+    assert report["status"] == "incomplete" and report["budget"]["reserved_tokens"] == 0
+    assert json.loads((run.work / "diagnostic" / "leak-scan.json").read_text())["verdict"] == "clean"
+    assert run.published() == PAIR_FILES and FAKE_KEY not in run.everything()

@@ -13,12 +13,14 @@ Spécification : fichier JSON désigné par ``W5_C_HARNESS`` ; aucun secret n'y 
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
 import sqlite3
 import sys
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -65,6 +67,43 @@ class _Clients:
         self.branches = _Branches(spec)
 
 
+_FAULT = sqlite3.OperationalError("simulated persisting write failure")
+
+
+def _failing(target, name, *, when=lambda *a, **k: True, times=None):
+    """Panne d'ÉCRITURE ciblée (``sqlite3.OperationalError``) dans le processus de ``run`` seulement : le marquage d'inconnue, l'opération du registre ou la
+    réparation de fin d'exécution échouent, comme lors d'un verrou SQLite ou d'un disque en défaut. Les noms privés ne servent qu'à choisir où la panne
+    tombe ; les attentes des tests portent sur l'état observé du registre et sur le CLI ``finalize`` réel, qui s'exécute dans un AUTRE processus, sans panne."""
+    original = getattr(target, name)
+    state = {"raised": 0}
+
+    def wrapper(*args, **kwargs):
+        if when(*args, **kwargs) and (times is None or state["raised"] < times):
+            state["raised"] += 1
+            raise _FAULT
+        return original(*args, **kwargs)
+
+    return mock.patch.object(target, name, new=wrapper)
+
+
+def _fault_patches(names):
+    from collegue.broker import BrokerService
+
+    catalogue = {
+        # la réparation de fin d'exécution (``sweep=True``) échoue aussi : la panne dure jusqu'à la fermeture du journal
+        "stale_repair": lambda: _failing(
+            BrokerService, "repair", when=lambda self, *a, **k: k.get("sweep", True) is True
+        ),
+        # l'inconnue d'une émission possible ne peut pas être écrite
+        "block_unknown": lambda: _failing(BrokerService, "_block_unknown"),
+        # le règlement établi sur la tentative n'est pas appliqué au registre (une fois)
+        "apply_ledger_settled_once": lambda: _failing(
+            BrokerService, "_apply_ledger", when=lambda self, attempt, *r, **k: attempt.state == "settled", times=1
+        ),
+    }
+    return [catalogue[name]() for name in names]
+
+
 def _load_cli():
     spec = importlib.util.spec_from_file_location("w5_json_pair_cli_real", REPO / "scripts" / "w5_json_pair.py")
     module = importlib.util.module_from_spec(spec)
@@ -99,7 +138,11 @@ def main() -> int:
             f"{command} LLM_API_KEY={'present' if os.environ.get('LLM_API_KEY') else 'absent'}"
             f" GITHUB_TOKEN={'present' if os.environ.get('GITHUB_TOKEN') else 'absent'}\n"
         )
-    code = cli.main(sys.argv[1:])
+    with contextlib.ExitStack() as stack:
+        if command == "run":  # les pannes d'écriture ne concernent que le conducteur ; ``finalize`` tourne sans panne
+            for patch in _fault_patches(spec.get("faults", [])):
+                stack.enter_context(patch)
+        code = cli.main(sys.argv[1:])
     if command == "run" and spec.get("reflect_key_in_registry"):
         args = sys.argv[1:]
         root = Path(args[args.index("--root") + 1])
