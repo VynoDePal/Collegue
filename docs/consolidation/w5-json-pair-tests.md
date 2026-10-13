@@ -1,7 +1,7 @@
 # Paire JSON — tests adverses (lot B37/B38)
 
 Contrat : `briefs/w5-json-pair-contract.md`, arbitrage définitif `briefs/w5-json-pair-cli-ruling.md` et notes `evidence/w5-manager-json-pair-review-notes.md`. Fichiers de B : `tests/test_w5_json_pair_adversarial.py`, `tests/w5_json_pair_support.py`, ce document. **Aucun fichier de A ou de C.**
-Ces tests n'ont **pas encore été exécutés contre le lot A** : la collecte échoue sur `from collegue.broker import json_pair` tant que le module n'est pas intégré (état attendu d'un test écrit avant son lot, ce n'est pas un rouge métier). Aucun `skip`/`xfail`.
+Ces tests ont été écrits avant le lot A (la collecte échouait sur `from collegue.broker import json_pair` tant que le module n'était pas intégré : état attendu, pas un rouge métier) puis exécutés contre le lot A figé `e598f3b` (voir « Résultat sur le vrai lot A »). Aucun `skip`/`xfail`.
 
 ## Principes
 
@@ -44,10 +44,21 @@ Ces tests n'ont **pas encore été exécutés contre le lot A** : la collecte é
 
 `read_report` peut être pur **ou** une réconciliation explicitement appelée : les tests exigent seulement de ne rien émettre, de ne pas libérer l'inconnue, de ne pas toucher aux règlements, tentatives et horloges, et que deux relectures successives donnent le même rapport. Une relecture d'un registre absent ne fabrique ni résultat ni dépense.
 
-## Exécuter contre A (passe suivante)
+## Exécuter contre A
 
 Depuis la racine du worktree B intégrant le SHA de A figé par le manager : `COLLEGUE_HOME` et `STATE_DATABASE_URL` neufs, `TMPDIR` ancêtre de `--basetemp` sous `/tmp`, `PYTHONDONTWRITEBYTECODE=1`, `python -m pytest -p no:cacheprovider tests/test_w5_json_pair_adversarial.py` (≈ 30 s). Tout échec est à arbitrer (défaut de A ou attente trop stricte de B), jamais masqué.
 
 ## Preuves de satisfaisabilité hors dépôt (≠ validation de A)
 
 Une référence **de scratch** (`evidence/w5-b38-scratch/`) et une implémentation **naïve** (service nu enchaîné deux fois) ont servi à montrer que les tests sont satisfaisables et discriminants ; leurs résultats et les limites de cette démarche sont dans `reports/w5-b38-json-pair.md`. Ce n'est pas du code livré et cela ne dit rien du code de A.
+
+## Résultat sur le vrai lot A (B39)
+
+Fusion locale `--no-ff` du SHA A figé `e598f3bef03453771964df15d2491eca5381347b` (commit de fusion `5ddcc64`, fichiers de A non modifiés : `collegue/broker/json_pair.py`, `scripts/w5_json_pair.py`, `tests/test_w5_json_pair.py`, `docs/consolidation/w5-json-pair.md`). Exécution depuis la racine du worktree B avec `envs/b`, `PYTHONPATH=tests`, scratch et base neufs sous `/tmp/b39`, vrai `GoogleUpstream` sur faux HTTP, vrai code de A :
+
+| Exécution | Tests | Passés | Échecs | Erreurs | Skips |
+|---|---|---|---|---|---|
+| 1 (tests c4888a5) | 97 | 93 | 4 | 0 | 0 |
+| 2 (après correction d'une assertion de test) | 97 | **97** | 0 | 0 | 0 |
+
+Les 4 échecs de l'exécution 1 (`over_count` et `over_cap`, sur les deux variantes) venaient d'une assertion trop stricte de B, pas d'un défaut de A : B exigeait `json_valid is not True` pour une réponse à **borne démentie mais usage connu**. A rend `status = failed`, `reason = bound_violation`, état de variante `bound_violation`, scope bloqué, seconde variante `skipped`, usage réglé conservé, et `json_valid = true` parce que le **contenu** est bien un objet JSON : `json_valid` décrit le contenu (le ruling sépare « objet JSON valide » de « usage connu, sans blocage »). L'assertion est désormais : pour usage inconnu (`missing`, `inconsistent`) `json_valid is not True` (inchangé) ; pour borne démentie, l'état de la variante n'est jamais `observed`. Le statut non-`observed`, le blocage et l'absence de seconde émission restent vérifiés dans les deux cas.

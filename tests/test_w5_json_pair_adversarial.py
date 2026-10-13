@@ -546,9 +546,14 @@ async def test_an_absent_or_incoherent_usage_or_a_broken_bound_blocks_everything
     assert totals["blocked"] and totals["unknown"] + totals["consumed"] > 0, (
         "dépense inconnue ou règlement conservé, scope bloqué"
     )
-    assert rep["variants"][S.VARIANTS.index(variant)]["json_valid"] is not True, (
-        "une réponse à usage incohérent ne valide rien"
-    )
+    index = S.VARIANTS.index(variant)
+    if kind in {"missing", "inconsistent"}:
+        # usage inconnu : le contenu n'est pas tenu pour établi, rien n'est validé
+        assert rep["variants"][index]["json_valid"] is not True, "une réponse à usage inconnu ne valide rien"
+    else:
+        # borne démentie MAIS usage connu et réglé : ``json_valid`` décrit seulement le contenu (fait de parsing) ; le verdict de la variante
+        # et de la paire, lui, est négatif (``observed`` exige un usage sans blocage, arbitrage § 4)
+        assert rep["variants"][index]["state"] != "observed", "une variante à borne démentie n'est jamais « observed »"
     if variant == "prompt_only":
         untouched(wire, "native_json")
     assert_report_matches_registry(rep, env)
