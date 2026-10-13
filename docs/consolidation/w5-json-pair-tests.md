@@ -65,7 +65,7 @@ Les 4 échecs de l'exécution 1 (`over_count` et `over_cap`, sur les deux varian
 
 ## Réparation d'un journal fermé (B40) — `tests/test_w5_json_pair_reconcile_adversarial.py`
 
-Défaut établi par le manager sur `ffb48b5` : `reconcile_pair` rend le rapport dès que le journal est `closed`, alors que `_conduct` ferme le journal même si une écriture budgétaire a échoué ; une tentative `emitting` et sa réservation restent ouvertes (`reserved_tokens` > 0, `unknown_tokens` = 0, `blocked` faux). Ces 26 tests sont écrits **avant** le correctif de A (A46) et n'assouplissent aucune garde ; ils réutilisent le faux Google natif du support et injectent des **pannes de stockage ciblées** (`sqlite3.OperationalError`) à des points précis du vrai code, puis jugent l'état OBSERVÉ (registre en lecture seule, requêtes reçues par le faux Google, rapports publics).
+Défaut établi par le manager sur `ffb48b5` : `reconcile_pair` rend le rapport dès que le journal est `closed`, alors que `_conduct` ferme le journal même si une écriture budgétaire a échoué ; une tentative `emitting` et sa réservation restent ouvertes (`reserved_tokens` > 0, `unknown_tokens` = 0, `blocked` faux). Ces tests (26 à l'origine, 32 après B41) sont écrits **avant** le correctif de A (A46) et n'assouplissent aucune garde ; ils réutilisent le faux Google natif du support et injectent des **pannes de stockage ciblées** (`sqlite3.OperationalError`) à des points précis du vrai code, puis jugent l'état OBSERVÉ (registre en lecture seule, requêtes reçues par le faux Google, rapports publics).
 
 | Exigence | Tests |
 |---|---|
@@ -79,3 +79,12 @@ Défaut établi par le manager sur `ffb48b5` : `reconcile_pair` rend le rapport 
 Hypothèses de propriété de la tentative : voir l'en-tête du fichier (conducteur « disparu » = journal `closed` ou processus inexistant ; conducteur vivant d'un autre processus jamais touché ; la preuve de non-émission d'une tentative `prepared` est indépendante du produit : le faux Google n'a reçu aucun `generateContent`).
 
 Résultat sur `ffb48b5` (état avant correctif) : 26 tests, **19 rouges par assertion** (cas de l'état établi), **7 témoins verts** (journal de variante en retard ×2, journal sain ×4, conducteur vivant ×1), 0 erreur. Le résultat sur le correctif A46 sera ajouté à la passe de validation.
+
+### Résultat sur le correctif A46 (B41)
+
+Fusion locale `--no-ff` de A46 `01319977f37291d0f046a16e1e8bc3927109cf15` (commit `e90cc8d`, fichiers de A non modifiés). A46 ajoute une **réparation proactive** de fin d'exécution (`_conduct`, `finally`) en plus de la réparation à la reprise d'un journal fermé.
+
+* **Rejeu des 26 tests B40 inchangés** : 19 échecs, tous dus au MONTAGE et non à une garde manquante : la panne d'écriture injectée une seule fois (`times=1`) était réparée tout de suite par la réparation proactive, de sorte que la précondition « la réserve est encore ouverte » ne tenait plus (et, pour `_block_unknown`, le compteur « panne atteinte exactement une fois » voyait deux appels : le run puis la réparation proactive).
+* **Adaptation du montage seulement** (aucune attente finale modifiée) : `stale_run()` prolonge la panne jusqu'à la fermeture du journal en rendant `BrokerService.repair` indisponible pour les seuls appels `sweep=True` (réparation de fin d'exécution et réconciliation) pendant le run ; la purge légère `sweep=False` du service reste disponible, sans quoi le run échouerait avant toute émission. Le compteur de panne devient `>= 1`. La panne est retirée ensuite : c'est `finalize`/`reconcile_pair` qui doit réparer.
+* **Ajouts** : réparation proactive RÉUSSIE (4 cas à panne transitoire : émission possible, inconnue non appliquée au registre, règlement non appliqué, tentative préparée) ; reprises concurrentes indépendantes de 5 processus sur un journal fermé à réparer (2 cas) : l'inconnue / le règlement n'est inscrit qu'une fois.
+* **Rouge sur `ffb48b5`, vert sur A46** : 32 tests ; `ffb48b5` : 25 rouges, 7 témoins verts ; A46 : **32/32 verts**. Suite adverse générale (97 tests) sur A46 : **97/97 verts**.

@@ -11,6 +11,11 @@ VRAI ``BrokerService`` et ``GoogleUpstream`` sur le faux Google natif du support
 (marquage d'émission), ``_Journal.finish_variant`` (journal de variante) et ``BrokerService.repair`` (réparation). Les noms privés ne servent qu'à
 choisir où la panne tombe ; toutes les attentes portent sur l'état OBSERVÉ du registre, du faux Google et des rapports publics.
 
+**Montage et réparation proactive de A46 (B41)** : depuis A46, ``_conduct`` tente une réparation du registre dans son ``finally`` (instance au repos). Pour
+reproduire « la panne dure jusqu'à la fermeture du journal » — l'état que ``finalize``/``reconcile_pair`` doit réparer —, le montage prolonge la panne
+d'écriture en rendant aussi ``BrokerService.repair`` indisponible PENDANT le run seulement (``stale_run``). Les attentes finales sont inchangées. La réparation
+proactive RÉUSSIE (panne transitoire) est testée à part (``test_a_proactive_repair_that_succeeds_…``).
+
 Hypothèses de propriété de la tentative (explicites) : un conducteur est « disparu » quand son journal est ``closed`` ou que son processus n'existe plus ;
 un conducteur d'un AUTRE processus encore vivant n'est jamais touché ; une tentative ``emitting`` appartient à la paire (son ``request_id`` est
 ``jp-<campagne>-…``) et son émission est POSSIBLE même si la panne a empêché de l'écrire ; une tentative ``prepared`` n'a PAS été marquée émise, et la
@@ -120,6 +125,15 @@ def fault(target, name, *, when=lambda *a, **k: True, times=None):
         yield state
 
 
+@contextlib.contextmanager
+def stale_run():
+    """Panne qui dure jusqu'à la fermeture du journal : la réparation proactive de fin d'exécution échoue aussi (montage seulement)."""
+    # Seuls les appels « sweep » (réparation de fin d'exécution de A46, réconciliation) tombent en panne ; la purge légère que le service fait
+    # lui-même avant chaque émission (``sweep=False``) reste disponible, sinon le run échouerait avant toute émission.
+    with fault(BrokerService, "repair", when=lambda self, *a, **k: k.get("sweep", True) is True) as proactive:
+        yield proactive
+
+
 def attempt_state_is(expected):
     return lambda self, attempt, *rest, **kw: attempt.state == expected
 
@@ -144,9 +158,9 @@ def assert_funds_unknown_and_blocked(db: Path, *, consumed=0):
 async def reproduce_closed_emitting(env_: Env, behavior=None, *, variant="prompt_only"):
     """Une émission a lieu, puis l'écriture de l'inconnue échoue : journal fermé, tentative ``emitting``, réservation ouverte."""
     wire = env_.wire(S.script(**{variant: behavior or S.http(500, "INTERNAL")}))
-    with fault(BrokerService, "_block_unknown") as injected:
+    with stale_run(), fault(BrokerService, "_block_unknown") as injected:
         report = await env_.run(wire)
-    assert injected["raised"] == 1, "la panne de stockage ciblée n'a pas été atteinte : scénario invalide"
+    assert injected["raised"] >= 1, "la panne de stockage ciblée n'a pas été atteinte : scénario invalide"
     state = raw(env_.db)
     # préconditions : EXACTEMENT l'état du défaut (sinon le test ne prouve rien)
     assert state["journal"][0] == "closed", state["journal"]
@@ -231,7 +245,7 @@ async def test_every_possible_emission_whose_unknown_could_not_be_written_ends_u
 
 async def test_an_unknown_marked_on_the_attempt_but_not_applied_to_the_ledger_is_completed_not_duplicated(env):
     wire = env.wire(S.script(prompt_only=S.http(500, "INTERNAL")))
-    with fault(BrokerService, "_apply_ledger", when=attempt_state_is("unknown"), times=1) as injected:
+    with stale_run(), fault(BrokerService, "_apply_ledger", when=attempt_state_is("unknown"), times=1) as injected:
         await env.run(wire)
     assert injected["raised"] == 1
     state = raw(env.db)
@@ -254,7 +268,7 @@ async def test_a_settlement_established_on_the_attempt_but_not_in_the_ledger_is_
     env,
 ):
     wire = env.wire()
-    with fault(BrokerService, "_apply_ledger", when=attempt_state_is("settled"), times=1) as injected:
+    with stale_run(), fault(BrokerService, "_apply_ledger", when=attempt_state_is("settled"), times=1) as injected:
         await env.run(wire)
     assert injected["raised"] == 1
     state = raw(env.db)
@@ -341,7 +355,7 @@ async def test_a_prepared_attempt_proven_not_emitted_is_released_without_inventi
         trigger = fault(BrokerStore, "admit_emission", times=1)
     else:  # le témoin se règle normalement, la panne tombe au marquage d'émission de la seconde variante
         trigger = fault(BrokerStore, "admit_emission", when=lambda *a, **k: len(wire.generated()) == 1, times=1)
-    with trigger as injected:
+    with stale_run(), trigger as injected:
         await env.run(wire)
     assert injected["raised"] == 1
     state = raw(env.db)
@@ -403,6 +417,123 @@ async def test_a_persistent_repair_failure_stays_incomplete_never_frees_the_fund
 
     assert_wire_still(wire, events)
     assert_funds_unknown_and_blocked(env.db)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 4 bis. Réparation proactive réussie (A46) : panne TRANSITOIRE, registre réparé dès la fin de l'exécution
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+
+def transient(case):
+    if case == "emitting":
+        return fault(BrokerService, "_block_unknown", times=1), S.script(prompt_only=S.http(500, "INTERNAL")), 0
+    if case == "unknown_not_applied":
+        return (
+            fault(BrokerService, "_apply_ledger", when=attempt_state_is("unknown"), times=1),
+            S.script(prompt_only=S.http(500, "INTERNAL")),
+            0,
+        )
+    if case == "settlement_not_applied":
+        return fault(BrokerService, "_apply_ledger", when=attempt_state_is("settled"), times=1), S.script(), None
+    return fault(BrokerStore, "admit_emission", times=1), S.script(), 0  # prepared
+
+
+@pytest.mark.parametrize("case", ["emitting", "unknown_not_applied", "settlement_not_applied", "prepared"])
+async def test_a_proactive_repair_that_succeeds_leaves_a_repaired_registry_before_any_finalize(env, case):
+    trigger, script_, _ = transient(case)
+    wire = env.wire(script_)
+    with trigger as injected:
+        report = await env.run(wire)
+    assert injected["raised"] == 1, "la panne transitoire n'a pas été atteinte : scénario invalide"
+    events = list(wire.events())
+    state = raw(env.db)
+
+    assert state["journal"][0] == "closed" and state["reserved"] == 0, (
+        "aucune réserve ouverte : la réparation de fin d'exécution a réussi"
+    )
+    if case in {"emitting", "unknown_not_applied"}:
+        assert_funds_unknown_and_blocked(env.db)
+        assert report["budget"]["unknown_tokens"] == RESERVED and report["budget"]["blocked"] is True
+    elif case == "settlement_not_applied":
+        assert state["consumed"] == SETTLED * len(wire.generated()) and state["unknown"] == 0 and not state["blocked"]
+    else:
+        assert (
+            state["attempts"][-1] == ("released", "interrupted_before_emission")
+            and state["unknown"] == 0
+            and not state["blocked"]
+        )
+    assert report["status"] != "observed", "un incident d'écriture n'est jamais une paire observée"
+    after = totals(env.db)
+
+    again = [env.reconcile(), env.reconcile(), await env.run(env.wire())]
+
+    assert_wire_still(wire, events)
+    assert totals(env.db) == after, "la reprise d'un registre déjà réparé ne réécrit rien (aucun double comptage)"
+    assert all(r["budget"] == again[0]["budget"] and r["status"] == again[0]["status"] for r in again)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 4 ter. Reprises concurrentes indépendantes sur un journal fermé à réparer : une seule inscription, aucun double comptage
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+
+async def stale_registry(env_: Env, case: str):
+    if case == "emitting":
+        return await reproduce_closed_emitting(env_)
+    wire = env_.wire()
+    with stale_run(), fault(BrokerService, "_apply_ledger", when=attempt_state_is("settled"), times=1) as injected:
+        await env_.run(wire)
+    assert injected["raised"] == 1
+    assert raw(env_.db)["reserved"] == RESERVED and raw(env_.db)["consumed"] == 0
+    return wire, None
+
+
+@pytest.mark.parametrize("case", ["emitting", "settlement_not_applied"])
+async def test_concurrent_independent_repairs_of_a_stale_closed_journal_apply_the_repair_exactly_once(env, case):
+    wire, _ = await stale_registry(env, case)
+    events, emitted = list(wire.events()), len(wire.generated())
+    barrier = env.dir / "go-repair"
+    processes = [
+        S.spawn(
+            S.child_spec(database=env.db, campaign_id=CAMPAIGN, wire=env.wire(), barrier=barrier),
+            env.dir,
+            f"repairer{i}",
+        )
+        for i in range(5)
+    ]
+    deadline = time.time() + 90
+    while len(list(env.dir.glob("go-repair.ready.*"))) < 5 and time.time() < deadline:
+        time.sleep(0.02)
+    assert len(list(env.dir.glob("go-repair.ready.*"))) == 5, "tous les processus doivent atteindre la barrière"
+    barrier.write_text("go")
+    results = [S.finish(p, timeout=120) for p in processes]
+
+    assert all(r["rc"] == 0 and r["result"] is not None for r in results), [
+        (r["rc"], r["stderr"][-200:]) for r in results
+    ]
+    assert_wire_still(wire, events)
+    state = raw(env.db)
+    if case == "emitting":
+        assert_funds_unknown_and_blocked(env.db)
+        assert [e for e in state["events"] if e[0] == "unknown"] == [("unknown", 0)], (
+            "l'inconnue est inscrite UNE seule fois (jamais 540)"
+        )
+    else:
+        assert (
+            state["consumed"] == SETTLED * emitted
+            and state["reserved"] == 0
+            and state["unknown"] == 0
+            and not state["blocked"]
+        )
+        assert [e for e in state["events"] if e[0] == "commit"] == [("commit", SETTLED * emitted)], (
+            "le règlement est appliqué UNE seule fois"
+        )
+    assert len(state["reservations"]) == emitted
+    final = env.read()
+    assert final["status"] != "observed"
+    for r in results:
+        if r["result"]["outcome"] == "returned":
+            assert r["result"]["report"]["status"] != "observed"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
