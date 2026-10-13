@@ -244,6 +244,9 @@ def test_the_other_workflows_never_reference_the_campaign_key_or_environment_and
             continue
         text = path.read_text(encoding="utf-8")
         assert "W5_GOOGLE_API_KEY" not in text and "w5-gemma-campaign" not in text, path.name
+        if path.name == "w5-json-pair.yml":
+            # la paire JSON a sa propre clé, son propre environnement et ses propres contrôles (tests/test_w5_json_pair_workflow.py)
+            continue
         assert "GOOGLE_API_KEY" not in text, f"{path.name} : aucune clé fournisseur hors de la campagne"
     nightly = yaml.safe_load((WORKFLOWS / "integration-nightly.yml").read_text(encoding="utf-8"))
     assert nightly["jobs"]["product-e2e"]["if"] == "vars.INTEGRATION_E2E_ENABLED == 'true'"

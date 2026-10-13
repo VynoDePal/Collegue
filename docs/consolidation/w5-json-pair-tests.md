@@ -1,0 +1,90 @@
+# Paire JSON — tests adverses (lot B37/B38)
+
+Contrat : `briefs/w5-json-pair-contract.md`, arbitrage définitif `briefs/w5-json-pair-cli-ruling.md` et notes `evidence/w5-manager-json-pair-review-notes.md`. Fichiers de B : `tests/test_w5_json_pair_adversarial.py`, `tests/w5_json_pair_support.py`, ce document. **Aucun fichier de A ou de C.**
+Ces tests ont été écrits avant le lot A (la collecte échouait sur `from collegue.broker import json_pair` tant que le module n'était pas intégré : état attendu, pas un rouge métier) puis exécutés contre le lot A figé `e598f3b` (voir « Résultat sur le vrai lot A »). Aucun `skip`/`xfail`.
+
+## Principes
+
+* **API publique seulement** : `MODEL`, `VARIANT_NAMES`, `payloads()`, `run_pair(database=, campaign_id=, upstream=, clock=)`, `read_report(database=, campaign_id=)`.
+* **Vérité terrain indépendante** : un faux Google natif (`httpx.MockTransport` derrière le VRAI `GoogleUpstream`) journalise dans un fichier partagé (`O_APPEND`) chaque `countTokens`/`generateContent` reçu, tous processus confondus ; il enregistre aussi, en lecture seule, l'état du registre au moment de la requête (échéance ouverte, tentative `emitting`, jetons réservés).
+* **Registre relu par SQLite** sur les tables **existantes** du registre budgétaire (`budget_scopes`, `broker_attempts`, `broker_clocks`…), jamais sur le journal privé de A.
+* **Processus réels** (`subprocess`) : crash (`os._exit(137)`), SIGKILL pendant une génération en vol, reprise par un processus neuf avec un fournisseur SAIN (un renvoi serait détectable), concurrence de 4 à 6 processus avec barrière de départ simultané sur un fichier inexistant.
+* Aucune clé réelle ni réseau ; clés/URL/identifiants factices hostiles recherchés dans rapport, registre (octets), journaux et sorties des processus.
+
+## Couverture (contrat § « Tests et livraison »)
+
+| Exigence | Tests |
+|---|---|
+| objet compté = objet émis, corps/empreintes fixes, différence = MIME seul | surface publique, `payloads` (copies profondes), corps normalisés, chemin nominal (4 requêtes exactement) |
+| 200 valides ; témoin non JSON ou vide | `test_a_200_witness_…` (4 cas), `test_a_200_native_answer_…` (3 cas) |
+| 4xx à chaque position | 4 positions × {400, 403, 404, 429} : arrêt, aucun renvoi, reprise avec fournisseur sain sans requête |
+| 500 / timeouts avant et après émission | 7 ambiguïtés × 2 variantes, échec de connexion, `countTokens` en échec (6 comportements × 2) |
+| usage absent / contradictoire / borne | `missing`, `inconsistent`, `over_count`, `over_cap` × 2 variantes |
+| modèle interdit | `MODEL` modifié (26B, Gemini, chemin hostile, vide) : seule la 31B peut être appelée |
+| réservation avant génération ; échéance avant le premier comptage | registre observé par le faux Google à chaque requête |
+| interruption, crash, reprise sans renvoi | 4 positions de crash + SIGKILL + réouvertures : aucune requête lors de la reprise, réservation conservée, règlements intacts |
+| concurrence interprocessus SQLite | 3 tours × 6 processus (un seul conducteur, 2 émissions), refus 4xx concurrent, deux identités en course, lecteurs pendant un run |
+| plafond de deux émissions, unicité de variante | invariants vérifiés après CHAQUE scénario (`assert_wire_invariants`) |
+| réentrée | 4 `run_pair` simultanés dans un processus ; fournisseur hostile qui réentre pendant la première génération |
+| échéance globale | +899 s (autorisé), +900/+901/+5000 s (aucun comptage ni génération), horloge injectée, échéance jamais déplacée |
+| compteurs honnêtes, rapports sans secret | voir ci-dessous ; 5 scénarios hostiles contre rapport/registre/journaux/sorties |
+
+## Verdicts attendus (arbitrage manager)
+
+* témoin 200 invalide/vide à usage connu puis natif 200 objet JSON valide : `status == "observed"`, `variants[0].json_valid == false` ;
+* seconde réponse (natif) 200 non JSON/vide : **exactement** `status == "failed"` et `reason == "json_output_invalid"`, jamais `observed`, même usage réglé ;
+* refus HTTP explicite (4xx, comptage ou génération) : `status == "failed"` ;
+* ambiguïté sur le premier appel, incident interne (exception arbitraire), refus de reprise après crash : `status == "incomplete"` ; ambiguïté sur le second appel : `failed` ou `incomplete` (jamais `observed`) ; usage/borne incohérents et échéance : jamais `observed`.
+
+## Compteurs
+
+`emissions` distingue : **émission réellement mesurée** (nom contenant `emitted`/`sent`/`transport`) → `null` ou **égale** à la vérité terrain du faux Google ; **admission durable** (`admit`) → au moins la vérité terrain et au plus 2 ; **issue de tentative** (réglée/libérée/inconnue) et **limites de configuration** (`max`/`limit`/`cap`) → jamais comparées au nombre de requêtes. Aucune égalité globale sur un nom contenant « generation ». Les nombres d'émissions ne prétendent pas prouver une réception effective par Google ; une fenêtre de crash ambiguë n'est jamais un zéro mesuré.
+
+## Relecture et réconciliation
+
+`read_report` peut être pur **ou** une réconciliation explicitement appelée : les tests exigent seulement de ne rien émettre, de ne pas libérer l'inconnue, de ne pas toucher aux règlements, tentatives et horloges, et que deux relectures successives donnent le même rapport. Une relecture d'un registre absent ne fabrique ni résultat ni dépense.
+
+## Exécuter contre A
+
+Depuis la racine du worktree B intégrant le SHA de A figé par le manager : `COLLEGUE_HOME` et `STATE_DATABASE_URL` neufs, `TMPDIR` ancêtre de `--basetemp` sous `/tmp`, `PYTHONDONTWRITEBYTECODE=1`, `python -m pytest -p no:cacheprovider tests/test_w5_json_pair_adversarial.py` (≈ 30 s). Tout échec est à arbitrer (défaut de A ou attente trop stricte de B), jamais masqué.
+
+## Preuves de satisfaisabilité hors dépôt (≠ validation de A)
+
+Une référence **de scratch** (`evidence/w5-b38-scratch/`) et une implémentation **naïve** (service nu enchaîné deux fois) ont servi à montrer que les tests sont satisfaisables et discriminants ; leurs résultats et les limites de cette démarche sont dans `reports/w5-b38-json-pair.md`. Ce n'est pas du code livré et cela ne dit rien du code de A.
+
+## Résultat sur le vrai lot A (B39)
+
+Fusion locale `--no-ff` du SHA A figé `e598f3bef03453771964df15d2491eca5381347b` (commit de fusion `5ddcc64`, fichiers de A non modifiés : `collegue/broker/json_pair.py`, `scripts/w5_json_pair.py`, `tests/test_w5_json_pair.py`, `docs/consolidation/w5-json-pair.md`). Exécution depuis la racine du worktree B avec `envs/b`, `PYTHONPATH=tests`, scratch et base neufs sous `/tmp/b39`, vrai `GoogleUpstream` sur faux HTTP, vrai code de A :
+
+| Exécution | Tests | Passés | Échecs | Erreurs | Skips |
+|---|---|---|---|---|---|
+| 1 (tests c4888a5) | 97 | 93 | 4 | 0 | 0 |
+| 2 (après correction d'une assertion de test) | 97 | **97** | 0 | 0 | 0 |
+
+Les 4 échecs de l'exécution 1 (`over_count` et `over_cap`, sur les deux variantes) venaient d'une assertion trop stricte de B, pas d'un défaut de A : B exigeait `json_valid is not True` pour une réponse à **borne démentie mais usage connu**. A rend `status = failed`, `reason = bound_violation`, état de variante `bound_violation`, scope bloqué, seconde variante `skipped`, usage réglé conservé, et `json_valid = true` parce que le **contenu** est bien un objet JSON : `json_valid` décrit le contenu (le ruling sépare « objet JSON valide » de « usage connu, sans blocage »). L'assertion est désormais : pour usage inconnu (`missing`, `inconsistent`) `json_valid is not True` (inchangé) ; pour borne démentie, l'état de la variante n'est jamais `observed`. Le statut non-`observed`, le blocage et l'absence de seconde émission restent vérifiés dans les deux cas.
+
+## Réparation d'un journal fermé (B40) — `tests/test_w5_json_pair_reconcile_adversarial.py`
+
+Défaut établi par le manager sur `ffb48b5` : `reconcile_pair` rend le rapport dès que le journal est `closed`, alors que `_conduct` ferme le journal même si une écriture budgétaire a échoué ; une tentative `emitting` et sa réservation restent ouvertes (`reserved_tokens` > 0, `unknown_tokens` = 0, `blocked` faux). Ces tests (26 à l'origine, 32 après B41) sont écrits **avant** le correctif de A (A46) et n'assouplissent aucune garde ; ils réutilisent le faux Google natif du support et injectent des **pannes de stockage ciblées** (`sqlite3.OperationalError`) à des points précis du vrai code, puis jugent l'état OBSERVÉ (registre en lecture seule, requêtes reçues par le faux Google, rapports publics).
+
+| Exigence | Tests |
+|---|---|
+| émission possible + inconnue non écrite ⇒ inconnue bloquante, jamais de réémission (y compris `run_pair` sur registre déjà démarré, avec fournisseur sain, et processus indépendant) | `…_repaired_into_a_blocking_unknown` (3 entrées), `…_idempotent_and_never_counts_the_unknown_twice`, `…_every_possible_emission_…` (5 causes × 2 variantes) |
+| règlement du registre partiellement appliqué | inconnue marquée sur la tentative mais pas dans le registre ; règlement durable de la tentative non appliqué au registre (conservé, jamais libéré ni converti) |
+| règlement établi dont le journal de variante n'a pas pu être fini | règlement 200 ; refus 4xx explicite (jamais converti en inconnue) |
+| `prepared` prouvé non émis (aucune génération reçue) ⇒ libération sûre sans consommation inventée | 2 variantes (le règlement du témoin est conservé) |
+| panne de réparation persistante ⇒ incomplet, fonds jamais libérés, la réparation est TENTÉE à chaque réconciliation, reprise propre ensuite | 1 test |
+| journal sain stable ; conducteur vivant d'un autre processus intouché | 4 scénarios sains ; conducteur bloqué en génération puis libéré (paire observée) |
+
+Hypothèses de propriété de la tentative : voir l'en-tête du fichier (conducteur « disparu » = journal `closed` ou processus inexistant ; conducteur vivant d'un autre processus jamais touché ; la preuve de non-émission d'une tentative `prepared` est indépendante du produit : le faux Google n'a reçu aucun `generateContent`).
+
+Résultat sur `ffb48b5` (état avant correctif) : 26 tests, **19 rouges par assertion** (cas de l'état établi), **7 témoins verts** (journal de variante en retard ×2, journal sain ×4, conducteur vivant ×1), 0 erreur. Le résultat sur le correctif A46 sera ajouté à la passe de validation.
+
+### Résultat sur le correctif A46 (B41)
+
+Fusion locale `--no-ff` de A46 `01319977f37291d0f046a16e1e8bc3927109cf15` (commit `e90cc8d`, fichiers de A non modifiés). A46 ajoute une **réparation proactive** de fin d'exécution (`_conduct`, `finally`) en plus de la réparation à la reprise d'un journal fermé.
+
+* **Rejeu des 26 tests B40 inchangés** : 19 échecs, tous dus au MONTAGE et non à une garde manquante : la panne d'écriture injectée une seule fois (`times=1`) était réparée tout de suite par la réparation proactive, de sorte que la précondition « la réserve est encore ouverte » ne tenait plus (et, pour `_block_unknown`, le compteur « panne atteinte exactement une fois » voyait deux appels : le run puis la réparation proactive).
+* **Adaptation du montage seulement** (aucune attente finale modifiée) : `stale_run()` prolonge la panne jusqu'à la fermeture du journal en rendant `BrokerService.repair` indisponible pour les seuls appels `sweep=True` (réparation de fin d'exécution et réconciliation) pendant le run ; la purge légère `sweep=False` du service reste disponible, sans quoi le run échouerait avant toute émission. Le compteur de panne devient `>= 1`. La panne est retirée ensuite : c'est `finalize`/`reconcile_pair` qui doit réparer.
+* **Ajouts** : réparation proactive RÉUSSIE (4 cas à panne transitoire : émission possible, inconnue non appliquée au registre, règlement non appliqué, tentative préparée) ; reprises concurrentes indépendantes de 5 processus sur un journal fermé à réparer (2 cas) : l'inconnue / le règlement n'est inscrit qu'une fois.
+* **Rouge sur `ffb48b5`, vert sur A46** : 32 tests ; `ffb48b5` : 25 rouges, 7 témoins verts ; A46 : **32/32 verts**. Suite adverse générale (97 tests) sur A46 : **97/97 verts**.
