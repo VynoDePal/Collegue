@@ -62,3 +62,20 @@ Fusion locale `--no-ff` du SHA A figé `e598f3bef03453771964df15d2491eca5381347b
 | 2 (après correction d'une assertion de test) | 97 | **97** | 0 | 0 | 0 |
 
 Les 4 échecs de l'exécution 1 (`over_count` et `over_cap`, sur les deux variantes) venaient d'une assertion trop stricte de B, pas d'un défaut de A : B exigeait `json_valid is not True` pour une réponse à **borne démentie mais usage connu**. A rend `status = failed`, `reason = bound_violation`, état de variante `bound_violation`, scope bloqué, seconde variante `skipped`, usage réglé conservé, et `json_valid = true` parce que le **contenu** est bien un objet JSON : `json_valid` décrit le contenu (le ruling sépare « objet JSON valide » de « usage connu, sans blocage »). L'assertion est désormais : pour usage inconnu (`missing`, `inconsistent`) `json_valid is not True` (inchangé) ; pour borne démentie, l'état de la variante n'est jamais `observed`. Le statut non-`observed`, le blocage et l'absence de seconde émission restent vérifiés dans les deux cas.
+
+## Réparation d'un journal fermé (B40) — `tests/test_w5_json_pair_reconcile_adversarial.py`
+
+Défaut établi par le manager sur `ffb48b5` : `reconcile_pair` rend le rapport dès que le journal est `closed`, alors que `_conduct` ferme le journal même si une écriture budgétaire a échoué ; une tentative `emitting` et sa réservation restent ouvertes (`reserved_tokens` > 0, `unknown_tokens` = 0, `blocked` faux). Ces 26 tests sont écrits **avant** le correctif de A (A46) et n'assouplissent aucune garde ; ils réutilisent le faux Google natif du support et injectent des **pannes de stockage ciblées** (`sqlite3.OperationalError`) à des points précis du vrai code, puis jugent l'état OBSERVÉ (registre en lecture seule, requêtes reçues par le faux Google, rapports publics).
+
+| Exigence | Tests |
+|---|---|
+| émission possible + inconnue non écrite ⇒ inconnue bloquante, jamais de réémission (y compris `run_pair` sur registre déjà démarré, avec fournisseur sain, et processus indépendant) | `…_repaired_into_a_blocking_unknown` (3 entrées), `…_idempotent_and_never_counts_the_unknown_twice`, `…_every_possible_emission_…` (5 causes × 2 variantes) |
+| règlement du registre partiellement appliqué | inconnue marquée sur la tentative mais pas dans le registre ; règlement durable de la tentative non appliqué au registre (conservé, jamais libéré ni converti) |
+| règlement établi dont le journal de variante n'a pas pu être fini | règlement 200 ; refus 4xx explicite (jamais converti en inconnue) |
+| `prepared` prouvé non émis (aucune génération reçue) ⇒ libération sûre sans consommation inventée | 2 variantes (le règlement du témoin est conservé) |
+| panne de réparation persistante ⇒ incomplet, fonds jamais libérés, la réparation est TENTÉE à chaque réconciliation, reprise propre ensuite | 1 test |
+| journal sain stable ; conducteur vivant d'un autre processus intouché | 4 scénarios sains ; conducteur bloqué en génération puis libéré (paire observée) |
+
+Hypothèses de propriété de la tentative : voir l'en-tête du fichier (conducteur « disparu » = journal `closed` ou processus inexistant ; conducteur vivant d'un autre processus jamais touché ; la preuve de non-émission d'une tentative `prepared` est indépendante du produit : le faux Google n'a reçu aucun `generateContent`).
+
+Résultat sur `ffb48b5` (état avant correctif) : 26 tests, **19 rouges par assertion** (cas de l'état établi), **7 témoins verts** (journal de variante en retard ×2, journal sain ×4, conducteur vivant ×1), 0 erreur. Le résultat sur le correctif A46 sera ajouté à la passe de validation.
