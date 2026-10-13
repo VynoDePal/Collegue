@@ -55,6 +55,15 @@ sans fournisseur : un `emitting` d'un conducteur disparu devient *inconnu et blo
 des variantes restées en vol, ferme le journal et rapporte. Un conducteur vivant (même hôte, pid et date de démarrage
 vérifiés ; autre hôte supposé vivant) n'est pas touché : le rapport dit `in_progress`.
 
+**Un journal fermé ne prouve pas que le registre est réparé (A46).** `_conduct` ferme le journal même si une écriture budgétaire a échoué
+(panne transitoire après un 500) : une tentative `emitting` et sa réserve peuvent rester ouvertes. `reconcile_pair` (donc `finalize`) répare
+donc aussi un journal **fermé** : `emitting` d'un propriétaire disparu → inconnu bloquant ; `prepared` → libéré (rien n'est parti, aucune
+consommation inventée) ; règlement du registre laissé à moitié → rejoué par clés d'événement (aucun double comptage) ; variante restée
+`claimed`/`emitting` dont le registre a réglé → finie d'après le registre (autorité). Le journal n'est **jamais rouvert** et rien n'est émis ; un conducteur
+vivant, un journal corrompu, étranger ou d'une autre campagne ne sont pas réparés ; un journal sain et réglé n'appelle aucune écriture (octets
+identiques). Tant que la panne dure, le rapport reste `incomplete` (jamais `observed`) ; une réserve encore ouverte avec deux variantes réglées
+donne `incomplete`/`budget_unknown`. À la fin d'une exécution, le lanceur tente aussi cette réparation immédiatement, instance au repos.
+
 ## Verdicts
 
 | Situation | `status` | `reason` | code |

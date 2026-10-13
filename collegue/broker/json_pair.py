@@ -822,8 +822,10 @@ def _verdict(run: _Run, resolved: List[_Resolved], registry: _Registry) -> Tuple
     if states[-1] == "parsing_failed" and states[0] in _CONTINUE:
         return "failed", "json_output_invalid"
     if all(state in _CONTINUE for state in states):
-        if registry.present and (registry.blocked or (registry.unknown_tokens or 0) > 0):
-            return "incomplete", "budget_unknown"
+        if registry.present and (
+            registry.blocked or (registry.unknown_tokens or 0) > 0 or (registry.reserved_tokens or 0) > 0
+        ):
+            return "incomplete", "budget_unknown"  # un règlement pas encore appliqué au registre n'est jamais un succès
         if run.halt_reason:
             return "incomplete", run.halt_reason
         return "observed", "ok"
@@ -1106,6 +1108,11 @@ async def _conduct(path: Path, campaign_id: str, upstream: Any, clock: Callable[
     finally:
         _ACTIVE.discard(str(path.resolve()))
         with contextlib.suppress(Exception):
+            if (
+                service is not None
+            ):  # instance au repos : ce qu'un incident d'écriture a laissé est réparé tout de suite si possible
+                service.repair(scope_keys=(scope_key,), include_own=True, sweep=True)
+        with contextlib.suppress(Exception):
             if service is not None:
                 service.shutdown()
         with contextlib.suppress(Exception):
@@ -1113,9 +1120,38 @@ async def _conduct(path: Path, campaign_id: str, upstream: Any, clock: Callable[
     return read_report(database=path, campaign_id=campaign_id)
 
 
+def _repair_registry(path: Path, run: _Run) -> None:
+    """Répare le registre d'après l'ÉTAT DURABLE des tentatives (autorité), sans fournisseur : ``emitting`` d'un propriétaire disparu →
+    inconnu bloquant (jamais rejoué), ``prepared`` → libéré (rien n'est parti : aucune consommation inventée), règlements du registre
+    laissés à moitié → rejoués par clés d'événement (idempotent, aucun double comptage). Une tentative d'un propriétaire VIVANT n'est
+    jamais touchée (contrat de propriété du service)."""
+    from collegue.state import ProjectStateManager
+
+    ledger = ProjectStateManager.from_url(_database_url(path), create=False).budget_ledger
+    service = BrokerService(ledger, _NoUpstream())
+    try:
+        service.repair(scope_keys=(run.scope_key,), sweep=True)
+    finally:
+        with contextlib.suppress(Exception):
+            service.shutdown()
+
+
+def _needs_reconciliation(run: _Run, variants: List[_Variant], registry: _Registry) -> bool:
+    """Un journal FERMÉ ne prouve pas que le registre est réparé : une panne d'écriture après l'émission peut avoir laissé une tentative
+    ``emitting``/``prepared`` ou une réserve ouverte. Un journal sain et réglé n'appelle AUCUNE écriture (idempotence octet pour octet)."""
+    if run.state == "running" or any(variant.state in ("claimed", "emitting") for variant in variants):
+        return True
+    if not registry.present:
+        return False
+    pending = any(a.state in ("prepared", "emitting") for a in (registry.attempts or {}).values())
+    return pending or bool(registry.reserved_tokens)
+
+
 def reconcile_pair(*, database: Path, campaign_id: str) -> dict:
-    """Reprise sans fournisseur : répare le registre (les tentatives d'un conducteur disparu deviennent inconnues et BLOQUANTES,
-    jamais rejouées), fixe l'état des variantes restées en vol, ferme le journal, puis rapporte. N'émet, ne compte ni ne génère."""
+    """Reprise sans fournisseur, sur un journal ouvert OU fermé : répare le registre (voir ``_repair_registry``), fixe l'état des variantes
+    restées en vol d'après le registre, ferme un journal resté ouvert, puis rapporte. N'émet, ne compte, ne génère et ne rouvre jamais.
+
+    Ne touche à rien si le conducteur est vivant, si le journal est corrompu, étranger ou illisible (refusés sans réparation)."""
     _check_campaign(campaign_id)
     path = Path(database)
     report = read_report(database=path, campaign_id=campaign_id)
@@ -1131,19 +1167,13 @@ def reconcile_pair(*, database: Path, campaign_id: str) -> dict:
         journal = _Journal(path, campaign_id, _utcnow)
         with _reader(path) as conn:
             run = _run_of(conn.execute(f"SELECT {_RUN_COLUMNS} FROM w5_json_pair_run").fetchone())
-        if run.state == "closed":
-            return report
-        if _alive(run, path):
-            return report  # un conducteur vivant : on ne touche à rien
-        from collegue.state import ProjectStateManager
-
-        with _reader(path) as conn:
             registry = _read_registry(conn, run.scope_key)
+        if run.state == "running" and _alive(run, path):
+            return report  # un conducteur vivant : on ne touche à rien
+        if not _needs_reconciliation(run, journal.variants(), registry):
+            return report
         if registry.present:
-            ledger = ProjectStateManager.from_url(_database_url(path), create=False).budget_ledger
-            service = BrokerService(ledger, _NoUpstream())
-            service.repair(scope_keys=(run.scope_key,), sweep=True)
-            service.shutdown()
+            _repair_registry(path, run)
         registry = _snapshot_registry(path, run.scope_key)
         for variant in journal.variants():
             if variant.state not in ("claimed", "emitting"):
@@ -1154,7 +1184,7 @@ def reconcile_pair(*, database: Path, campaign_id: str) -> dict:
             if resolved.state == "in_progress":
                 resolved = _Resolved("unknown", failure="ambiguous")
             journal.finish_variant(resolved, variant.name)
-        journal.close_run()
+        journal.close_run()  # no-op si le journal est déjà fermé : il n'est jamais rouvert
     except Exception:  # noqa: BLE001 - une réconciliation qui échoue ne rend jamais un rapport favorable
         return read_report(database=path, campaign_id=campaign_id) | {
             "reason": "internal_error",
