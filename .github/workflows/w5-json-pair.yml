@@ -1,0 +1,235 @@
+# Comparaison JSON ciblée W5 (UNE paire, 31B seulement, deux générations au plus) : même prompt JSON sans puis avec ``responseMimeType``.
+#
+# Ce workflow n'est PAS la campagne métier (``consolidation-e2e.yml``) ni le préflight produit (``w5-product-preflight.yml``) : pas de Docker,
+# pas de codeur, pas d'exécution métier, aucun BUILD/IMPROVE/incident. Il n'établit aucune qualification globale ; son résultat se limite aux
+# observations de la paire (voir ``docs/consolidation/w5-json-pair.md``). Déclenchement manuel (workflow_dispatch) UNIQUEMENT, sur ``main`` validé,
+# jamais de planification, jamais d'événement de dépôt, jamais de relance : l'identité de la comparaison est revendiquée côté fixture AVANT que la clé existe,
+# et une relance Actions (``run_attempt`` ≥ 2) est refusée par la première étape.
+#
+# Contexte de lancement RÉEL : événement, référence, SHA et tentative sont lus de l'environnement du runner, jamais fabriqués ni réécrits ici. Le manager saisit
+# ``expected_sha`` ; le SHA du run doit lui être égal ET être encore la pointe de ``main`` (lecture seule, jeton éphémère du run).
+#
+# Environnement GitHub « w5-json-pair » : propre à cette comparaison, distinct du nightly et des anciennes campagnes ; le manager y injecte le secret
+# TEMPORAIRE W5_JSON_PAIR_GOOGLE_API_KEY après la livraison et le retire à la clôture (ce workflow n'a aucun droit d'administration pour le faire). La clé n'existe
+# QUE dans l'étape « Paire réelle », sous le nom ``LLM_API_KEY`` (le seul que le produit lit), avec le scanner qui la cherche dans tout ce qui sera déposé. Le jeton de
+# la fixture n'existe QUE dans l'étape de revendication. Aucune clé dans le préflight, aucun jeton de fixture dans l'étape Google.
+#
+# Ordre (une étape qui échoue arrête tout ce qui suit ; seuls les dépôts et le diagnostic sont toujours tentés) :
+#   1. contexte réel (dispatch, main, SHA attendu, tentative 1) et chemins éphémères ; 2. pointe de ``main`` inchangée ;
+#   3. préflight SANS secret ; 4. revendication atomique de l'identité (``collegue-business-claims/<id>``) avec le jeton de la fixture seulement ;
+#   5. migrations du registre vierge ; 6. paire réelle + finalisation SANS clé + scan avec clé (SEULE étape qui reçoit la clé) ; 7. si la paire n'a pas démarré : rapports
+#   sans modèle et scan sans clé ; 8. diagnostic minimal sûr ; 9. dépôts (ensemble scanné seulement).
+# Un préflight qui ne peut pas ÉTABLIR une garde termine « incomplet » (code 3) AVANT toute émission : ce n'est ni un succès ni une preuve.
+
+name: W5 JSON pair (comparaison ciblée)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Confirmation du lancement UNIQUE (saisir exactement LANCER-UNE-PAIRE-JSON-2GENERATIONS-2USD-250000TOKENS-900S)"
+        required: true
+        type: string
+      campaign_id:
+        description: "Identifiant NEUF de la comparaison (revendiqué côté fixture avant la clé : aucun rerun avec le même)"
+        required: true
+        type: string
+      expected_sha:
+        description: "SHA complet (40 hexadécimaux minuscules) de main validé par le manager : doit égaler le SHA du run ET la pointe de main"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: w5-json-pair
+  cancel-in-progress: false
+
+jobs:
+  pair:
+    name: Paire JSON (préflight → revendication → paire → rapport)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm == 'LANCER-UNE-PAIRE-JSON-2GENERATIONS-2USD-250000TOKENS-900S' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: w5-json-pair
+    env:
+      W5_JSON_PAIR_CONFIRM: ${{ inputs.confirm }}
+      W5_JSON_PAIR_CAMPAIGN_ID: ${{ inputs.campaign_id }}
+      W5_JSON_PAIR_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      # La récurrence du nightly reste désactivée : le préflight refuse si elle est active.
+      INTEGRATION_E2E_ENABLED: ${{ vars.INTEGRATION_E2E_ENABLED }}
+    steps:
+      - name: Contexte de lancement réel et chemins éphémères du runner
+        id: context
+        shell: bash
+        run: |
+          # Chemins exportés AVANT toute validation : les étapes de dépôt et de diagnostic existent même si le contexte est refusé.
+          root="$RUNNER_TEMP/w5-json-pair"
+          mkdir -p "$root/home" "$root/proof" "$root/report" "$root/diagnostic"
+          chmod 700 "$root" "$root/home" "$root/proof" "$root/report" "$root/diagnostic"
+          {
+            printf 'W5_JSON_PAIR_ROOT=%s\n' "$root"
+            printf 'COLLEGUE_HOME=%s/home\n' "$root"
+            printf 'W5_PUBLISH=%s/publish\n' "$root"
+            printf 'W5_DIAG=%s/diagnostic\n' "$root"
+            printf 'W5_QUARANTINE=%s/quarantine\n' "$root"
+          } >> "$GITHUB_ENV"
+          if [[ ! "$W5_JSON_PAIR_CAMPAIGN_ID" =~ ^[a-z0-9][a-z0-9-]{2,39}$ ]]; then
+            echo "::error::campaign_id invalide (minuscules, chiffres et tirets, 3 à 40 caractères)."
+            exit 1
+          fi
+          if [[ ! "$W5_JSON_PAIR_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha invalide (40 hexadécimaux minuscules)."
+            exit 1
+          fi
+          # Valeurs RÉELLES du runner : on les compare, on ne les fabrique ni ne les réécrit jamais.
+          if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then echo "::error::déclenchement manuel uniquement."; exit 1; fi
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::la paire ne se lance que sur main."; exit 1; fi
+          if [ "$GITHUB_SHA" != "$W5_JSON_PAIR_EXPECTED_SHA" ]; then echo "::error::le SHA du run n'est pas expected_sha."; exit 1; fi
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then echo "::error::relance refusée (run_attempt != 1) : aucune seconde chance."; exit 1; fi
+          printf 'STATE_DATABASE_URL=sqlite:///%s/home/%s.sqlite3\n' "$root" "$W5_JSON_PAIR_CAMPAIGN_ID" >> "$GITHUB_ENV"
+
+      # Lecture seule, jeton éphémère du run (contents: read) : ce n'est ni le jeton de la fixture ni une clé. Toute erreur de lecture est un échec, jamais « inchangé ».
+      - name: Pointe de main inchangée depuis la validation
+        id: main_tip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tip="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          if [[ ! "$tip" =~ ^[0-9a-f]{40}$ ]]; then echo "::error::pointe de main illisible."; exit 1; fi
+          if [ "$tip" != "$W5_JSON_PAIR_EXPECTED_SHA" ]; then echo "::error::main a avancé depuis la validation : lancement refusé."; exit 1; fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: locks/dev.txt
+
+      - name: Installer les dépendances verrouillées
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes --no-deps -r locks/dev.txt
+
+      - name: Préflight (sans clé, sans jeton, sans réseau)
+        id: preflight
+        shell: bash
+        run: |
+          python scripts/w5_json_pair.py preflight --root "$W5_JSON_PAIR_ROOT" --campaign-id "$W5_JSON_PAIR_CAMPAIGN_ID" \
+            --expected-sha "$W5_JSON_PAIR_EXPECTED_SHA" --confirm "$W5_JSON_PAIR_CONFIRM"
+
+      # SEULE étape avec le jeton de la fixture : création exclusive et atomique de la référence ``collegue-business-claims/<id>`` AVANT que la clé existe.
+      # Aucune erreur GitHub n'est lue comme une absence ; la revendication n'est jamais supprimée (aucune étape de nettoyage dans ce workflow).
+      - name: Revendiquer l'identité (jeton de la fixture seulement, aucune clé)
+        id: claim
+        if: steps.preflight.outcome == 'success'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.INTEGRATION_FIXTURE_GITHUB_TOKEN }}
+        run: python scripts/w5_json_pair.py claim --root "$W5_JSON_PAIR_ROOT" --campaign-id "$W5_JSON_PAIR_CAMPAIGN_ID"
+
+      - name: Initialiser le registre durable local (migrations, base vierge de la comparaison)
+        id: migrate
+        if: steps.claim.outcome == 'success'
+        shell: bash
+        run: python -m collegue.migrations upgrade
+
+      - name: Paire réelle (SEULE étape qui reçoit la clé du fournisseur de modèle)
+        id: pair
+        if: steps.claim.outcome == 'success' && steps.migrate.outcome == 'success'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          LLM_API_KEY: ${{ secrets.W5_JSON_PAIR_GOOGLE_API_KEY }}
+        run: |
+          set +e
+          # Enveloppe de la paire : 900 s d'échéance persistée + marge. TERM puis KILL : aucune nouvelle émission après TERM (le conducteur le sait),
+          # la finalisation et le scan ont toujours le temps de s'exécuter dans le même pas, la clé n'ayant jamais quitté cette étape.
+          timeout --signal=TERM --kill-after=30 960 python scripts/w5_json_pair.py run \
+            --root "$W5_JSON_PAIR_ROOT" --campaign-id "$W5_JSON_PAIR_CAMPAIGN_ID"
+          run_rc=$?
+          # Finalisation SANS modèle ni réseau ET SANS clé (processus dont l'environnement n'a plus LLM_API_KEY) : rapports même sur échec, interruption ou
+          # timeout (relit le registre, n'émet jamais). Elle s'exécute AVANT le scan : ses octets sont les derniers, et ce sont eux que le scanner approuve.
+          env -u LLM_API_KEY python scripts/w5_json_pair.py finalize --root "$W5_JSON_PAIR_ROOT" --campaign-id "$W5_JSON_PAIR_CAMPAIGN_ID"
+          final_rc=$?
+          # Le rapport fait foi ; tout désaccord ou code inattendu (timeout 124/137/143, plantage) est « incomplet ».
+          status=3
+          case "$final_rc" in 0 | 1 | 3) if [ "$run_rc" = "$final_rc" ]; then status="$final_rc"; fi ;; esac
+          # Scanner de confiance : valeur lue dans l'environnement, contenu ET noms, jamais affichée. Il construit le SEUL ensemble publiable ($W5_PUBLISH).
+          python scripts/w5_leak_scan.py --env LLM_API_KEY --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
+            --report "$W5_DIAG/leak-scan.json" \
+            --source "report=$W5_JSON_PAIR_ROOT/report" --source "registry=$COLLEGUE_HOME::*.sqlite3*"
+          scan=$?
+          set -e
+          if [ "$scan" -ne 0 ]; then status=1; fi
+          exit "$status"
+
+      # Paire NON démarrée (contexte, préflight ou revendication refusés) : la clé n'a jamais existé dans un environnement ; mêmes règles de nature et même
+      # construction atomique de l'ensemble publiable, sans recherche de clé. Si la paire a démarré, c'est SON étape qui a construit l'ensemble.
+      - name: Rapports sans clé (paire non lancée, aucune clé n'a existé)
+        if: always() && steps.context.outcome == 'success' && steps.pair.outcome == 'skipped'
+        shell: bash
+        run: |
+          set +e
+          python scripts/w5_json_pair.py finalize --root "$W5_JSON_PAIR_ROOT" --campaign-id "$W5_JSON_PAIR_CAMPAIGN_ID"
+          set -e
+          python scripts/w5_leak_scan.py --assume-no-key --quarantine "$W5_QUARANTINE" --stage "$W5_PUBLISH" \
+            --report "$W5_DIAG/leak-scan.json" \
+            --source "report=$W5_JSON_PAIR_ROOT/report" --source "registry=$COLLEGUE_HOME::*.sqlite3*"
+
+      # Diagnostic minimal SÛR, jamais dérivé d'un fichier : issues des étapes (valeurs énumérées par GitHub) et identifiants validés seulement.
+      # Déposé même si le scanner a planté ou si la paire a été interrompue.
+      - name: Diagnostic minimal sûr (issues des étapes seulement)
+        if: always()
+        shell: bash
+        env:
+          OUTCOME_CONTEXT: ${{ steps.context.outcome }}
+          OUTCOME_MAIN_TIP: ${{ steps.main_tip.outcome }}
+          OUTCOME_PREFLIGHT: ${{ steps.preflight.outcome }}
+          OUTCOME_CLAIM: ${{ steps.claim.outcome }}
+          OUTCOME_MIGRATE: ${{ steps.migrate.outcome }}
+          OUTCOME_PAIR: ${{ steps.pair.outcome }}
+        run: |
+          diag="${W5_DIAG:-$RUNNER_TEMP/w5-json-pair/diagnostic}"
+          mkdir -p "$diag"
+          # L'identifiant et le SHA saisis ne sont recopiés que si l'étape de contexte les a validés.
+          id="unvalidated"; expected="unvalidated"
+          if [ "$OUTCOME_CONTEXT" = "success" ]; then id="$W5_JSON_PAIR_CAMPAIGN_ID"; expected="$W5_JSON_PAIR_EXPECTED_SHA"; fi
+          printf '{"campaign_id":"%s","run_id":"%s","run_attempt":"%s","sha":"%s","expected_sha":"%s","context":"%s","main_tip":"%s","preflight":"%s","claim":"%s","migrate":"%s","pair":"%s","publishable":"verified-files-only"}\n' \
+            "$id" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$expected" "$OUTCOME_CONTEXT" "$OUTCOME_MAIN_TIP" "$OUTCOME_PREFLIGHT" "$OUTCOME_CLAIM" "$OUTCOME_MIGRATE" "$OUTCOME_PAIR" \
+            > "$diag/outcomes.json"
+
+      # Seul $W5_PUBLISH est publié : ensemble de fichiers positivement vérifiés (vide si le scanner n'a pas tourné ou a planté ; jamais un répertoire source).
+      - name: Déposer le rapport (machine + humain + provenance, sans secret)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-json-pair-report
+          path: ${{ env.W5_PUBLISH }}/report
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Déposer le registre durable de la comparaison (budget, échéance, journal, identité consommée)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-json-pair-registry
+          path: ${{ env.W5_PUBLISH }}/registry
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Déposer le diagnostic minimal sûr et le rapport du scanner (noms expurgés)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w5-json-pair-diagnostic
+          path: ${{ env.W5_DIAG }}
+          if-no-files-found: warn
+          retention-days: 30
