@@ -6,8 +6,8 @@ Deux familles de contrôles, tous hors ligne et sans fournisseur :
 * l'exécution RÉELLE des scripts bash des étapes, avec le CLI de la paire (propriété A) et ``gh`` remplacés par des doublures et le VRAI scanner
   de confiance (``scripts/w5_leak_scan.py``) : codes de sortie, ensemble publié, absence de fuite.
 
-Le CLI lui-même (``scripts/w5_json_pair.py``) n'est pas testé ici : il n'est intégré qu'après ordre du manager. Les contrôles qui le lisent sont
-marqués ignorés tant qu'il est absent, jamais comptés comme réussis.
+Le CLI réel (``scripts/w5_json_pair.py``) est joué de bout en bout dans ``tests/test_w5_json_pair_workflow_cli.py`` ; ici il est remplacé par des
+doublures pour isoler la logique des scripts d'étape (aucun contrôle ignoré).
 """
 
 from __future__ import annotations
@@ -344,20 +344,20 @@ def test_the_general_ci_does_not_run_the_pair_and_keeps_its_five_check_names():
     ]
 
 
-# ── contrat avec le CLI de A (lu seulement s'il est intégré) ─────────────────────────────────────────────────────────────────────
+# ── contrat avec le CLI de A : la valeur exposée et les quatre sous-commandes (le CLI est intégré : plus aucun contrôle ignoré) ───────
 
 
-@pytest.mark.skipif(
-    not CLI.exists(),
-    reason="scripts/w5_json_pair.py (lot A) n'est pas encore intégré : contrôle non joué, non compté comme réussi",
-)
-def test_the_cli_exposes_the_four_steps_and_the_same_confirmation_phrase(job):
-    source = CLI.read_text(encoding="utf-8")
-    for command in ("preflight", "claim", "run", "finalize"):
-        assert f'"{command}"' in source or f"'{command}'" in source, command
-    assert CONFIRMATION in source, "la phrase du workflow est celle du CLI"
-    for flag in ("--root", "--campaign-id", "--expected-sha", "--confirm"):
-        assert flag in source, flag
+def test_the_cli_exposes_the_four_steps_and_the_confirmation_phrase_it_really_imports():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("w5_json_pair_cli_contract", CLI)
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    assert cli.CONFIRMATION == CONFIRMATION, (
+        "la phrase du workflow est celle que le CLI expose réellement (importée du cœur)"
+    )
+    choices = next(a for a in cli.build_parser()._actions if a.dest == "command").choices
+    assert sorted(choices) == ["claim", "finalize", "preflight", "run"]
 
 
 # ── exécution RÉELLE des scripts des étapes (CLI et gh remplacés, vrai scanner de confiance) ────────────────────────────────────
