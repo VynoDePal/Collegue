@@ -1539,3 +1539,188 @@ def test_the_claim_targets_the_exact_reference_the_real_fixture_and_keeps_the_cu
         proof["preflight_proof_sha256"]
         == json.loads((tmp_path / "proof" / "preflight.json").read_text())["proof_sha256"]
     )
+
+
+# ── A46 : un journal FERMÉ ne prouve pas que le registre est réparé ──────────────────────────────────────────────────
+
+from unittest.mock import patch  # noqa: E402
+
+SCOPE = f"json-pair:{CAMPAIGN}"
+
+
+def registry_state(path: Path) -> dict:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        scope = conn.execute(
+            "SELECT consumed_tokens, unknown_tokens, reserved_tokens, blocked_reason IS NOT NULL FROM budget_scopes WHERE scope_key = ?",
+            (SCOPE,),
+        ).fetchone()
+        attempts = sorted(conn.execute("SELECT request_id, state FROM broker_attempts WHERE scope_key = ?", (SCOPE,)))
+        journal = conn.execute("SELECT state FROM w5_json_pair_run").fetchone()[0]
+    return {
+        "consumed": scope[0],
+        "unknown": scope[1],
+        "reserved": scope[2],
+        "blocked": bool(scope[3]),
+        "attempts": [state for _, state in attempts],
+        "journal": journal,
+    }
+
+
+def transient_write_failure():
+    return sqlite3.OperationalError("simulated temporary write failure")
+
+
+async def pair_with_failed_unknown_write(path: Path):
+    """500 après émission ; l'écriture de l'inconnu échoue (panne transitoire) : journal fermé, tentative ``emitting`` restée."""
+    upstream = Scripted(http_error(500))
+    with patch.object(BrokerService, "_block_unknown", side_effect=transient_write_failure()):
+        report = await go(path, upstream)
+    return upstream, report
+
+
+async def test_closed_journal_with_an_unrecorded_emission_is_repaired_into_a_blocking_unknown(path):
+    upstream, before = await pair_with_failed_unknown_write(path)
+    state = registry_state(path)
+    assert state["journal"] == "closed" and state["attempts"] == ["emitting"]
+    assert (state["reserved"], state["unknown"], state["blocked"]) == (
+        266,
+        0,
+        False,
+    )  # la panne a laissé la réserve ouverte
+    assert (before["status"], before["reason"]) == ("incomplete", "upstream_ambiguous")
+    repaired = reconcile_pair(database=path, campaign_id=CAMPAIGN)
+    state = registry_state(path)
+    assert (state["reserved"], state["unknown"], state["blocked"], state["consumed"]) == (0, 266, True, 0)
+    assert state["attempts"] == ["unknown"] and state["journal"] == "closed"  # jamais rouvert
+    assert (repaired["status"], repaired["reason"], states(repaired)) == (
+        "incomplete",
+        "upstream_ambiguous",
+        ["unknown", "skipped"],
+    )
+    assert repaired["budget"]["unknown_tokens"] == 266 and repaired["budget"]["blocked"] is True
+    assert reconcile_pair(database=path, campaign_id=CAMPAIGN) == repaired  # idempotent
+    assert read_report(database=path, campaign_id=CAMPAIGN) == repaired
+    assert await go(path, upstream) == repaired
+    assert (
+        len(upstream.count_calls) == len(upstream.generate_calls) == 1
+    )  # aucun nouvel appel, aucune seconde génération
+
+
+async def test_a_persisting_failure_keeps_the_report_unfavourable_then_the_repair_counts_once(path):
+    upstream, _ = await pair_with_failed_unknown_write(path)
+    with patch.object(BrokerService, "_block_unknown", side_effect=transient_write_failure()):
+        for _ in range(2):
+            held = reconcile_pair(database=path, campaign_id=CAMPAIGN)
+            assert held["status"] == "incomplete" and held["status"] != "observed"
+            assert registry_state(path)["attempts"] == ["emitting"] and registry_state(path)["reserved"] == 266
+    for _ in range(3):  # la panne disparaît : une seule comptabilisation, quelle que soit la répétition
+        reconcile_pair(database=path, campaign_id=CAMPAIGN)
+        state = registry_state(path)
+        assert (state["reserved"], state["unknown"], state["consumed"], state["blocked"]) == (0, 266, 0, True)
+    assert len(upstream.generate_calls) == 1
+
+
+async def test_a_prepared_attempt_of_a_closed_journal_is_released_without_inventing_any_consumption(path):
+    upstream = Scripted()
+    started = asyncio.Event()
+
+    async def hanging(_request):
+        started.set()
+        await asyncio.sleep(60)
+
+    upstream.count_tokens = hanging
+    with patch.object(
+        BrokerService, "repair", return_value=0
+    ):  # aucune réparation pendant le run : la tentative reste préparée
+        task = asyncio.ensure_future(go(path, upstream))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert registry_state(path)["attempts"] == ["prepared"] and registry_state(path)["journal"] == "closed"
+    report = reconcile_pair(database=path, campaign_id=CAMPAIGN)
+    state = registry_state(path)
+    assert state["attempts"] == ["released"] and (
+        state["reserved"],
+        state["unknown"],
+        state["consumed"],
+        state["blocked"],
+    ) == (0, 0, 0, False)
+    assert report["status"] == "incomplete" and states(report) == ["interrupted", "skipped"]
+    assert reconcile_pair(database=path, campaign_id=CAMPAIGN) == report and not upstream.generate_calls
+
+
+async def test_a_settlement_whose_variant_could_not_be_finished_is_completed_from_the_registry(path):
+    upstream = Scripted()
+    with patch.object(json_pair._Journal, "finish_variant", side_effect=transient_write_failure()):
+        report = await go(path, upstream)
+    assert report["reason"] == "internal_error" and registry_state(path)["journal"] == "closed"
+    assert [row[1] for row in journal_rows(path)] == ["emitting", "pending"]  # le journal n'a pas pu être fini
+    repaired = reconcile_pair(database=path, campaign_id=CAMPAIGN)
+    assert [row[1] for row in journal_rows(path)] == ["observed", "pending"]
+    assert (repaired["status"], repaired["reason"], states(repaired)) == (
+        "incomplete",
+        "internal_error",
+        ["observed", "skipped"],
+    )
+    assert repaired["budget"]["consumed_tokens"] == 15 and len(upstream.generate_calls) == 1
+    assert reconcile_pair(database=path, campaign_id=CAMPAIGN) == repaired
+
+
+async def test_a_settlement_only_partly_applied_to_the_ledger_is_completed_without_double_counting(path):
+    upstream = Scripted()
+    with patch.object(BrokerService, "_apply_ledger", side_effect=transient_write_failure()):
+        report = await go(path, upstream)
+    state = registry_state(path)
+    assert state["attempts"] == ["settled"] and (state["consumed"], state["reserved"]) == (
+        0,
+        266,
+    )  # règlement à moitié appliqué
+    assert report["status"] == "incomplete" and report["status"] != "observed"
+    for _ in range(3):
+        repaired = reconcile_pair(database=path, campaign_id=CAMPAIGN)
+        state = registry_state(path)
+        assert (state["consumed"], state["reserved"], state["unknown"], state["blocked"]) == (15, 0, 0, False)
+    assert (
+        states(repaired) == ["observed", "skipped"] and repaired["status"] == "incomplete"
+    )  # l'arrêt interne reste visible
+    assert len(upstream.generate_calls) == 1
+
+
+async def test_a_healthy_closed_journal_is_left_byte_identical_by_reconciliation(path):
+    done = await go(path, Scripted())
+    before = path.read_bytes()
+    for _ in range(3):
+        assert reconcile_pair(database=path, campaign_id=CAMPAIGN) == done
+    assert path.read_bytes() == before and done["status"] == "observed"
+
+
+async def test_a_live_conductor_is_never_repaired_while_it_conducts(path):
+    upstream = Scripted()
+    upstream.gate = asyncio.Event()
+    task = asyncio.ensure_future(go(path, upstream))
+    while not upstream.generate_calls:
+        await asyncio.sleep(0.01)
+    before = registry_state(path)
+    held = reconcile_pair(database=path, campaign_id=CAMPAIGN)
+    assert (held["status"], held["reason"]) == ("incomplete", "in_progress")
+    assert registry_state(path) == before and before["attempts"] == ["emitting"] and before["reserved"] == 266
+    upstream.gate.set()
+    assert (await task)["status"] == "observed"
+
+
+async def test_a_corrupt_or_foreign_registry_is_refused_without_any_repair(path, tmp_path):
+    await pair_with_failed_unknown_write(path)
+    broken = degraded_copy(path, tmp_path / "corrupt.sqlite3", DEGRADATIONS["fingerprint_changed"])
+    before = broken.read_bytes()
+    assert reconcile_pair(database=broken, campaign_id=CAMPAIGN)["reason"] == "journal_corrupt"
+    assert reconcile_pair(database=path, campaign_id="another-pair-01")["reason"] == "campaign_mismatch"
+    assert broken.read_bytes() == before and registry_state(path)["attempts"] == ["emitting"]
+
+
+async def test_the_repair_never_reopens_the_campaign_nor_allows_another_emission(path):
+    upstream, _ = await pair_with_failed_unknown_write(path)
+    reconcile_pair(database=path, campaign_id=CAMPAIGN)
+    journal = json_pair._Journal(path, CAMPAIGN, json_pair._utcnow)
+    assert journal.claim_variant("native_json") == "run_closed" and journal.admit_send("prompt_only") == "run_closed"
+    assert registry_state(path)["journal"] == "closed" and len(upstream.generate_calls) == 1
